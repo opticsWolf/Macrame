@@ -12,14 +12,91 @@ use crate::util::clock::{Clock, SystemClock};
 use crate::util::timestamp;
 use crate::vector::ModelName;
 
-/// Rows per chunk on the background write paths (D-011, D-014).
+/// Rows per chunk on the background write paths (§5.1.5, D-011, D-014, D-058).
 ///
 /// The Write Actor holds the sole write connection, so a single large statement
 /// blocks every other writer for its duration. Chunking bounds that stall; the
 /// cost is that a bulk import is *not* atomic across chunks, which is why it is
 /// a separate command from [`HighPriCommand::WriteBulkAtomic`] rather than a
 /// tuning parameter on it.
-pub const CHUNK_ROWS: usize = 1000;
+///
+/// # Why these are four constants and not one
+///
+/// Through 0.5.5 this was a single `CHUNK_ROWS = 1000` for all four bulk paths.
+/// The golden rule it was meant to serve is a bound on *duration* — a background
+/// chunk must commit fast enough that an interactive write queued behind it is
+/// not made to wait — and one row count cannot express one duration across paths
+/// whose measured per-row costs differ by 60× (D-058). At 1,000 rows the four
+/// paths took 3.5 ms, 24 ms, 89 ms and 143 ms: the same constant, four answers,
+/// three of them far outside the bound.
+///
+/// Each size below is derived from `benches/budgets.rs`'s `chunk_scaling`
+/// sweep against [`CHUNK_BUDGET`], then verified by measuring that size directly.
+/// They are *measurements of this machine*, not universal constants — D-055's
+/// reasoning about reference hardware applies here too, and re-deriving them on
+/// materially different storage is a `cargo bench` away.
+///
+/// # Sized for the tail, not the median
+///
+/// The first derivation solved `f + c·n = 3 ms` exactly and produced sizes whose
+/// *median* commit was 2.93 ms and whose upper estimate was 2.96 — inside the
+/// bound as reported and outside it for any chunk slower than typical. A latency
+/// bound is a statement about the chunk an unlucky interactive write actually
+/// queues behind, so these solve for ≈2.5 ms instead, leaving the remainder as
+/// headroom for the tail. That costs a few percent of throughput on the two
+/// linear paths and nothing on the two superlinear ones.
+///
+/// As measured by `chunk_budget`, each at its own size: edges **2.39 ms**,
+/// concepts **2.35 ms**, annotations **2.36 ms**, embeddings **2.06 ms**, no
+/// upper estimate above 2.42.
+pub mod chunk_rows {
+    /// Edge assertions (`bulk_import`).
+    ///
+    /// This path is *superlinear* in chunk size — marginal cost rises from ~11 µs
+    /// to ~103 µs per row between 10 and 1,000 rows — so the old 1,000-row chunk
+    /// was both the slowest to commit and the least efficient per row. Cutting it
+    /// costs no throughput at all; it gains: 1,000 edges take 88.5 ms in one
+    /// chunk against ~27 ms in eleven of these.
+    pub const EDGES: usize = 90;
+
+    /// Concept upserts (`write_annotations`).
+    ///
+    /// Linear at ~23 µs per row, so unlike [`EDGES`] this size *is* a genuine
+    /// throughput sacrifice: 1,000-row chunks ran at 23.6 µs per row against
+    /// ~35 µs here. Paid deliberately — a 1,000-row chunk takes 24 ms, eight
+    /// times the bound.
+    pub const CONCEPTS: usize = 70;
+
+    /// Analytics annotations (`write_analytics_annotations`).
+    ///
+    /// The one path where the old constant was nearly right, and the only bulk
+    /// table with no triggers at all: ~2.5 µs per row, linear, so the bound buys
+    /// a large chunk. 1,000 rows would be 3.5 ms — over, but only just.
+    pub const ANNOTATIONS: usize = 600;
+
+    /// Embedding vectors (`upsert_embeddings`).
+    ///
+    /// The smallest by a wide margin, because DiskANN index maintenance makes an
+    /// embedding the most expensive row in the system (~150 µs each at scale) and
+    /// this path superlinear besides. Again no throughput cost: 1,000-row chunks
+    /// ran at 143 µs per row against ~70 µs here.
+    pub const EMBEDDINGS: usize = 30;
+}
+
+/// The latency bound [`chunk_rows`] is derived from (§5.1.5, D-058).
+///
+/// This is the golden rule's actual content. §9 has carried it as a row count
+/// with a duration attached — "chunk commit, 500 rows ≤ 3 ms" — which reads as
+/// two requirements and is one: the duration is the requirement, and the row
+/// count is whatever satisfies it on a given path and machine.
+///
+/// 3 ms is §9's number, kept rather than renegotiated. What it buys, end to end:
+/// an interactive assertion arriving at the worst possible moment waits for the
+/// chunk in flight (≤ 3 ms, because the SQLite write lock is not preemptible —
+/// see [`HighPriCommand`]) and then runs its own write (≤ 5 ms, §9), so ≤ 8 ms
+/// worst case. That fits inside a 60 Hz frame with room, which is the standard
+/// this bound is ultimately answerable to.
+pub const CHUNK_BUDGET: std::time::Duration = std::time::Duration::from_millis(3);
 
 /// A concept assertion: the payload of an upsert.
 #[derive(Debug, Clone, PartialEq)]
@@ -389,12 +466,15 @@ impl Database {
     /// Import edges on the background channel, chunked (D-011).
     ///
     /// Atomic *per chunk*, not overall: a failure partway leaves earlier chunks
-    /// committed. That is the tradeoff [`CHUNK_ROWS`] documents — use
+    /// committed. That is the tradeoff [`chunk_rows`] documents — use
     /// [`Database::write_bulk_atomic`] when the batch must be all-or-nothing.
+    ///
+    /// Chunked at [`chunk_rows::EDGES`], which is also faster in total than the
+    /// larger chunks this used through 0.5.5 (D-058).
     pub async fn bulk_import(&self, edges: Vec<EdgeAssertion>) -> Result<usize> {
         let edges = normalize_all(edges)?;
         let mut written = 0;
-        for chunk in edges.chunks(CHUNK_ROWS) {
+        for chunk in edges.chunks(chunk_rows::EDGES) {
             let chunk = chunk.to_vec();
             written += self
                 .low(|responder| LowPriCommand::BulkImportChunk { chunk, responder })
@@ -416,7 +496,7 @@ impl Database {
             .map(ConceptUpsert::normalized)
             .collect::<Result<_>>()?;
         let mut written = 0;
-        for chunk in concepts.chunks(CHUNK_ROWS) {
+        for chunk in concepts.chunks(chunk_rows::CONCEPTS) {
             let chunk = chunk.to_vec();
             written += self
                 .low(|responder| LowPriCommand::WriteAnnotationsChunk { chunk, responder })
@@ -481,9 +561,11 @@ impl Database {
     /// is `query_only`, and the write connection lives inside the actor — so an
     /// application could search vectors it had no way to store.
     ///
-    /// Low priority and chunked at [`CHUNK_ROWS`], because embedding is bulk
-    /// derived work: a 50,000-vector backfill must yield to an interactive
-    /// assertion at every chunk boundary. Atomic per chunk, not overall, which
+    /// Low priority and chunked at [`chunk_rows::EMBEDDINGS`], because embedding
+    /// is bulk derived work: a 50,000-vector backfill must yield to an
+    /// interactive assertion at every chunk boundary. That constant is the
+    /// smallest of the four by a wide margin — DiskANN index maintenance makes an
+    /// embedding the most expensive row in the system (D-058). Atomic per chunk, not overall, which
     /// is the same trade [`Database::bulk_import`] makes and is safer here than
     /// there — an embedding is derived (Doctrine VII), so a partially written
     /// batch is recoverable by re-embedding.
@@ -498,7 +580,7 @@ impl Database {
         rows: Vec<(String, Vec<f32>)>,
     ) -> Result<usize> {
         let mut written = 0;
-        for chunk in rows.chunks(CHUNK_ROWS) {
+        for chunk in rows.chunks(chunk_rows::EMBEDDINGS) {
             let chunk = chunk.to_vec();
             let model = model.clone();
             written += self
@@ -536,7 +618,9 @@ impl Database {
     /// concept. Rerunning an algorithm replaces the previous pass rather than
     /// recording that the world changed.
     ///
-    /// Low priority and chunked at [`CHUNK_ROWS`], so a 50,000-label Louvain
+    /// Low priority and chunked at [`chunk_rows::ANNOTATIONS`] — the largest of
+    /// the four, because this is the only bulk table carrying no triggers at all
+    /// and its rows are correspondingly cheap (D-058) — so a 50,000-label Louvain
     /// save yields to interactive writes at every chunk boundary and carries the
     /// per-chunk fidelity boundary of §5.1.6 — a partially written pass is
     /// recoverable by rerunning, which is the property that makes derived state
@@ -546,7 +630,7 @@ impl Database {
         annotations: Vec<Annotation>,
     ) -> Result<usize> {
         let mut written = 0;
-        for chunk in annotations.chunks(CHUNK_ROWS) {
+        for chunk in annotations.chunks(chunk_rows::ANNOTATIONS) {
             let chunk = chunk.to_vec();
             written += self
                 .low(|responder| LowPriCommand::WriteAnalyticsChunk { chunk, responder })
@@ -716,6 +800,38 @@ async fn run_writer_actor(
 const INSERT_LINK: &str = "INSERT INTO links \
      (source_id, target_id, edge_type, valid_from, valid_to, weight, properties, recorded_at) \
      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)";
+
+/// Shared by the single-concept write and the chunked one, so the two paths
+/// cannot drift into upserting different column sets — and so the chunk has a
+/// statement text it can prepare once (D-056).
+const UPSERT_CONCEPT: &str = "INSERT INTO concepts \
+     (id, title, content, embedding_model, valid_from, valid_to, recorded_at, retired) \
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
+     ON CONFLICT(id) DO UPDATE SET \
+         title = excluded.title, \
+         content = excluded.content, \
+         embedding_model = excluded.embedding_model, \
+         valid_from = excluded.valid_from, \
+         valid_to = excluded.valid_to, \
+         recorded_at = excluded.recorded_at, \
+         retired = excluded.retired";
+
+/// The parameter row for [`UPSERT_CONCEPT`], in one place for the same reason.
+fn concept_params<'a>(concept: &'a ConceptUpsert, stamp: &'a str) -> [libsql::Value; 8] {
+    [
+        concept.id.as_str().into(),
+        concept.title.as_str().into(),
+        concept.content.as_str().into(),
+        concept
+            .embedding_model
+            .as_deref()
+            .map_or(libsql::Value::Null, Into::into),
+        concept.valid_from.as_str().into(),
+        concept.valid_to.as_str().into(),
+        stamp.into(),
+        (concept.retired as i64).into(),
+    ]
+}
 
 impl HighPriCommand {
     /// Run one command and answer its caller.
@@ -905,29 +1021,7 @@ async fn upsert_concept(
     stamp: &str,
 ) -> Result<()> {
     let res = conn
-        .execute(
-            "INSERT INTO concepts \
-                 (id, title, content, embedding_model, valid_from, valid_to, recorded_at, retired) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
-             ON CONFLICT(id) DO UPDATE SET \
-                 title = excluded.title, \
-                 content = excluded.content, \
-                 embedding_model = excluded.embedding_model, \
-                 valid_from = excluded.valid_from, \
-                 valid_to = excluded.valid_to, \
-                 recorded_at = excluded.recorded_at, \
-                 retired = excluded.retired",
-            libsql::params![
-                concept.id.as_str(),
-                concept.title.as_str(),
-                concept.content.as_str(),
-                concept.embedding_model.as_deref(),
-                concept.valid_from.as_str(),
-                concept.valid_to.as_str(),
-                stamp,
-                concept.retired as i64
-            ],
-        )
+        .execute(UPSERT_CONCEPT, concept_params(concept, stamp))
         .await;
 
     match res {
@@ -1042,27 +1136,33 @@ async fn write_annotations_atomic(
         .transaction_with_behavior(libsql::TransactionBehavior::Immediate)
         .await?;
 
+    let stmt = tx
+        .prepare(
+            "INSERT INTO analytics_annotations (concept_id, label, value, computed_at) \
+             VALUES (?1, ?2, ?3, ?4) \
+             ON CONFLICT(concept_id, label) DO UPDATE SET \
+                 value = excluded.value, computed_at = excluded.computed_at",
+        )
+        .await?;
+
     for a in annotations {
-        let res = tx
-            .execute(
-                "INSERT INTO analytics_annotations (concept_id, label, value, computed_at) \
-                 VALUES (?1, ?2, ?3, ?4) \
-                 ON CONFLICT(concept_id, label) DO UPDATE SET \
-                     value = excluded.value, computed_at = excluded.computed_at",
-                libsql::params![
-                    a.concept_id.as_str(),
-                    a.label.as_str(),
-                    a.value.as_str(),
-                    stamp
-                ],
-            )
+        stmt.reset();
+        let res = stmt
+            .execute(libsql::params![
+                a.concept_id.as_str(),
+                a.label.as_str(),
+                a.value.as_str(),
+                stamp
+            ])
             .await;
         if let Err(e) = res {
+            drop(stmt);
             let _ = tx.rollback().await;
             return Err(DbError::Engine(e));
         }
     }
 
+    drop(stmt);
     tx.commit().await?;
     Ok(annotations.len())
 }
@@ -1080,13 +1180,33 @@ async fn write_concepts_atomic(
         .transaction_with_behavior(libsql::TransactionBehavior::Immediate)
         .await?;
 
+    // Prepared once, like the edge chunk (D-056). This no longer routes through
+    // [`upsert_concept`] — that function prepares per call by construction — but
+    // it shares that function's statement text and parameter row, so the two
+    // cannot upsert different columns.
+    let stmt = tx.prepare(UPSERT_CONCEPT).await?;
+
     for concept in concepts {
-        if let Err(e) = upsert_concept(&tx, concept, stamp).await {
+        stmt.reset();
+        let res = stmt.execute(concept_params(concept, stamp)).await;
+
+        if let Err(e) = res {
+            let typed = classify(
+                &tx,
+                e,
+                WriteOp::Concept {
+                    id: &concept.id,
+                    recorded_at: stamp,
+                },
+            )
+            .await;
+            drop(stmt);
             let _ = tx.rollback().await;
-            return Err(e);
+            return Err(typed);
         }
     }
 
+    drop(stmt);
     tx.commit().await?;
     Ok(concepts.len())
 }

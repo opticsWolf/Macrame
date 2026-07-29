@@ -78,15 +78,29 @@ pub(crate) async fn upsert_embedding_chunk(
         .transaction_with_behavior(libsql::TransactionBehavior::Immediate)
         .await?;
 
+    // Prepared once per chunk, for the same reason the dimension is resolved once
+    // per chunk and the same reason the edge chunk hoists its insert (D-056): the
+    // statement text is identical for every row, and the embedding tables carry a
+    // DiskANN index whose maintenance is compiled into each preparation.
+    //
+    // `reset()` between rows is required — libsql's `Statement::execute` binds and
+    // steps without resetting first.
+    let stmt = tx.prepare(&sql).await?;
+
     let res: Result<()> = async {
         for (concept_id, vector) in rows {
             let blob = EmbeddingCodec::encode(vector, dim, model.as_str())?;
-            tx.execute(&sql, libsql::params![concept_id.as_str(), blob])
+            stmt.reset();
+            stmt.execute(libsql::params![concept_id.as_str(), blob])
                 .await?;
         }
         Ok(())
     }
     .await;
+
+    // Dropped before either arm ends the transaction: a live statement on the
+    // connection is what makes SQLite refuse to commit or roll back.
+    drop(stmt);
 
     match res {
         Ok(()) => {

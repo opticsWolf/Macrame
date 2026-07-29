@@ -52,8 +52,8 @@ db.upsert_concept(concept).await?;
 
 // -- Bulk writes: the fidelity boundary of §5.1.6 --
 db.write_bulk_atomic(edges).await?;    // one transaction, one stamp, one stall
-db.bulk_import(edges).await?;          // chunked at CHUNK_ROWS, atomic per chunk
-db.write_annotations(concepts).await?; // chunked at CHUNK_ROWS, atomic per chunk
+db.bulk_import(edges).await?;          // chunked at chunk_rows::EDGES, atomic per chunk
+db.write_annotations(concepts).await?; // chunked at chunk_rows::CONCEPTS, atomic per chunk
 
 // -- Traversal (read side; takes a connection, not the handle) --
 let ids = TraversalBuilder::new(root)

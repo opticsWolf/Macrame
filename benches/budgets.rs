@@ -46,7 +46,7 @@
 
 use std::path::PathBuf;
 
-use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
+use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
 use macrame::prelude::*;
 use macrame::temporal::{reconstruct, save_snapshot};
 
@@ -302,6 +302,372 @@ const INSERT_LINK_SQL: &str = "INSERT INTO links \
      (source_id, target_id, edge_type, valid_from, valid_to, weight, properties, recorded_at) \
      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)";
 
+/// Each bulk path at *its own* chunk size, against the 3 ms bound (D-058).
+///
+/// This is the row §9 should have had all along: one measurement per path, each
+/// at the size that path actually chunks at, all answerable to one duration. The
+/// old single `Chunk commit, 500 rows ≤ 3 ms` row could not be that, because 500
+/// rows is 2.3 ms on one of these paths and 67 ms on another.
+///
+/// A bench and not a test, for [D-055](../docs/architecture/s13-decision-register.md)'s
+/// reason: `assert!(elapsed <= 3ms)` on unknown CI hardware asserts something
+/// about the runner. What makes the bound falsifiable is that these four numbers
+/// are printed next to it.
+fn chunk_budget(c: &mut Criterion) {
+    let rt = runtime();
+
+    let mut group = c.benchmark_group("chunk_budget");
+    group.sample_size(20);
+
+    group.bench_function(
+        format!("edges/{} (§5.1.5 ≤ 3 ms)", chunk_rows::EDGES),
+        |b| {
+            b.iter_batched(
+                || {
+                    rt.block_on(async {
+                        let fx = fixture().await;
+                        seed_concepts(&fx.db, chunk_rows::EDGES + 1).await;
+                        fx
+                    })
+                },
+                |fx| {
+                    let edges: Vec<EdgeAssertion> = (0..chunk_rows::EDGES)
+                        .map(|k| {
+                            EdgeAssertion::new("c0000000", format!("c{:07}", k + 1), "CHUNK")
+                                .valid_from(TS)
+                                .valid_to(OPEN)
+                        })
+                        .collect();
+                    rt.block_on(fx.db.write_bulk_atomic(edges)).unwrap()
+                },
+                BatchSize::PerIteration,
+            )
+        },
+    );
+
+    group.bench_function(
+        format!("concepts/{} (§5.1.5 ≤ 3 ms)", chunk_rows::CONCEPTS),
+        |b| {
+            b.iter_batched(
+                || {
+                    rt.block_on(async {
+                        let fx = fixture().await;
+                        seed_concepts(&fx.db, chunk_rows::CONCEPTS).await;
+                        fx
+                    })
+                },
+                |fx| {
+                    let rows: Vec<ConceptUpsert> = (0..chunk_rows::CONCEPTS)
+                        .map(|i| {
+                            ConceptUpsert::new(format!("c{i:07}"), format!("Rewritten {i}"))
+                                .content(format!("new body for {i}"))
+                                .valid_from(TS)
+                        })
+                        .collect();
+                    rt.block_on(fx.db.write_annotations(rows)).unwrap()
+                },
+                BatchSize::PerIteration,
+            )
+        },
+    );
+
+    group.bench_function(
+        format!("annotations/{} (§5.1.5 ≤ 3 ms)", chunk_rows::ANNOTATIONS),
+        |b| {
+            b.iter_batched(
+                || {
+                    rt.block_on(async {
+                        let fx = fixture().await;
+                        seed_concepts(&fx.db, chunk_rows::ANNOTATIONS).await;
+                        fx
+                    })
+                },
+                |fx| {
+                    let rows: Vec<Annotation> = (0..chunk_rows::ANNOTATIONS)
+                        .map(|i| Annotation {
+                            concept_id: format!("c{i:07}"),
+                            label: "community".into(),
+                            value: format!("{}", i % 7),
+                        })
+                        .collect();
+                    rt.block_on(fx.db.write_analytics_annotations(rows)).unwrap()
+                },
+                BatchSize::PerIteration,
+            )
+        },
+    );
+
+    group.bench_function(
+        format!("embeddings/{} (§5.1.5 ≤ 3 ms)", chunk_rows::EMBEDDINGS),
+        |b| {
+            b.iter_batched(
+                || {
+                    rt.block_on(async {
+                        let fx = fixture().await;
+                        seed_concepts(&fx.db, chunk_rows::EMBEDDINGS).await;
+                        let model = ModelName::new("bench_v1").unwrap();
+                        fx.db.register_model(&model, 8).await.unwrap();
+                        (fx, model)
+                    })
+                },
+                |(fx, model)| {
+                    let rows: Vec<(String, Vec<f32>)> = (0..chunk_rows::EMBEDDINGS)
+                        .map(|i| {
+                            let t = i as f32 / 500.0;
+                            (
+                                format!("c{i:07}"),
+                                (0..8).map(|k| ((t + k as f32) * 0.37).sin()).collect(),
+                            )
+                        })
+                        .collect();
+                    rt.block_on(fx.db.upsert_embeddings(&model, rows)).unwrap()
+                },
+                BatchSize::PerIteration,
+            )
+        },
+    );
+
+    group.finish();
+}
+
+/// Chunk cost as a function of chunk size, for the re-derivation of §5.1.5.
+///
+/// §5.1.5 justifies `CHUNK_ROWS` at 500–1,000 with two quantitative claims and
+/// measures neither: that per-transaction overhead "amortizes to noise" at that
+/// size, and that a chunk "commits in 2–3 ms even where trigger amplification
+/// applies". The second is false by a factor of twelve ([D-056](../docs/architecture/s13-decision-register.md)).
+/// This group exists to test the first, and to supply the coefficient the rule
+/// actually needs.
+///
+/// The model is `T(n) = f + c·n` — a fixed cost per transaction (BEGIN, COMMIT,
+/// one `prepare`, the fsync under `synchronous = NORMAL`) plus a per-row cost.
+/// Neither term can be inferred from the single 500-row measurement the previous
+/// entries took: 37 ms at 500 rows is consistent with a 35 ms fixed cost and with
+/// a 4 ms one, and the two imply opposite chunk sizes. Sweeping `n` separates
+/// them, and the sweep also checks the linearity the model assumes rather than
+/// asserting it — a superlinear term would mean chunk size trades against itself
+/// and the rule needs a different shape entirely.
+///
+/// All four paths, because [D-057](../docs/architecture/s13-decision-register.md)
+/// measured their per-row costs spanning 31× and a single row count cannot bound
+/// four different durations. Every size here is ≤ `CHUNK_ROWS`, so each
+/// measurement is exactly one chunk and one transaction.
+fn chunk_scaling(c: &mut Criterion) {
+    let rt = runtime();
+    const SIZES: [usize; 6] = [1, 10, 50, 100, 500, 1_000];
+
+    let mut group = c.benchmark_group("chunk_scaling");
+    group.sample_size(10);
+
+    for n in SIZES {
+        group.bench_with_input(BenchmarkId::new("edges", n), &n, |b, &n| {
+            b.iter_batched(
+                || {
+                    rt.block_on(async {
+                        let fx = fixture().await;
+                        seed_concepts(&fx.db, n + 1).await;
+                        fx
+                    })
+                },
+                |fx| {
+                    let edges: Vec<EdgeAssertion> = (0..n)
+                        .map(|k| {
+                            EdgeAssertion::new("c0000000", format!("c{:07}", k + 1), "CHUNK")
+                                .valid_from(TS)
+                                .valid_to(OPEN)
+                        })
+                        .collect();
+                    rt.block_on(fx.db.write_bulk_atomic(edges)).unwrap()
+                },
+                BatchSize::PerIteration,
+            )
+        });
+
+        group.bench_with_input(BenchmarkId::new("concepts", n), &n, |b, &n| {
+            b.iter_batched(
+                || {
+                    rt.block_on(async {
+                        let fx = fixture().await;
+                        seed_concepts(&fx.db, n).await;
+                        fx
+                    })
+                },
+                |fx| {
+                    let rows: Vec<ConceptUpsert> = (0..n)
+                        .map(|i| {
+                            ConceptUpsert::new(format!("c{i:07}"), format!("Rewritten {i}"))
+                                .content(format!("new body for {i}"))
+                                .valid_from(TS)
+                        })
+                        .collect();
+                    rt.block_on(fx.db.write_annotations(rows)).unwrap()
+                },
+                BatchSize::PerIteration,
+            )
+        });
+
+        group.bench_with_input(BenchmarkId::new("annotations", n), &n, |b, &n| {
+            b.iter_batched(
+                || {
+                    rt.block_on(async {
+                        let fx = fixture().await;
+                        seed_concepts(&fx.db, n).await;
+                        fx
+                    })
+                },
+                |fx| {
+                    let rows: Vec<Annotation> = (0..n)
+                        .map(|i| Annotation {
+                            concept_id: format!("c{i:07}"),
+                            label: "community".into(),
+                            value: format!("{}", i % 7),
+                        })
+                        .collect();
+                    rt.block_on(fx.db.write_analytics_annotations(rows)).unwrap()
+                },
+                BatchSize::PerIteration,
+            )
+        });
+
+        group.bench_with_input(BenchmarkId::new("embeddings", n), &n, |b, &n| {
+            b.iter_batched(
+                || {
+                    rt.block_on(async {
+                        let fx = fixture().await;
+                        seed_concepts(&fx.db, n).await;
+                        let model = ModelName::new("bench_v1").unwrap();
+                        fx.db.register_model(&model, 8).await.unwrap();
+                        (fx, model)
+                    })
+                },
+                |(fx, model)| {
+                    let rows: Vec<(String, Vec<f32>)> = (0..n)
+                        .map(|i| {
+                            let t = i as f32 / 500.0;
+                            (
+                                format!("c{i:07}"),
+                                (0..8).map(|k| ((t + k as f32) * 0.37).sin()).collect(),
+                            )
+                        })
+                        .collect();
+                    rt.block_on(fx.db.upsert_embeddings(&model, rows)).unwrap()
+                },
+                BatchSize::PerIteration,
+            )
+        });
+    }
+
+    group.finish();
+}
+
+/// The three bulk chunk paths that are **not** the edge chunk (D-056).
+///
+/// §9 budgets one chunk commit and the edge chunk is the row it names, so these
+/// were unmeasured while sharing its defect: `bulk_import` was not the only path
+/// calling `execute` once per row inside a transaction, merely the only one
+/// anyone had timed. The statement hoist applies to each of them for the same
+/// reason, and the point of this group is that the claim is checked rather than
+/// asserted by analogy.
+///
+/// They are not equivalent to each other, and the numbers should differ:
+///
+/// * **concepts** — an upsert on a table with an FTS5 trigger pair, so a rewrite
+///   pays a delete-then-insert into `concepts_fts` on top of the row.
+/// * **annotations** — `analytics_annotations` carries no triggers at all
+///   (Doctrine VI's third category: derived, outside the ledger). This is the
+///   closest thing in the codebase to the cost of a bare upsert, which makes it
+///   the useful control for the two above.
+/// * **embeddings** — an insert into a `F32_BLOB` table with a DiskANN index,
+///   whose maintenance is the dominant term and is not a trigger.
+///
+/// All three at 500 rows, matching §9's chunk row so the figures are comparable
+/// to it, and all three via the public API so what is measured is what callers
+/// actually get.
+fn bulk_chunks(c: &mut Criterion) {
+    let rt = runtime();
+
+    let mut group = c.benchmark_group("bulk_chunks");
+    group.sample_size(10);
+
+    group.bench_function("concepts_500 (upsert + FTS triggers)", |b| {
+        b.iter_batched(
+            || {
+                rt.block_on(async {
+                    let fx = fixture().await;
+                    // Seeded first, so the measured chunk is the *rewrite* case —
+                    // the one that pays the FTS delete as well as the insert, and
+                    // the one a re-import actually performs.
+                    seed_concepts(&fx.db, 500).await;
+                    fx
+                })
+            },
+            |fx| {
+                let rows: Vec<ConceptUpsert> = (0..500)
+                    .map(|i| {
+                        ConceptUpsert::new(format!("c{i:07}"), format!("Rewritten {i}"))
+                            .content(format!("new body for {i}"))
+                            .valid_from(TS)
+                    })
+                    .collect();
+                rt.block_on(fx.db.write_annotations(rows)).unwrap()
+            },
+            BatchSize::PerIteration,
+        )
+    });
+
+    group.bench_function("annotations_500 (no triggers — the control)", |b| {
+        b.iter_batched(
+            || {
+                rt.block_on(async {
+                    let fx = fixture().await;
+                    seed_concepts(&fx.db, 500).await;
+                    fx
+                })
+            },
+            |fx| {
+                let rows: Vec<Annotation> = (0..500)
+                    .map(|i| Annotation {
+                        concept_id: format!("c{i:07}"),
+                        label: "community".into(),
+                        value: format!("{}", i % 7),
+                    })
+                    .collect();
+                rt.block_on(fx.db.write_analytics_annotations(rows)).unwrap()
+            },
+            BatchSize::PerIteration,
+        )
+    });
+
+    group.bench_function("embeddings_500 (DiskANN maintenance)", |b| {
+        b.iter_batched(
+            || {
+                rt.block_on(async {
+                    let fx = fixture().await;
+                    seed_concepts(&fx.db, 500).await;
+                    let model = ModelName::new("bench_v1").unwrap();
+                    fx.db.register_model(&model, 8).await.unwrap();
+                    (fx, model)
+                })
+            },
+            |(fx, model)| {
+                let rows: Vec<(String, Vec<f32>)> = (0..500)
+                    .map(|i| {
+                        let t = i as f32 / 500.0;
+                        (
+                            format!("c{i:07}"),
+                            (0..8).map(|k| ((t + k as f32) * 0.37).sin()).collect(),
+                        )
+                    })
+                    .collect();
+                rt.block_on(fx.db.upsert_embeddings(&model, rows)).unwrap()
+            },
+            BatchSize::PerIteration,
+        )
+    });
+
+    group.finish();
+}
+
 // ---------------------------------------------------------------------------
 // §9: traversal
 // ---------------------------------------------------------------------------
@@ -548,6 +914,9 @@ fn snapshot(c: &mut Criterion) {
 criterion_group!(
     budgets,
     write_path,
+    bulk_chunks,
+    chunk_budget,
+    chunk_scaling,
     traversal,
     replay,
     integrity,

@@ -592,8 +592,8 @@ async fn embedding_an_unregistered_model_is_refused_by_name() {
     assert!(matches!(err, DbError::ModelNotRegistered { .. }), "got {err:?}");
 }
 
-/// More rows than `CHUNK_ROWS`, so the chunking loop runs more than once and
-/// every chunk's rows land.
+/// More rows than `chunk_rows::EMBEDDINGS`, so the chunking loop runs more than
+/// once and every chunk's rows land.
 #[tokio::test]
 async fn a_backfill_larger_than_one_chunk_lands_completely() {
     use macrame::prelude::*;
@@ -602,7 +602,7 @@ async fn a_backfill_larger_than_one_chunk_lands_completely() {
     let db = Database::open(&harness.db_path).await.unwrap();
     let m = ModelName::new("handle_v1").unwrap();
 
-    let n = CHUNK_ROWS + 7;
+    let n = chunk_rows::EMBEDDINGS + 7;
     let mut concepts = Vec::with_capacity(n);
     for i in 0..n {
         concepts.push(ConceptUpsert::new(format!("c{i:06}"), "N").valid_from(TS));

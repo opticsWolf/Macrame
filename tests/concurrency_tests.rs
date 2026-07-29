@@ -267,17 +267,17 @@ async fn a_lone_high_priority_write_is_still_serviced_before_a_saturated_backlog
 
 /// D-011 / D-014: `bulk_import` is atomic **per chunk**, not overall.
 ///
-/// This is the tradeoff the `CHUNK_ROWS` doc comment states, and it is a real
+/// This is the tradeoff the `chunk_rows` doc comment states, and it is a real
 /// consequence a caller has to plan for, not an implementation detail: a failure
 /// in chunk two leaves chunk one committed. The counts below are exact so that
-/// the boundary itself is pinned — `CHUNK_ROWS` rows survive, the partial chunk
-/// leaves nothing.
+/// the boundary itself is pinned — `chunk_rows::EDGES` rows survive, the partial
+/// chunk leaves nothing.
 #[tokio::test]
 async fn bulk_import_is_atomic_per_chunk_not_overall() {
     let harness = TestHarness::new();
     let db = Database::open(&harness.db_path).await.unwrap();
 
-    let n = CHUNK_ROWS;
+    let n = chunk_rows::EDGES;
     let nodes = std::iter::once("SRC".to_string()).chain((0..=n).map(|i| format!("T{i}")));
     seed_nodes(&db, nodes).await;
 
@@ -329,7 +329,7 @@ async fn write_annotations_commits_earlier_chunks_when_a_later_one_fails() {
     let harness = TestHarness::new();
     let db = Database::open(&harness.db_path).await.unwrap();
 
-    let n = CHUNK_ROWS;
+    let n = chunk_rows::CONCEPTS;
     let mut concepts: Vec<ConceptUpsert> = (0..n)
         .map(|i| ConceptUpsert::new(format!("C{i}"), format!("Concept {i}")).valid_from(T1))
         .collect();

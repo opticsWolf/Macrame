@@ -11,7 +11,7 @@ pub use connection::{Annotation, ConceptUpsert, Database};
 pub use error::{DbError, Result};
 
 pub mod prelude {
-    pub use crate::connection::{Annotation, ConceptUpsert, Database, CHUNK_ROWS};
+    pub use crate::connection::{chunk_rows, Annotation, ConceptUpsert, Database, CHUNK_BUDGET};
     pub use crate::error::{DbError, Result};
     pub use crate::graph::{
         AttributeMode, CandidateCount, CostEstimate, CostEstimator, EdgeAssertion,

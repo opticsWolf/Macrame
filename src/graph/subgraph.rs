@@ -159,7 +159,8 @@ impl Subgraph {
     /// Write one derived result per node under `label` (§5.4, D-041).
     ///
     /// Goes through [`Database::write_analytics_annotations`], which chunks at
-    /// [`crate::connection::CHUNK_ROWS`] and sends on the low-priority channel,
+    /// [`crate::connection::chunk_rows::ANNOTATIONS`] and sends on the
+    /// low-priority channel,
     /// so a community assignment over a large subgraph cannot starve interactive
     /// writes.
     ///
