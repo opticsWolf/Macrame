@@ -1,0 +1,105 @@
+                              Apache License
+                        Version 2.0, January 2004
+                     http://www.apache.org/licenses/
+
+TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
+
+1. Definitions.
+
+   "License" shall mean any term or agreement which makes use of the
+   following terminology, including the incorporation of the Apache
+   License.
+
+   "Package" shall mean the work resulting from the distribution of the
+   Software as defined in the License.
+
+   "Source" form shall mean the preferred form of the Software for making
+   modifications to it.
+
+   "Object" code form shall mean the modified version of the Software in
+   object code form or as a modification of the Software in object code
+   form.
+
+   "Work" shall mean the work of the author, or any derivative work of the
+   Work as defined in the License.
+
+   "Derivative works" shall mean any work that is based on the Work and
+   which includes the Work or a portion of it, with or without
+   modifications.
+
+   "Contributor" shall mean any individual or entity that submits a work
+   intended to be published in accordance with the License.
+
+   "Contribution" shall mean any work of authorship intended to be
+   published in accordance with the License.
+
+   "Contributor license agreement" shall mean any document that sets forth
+   the terms under which a Contributor has granted the License the rights to
+   use, distribute, and modify the Contribution.
+
+   "You" shall mean the licensee.
+
+   "Licensor" shall mean the entity that grants the License.
+
+2. Grant of License.
+
+   Subject to the conditions in this License, the Licensor grants You a
+   worldwide, royalty-free, non-exclusive, irrevocable license to use,
+   reproduce, modify, and distribute the Work as a whole or in part.
+
+3. Reproduction of Copyright and License Notices.
+
+   You may add your own copyright notices to your modifications and may
+   provide your own license notices, provided that you include the license
+   notices provided with the original Work.
+
+4. Distribution.
+
+   You may distribute copies of the Work in any medium, provided that you
+   include the license notices and copyright notices with the Work, and
+   that you retain any notices on the original Work.
+
+5. Modifications.
+
+   You may modify the Work and distribute your modifications, provided that:
+
+   a) You must cause the modified files to carry prominent notices stating
+      that you changed the files.
+
+   b) You must include the license notices with your modifications.
+
+   c) You must retain all copyright, license, notice, and attribution
+      notices in the original Work.
+
+6. Trademarks.
+
+   The name of the Licensor, the name of the Work, or the Licensor's
+   trademarks may not be used to endorse or promote products derived from
+   this License without specific prior written permission.
+
+7. Limitation of Liability.
+
+   IN NO EVENT UNLESS REQUIRED BY APPLICABLE LAW OR AGREED TO IN WRITING
+   WILL ANY COPYRIGHT HOLDER, AUTHOR, OR ANY OTHER CONTRIBUTOR TO THE WORK
+   BE LIABLE FOR ANY DAMAGES ARISING FROM THE USE OF THE WORK.
+
+8. Accepting Warranty or Additional Liability.
+
+   You may choose to offer and charge a fee for copying, distribution,
+   modification, or a warranty of the Work, provided that you do so under
+   the terms of a license that carries its own set of warranties and
+   disclaimers, and that you clearly indicate the terms of the license that
+   you are offering on behalf of the Work.
+
+9. GNU GPL Compatibility.
+
+   This License may be used in conjunction with the GNU General Public
+   License version 3.0 (GPLv3). You may combine the Work with code covered
+   by the GPLv3 under the terms of the GPLv3.
+
+10. Termination.
+
+    You may not attempt to modify the License or claim that your version of
+    the License is the Apache License.
+
+END OF TERMS AND CONDITIONS

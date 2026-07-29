@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 5e39210d08a5bb6905f6b02e246d58b19fd043d87379a780f241b5bec9821781 # shrinks to history = [Assert { src: 0, tgt: 0, etype: 0, valid_from: 0, valid_to: None }, Assert { src: 0, tgt: 0, etype: 0, valid_from: 0, valid_to: None }]
+cc fb478fa4ca1de1b44d341daf173e560d71b2d010ee0bb1c33d7a5774888dfc4f # shrinks to history = [Assert { src: 0, tgt: 0, etype: 0, valid_from: 0, valid_to: None }, RetireConcept { id: 0 }]

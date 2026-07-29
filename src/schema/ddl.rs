@@ -1,0 +1,442 @@
+/// DDL statements for the Macrame bitemporal schema as specified in §4.
+
+/// GLOB pattern matching the canonical timestamp form `YYYY-MM-DDTHH:MM:SS.ffffffZ`.
+///
+/// A macro rather than a `const` so it can be spliced into the DDL literals by
+/// `concat!`, which only accepts literals. Kept byte-identical to
+/// [`crate::util::timestamp::CANONICAL_TS_GLOB`] by the unit test at the bottom
+/// of this file — the storage-layer guard and the Rust-layer guard must agree
+/// or one of them is decorative.
+macro_rules! ts_glob {
+    () => {
+        "[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z"
+    };
+}
+
+/// Table-level CHECK asserting every temporal column is canonical (§4.1, 0.5.4).
+///
+/// Timestamps are compared lexicographically everywhere — in SQL predicates, in
+/// `MAX(recorded_at)` when the clock recovers its floor, and in Rust `str`
+/// ordering. That is sound only if every value has the same width, so mixing
+/// `...T00:00:00Z` with `...T00:00:00.000000Z` makes `<=` disagree with
+/// chronology and traversals return empty sets with no error. The `Z` suffix
+/// alone does not achieve this; a fixed width does, and a CHECK is what makes
+/// it a property of the data rather than a convention.
+macro_rules! canonical_ts_check {
+    ($($col:literal),+ $(,)?) => {
+        concat!("CHECK (", $( $col, " GLOB '", ts_glob!(), "' AND ", )+ "1)")
+    };
+}
+
+/// The `RAISE(ABORT, …)` messages the schema's guards emit (§4.3).
+///
+/// Spliced into the trigger DDL *and* matched by [`crate::error::abort_kind`],
+/// so the guard and its classifier cannot drift. When they drift the failure is
+/// silent in the worst direction: the guard still fires, but the typed error
+/// (`SingleOpenViolation`, `RecordedAtRegression`, `ArchiveViolation`) degrades
+/// into an opaque `Engine` error that no caller can match on.
+macro_rules! abort_single_open {
+    () => {
+        "macrame: edge already has an open interval; retire it first"
+    };
+}
+macro_rules! abort_monotonic_ra {
+    () => {
+        "macrame: concept recorded_at must be strictly increasing"
+    };
+}
+macro_rules! abort_delete_guard {
+    () => {
+        "macrame: physical delete blocked outside archive session"
+    };
+}
+
+pub const ABORT_SINGLE_OPEN: &str = abort_single_open!();
+pub const ABORT_MONOTONIC_RA: &str = abort_monotonic_ra!();
+pub const ABORT_DELETE_GUARD: &str = abort_delete_guard!();
+
+/// Marker table probed by the delete guards (D-008 revised).
+///
+/// The archive session creates this table and drops it again inside the single
+/// `BEGIN IMMEDIATE … COMMIT` archive transaction, so it never exists as
+/// committed state. Connection-locality — the property the original
+/// `temp.sqlite_master` probe was reaching for — is preserved by two
+/// independent mechanisms: uncommitted DDL is visible only to the writing
+/// connection, and the archive transaction holds the write lock for its
+/// duration, so no other connection can reach the guard at all.
+pub const ARCHIVE_SESSION_MARKER: &str = "macrame_archive_session";
+
+pub const CREATE_CONCEPTS_TABLE: &str = concat!(
+    r#"
+CREATE TABLE IF NOT EXISTS concepts (
+    id               TEXT PRIMARY KEY,
+    title            TEXT NOT NULL,
+    content          TEXT NOT NULL DEFAULT '',
+    embedding_model  TEXT,
+    valid_from       TEXT NOT NULL,
+    valid_to         TEXT NOT NULL DEFAULT '9999-12-31T23:59:59.999999Z',
+    recorded_at      TEXT NOT NULL,
+    retired          INTEGER NOT NULL DEFAULT 0,
+    "#,
+    canonical_ts_check!("valid_from", "valid_to", "recorded_at"),
+    r#"
+);
+"#
+);
+
+pub const CREATE_LINKS_TABLE: &str = concat!(
+    r#"
+CREATE TABLE IF NOT EXISTS links (
+    source_id   TEXT NOT NULL REFERENCES concepts(id),
+    target_id   TEXT NOT NULL REFERENCES concepts(id),
+    edge_type   TEXT NOT NULL,
+    valid_from  TEXT NOT NULL,
+    recorded_at TEXT NOT NULL,
+    valid_to    TEXT NOT NULL DEFAULT '9999-12-31T23:59:59.999999Z',
+    weight      REAL NOT NULL DEFAULT 1.0,
+    properties  TEXT NOT NULL DEFAULT '{}',
+    PRIMARY KEY (source_id, target_id, edge_type, valid_from, recorded_at),
+    "#,
+    canonical_ts_check!("valid_from", "valid_to", "recorded_at"),
+    r#"
+);
+"#
+);
+
+pub const CREATE_LINKS_CURRENT_TABLE: &str = concat!(
+    r#"
+CREATE TABLE IF NOT EXISTS links_current (
+    source_id   TEXT NOT NULL,
+    target_id   TEXT NOT NULL,
+    edge_type   TEXT NOT NULL,
+    valid_from  TEXT NOT NULL,
+    valid_to    TEXT NOT NULL,
+    weight      REAL NOT NULL,
+    properties  TEXT NOT NULL,
+    recorded_at TEXT NOT NULL,
+    PRIMARY KEY (source_id, target_id, edge_type, valid_from),
+    "#,
+    canonical_ts_check!("valid_from", "valid_to", "recorded_at"),
+    r#"
+);
+"#
+);
+
+pub const CREATE_TRANSACTION_LOG_TABLE: &str = concat!(
+    r#"
+CREATE TABLE IF NOT EXISTS transaction_log (
+    seq_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    table_name  TEXT NOT NULL,
+    entity_id   TEXT NOT NULL,
+    operation   TEXT NOT NULL,
+    payload     TEXT NOT NULL,
+    recorded_at TEXT NOT NULL,
+    "#,
+    canonical_ts_check!("recorded_at"),
+    r#"
+);
+"#
+);
+
+/// The per-model embedding table (§4.1, D-005), for a validated model name.
+///
+/// A function rather than a `const` because the table's identity *and its
+/// column type* both depend on the model: `F32_BLOB(dim)` carries the declared
+/// dimension in the schema, which is what [`crate::vector::declared_dimension`]
+/// reads back so the crate never keeps a second copy of it.
+///
+/// Deliberately not part of the baseline migration. Which models exist is an
+/// application's choice made over time, not a property of the schema version,
+/// and D-036 classifies these tables as disposable periphery: a migration may
+/// drop one and re-embed. `IF NOT EXISTS` makes registration idempotent.
+///
+/// No temporal columns, on purpose. Doctrine VII makes an embedding a derived
+/// artifact of a model applied to content — it has no valid time of its own, and
+/// giving it a `recorded_at` would put a third clock next to the two §2 permits
+/// and invite queries that mix them.
+pub fn create_embeddings_table(model: &crate::vector::ModelName, dim: usize) -> String {
+    format!(
+        "CREATE TABLE IF NOT EXISTS {table} (
+    concept_id  TEXT PRIMARY KEY REFERENCES concepts(id),
+    embedding   F32_BLOB({dim}) NOT NULL
+);",
+        table = model.table(),
+    )
+}
+
+/// The DiskANN index over a model's vectors.
+///
+/// **Load-bearing for correctness, not only for speed.** Measured against
+/// libSQL 0.9.30: a blob of the wrong length inserted into an `F32_BLOB(4)`
+/// column is *accepted* while no vector index exists, and rejected — with the
+/// row not landing — once one does. §4.1 previously claimed the column type
+/// enforced its own dimension at insert time; it does not. So this index is
+/// created together with the table it indexes and is never optional, and
+/// dropping it to speed up a bulk load would silently disarm the only
+/// storage-layer check on dimension.
+pub fn create_embeddings_index(model: &crate::vector::ModelName) -> String {
+    format!(
+        "CREATE INDEX IF NOT EXISTS {index} ON {table} (libsql_vector_idx(embedding));",
+        index = model.index(),
+        table = model.table(),
+    )
+}
+
+/// Derived analytics output, keyed by concept and label (§5.4, D-041).
+///
+/// Deliberately outside the ledger. Three properties are load-bearing and each
+/// is the opposite of what the four normative tables above do.
+///
+/// **No log trigger.** Nothing in [`CREATE_TRIGGERS`] fires on this table, so an
+/// annotation never reaches `transaction_log`. That is Doctrine VII's reasoning
+/// about embeddings applied to the other derived artifact: a community label is
+/// a function of an algorithm, a version of that algorithm, and a graph — not a
+/// statement about the world, and a ledger that records it is recording the
+/// analytics schedule as though it were history. A reconstruction that wants
+/// labels recomputes them, which is the only honest way to ask what a past
+/// graph's communities *were*.
+///
+/// **No delete guard.** Doctrine V protects the hot ledger tables; this table is
+/// derivative state in Doctrine VI's second category, so wiping it must stay a
+/// legal, ordinary operation — a rerun replaces the previous pass, and dropping
+/// the whole table costs nothing but the recomputation.
+///
+/// **Upsert on `(concept_id, label)`.** One current value per label per concept.
+/// Storing a history of successive runs here would be the ledger again, by
+/// another name.
+///
+/// The foreign key is safe in a way `links_current`'s omitted ones are not:
+/// concepts are never physically deleted (D-022), and this table is rebuilt by
+/// re-running an algorithm that read `concepts` in the first place, so there is
+/// no insertion-order problem to solve.
+pub const CREATE_ANALYTICS_ANNOTATIONS_TABLE: &str = concat!(
+    r#"
+CREATE TABLE IF NOT EXISTS analytics_annotations (
+    concept_id  TEXT NOT NULL REFERENCES concepts(id),
+    label       TEXT NOT NULL,
+    value       TEXT NOT NULL,
+    computed_at TEXT NOT NULL,
+    PRIMARY KEY (concept_id, label),
+    "#,
+    canonical_ts_check!("computed_at"),
+    r#"
+);
+"#
+);
+
+pub const CREATE_INDICES: &[&str] = &[
+    "CREATE INDEX IF NOT EXISTS idx_annotations_label ON analytics_annotations (label);",
+    // Covering index for the traversal CTE (§5.2, D-042).
+    //
+    // Column order is load-bearing and was measured with EXPLAIN QUERY PLAN.
+    // The seek column is `source_id`; everything after it is there so the
+    // recursive step never touches the base table. The two range columns come
+    // next and `edge_type` comes *after* them, because `edge_types` is empty
+    // unless a caller sets it: with `edge_type` in second position SQLite
+    // declines the index for the unfiltered traversal — the default one — and
+    // silently falls back to a non-covering plan.
+    //
+    //   (source_id, edge_type, valid_from, ...)   filtered: COVERING
+    //                                             unfiltered: NOT covering
+    //   (source_id, valid_from, valid_to, weight, edge_type, target_id)
+    //                                             both: COVERING
+    //
+    // This subsumes the former idx_lc_src_active (source_id, valid_to): same
+    // prefix column, strictly more payload. Keeping both would pay two index
+    // writes per assertion on a table that already takes three writes.
+    "CREATE INDEX IF NOT EXISTS idx_lc_traversal_cover ON links_current \
+     (source_id, valid_from, valid_to, weight, edge_type, target_id);",
+    "CREATE INDEX IF NOT EXISTS idx_lc_tgt_active ON links_current (target_id, valid_to);",
+    "CREATE INDEX IF NOT EXISTS idx_txlog_time ON transaction_log (recorded_at);",
+    "CREATE INDEX IF NOT EXISTS idx_txlog_entity ON transaction_log (entity_id);",
+];
+
+pub const CREATE_TRIGGERS: &[&str] = &[
+    r#"
+    CREATE TRIGGER IF NOT EXISTS trg_links_current_sync
+    AFTER INSERT ON links
+    BEGIN
+        INSERT INTO links_current
+            (source_id, target_id, edge_type, valid_from, valid_to,
+             weight, properties, recorded_at)
+        VALUES
+            (NEW.source_id, NEW.target_id, NEW.edge_type, NEW.valid_from,
+             NEW.valid_to, NEW.weight, NEW.properties, NEW.recorded_at)
+        ON CONFLICT(source_id, target_id, edge_type, valid_from) DO UPDATE SET
+            valid_to    = excluded.valid_to,
+            weight      = excluded.weight,
+            properties  = excluded.properties,
+            recorded_at = excluded.recorded_at
+        WHERE excluded.recorded_at > links_current.recorded_at;
+    END;
+    "#,
+    concat!(
+        r#"
+    CREATE TRIGGER IF NOT EXISTS trg_links_single_open
+    BEFORE INSERT ON links
+    WHEN NEW.valid_to = '9999-12-31T23:59:59.999999Z'
+         AND EXISTS (
+             SELECT 1 FROM links_current
+             WHERE source_id  = NEW.source_id
+               AND target_id  = NEW.target_id
+               AND edge_type  = NEW.edge_type
+               AND valid_from <> NEW.valid_from
+               AND valid_to   = '9999-12-31T23:59:59.999999Z'
+         )
+    BEGIN
+        SELECT RAISE(ABORT, '"#,
+        abort_single_open!(),
+        r#"');
+    END;
+    "#
+    ),
+    concat!(
+        r#"
+    CREATE TRIGGER IF NOT EXISTS trg_concepts_monotonic_ra
+    BEFORE UPDATE ON concepts
+    WHEN NEW.recorded_at <= OLD.recorded_at
+    BEGIN
+        SELECT RAISE(ABORT, '"#,
+        abort_monotonic_ra!(),
+        r#"');
+    END;
+    "#
+    ),
+    r#"
+    CREATE TRIGGER IF NOT EXISTS trg_concepts_log_insert
+    AFTER INSERT ON concepts
+    BEGIN
+        INSERT INTO transaction_log (table_name, entity_id, operation, payload, recorded_at)
+        VALUES ('concepts', NEW.id, 'I',
+                json_object('v', 1, 'title', NEW.title, 'content', NEW.content,
+                            'valid_from', NEW.valid_from, 'valid_to', NEW.valid_to,
+                            'retired', NEW.retired),
+                NEW.recorded_at);
+    END;
+    "#,
+    r#"
+    CREATE TRIGGER IF NOT EXISTS trg_concepts_log_update
+    AFTER UPDATE ON concepts
+    BEGIN
+        INSERT INTO transaction_log (table_name, entity_id, operation, payload, recorded_at)
+        VALUES ('concepts', NEW.id, 'U',
+                json_object('v', 1, 'title', NEW.title, 'content', NEW.content,
+                            'valid_from', NEW.valid_from, 'valid_to', NEW.valid_to,
+                            'retired', NEW.retired),
+                NEW.recorded_at);
+    END;
+    "#,
+    r#"
+    CREATE TRIGGER IF NOT EXISTS trg_links_log_insert
+    AFTER INSERT ON links
+    BEGIN
+        INSERT INTO transaction_log (table_name, entity_id, operation, payload, recorded_at)
+        VALUES ('links',
+                NEW.source_id || '|' || NEW.target_id || '|' || NEW.edge_type || '|' || NEW.valid_from,
+                'I',
+                json_object('v', 1, 'source_id', NEW.source_id, 'target_id', NEW.target_id,
+                            'edge_type', NEW.edge_type, 'valid_from', NEW.valid_from,
+                            'valid_to', NEW.valid_to, 'weight', NEW.weight,
+                            'properties', json(NEW.properties)),
+                NEW.recorded_at);
+    END;
+    "#,
+    // Concepts are NEVER physically archived (D-022), so this guard is
+    // unconditional -- there is no session in which the delete becomes legal.
+    r#"
+    CREATE TRIGGER IF NOT EXISTS trg_concepts_guard_delete
+    BEFORE DELETE ON concepts
+    BEGIN
+        SELECT RAISE(ABORT, 'macrame: concepts are never physically archived (D-022)');
+    END;
+    "#,
+    // D-008 (revised): probe main.sqlite_master for the archive-session marker.
+    // SQLite forbids a trigger in `main` from referencing objects in another
+    // database, temp included, so the original temp.sqlite_master probe fails
+    // at CREATE TRIGGER time and is unimplementable.
+    concat!(
+        r#"
+    CREATE TRIGGER IF NOT EXISTS trg_links_guard_delete
+    BEFORE DELETE ON links
+    WHEN NOT EXISTS (
+        SELECT 1 FROM sqlite_master
+        WHERE type = 'table' AND name = 'macrame_archive_session'
+    )
+    BEGIN
+        SELECT RAISE(ABORT, '"#,
+        abort_delete_guard!(),
+        r#"');
+    END;
+    "#
+    ),
+    concat!(
+        r#"
+    CREATE TRIGGER IF NOT EXISTS trg_txlog_guard_delete
+    BEFORE DELETE ON transaction_log
+    WHEN NOT EXISTS (
+        SELECT 1 FROM sqlite_master
+        WHERE type = 'table' AND name = 'macrame_archive_session'
+    )
+    BEGIN
+        SELECT RAISE(ABORT, '"#,
+        abort_delete_guard!(),
+        r#"');
+    END;
+    "#
+    ),
+];
+
+#[cfg(test)]
+mod tests {
+    use crate::util::timestamp::{CANONICAL_TS_GLOB, OPEN_SENTINEL};
+
+    /// The DDL's CHECK pattern and the Rust-side pattern must be the same
+    /// pattern. If they drift, one layer accepts what the other rejects and the
+    /// canonical-form invariant is enforced in name only.
+    #[test]
+    fn ddl_glob_matches_the_rust_canonical_pattern() {
+        assert_eq!(format!("'{}'", ts_glob!()), CANONICAL_TS_GLOB);
+    }
+
+    /// Every DDL statement that declares a temporal default must use the
+    /// canonical sentinel; a second-precision default would be rejected by the
+    /// very CHECK sitting next to it.
+    #[test]
+    fn ddl_defaults_use_the_canonical_sentinel() {
+        for ddl in [
+            super::CREATE_CONCEPTS_TABLE,
+            super::CREATE_LINKS_TABLE,
+            super::CREATE_LINKS_CURRENT_TABLE,
+            super::CREATE_TRANSACTION_LOG_TABLE,
+        ] {
+            assert!(
+                !ddl.contains("9999-12-31T23:59:59Z"),
+                "DDL still carries the pre-0.5.4 second-precision sentinel: {ddl}"
+            );
+        }
+        for trigger in super::CREATE_TRIGGERS {
+            assert!(
+                !trigger.contains("9999-12-31T23:59:59Z"),
+                "trigger still carries the pre-0.5.4 sentinel: {trigger}"
+            );
+        }
+        assert!(super::CREATE_LINKS_TABLE.contains(OPEN_SENTINEL));
+    }
+
+    /// Every abort message the classifier matches on must actually appear in the
+    /// DDL that emits it. `concat!` makes this true by construction today; the
+    /// test is what keeps it true if someone re-inlines a literal.
+    #[test]
+    fn every_abort_message_appears_in_a_trigger() {
+        for msg in [
+            super::ABORT_SINGLE_OPEN,
+            super::ABORT_MONOTONIC_RA,
+            super::ABORT_DELETE_GUARD,
+        ] {
+            assert!(
+                super::CREATE_TRIGGERS.iter().any(|t| t.contains(msg)),
+                "no trigger emits {msg:?}, so its typed error is unreachable"
+            );
+        }
+    }
+}

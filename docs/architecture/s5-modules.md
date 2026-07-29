@@ -1,0 +1,611 @@
+<!--nav-->
+← [previous](s4-schema.md) · [index](README.md) · [next](s6-s10-flows-to-dependencies.md) →
+<!--/nav-->
+
+## §5 Modules
+
+### 5.1 connection.rs — the handle, the pragmas, and the Write Actor
+
+Amended in 0.4.5; corrected and hardened in 0.5.0; clarified in 0.5.1 and 0.5.2. This section is the substance of the amendment; everything else in the document either feeds it or is fed by it.
+
+#### 5.1.1 Why a Mutex is not enough
+
+The v0.4.0 handle wrapped a single shared connection, and [§2](s0-s3-foundations.md#2-system-context) promised that "write serialization is structural rather than negotiated" because all writes went through one transaction() entry point. That was true — and insufficient. The failure mode is not concurrent writes, which the entry point prevented, but concurrent occupancy: a background task inside transaction() writing 50,000 analytics annotations holds the file-level write lock for the entire duration of the transaction, and a tokio::sync::Mutex around the connection merely converts the file lock into a task queue with no say over its ordering and no bound on its service time. The UI thread blocks behind the whole bulk job. In SQLite, the lock is held at the file-system level for the duration of a transaction; no wrapper above the engine can interrupt it. The only cure is to govern how long any single transaction holds the lock and who gets it next. 0.4.5 therefore replaces the shared entry point with a dedicated owner.
+
+#### 5.1.2 Handle shape and the clock contract
+```rust
+// shape only — see Appendix A for normative signatures
+
+pub struct Database {
+    db: libsql::Database,                       // engine handle; readers can be spawned freely
+    read_conn: libsql::Connection,              // WAL reader — never writes, never traverses the actor
+    high_pri_tx: mpsc::Sender<HighPriCommand>,  // UI-driven work
+    low_pri_tx: mpsc::Sender<LowPriCommand>,    // background work
+    clock: Arc<dyn Clock>,
+    archive_path: PathBuf,                      // (0.5.2) cold DB, derived by convention at open()
+    schema_version: u32,
+    writer: Option<JoinHandle<Result<()>>>,
+}
+```
+
+The write connection has deliberately no field: it is moved into the actor task at open() and no other code path can name it. Reads do not traverse the actor at all — as_of() traversals, reconstruct() folds, audit_current(), vector and hybrid search are all served from read_conn, because under WAL a reader never blocks on the writer, and routing reads through the actor would add latency for nothing. The actor's loop stays tight: it schedules writes and nothing else.
+```rust
+// shape only — see Appendix A for normative signatures
+
+impl Database {
+    pub async fn open(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        let db = libsql::Builder::new_local(path).build().await?;
+        let write_conn = configure(db.connect()?).await?;
+        let read_conn  = configure(db.connect()?).await?;
+
+        // (0.5.0) Structural read-guard: even a logic error in connection
+        // routing cannot produce a write through the read path.
+        read_conn.execute("PRAGMA query_only = ON", ()).await?;
+
+        migrations::run(&write_conn).await?;
+
+        let (high_pri_tx, high_pri_rx) = mpsc::channel(256);
+        let (low_pri_tx,  low_pri_rx)  = mpsc::channel(64);
+        // (0.5.2) SystemClock reads MAX(recorded_at) to floor itself — see below.
+        let clock: Arc = Arc::new(SystemClock::new(&read_conn).await?);
+        let writer = tokio::spawn(run_writer_actor(
+            write_conn, Arc::clone(&clock), high_pri_rx, lowpri_rx));
+
+        // (0.5.2) Archive path derived by convention: foo.db -> foo_archive.db
+        let archive_path = derive_archive_path(path);
+
+        Ok(Self { db, read_conn, high_pri_tx, low_pri_tx, clock, archive_path,
+                  schema_version: migrations::current_version(),
+                  writer: Some(writer) })
+    }
+}
+
+/// Identical pragma set on every connection — writer and readers alike.
+async fn configure(conn: libsql::Connection) -> Result<libsql::Connection> {
+    conn.execute("PRAGMA journal_mode = WAL", ()).await?;
+    conn.execute("PRAGMA synchronous = NORMAL", ()).await?;
+    conn.execute("PRAGMA busy_timeout = 5000", ()).await?;
+    conn.execute("PRAGMA foreign_keys = ON", ()).await?;
+    // (0.5.0) Explicit: SQLite defaults recursive_triggers to OFF, which is
+    // correct here — trg_links_current_sync fires an upsert into links_current,
+    // and we must not re-fire any trigger on links_current.
+    conn.execute("PRAGMA recursive_triggers = OFF", ()).await?;
+    Ok(conn)
+}
+```
+
+The pragma set is small and intentional, unchanged from 0.4.0 except for the two 0.5.0 additions noted inline. WAL journaling gives non-blocking readers behind a single writer; synchronous = NORMAL is the durability/speed equilibrium for WAL mode on desktop hardware, where the failure window is a power loss mid-WAL-checkpoint rather than a lost committed transaction; and foreign_keys = ON is non-negotiable in a schema whose referential integrity is part of its meaning. busy_timeout = 5000 is set on every connection — writer and readers — because even with perfect in-process queueing, a read transaction that escalates, or a manual SQLite CLI query against the file, can hold the lock briefly; the timeout converts that into a bounded wait instead of an immediate SQLITE_BUSY. Five seconds is long enough to survive a WAL checkpoint flush and short enough that a genuinely stuck lock surfaces as a typed error rather than a hung UI.
+
+Migrations run through user_version, the engine's own schema-version slot, with each migration an idempotent step reviewed as ordinary DDL. The clock is injected here and threaded everywhere: production uses SystemClock (RFC 3339, microsecond precision, UTC); every test uses FakeClock, which is what makes the entire temporal test suite deterministic — including, as of 0.4.5, the actor, which receives the same Arc the harness holds.
+
+Clock monotonicity guarantee (0.5.1). Both SystemClock and FakeClock implement the Clock trait with a strict monotonicity contract:
+```rust
+pub trait Clock: Send + Sync {
+    /// Returns the current timestamp as ISO-8601 UTC.
+    /// CONTRACT: successive calls return strictly increasing values,
+    /// even across application restarts and NTP corrections.
+    fn now(&self) -> String;
+}
+```
+
+SystemClock enforces this by maintaining an interior Mutex tracking the last-issued timestamp. On each call to now(), it computes max(wall_clock, last_issued + 1μs) and updates the interior state. On construction (SystemClock::new()), it queries the database for MAX(recorded_at) across concepts and links and floors the interior state to that value, so that a restart after an NTP backward correction cannot issue a timestamp older than the newest row in the database. This guarantees that trg_concepts_monotonic_ra ([§4.3](s4-schema.md#43-the-transaction-log)) never rejects a legitimate update due to clock drift. FakeClock is monotonic by construction: the harness advances it explicitly via advance(Duration), and it never moves backwards.
+
+Timestamp parsing contract (0.5.2, [D-027](s13-decision-register.md#d-027)). Because recorded_at is stored as ISO-8601 text, SystemClock::new() must parse the stored string back into a SystemTime to use as its floor. This is the one place in the clock module where a panic is possible if handled carelessly, so the contract is explicit:
+```rust
+// util/clock.rs — shape only
+
+impl SystemClock {
+    pub async fn new(conn: &libsql::Connection) -> Result<Self> {
+        // SQLite MAX() on ISO-8601 'Z' text is lexicographic, which is
+        // chronologically correct for UTC strings with identical format.
+        let max_ts: Option<String> = conn.query(
+            "SELECT MAX(recorded_at) FROM (
+                 SELECT MAX(recorded_at) AS recorded_at FROM concepts
+                 UNION ALL
+                 SELECT MAX(recorded_at) AS recorded_at FROM links
+             )", ()
+        ).await?.next().await?.and_then(|row| row.get(0).ok());
+
+        let floor = match max_ts {
+            Some(ts) => parse_iso8601_utc(&ts).unwrap_or_else(|e| {
+                // Corrupt or manually-edited timestamp. Don't panic on
+                // startup; fall back to wall clock and warn. The
+                // monotonicity trigger (§4.3) prevents the corruption
+                // from propagating into new writes.
+                tracing::warn!(
+                    "SystemClock: failed to parse MAX(recorded_at)={:?}: {}; \
+                     falling back to wall clock", ts, e
+                );
+                SystemTime::now()
+            }),
+            None => SystemTime::now(),  // empty database
+        };
+
+        Ok(Self { floor: Mutex::new(floor) })
+    }
+}
+
+/// Strict parser for the exact format SystemClock produces:
+/// "YYYY-MM-DDTHH:MM:SS.ffffffZ" (microsecond precision, UTC).
+/// Also accepts second precision ("YYYY-MM-DDTHH:MM:SSZ") for
+/// compatibility with rows written by older crate versions.
+/// Rejects offsets, missing 'Z', and malformed components.
+fn parse_iso8601_utc(s: &str) -> Result<SystemTime> { /* … */ }
+```
+
+The decisions: parse failure never panics — a corrupt recorded_at falls back to SystemTime::now() with a tracing::warn!; the parser is strict (accepts only the crate's own format plus second-precision backward compatibility, rejects offsets and missing Z); and there is no chrono dependency — the parser is ~20 lines of manual string slicing, and adding a datetime crate for one call site is not justified. The lexicographic MAX() is safe precisely because every recorded_at is a UTC Z string in an identical fixed format, which is why [§4.1](s4-schema.md#41-concepts-and-per-model-embeddings) mandates the explicit Z suffix.
+
+#### 5.1.3 The two-tier command channel
+```rust
+// shape only — see Appendix A for normative signatures
+
+/// Work that preempts background jobs at the next transaction boundary.
+pub enum HighPriCommand {
+    AssertEdge {
+        source: String, target: String, edge_type: String,
+        valid_from: String, valid_to: String,
+        weight: f64, properties: String,
+        responder: oneshot::Sender<Result<()>>,
+    },
+    RetireEdge { /* … */ responder: oneshot::Sender<Result<()>> },
+    UpsertConcept { /* … */ responder: oneshot::Sender<Result<()>> },
+    /// The explicit atomic escape hatch (§5.1.6): one transaction, one stamp,
+    /// one stall. High-priority because the caller has accepted the cost.
+    WriteBulkAtomic { rows: Vec<AnnotationRow>,
+                      responder: oneshot::Sender<Result<()>> },
+    /// Integrity repair preempts analytics: a detected drift is a
+    /// corrective act (§5.8). See §5.8 for sizing and operational guidance.
+    RebuildCurrent { responder: oneshot::Sender<Result<RebuildReport>> },
+    Shutdown { responder: oneshot::Sender<Result<()>> },
+}
+
+/// Work that yields to any high-priority command at every chunk boundary.
+pub enum LowPriCommand {
+    WriteAnnotationsChunk { chunk: Vec<AnnotationRow>,
+                            responder: oneshot::Sender<Result<()>> },
+    BulkImportChunk { /* … */ responder: oneshot::Sender<Result<()>> },
+    /// Archive is one atomic transaction by nature (§5.7); it is low-priority
+    /// because it is scheduled, not user-driven.
+    Archive { cutoff: String, responder: oneshot::Sender<Result<ArchiveReport>> },
+}
+```
+
+> **These two sketches are 0.4.5 vintage and the crate has moved past them (0.5.4).** They are restored as written because the prose around them argues from their shape, but three things in them are no longer true: the payload fields are now typed values (`EdgeAssertion`, `ConceptUpsert`, `Annotation`) rather than loose columns, since a command carrying strings is an arbitrary-SQL channel ([D-034](s13-decision-register.md#d-034)); the wildcard `_ => LoopCtl::Continue` in `execute` below is the exact defect [D-034](s13-decision-register.md#d-034) removed, because it dropped the responder for nine of twelve commands; and the command set has since gained `RegisterModel`, `UpsertEmbeddingChunk` ([D-048](s13-decision-register.md#d-048)) and `WriteAnalyticsChunk` ([D-041](s13-decision-register.md#d-041)). [Appendix A](appendices.md#appendix-a--public-api-normative) is the current surface.
+
+Every command carries its own oneshot responder: the actor answers each request individually, and the caller's await is the join point between the two tasks. Two tiers are enough for this system — user-driven work and background work — and select! extends to a third arm without structural change should a maintenance tier ever appear. The channels are bounded, and the bounds are backpressure: when the low-priority queue is full, an analytics worker blocks on send().await, which is exactly correct — the producer is throttled by the consumer, and the UI is never a party to the negotiation.
+
+#### 5.1.4 The actor loop
+```rust
+// shape only — see Appendix A for normative signatures
+
+enum LoopCtl { Continue, Break }
+
+async fn run_writer_actor(
+    conn: libsql::Connection,
+    clock: Arc<dyn Clock>,
+    mut high_pri_rx: mpsc::Receiver<HighPriCommand>,
+    mut low_pri_rx: mpsc::Receiver<LowPriCommand>,
+) -> Result<()> {
+    loop {
+        let ctl = tokio::select! {
+            // biased polls the arms in written order: while the high-priority
+            // queue is non-empty, the low-priority arm is never even polled.
+            biased;
+
+            Some(cmd) = high_pri_rx.recv() => cmd.execute(&conn, &*clock).await,
+            Some(cmd) = low_pri_rx.recv()  => cmd.execute(&conn, &*clock).await,
+            else => LoopCtl::Break,                     // both channels closed
+        };
+        if matches!(ctl, LoopCtl::Break) { break; }
+    }
+    Ok(())
+}
+```
+
+Each execute runs exactly one transaction — BEGIN IMMEDIATE … COMMIT — and routes its DbError, if any, to the command's responder rather than to the loop; a failed assertion must not kill the writer. The loop is the only scheduler in the system, and its policy is one line: between any two transactions, re-check the UI queue before touching the background queue. The priority queue decides who goes next; it does not — cannot — interrupt a transaction already in flight, because SQLite's lock is not preemptible. That single fact is the reason [§5.1.5](s5-modules.md#515-cooperative-chunking--the-golden-rule) exists.
+```rust
+// shape only — see Appendix A for normative signatures
+
+impl HighPriCommand {
+    async fn execute(self, conn: &libsql::Connection, clock: &dyn Clock) -> LoopCtl {
+        match self {
+            HighPriCommand::AssertEdge { source, target, edge_type,
+                                         valid_from, valid_to, weight,
+                                         properties, responder } => {
+                let stamp = clock.now();
+                let result = async {
+                    let tx = conn
+                        .transaction_with_behavior(TransactionBehavior::Immediate)
+                        .await?;
+                    // Fires trg_links_current_sync and trg_links_log_i
+                    // inside the transaction.
+                    tx.execute(
+                        "INSERT INTO links (source_id, target_id, edge_type,
+                                            valid_from, valid_to, weight,
+                                            properties, recorded_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                        libsql::params![source, target, edge_type, valid_from,
+                                        valid_to, weight, properties, stamp],
+                    ).await?;
+                    tx.commit().await?;
+                    Ok(())
+                }.await;
+                let _ = responder.send(result);
+                LoopCtl::Continue
+            }
+            HighPriCommand::Shutdown { responder } => {
+                let _ = responder.send(Ok(()));
+                LoopCtl::Break
+            }
+            /* RetireEdge, UpsertConcept, RebuildCurrent,
+               WriteBulkAtomic — same shape */
+            _ => LoopCtl::Continue,
+        }
+    }
+}
+```
+
+transaction() as a public entry point is withdrawn in 0.4.5 ([D-016](s13-decision-register.md#d-016)): a caller-held closure would let arbitrary work hold the write lock for arbitrary time, reintroducing exactly the starvation this amendment removes. The mechanism survives as the actor-internal shape above — every write is still one BEGIN IMMEDIATE … COMMIT, so the v0.4.0 invariant "all writes funnel through a single transaction entry point" is preserved and strengthened: the entry point is now a task, and the task is the only thing in the process that can write.
+
+#### 5.1.5 Cooperative chunking — the golden rule
+
+The priority queue decides who goes next. It does not interrupt a transaction already running. If a background worker were allowed to submit 50,000 annotation writes as one command, the high-priority queue would still be blocked until that transaction committed — the actor would hold the lock on behalf of the background for the entire duration, and the biased poll would be irrelevant.
+
+The Golden Rule: low-priority workers must chunk their data. Chunk sizes of 500 to 1,000 rows are the calibration: large enough that per-transaction overhead (BEGIN, COMMIT, fsync under synchronous = NORMAL) amortizes to noise, small enough that a chunk commits in 2–3 ms even where trigger amplification applies (a links insert fans out to three writes — the row, the links_current upsert, the log entry). The writer yields back to the select! after every chunk, and the biased poll does the rest.
+```rust
+// shape only — see Appendix A for normative signatures
+
+impl Database {
+    /// Background write-back of analytics results (e.g. 50K Louvain labels).
+    ///
+    /// Fidelity boundary (§5.1.6): chunked writes are NOT transaction-time
+    /// atomic. Each chunk commits under its own recorded_at; a reconstruct()
+    /// mid-write observes a prefix of the results. Callers who need atomicity
+    /// use writeanalyticsresults_atomic().
+    pub async fn write_analytics_results(
+        &self,
+        results: Vec<AnnotationRow>,
+    ) -> Result {
+        const CHUNK_SIZE: usize = 500;
+
+        for chunk in results.chunks(CHUNK_SIZE) {
+            let (tx, rx) = oneshot::channel();
+            self.low_pri_tx.send(LowPriCommand::WriteAnnotationsChunk {
+                chunk: chunk.to_vec(),
+                responder: tx,
+            }).await.maperr(|| DbError::WriterUnavailable)?;
+            // Wait for this chunk to commit. The await itself yields control:
+            // the actor finishes the chunk, loops, and polls the high-priority
+            // queue before our next send can land.
+            rx.await.maperr(|| DbError::WriterDroppedResponder)??;
+        }
+        Ok(())
+    }
+}
+```
+
+Note what the error handling does not do: it does not unwrap(). If the actor task has died, send fails and the oneshot drops; both are mapped to typed variants ([§7](s6-s10-flows-to-dependencies.md#7-errors)), so an actor failure degrades to an error the caller can catch, log, and recover from — rather than a panic that cascades through every in-flight request in the process.
+
+#### 5.1.6 The fidelity boundary of chunked writes
+
+[Doctrine II](s0-s3-foundations.md#doctrine-ii) stamps recorded_at per application transaction; under chunking, each chunk *is* the application transaction. A 50,000-row write-back therefore lands under roughly 100 distinct stamps, and reconstruct(ts) called mid-write observes a prefix — chunk 42 learned, chunk 43 not yet. This is correct bitemporal behavior (each chunk is a distinct "the database learned these facts" event), and the ledger is unaffected (seq_id remains strictly monotonic across chunks — gaps are possible only on rollback, not on successful commit; [Doctrine IV](s0-s3-foundations.md#doctrine-iv) never sees the seams), but it is a fidelity boundary callers must be told about:
+
+write_analytics_results — chunked, low-priority, not transaction-time atomic. The default for analytics write-backs, bulk imports, and any job where partial visibility is harmless.
+writeanalyticsresults_atomic — one WriteBulkAtomic command, one transaction, one stamp, and one UI stall for the duration. The explicit escape hatch when the operation must be visible all-at-once or not at all.
+
+The gap between the two is documented in both rustdocs and pinned by test ([§8](s6-s10-flows-to-dependencies.md#8-testing-strategy)), in the same spirit as [Doctrine VIII](s0-s3-foundations.md#doctrine-viii)'s as_of/reconstruct distinction: fidelity is a parameter, never a silent default.
+
+#### 5.1.7 Shutdown and snapshot coordination
+```rust
+// shape only — see Appendix A for normative signatures
+
+impl Database {
+    /// Clean shutdown: stop the actor, then anchor the log with a final snapshot.
+    pub async fn close(mut self) -> Result<()> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.high_pri_tx
+            .send(HighPriCommand::Shutdown { responder: tx }).await;
+        let _ = rx.await;   // best-effort: the actor may already be gone
+        if let Some(handle) = self.writer.take() { let _ = handle.await; }
+
+        // The log is durable and the actor is quiescent: fold the tail from
+        // the read side and write the final snapshot file (§5.5).
+        // No write connection needed.
+        snapshot::write_final(&self.read_conn).await?;
+        Ok(())
+    }
+}
+```
+
+The sequence matters. Shutdown is answered between transactions — the actor is never mid-commit when it accepts it — so every accepted command is durable before the task exits. Dropping the handle without close() also terminates the actor (both channels close, the else arm fires), but skips the final snapshot: that is an unclean shutdown by definition, and recovery is exactly the [§5.5](s5-modules.md#55-temporalreplayrs-and-temporalsnapshotrs--reconstruction-and-snapshots) path — fold from the last snapshot, lose nothing, pay the cold-start latency. The writer does not restart automatically after a panic or an unclean exit; every subsequent operation returns WriterUnavailable, and the application reopens the Database. This is a deliberate choice ([D-015](s13-decision-register.md#d-015)): a dead writer indicates a bug that should surface in a crash report, not be silently papered over by a respawn.
+
+#### 5.1.8 Write-queue latency and caller timeouts (0.5.2, D-028)
+
+busy_timeout governs SQLite lock acquisition. It does not govern the write path described in this section, and callers must understand why. When the UI sends a HighPriCommand::AssertEdge while a rebuild_current() (~50 s at 10M edges) or an archive() transaction is in flight, the command sits in the mpsc channel and the caller awaits its oneshot responder in Rust — no SQLite call is executing on the caller's behalf, so busy_timeout never engages. The await blocks for the duration of the in-flight transaction.
+
+This is correct behavior, not a defect: under WAL, readers are unaffected, so the UI can still render, traverse, and search while the write queues. But the latency contract of every write method must state it plainly. The rustdoc for assert_edge (and every HighPriCommand-backed method) therefore carries a # Latency section:
+```rust
+/// # Latency
+///
+/// Under normal operation, completes in < 5 ms (§9). If a `rebuild_current()`
+/// or an `archive()` transaction is in flight, this call waits for that
+/// transaction to commit — up to ~50 s at 10M edges (§5.8 sizing table).
+/// `busy_timeout` does **not** bound this wait: it is a channel wait in Rust,
+/// not a lock wait in SQLite. Reads are unaffected under WAL.
+///
+/// To bound the wait, wrap the call:
+///
+/// ```ignore
+/// tokio::time::timeout(Duration::from_secs(2), db.assert_edge(edge)).await
+/// ```
+///
+/// A timeout is **not** a cancellation. The command remains queued and commits
+/// when the actor reaches it; the timeout only stops *you* waiting. For a
+/// ledger this is the correct semantic — an asserted fact is asserted whether
+/// or not anyone is still listening. True abandonment is an application-layer
+/// `CancellationToken` checked *before* `send`, not after (D-028).
+```
+
+That last paragraph is the substance of [D-028](s13-decision-register.md#d-028) and the reason crate-level write cancellation was declined. A cancellable write command would require the actor to dequeue and discard, which introduces a failure mode the ledger does not want: a command reported as cancelled that in fact ran, or ran partially. The channel is a commitment queue, not a work queue.
+
+### 5.2 graph/builder.rs — traversal, valid time, and attribute fidelity
+
+The builder compiles every traversal into a recursive CTE over `links_current`, with every parameter bound and none interpolated — edge types included, as of 0.5.4. Cycle detection uses a path of concatenated fixed-width ID bytes rather than the classic comma-delimited string path: every ULID occupies exactly 26 bytes and the crate additionally separates them with `/`, so the `INSTR(path, id) = 0` test cannot produce the delimiter-confusion false positives of text paths. A spurious match would require one ULID to appear inside the concatenation of others — a ~2⁻¹³⁰ event per hop, which the design documents and disregards.
+
+```sql
+WITH RECURSIVE walk(node_id, depth, path) AS (
+    SELECT ?1, 0, CAST(?1 AS BLOB)
+    UNION ALL
+    SELECT l.target_id, w.depth + 1, w.path || '/' || CAST(l.target_id AS BLOB)
+    FROM walk w
+    JOIN links_current l ON l.source_id = w.node_id
+    WHERE w.depth < ?2
+      AND l.valid_from <= ?3 AND ?3 < l.valid_to      -- the valid-time window
+      AND l.weight >= ?4
+      AND l.edge_type IN (?5, ?6, ...)                -- bound, never spliced
+      AND INSTR(w.path, CAST(l.target_id AS BLOB)) = 0
+)
+SELECT DISTINCT w.node_id
+FROM walk w JOIN concepts c ON c.id = w.node_id
+WHERE c.retired = 0
+ORDER BY w.node_id;
+```
+
+**Two corrections to the pre-0.5.4 text (0.5.4).** First, the document described two SQL shapes — an "active mode" carrying `l.valid_to > :now`, and an `as_of(ts)` variant that "rewrites exactly two predicates". There is one shape. The half-open window `l.valid_from <= ?3 AND ?3 < l.valid_to` is parameterised by a timestamp, and "active" is that predicate evaluated at `now`. One shape means one thing to test and one place for the [D-029](s13-decision-register.md#d-029) canonical-form requirement to bite; a rewrite that produces a second predicate string is a second thing that can be wrong.
+
+Second, the claim that "the terminal concept filter likewise" is rewritten is false, and the truth is a limitation worth stating plainly: `c.retired = 0` is evaluated against the **live** concept row at every `ts`. A concept retired today is therefore absent from `as_of(last year)`. This is defensible — `retired` is the application axis, not the domain axis ([§4.1](s4-schema.md#41-concepts-and-per-model-embeddings)), and it answers "should the user see this now?" rather than "did this hold then?" — but it means a valid-time traversal is filtered by a present-tense predicate, and callers reconstructing a historical view should use `reconstruct(ts)` ([§5.5](s5-modules.md#55-temporalreplayrs-and-temporalsnapshotrs--reconstruction-and-snapshots)), which folds the log and sees `retired` as it was believed. The distinction is [Doctrine VIII](s0-s3-foundations.md#doctrine-viii)'s, applied one level down.
+
+The projection returns node ids alone, ordered by id. Attributes are a separate step, because the three modes read from two different places:
+
+```rust
+pub enum AttributeMode {
+    Current,   // live attributes from `concepts`. Fast. WRONG for historical text.
+    AtTime,    // attributes as believed at ts, hydrated from transaction_log.
+    Omit,      // topology only; the concepts read is skipped entirely.
+}
+```
+
+`AtTime` hydration leaves the walk untouched and resolves attributes for the result set with one window query — latest log entry per entity with `recorded_at <= :ts` — merged over the live rows ([§5.6](s5-modules.md#56-temporalas_ofrs--valid-time-queries-and-attribute-hydration)). The walk's cost is unchanged; the hydration is one indexed scan over `idx_txlog_entity` bounded by the result-set size, not by the log size.
+
+Separating hydration from the walk is what fixed the second defect [D-039](s13-decision-register.md#d-039) records. The pre-0.5.4 `build_sql` always emitted the `concepts` join, so `attribute_mode` was stored on the builder, exposed by a builder method, and never read: a caller asking for `AtTime` received live attributes with no indication the mode had been ignored. That is the exact failure [Doctrine II](s0-s3-foundations.md#doctrine-ii) exists to prevent, and it arrived as a silent wrong answer rather than as an error.
+
+**Edge types are bind parameters, not literals (0.5.4, [D-039](s13-decision-register.md#d-039)).** An earlier version spliced them into the CTE with `format!("'{t}'")`, which made any caller-supplied string a SQL fragment on the read path. The only validation in the crate, `validate_edge_type`, runs from `EdgeAssertion::normalized` on the *write* path, so a traversal never passed through it — and that function's own doc comment cited the traversal CTE as its justification. Binding removes the question rather than answering it: unlike a table name, an edge type is a value, and values can be parameters. Contrast [D-037](s13-decision-register.md#d-037), where a model name is an identifier, cannot be bound, and validation was therefore the only option.
+
+**The recursive step is index-only (0.5.4, [D-042](s13-decision-register.md#d-042)).** `idx_lc_traversal_cover` carries every column the walk reads, so the hop join never fetches a base-table row: `EXPLAIN QUERY PLAN` reports `SEARCH l USING COVERING INDEX idx_lc_traversal_cover (source_id=? AND valid_from<?)`, and `links_current` itself is not touched until the terminal join to `concepts`. That plan shape is asserted by test rather than assumed, including the seek constraint and not merely the word `COVERING` — the column order is what makes the difference, and an index in the wrong order still exists, still reports as covering, and still walks more of itself than it needs to. [D-042](s13-decision-register.md#d-042) records the ordering argument and the measurement that corrected it.
+
+**Cycle-detection performance note (0.5.1).** `INSTR(w.path, CAST(l.target_id AS BLOB))` is O(path length) per hop. At the default `max_depth = 3` with 27-byte path elements the path is ~81 bytes — trivial. At depth 10 it is ~270 bytes — still fast. At depth ≥ 50 it exceeds 1,300 bytes and `INSTR` becomes CPU-bound. The practical maximum depth for knowledge-graph traversals is 5–10 hops, and the [§9](s6-s10-flows-to-dependencies.md#9-performance-budgets) gates measure depth 3. If a use case ever requires depth ≥ 20, benchmark this against a visited-set CTE (`json_each` over a JSON array of visited ids) and document the crossover. The current design is correct and fast for the target workload; this note exists so a future maintainer does not assume O(1) cycle detection.
+
+### 5.3 graph/vector_filter.rs — strategies and the byte-budget cost model
+
+Vector queries rarely arrive naked: the caller wants "the ten nearest neighbours of this embedding *among concepts reachable in two hops*", or "*among edges of type `CITES` with weight ≥ 0.7*". DiskANN answers the pure-vector question and the relational engine answers the pure-filter question; the composition is where naive implementations go wrong, because the two access paths cannot be nested — the DiskANN index is opaque to SQL predicates, and the relational filter is opaque to the index.
+
+Three strategies are available, and the choice is a cost decision, not a style decision. The 0.4.5 text named them `VectorFirst` / `FilterFirst` / `Staged`; the enum names them as below. The names changed; the strategies did not.
+
+- **`PostFilter`** (was `VectorFirst`) — retrieve a generous top-k′ from DiskANN, then post-filter against the relational predicate. Cheap when the filter is loose, because most of the top-k′ survives; catastrophic when it is tight, because the answer set falls off the end of k′ and the query silently under-returns rather than failing.
+- **`PreFilterCTE`** (was `FilterFirst`) — materialize the candidate id set from the relational predicate, then re-rank candidates by exact vector distance: a brute-force scan over `F32_BLOB` rows with no index. Cheap when the candidate set is small and the filter selective; a full-table distance scan when it is not.
+- **`TwoPhaseTempTable`** (was `Staged`) — run the relational filter first and push the candidate ids into the vector query as an allow-list, falling back to `PostFilter` with a k′ inflated by the filter's estimated selectivity where no push-down is available.
+
+The byte-budget model makes the choice arithmetically rather than by rule of thumb ([D-007](s13-decision-register.md#d-007)). For each strategy the planner estimates bytes touched:
+
+| Strategy | Estimated bytes |
+|---|---|
+| `PostFilter` | `k′ × (vector_bytes + row_bytes)` + the filter pass |
+| `PreFilterCTE` | the filtered scan + `|candidates| × vector_bytes` of exact distance computation |
+| `TwoPhaseTempTable` | the filter + the allow-listed index walk |
+
+`vector_bytes` comes from the model's declared dimension (768 × 4 for `nomic_v1`, read from the schema per [D-037](s13-decision-register.md#d-037) rather than from a registry the crate maintains); selectivity is estimated from index statistics over `links_current`; and the planner takes the minimum. Estimates are logged at `debug` alongside the chosen strategy, so tuning is empirical: when the model is wrong, the logs say which term lied. The subgraph byte budget of [§5.4](s5-modules.md#54-graphsubgraphrs-and-graphalgorithmsrs--native-in-memory-analytics) applies as a hard ceiling on the candidate set regardless of strategy, and exceeding it raises `SubgraphTooLarge` rather than silently degrading — which, as of 0.5.4, it can actually do ([D-039](s13-decision-register.md#d-039)).
+
+**Implementation status (0.5.4, open).** Everything above is design. The document should say plainly what exists:
+
+- The three strategies are an enum. **None of them has an execution body.** Nothing in the crate takes a `VectorFilterStrategy` and runs the query it names.
+- `CostEstimator` carries a `byte_budget` field and does not read it. `select_strategy` branches on `candidate_count` against two hard-coded thresholds (500, 5000), so the selector is a candidate-count heuristic wearing the name of a byte-budget cost model. [D-007](s13-decision-register.md#d-007)'s interface is implemented; [D-007](s13-decision-register.md#d-007)'s mechanism is not.
+- Nothing logs an estimate, so the empirical-tuning requirement is unmet by construction.
+
+This is the same shape the pre-0.5.4 `louvain_communities` had and that [D-039](s13-decision-register.md#d-039) removed: a named thing that is not the thing. It is recorded here rather than left as confident prose so the gap is legible from the normative document, not only from the code.
+
+**Three premises of the design are unestablished, and each is a prerequisite rather than a detail (0.5.4).** They are recorded because the 0.4.5 text asserted all three, and a plan built on them would discover the first one only after writing the strategy:
+
+1. **`TwoPhaseTempTable` cannot run on the read connection as configured.** Measured against the current build: `CREATE TEMP TABLE` on `read_conn` fails with `SQLITE_READONLY (8), "attempt to write a readonly database"`. `PRAGMA query_only = ON` ([D-019](s13-decision-register.md#d-019)) covers the TEMP database too, so the strategy's defining mechanism is unavailable on the only connection a caller can reach. [D-019](s13-decision-register.md#d-019) is not up for renegotiation — it is the runtime half of the write-serialization guarantee — so the strategy needs either a reformulation that carries candidates in the query itself (a CTE or a bound `VALUES` list, which is what makes the "temp table" name misleading in the first place), or a separate non-`query_only` read connection whose write capability is bounded to `temp`. The latter is a connection-topology change and belongs in [§5.1](s5-modules.md#51-connectionrs--the-handle-the-pragmas-and-the-write-actor), not here.
+2. **The allow-list push-down is not known to exist.** `vector_top_k(index, vector, k)` takes an index name, a query vector and a k. It accepts no candidate set. Until a libSQL facility for constraining the index walk is identified, `TwoPhaseTempTable` degrades to `PostFilter` with an inflated k′ — which is a legitimate strategy but not a third one, and the cost table's third row is currently a cost for an operation the engine does not offer.
+3. **Selectivity has no source.** SQLite maintains no histograms. `ANALYZE` populates `sqlite_stat1` with average rows-per-key, which supports an equality-predicate estimate and does not support a range or a multi-hop-reachability estimate — and reachability is exactly the predicate being estimated. Either the planner runs a bounded counting probe (which costs part of what it is trying to price) or it estimates from `max_depth` and observed average degree. Neither is written; the choice between them determines whether the cost model is worth having.
+
+### 5.4 graph/subgraph.rs and graph/algorithms.rs — native in-memory analytics
+
+Superseded in 0.5.4 by [D-039](s13-decision-register.md#d-039), which replaced the petgraph bridge this section used to describe. The analytics surface is five algorithms — Dijkstra, A\*, strongly connected components, k-core, and Louvain — implemented in-crate over an adjacency list, with no external graph dependency.
+
+`Database::load_subgraph(start_node, max_hops, now_ts, byte_budget)` walks `links_current` under the same bounded CTE shape as [§5.2](s5-modules.md#52-graphbuilderrs--traversal-valid-time-and-attribute-fidelity), hydrates node attributes, and returns a `Subgraph` holding `BTreeMap` node and adjacency maps. Two boundary conditions are enforced during the load rather than left to the algorithms:
+
+- **The byte budget is measured and enforced, in linear time.** `DbError::SubgraphTooLarge` existed in the error enum from 0.4.0 and was constructed nowhere, so [D-007](s13-decision-register.md#d-007)'s budget was declared and unenforced through four releases. `load_subgraph` now carries a running payload total and refuses the moment it passes the budget — topology as edges arrive, attributes as they hydrate. The total is accumulated rather than recomputed: `estimated_bytes()` is O(V + E), and calling it per row made loading O(E²), so the check that bounds a load was itself the thing that did not scale ([D-047](s13-decision-register.md#d-047)). Both the agreement between the running total and the derivation, and the growth rate, are pinned by test.
+- **Negative and NaN edge weights are refused at the boundary** with a typed `NegativeEdgeWeight`. Dijkstra and A\* are correct only for non-negative weights; a negative weight yields a shortest path that is merely a path. `links.weight` is a bare `REAL NOT NULL` with no CHECK, and adding one is a schema change against the [D-036](s13-decision-register.md#d-036) freeze that is not taken unilaterally — so the refusal sits at the load boundary instead. Whether the constraint should also exist in the schema is open ([§7](s6-s10-flows-to-dependencies.md#7-errors) of the implementation plan).
+
+Determinism is a property of the data structures, not of a sort applied at the end. `Subgraph` uses `BTreeMap`; the algorithms return `BTreeMap`/`BTreeSet` rather than the hashed equivalents; and every tie is broken explicitly — equal-distance heap entries by node id, equal-gain Louvain moves by the lower community index. Any one of the three left as a `HashMap` reintroduces per-process variation, because Rust's default hasher is seeded per process. Distances additionally need a total order that `f64` does not have: `OrdF64` wraps `total_cmp`, so a NaN weight cannot silently corrupt the heap's invariant.
+
+Write-back goes through the low-priority channel. `Subgraph::write_back_annotations` delegates to `Database::write_annotations`, which chunks at `CHUNK_ROWS` ([§5.1.5](s5-modules.md#515-cooperative-chunking--the-golden-rule)) — so an analytics job that annotates 50,000 nodes yields the writer to the UI at every chunk boundary and accepts the fidelity boundary of [§5.1.6](s5-modules.md#516-the-fidelity-boundary-of-chunked-writes) in exchange. The 50,000-label Louvain save is the case the 0.4.5 amendment was designed around.
+
+**Where analytics output belongs (0.5.4, [D-041](s13-decision-register.md#d-041)).** An analytics result is an annotation, and an annotation is derivative state:
+
+```rust
+pub struct Annotation {
+    pub concept_id: String,
+    pub label: String,      // e.g. "louvain.community"
+    pub value: String,      // JSON-encoded payload
+}
+```
+
+They land in `analytics_annotations` ([§4.5](s4-schema.md#45-analytics-annotations--the-second-derivative-table-054-d-041)): a derivative table created by the migration runner alongside the normative schema, disposable and rebuildable by re-running the algorithm ([Doctrine VI](s0-s3-foundations.md#doctrine-vi), second category), and excluded from `transaction_log` by the same reasoning that excludes embeddings ([Doctrine VII](s0-s3-foundations.md#doctrine-vii)). No trigger is defined on it, so the ledger never sees it — and a reconstruction that needs community labels recomputes them, which is the only honest way to ask what a past graph's communities *were*.
+
+`Subgraph::write_back_annotations(&db, label, &values)` builds one `Annotation` per node present in `values` and hands them to `Database::write_analytics_annotations`, which chunks at `CHUNK_ROWS` on the low-priority tier. The per-chunk fidelity boundary of [§5.1.6](s5-modules.md#516-the-fidelity-boundary-of-chunked-writes) is acceptable here for a reason it is not acceptable for assertions: a partially written analytics pass is recoverable by rerunning, and a partially written history is not.
+
+**What this replaced (0.5.4, [D-041](s13-decision-register.md#d-041)).** Until 0.5.4 the method built a `ConceptUpsert` per node and put the annotation value in the `content` field, so writing back a Louvain partition **overwrote every annotated concept's document text with a community label**. Two further consequences followed: the annotations entered `transaction_log` through the concept triggers, permanently inflating the ledger with derived data [Doctrine VII](s0-s3-foundations.md#doctrine-vii)'s reasoning excludes; and because a concept `UPDATE` requires a strictly advancing `recorded_at` ([§4.3](s4-schema.md#43-the-transaction-log)), rerunning the same algorithm produced a fresh version of every concept, so the ledger recorded repeated analytics passes as though the world had changed. The method's own doc comment defended the write as "a normal bitemporal write and not an edit of history," which was true of the mechanism and false of the intent: that mechanism is correct for a domain fact, and a community label is not one.
+
+The full rationale, the rejected alternatives, and the differential-testing argument that replaces petgraph's track record are in [D-039](s13-decision-register.md#d-039).
+
+### 5.5 temporal/replay.rs and temporal/snapshot.rs — reconstruction and snapshots
+
+The replay fold derives belief-at-`ts` from the log using a window function:
+
+```sql
+SELECT seq_id, table_name, entity_id, operation, payload
+FROM (
+    SELECT seq_id, table_name, entity_id, operation, payload,
+           ROW_NUMBER() OVER (
+               PARTITION BY entity_id ORDER BY seq_id DESC
+           ) AS rn
+    FROM transaction_log
+    WHERE recorded_at <= ?1
+) WHERE rn = 1;
+```
+
+The `seq_id DESC` ordering resolves same-timestamp entries within a single transaction correctly by construction, and `idx_txlog_entity` lets SQLite stream each partition without a global sort. Where an anchored fold is used, the `seq_id > :anchor` predicate is an inequality, which correctly skips any gaps left by rolled-back transactions ([D-024](s13-decision-register.md#d-024) — see the [§4.3](s4-schema.md#43-the-transaction-log) monotonicity note). The fold routes rows on `table_name`, deserializes payloads with `serde_json` (branching on the payload version field, and raising `PayloadVersion` for anything newer than the crate understands), populates `ReplayCorrupt` with the actual offending `seq_id` rather than a placeholder, and builds an adjacency index as it goes — so the resulting `MaterializedState` answers node, edge and neighbour queries with the shape of the live `Database`. Callers do not need to know whether they are querying the present or the past. The fold is a read: it runs on `read_conn` and never touches the actor.
+
+**The cold-database read path (0.5.2, [D-026](s13-decision-register.md#d-026)).** When `ts` predates the hot log's horizon, the delta needed to answer the question lives in the archive. `reconstruct` tests coverage first — is the oldest hot entry newer than `ts`? — and if the hot log does not cover it, ATTACHes the archive database, folds a `UNION ALL` of `main.transaction_log` and `cold.transaction_log` through the identical window query, and DETACHes:
+
+```sql
+SELECT seq_id, table_name, entity_id, operation, payload
+FROM (
+    SELECT seq_id, table_name, entity_id, operation, payload,
+           ROW_NUMBER() OVER (PARTITION BY entity_id ORDER BY seq_id DESC) AS rn
+    FROM (
+        SELECT seq_id, table_name, entity_id, operation, payload, recorded_at
+          FROM main.transaction_log
+        UNION ALL
+        SELECT seq_id, table_name, entity_id, operation, payload, recorded_at
+          FROM cold.transaction_log
+    ) WHERE recorded_at <= ?1
+) WHERE rn = 1;
+```
+
+The hot entry wins for entities present in both files because its `seq_id` is greater — the same last-writer-wins rule as snapshot composition, so the two paths agree by construction. ATTACH and DETACH bracket exactly one fold and never persist. The DETACH is unconditional, error paths included: ATTACH is not transactional and survives `ROLLBACK`, so a handle leaked by an early return would make every later `reconstruct` *and* every later `archive` fail with "database cold is already in use" — one corrupt payload would permanently poison the connection. `archive()` carries a note about the same failure mode, and the two share a shape.
+
+**And a best-effort DETACH runs before each ATTACH (0.5.4, [D-044](s13-decision-register.md#d-044)).** Pairing covers every `Result` path and cannot cover a panic unwinding between the two, which skips the DETACH whatever the function would have returned. Recovering on the way *in* closes that hole without a destructor: in normal operation the statement fails harmlessly with "no such database: cold", and after a leak it turns permanent poisoning into one failed statement nobody sees. The `Drop` guard that suggests itself is not available — `execute` is `async`, `Drop` cannot await, and such a guard would discard the future and look like cleanup while doing none. [D-044](s13-decision-register.md#d-044) records why. If the cold file is absent or has been moved, the module returns a typed `ReplayCorrupt` naming the condition rather than a wrong answer ([R14](s11-s12-milestones-and-risks.md#r14)).
+
+**The snapshot file is a versioned container (0.5.4, [D-043](s13-decision-register.md#d-043)).** Ten bytes precede the payload — magic `MACR`, a `u16` container format version, and the `u32` schema version this build understands — written uncompressed and checked before anything is decompressed:
+
+```
+offset 0  4  6        10
+       MACR|fmt|schema| zstd(bincode(MaterializedState)) ...
+```
+
+A mismatch is `DbError::SnapshotIncompatible`, deliberately distinct from `ReplayCorrupt`: corruption is a fault to report, an incompatible snapshot is the ordinary consequence of upgrading, and the right response to the second is to discard the file and fold from the log. Without the header this failure is silent rather than loud — `bincode` is not self-describing, so a file written against a different shape of `MaterializedState` does not reliably fail to load, it loads into wrong values, and the newest snapshot is the first thing a restart reaches for. Files written before the container existed are caught by the same check, since their first bytes are zstd's magic rather than `MACR`.
+
+Because an append-only log grows without bound, reconstruction is *designed* to compose with snapshots. A snapshot is a full `MaterializedState` serialized with bincode and compressed with zstd — JSON's readability buys nothing when both ends of the wire are owned by this crate — stored as a sidecar file named for the `transaction_log.seq_id` it reflects (`snapshots/0000000000000000123.snap.zst`). Snapshots are written every 10,000 log entries and on clean shutdown, with retention of the last five plus one daily for thirty days. Snapshot creation is a read-fold plus a file write; it never requires the write connection, and it runs entirely on the read side — a lightweight maintenance task watches `seq_id` through `read_conn`, and `close()` writes the final anchor after the actor has exited ([§5.1.7](s5-modules.md#517-shutdown-and-snapshot-coordination)). Keeping replay and snapshotting off the write connection is deliberate: the actor's loop must stay short enough that [§5.1.5](s5-modules.md#515-cooperative-chunking--the-golden-rule)'s latency bound holds.
+
+`reconstruct(ts)` is specified to locate the newest snapshot `S` with `S.created_at <= ts`, fold the log delta (`seq_id > S.seq_id AND recorded_at <= ts`), and merge: for each entity the fold's row wins, because it is newer; for entities absent from the fold, the snapshot's row stands. The composition rule is last-writer-wins by `seq_id`, which is the same rule `links_current`'s upsert applies and the same rule the cold fold applies — three paths, one rule.
+
+> **Implemented in 0.5.4 ([D-049](s13-decision-register.md#d-049)), with two carve-outs.** The composition above is what `reconstruct` does, and `Database::reconstruct(ts)` supplies both paths from the handle so it is the default. The merge collects *tombstones* — a winning `'D'` row, or a `retired = 1` concept — because onto a snapshot those must remove an entity the base carries, where folding from nothing they were indistinguishable from absence. Agreement between the composed and full-fold answers is a property test over generated histories, which is what the "three paths, one rule" sentence above had asserted since 0.4.5 without evidence.
+>
+> **Carve-out 1: composition is disabled once an archive database exists.** Archived log rows are scattered rather than a prefix, so a row the delta needs can be gone while a newer row for the same entity — recorded after `ts` — keeps it out of the hot log; the composed answer would be silently wrong. The full fold is slower and right. Composing across the archive boundary stays open.
+>
+> **Carve-out 2: there is still no cadence.** Only `close()` writes an anchor, so a cleanly-shut-down application composes from its shutdown snapshot while a long-running session accumulates an unbounded delta. The maintenance task this section specifies is a spawn whose lifecycle is an undecided question, and it is left open rather than guessed at.
+
+**Snapshot file cleanup (0.5.1).** The retention policy must delete the corresponding `.snap.zst` files from the filesystem when a snapshot expires. The cleanup routine in `snapshot.rs` uses `std::fs::remove_file` for each expired sidecar and logs a `tracing::warn!` if deletion fails — a file locked by another process, typically. Expired snapshots that cannot be deleted are left in place and retried on the next pass; they do not affect reconstruction correctness, since the fold ignores snapshots older than the retention window.
+
+> **Terminology note (0.5.0).** Prior versions of this document used "checkpoint" for this application-level concept. That collides with SQLite's WAL checkpoint (`PRAGMA wal_checkpoint`), the engine's own mechanism for flushing the write-ahead log into the main database file — an entirely different operation. To eliminate confusion in code review, commit messages and operational discussion, the application concept is called a **snapshot** throughout. The file extension is `.snap.zst`; the module is `snapshot.rs`. Where this document means the engine's mechanism, it says "WAL checkpoint" explicitly.
+
+### 5.6 temporal/as_of.rs — valid-time queries and attribute hydration
+
+`as_of` is a filtered read of live tables; it never touches the log. Its edge query applies the half-open window directly to `links_current`:
+
+```sql
+SELECT source_id, target_id, edge_type, valid_from, valid_to
+FROM links_current
+WHERE valid_from <= ?1 AND ?1 < valid_to;
+```
+
+This is the same predicate the traversal CTE carries ([§5.2](s5-modules.md#52-graphbuilderrs--traversal-valid-time-and-attribute-fidelity)), against the same table, which is the point: `as_of` and a traversal at `ts` agree because they ask the same question of the same rows, not because two query builders were kept in step by hand.
+
+The module also owns attribute hydration, which is the mechanism behind `AttributeMode` ([§5.2](s5-modules.md#52-graphbuilderrs--traversal-valid-time-and-attribute-fidelity), [§4.4](s4-schema.md#44-asymmetric-versioning-deliberately)). `hydrate_attributes(conn, node_ids, ts, mode)` is the single entry point and dispatches on the mode: `Omit` returns nothing and reads nothing; `Current` reads the live `concepts` rows; `AtTime` resolves the latest `transaction_log` entry per entity with `recorded_at <= ts` and deserializes attributes from the payload. It is bounded by the id list handed to it — the result set — rather than by the log, which is what keeps the [§9](s6-s10-flows-to-dependencies.md#9-performance-budgets) budget of 30 ms for 100 nodes independent of history size.
+
+The honest cost of [§4.4](s4-schema.md#44-asymmetric-versioning-deliberately)'s asymmetry lands here. `Current` is the default because it is what almost every caller wants and because the alternative taxes every query in the system; it is documented as wrong for historical text, and it emits a `tracing::warn!` when combined with `as_of`. A caller who needs belief-at-`ts` fidelity across retroactive assertions should not reach for `AtTime` at all — they should use `reconstruct(ts)` ([§5.5](s5-modules.md#55-temporalreplayrs-and-temporalsnapshotrs--reconstruction-and-snapshots)), which answers a transaction-time question rather than patching attributes onto a valid-time answer.
+
+### 5.7 temporal/archive.rs — cold storage
+
+Archive moves closed intervals and superseded log rows into a separate database file via `ATTACH`. The session is one atomic transaction ([D-012](s13-decision-register.md#d-012)): create the session marker, copy rows to the cold file, verify counts, re-derive the affected materialization, record the horizon, drop the marker, commit. A crash anywhere rolls the whole thing back, leaving hot and cold mutually consistent.
+
+**The session marker is committed state at no point ([D-008](s13-decision-register.md#d-008), revised 0.5.3).** `CREATE TABLE macrame_archive_session (x)` is the first statement *inside* the transaction and `DROP TABLE` is the last, so commit drops it and rollback discards it. There is no crash path that leaves the delete guards disarmed.
+
+The marker is an ordinary table in `main`, not a TEMP table, and the correction matters because the original formulation was unimplementable rather than merely suboptimal. Pre-0.5.3 the document specified `CREATE TEMP TABLE archive_session` with the guards probing `temp.sqlite_master`. SQLite forbids a trigger in `main` from referencing objects in another database, `temp` included, so that guard fails at `CREATE TRIGGER` time — the schema would not install. The guards therefore probe `main.sqlite_master` for the marker's name, which preserves [D-008](s13-decision-register.md#d-008)'s actual point: probing the catalogue rather than selecting from the marker directly is what turns an illegal delete into a typed `ArchiveViolation` instead of a "no such table" error nobody can act on. The connection-locality argument the TEMP formulation rested on is no longer needed, but its conclusion still holds by construction: only the Write Actor can create the marker, because only the Write Actor can write.
+
+**ATTACH is issued outside the transaction and DETACH unconditionally on the way out**, error paths included — the same reasoning as [D-026](s13-decision-register.md#d-026) ([§5.5](s5-modules.md#55-temporalreplayrs-and-temporalsnapshotrs--reconstruction-and-snapshots)): ATTACH is not transactional and survives `ROLLBACK`, so a leaked handle poisons the connection for every later archive and every later cold-database reconstruct. A best-effort DETACH also runs before the ATTACH, which is what closes the one hole pairing cannot — a panic between the two (0.5.4, [D-044](s13-decision-register.md#d-044)).
+
+**Archive scope.** The path targets exactly three tables, and the third was added in 0.5.3:
+
+1. **`links`** — an assertion is archivable when `recorded_at < :cutoff` **and** it is either superseded by a later assertion for the same interval key, or it is the current belief for an interval that closed before the cutoff. The predicate is deliberately not "`valid_to` is in the past": it must keep every row `links_current` still projects, or [Doctrine VI](s0-s3-foundations.md#doctrine-vi)'s rebuildability is broken by the archive itself.
+2. **`transaction_log`** — an entry is archivable when `recorded_at < :cutoff` and a later entry exists for the same entity. The newest entry per entity always stays hot, so `reconstruct(now)` never needs the cold file.
+3. **`links_current`** — the rows projecting the intervals that were removed. `links_current` must remain equal to the latest-belief projection of what is left in `links` ([Doctrine VI](s0-s3-foundations.md#doctrine-vi)), or `audit_current()` reports drift the moment an archive runs. **As of 0.5.4 this is done by re-derivation, not by a compensating DELETE ([D-035](s13-decision-register.md#d-035)):** the session calls `integrity::rebuild::rebuild_within(&tx)` inside the archive transaction. The prior hand-written compensation was a predicate over *valid* time standing in for one that also requires transaction time, and the two are not the same set — an interval closed at the cutoff but recorded at or after it survives in `links` while the compensation deleted it from `links_current`, producing permanent drift that the archive path itself caused. A description of a set can drift from the set; a derivation cannot.
+
+**Concepts are never physically archived ([D-022](s13-decision-register.md#d-022)).** This is a structural decision, not an omission, and it rests on three things:
+
+- **Foreign key integrity.** `embeddings_<model>.concept_id REFERENCES concepts(id)`. Deleting a concept violates the FK unless `ON DELETE CASCADE` is declared, and CASCADE silently destroys the embedding — a derived artifact [Doctrine VII](s0-s3-foundations.md#doctrine-vii) protects.
+- **Portability of the cold file.** `F32_BLOB` and DiskANN are libSQL-specific. The cold database is a plain file opened via `ATTACH` and is deliberately trigger-free and FK-free — the delete guards must not exist on a file whose whole purpose is to receive rows, and a FK from `cold.links` to `concepts` could not be satisfied in any case.
+- **Entity versus interval semantics.** Concepts are entities. They have no "closed" state analogous to a retired edge. A concept's lifecycle is `retired = 1` (application soft-delete) and `valid_to` (temporal expiry); physical removal is not part of it.
+
+`trg_concepts_guard_delete` remains as a safety net against accidental deletion via raw SQL, a migration script, or a future code path that targets concepts without going through the session. In normal operation it never fires. Concept *archival* — as distinct from erasure — is deferred rather than ruled out, and [Appendix C](appendices.md#appendix-c--future-considerations-deliberately-deferred) records the shape it would take; the constraint that survives is the third one, which turns archivability into a reachability predicate rather than an expiry predicate.
+
+If a concept must be removed for legal or compliance reasons, that is a separate operation outside the archive path, requiring explicit handling of embeddings, log entries, and `links_current` rows. It is not designed here because it is not part of the ledger's normal lifecycle ([Appendix C](appendices.md#appendix-c--future-considerations-deliberately-deferred)).
+
+**Sizing (0.5.0, updated 0.5.1).** [D-012](s13-decision-register.md#d-012) correctly keeps the archive atomic, but the lock-hold cost must be acknowledged. The planning estimate of 1,000 rows/sec is deliberately conservative; actual throughput on NVMe for `INSERT INTO … SELECT` across an `ATTACH` boundary, including trigger amplification on the deletes, is likely 5,000–10,000 rows/sec. At 1,000 rows/sec a 1M-row archive holds the write lock for ~16 minutes; at 10,000 rows/sec, ~100 seconds.
+
+Because the archive is a single atomic transaction, the cooperative chunking of [§5.1.5](s5-modules.md#515-cooperative-chunking--the-golden-rule) does not apply — there are no boundaries at which the actor can yield, and UI assertions queue behind the whole transaction ([§5.1.8](s5-modules.md#518-write-queue-latency-and-caller-timeouts-052-d-028) states this in the latency contract). The mitigation is at the scheduling layer: the scheduler estimates the transfer-set size before issuing the command, and if it exceeds 100,000 rows it logs a warning and defers to the next idle window with a smaller cutoff. Each window is still one atomic transaction; the scheduler bounds the window's scope rather than the transaction's.
+
+**Crash recovery between scheduled windows (0.5.1).** If the application crashes between two windows, some rows are in the cold database (committed window) and some remain hot (unstarted window). This is safe: nothing is duplicated or lost. The cold database holds a complete copy of what it received; the hot database still holds what it did not send. The next run resumes from the horizon recorded in `cold.archive_horizon`. This is distinct from chunking *within* a transaction, which [D-012](s13-decision-register.md#d-012) rejects: the scheduling-layer windows are separate transactions, each atomic.
+
+### 5.8 integrity/ — audit and rebuild
+
+`audit_current()` runs on `read_conn`. It compares `links_current` against the latest-belief projection of `links` and returns a count of divergent intervals. Zero is the only acceptable answer in steady state.
+
+**The audit computes a symmetric difference, and the way it does so is load-bearing (0.5.4, [D-030](s13-decision-register.md#d-030)).** The 0.4.5–0.5.3 query chained four compound-SELECT arms flatly — `A EXCEPT B UNION B EXCEPT A`. SQLite gives `EXCEPT` and `UNION` equal precedence and evaluates left-associatively, so that parses as `(((A EXCEPT B) UNION B) EXCEPT A)`, which reduces to a constant zero. The audit reported "no drift" for every possible state of the database, including a `links_current` the test suite had deliberately corrupted. An integrity check that cannot fail is worse than no integrity check, because it is trusted. Parentheses are not the fix — SQLite rejects a parenthesised compound-SELECT operand outright. The corrected query names both sides as CTEs and computes each direction inside its own scalar subquery, summing the two, so the grouping is structural rather than syntactic and no future edit can silently regroup it. Both directions are required: a row `links_current` lacks is a missed materialization, a row it holds that the projection does not is stale or spurious, and either alone is drift.
+
+`rebuild_current()` is a high-priority command ([D-013](s13-decision-register.md#d-013)). It deletes every row of `links_current` and re-inserts from the projection **in a single transaction** — which, until 0.5.4, it did not do. It had been a bare `DELETE` followed by an `INSERT`, and the window between them is the whole of current belief: a failure across it, or a concurrent reader landing in it, sees a graph with no edges and no error. [D-023](s13-decision-register.md#d-023) claimed atomicity in a document whose code did not implement it. `rebuild_within(&tx)` is the transactional form, and it is also what the archive session calls ([§5.7](s5-modules.md#57-temporalarchivers--cold-storage), [D-035](s13-decision-register.md#d-035)).
+
+**Sizing and operational guidance (0.5.1, [D-023](s13-decision-register.md#d-023)).** Rebuild is a recovery operation, not a routine one. In steady state the triggers maintain `links_current` correctly and the audit returns zero; a nonzero result indicates a bug — a trigger failure, manual manipulation, or a restore from an inconsistent backup — that should be investigated rather than papered over.
+
+The rebuild is atomic by necessity. A chunked rebuild would create a window in which `links_current` is partially populated, and concurrent traversals on `read_conn` would silently omit edges — a correctness failure worse than a latency stall. Unlike the archive, where partial state between scheduled windows is recoverable and detectable, a partial rebuild is actively harmful.
+
+| Edge count | Expected lock hold | Notes |
+|---|---|---|
+| 100K | ~500 ms | Acceptable even during active use |
+| 1M | ~5 s | Noticeable UI stall; run at idle |
+| 10M | ~50 s | Significant stall; run at startup only |
+
+- **At startup:** run `audit_current()` before the UI is active. If drift is detected, rebuild immediately — the user has not yet interacted, so the stall is invisible.
+- **During active use:** if the audit detects drift, log a `tracing::error!` with the count and defer the rebuild to the next idle window. Do not run a multi-second rebuild while the user is asserting edges.
+- **The high-priority tier is retained** because it governs *ordering*, not urgency: it means "fix this before the next analytics chunk," not "fix this before the user's next click." [§5.1.8](s5-modules.md#518-write-queue-latency-and-caller-timeouts-052-d-028)'s latency contract is what tells a caller what the difference costs them.
+
+### 5.9 vector/ — embeddings, the model registry, and search
+
+Restored in 0.5.4 from the 0.4.5 document, where this material was **[§5.6](s5-modules.md#56-temporalas_ofrs--valid-time-queries-and-attribute-hydration)**. The 0.5.x renumbering assigned [§5.6](s5-modules.md#56-temporalas_ofrs--valid-time-queries-and-attribute-hydration) to `temporal/as_of.rs` and dropped the vector section without moving its content anywhere — so the whole vector module had no section at all for four releases, and `vector/search.rs`'s doc comments went on citing "[§5.6](s5-modules.md#56-temporalas_ofrs--valid-time-queries-and-attribute-hydration)" for vector search while [§5.6](s5-modules.md#56-temporalas_ofrs--valid-time-queries-and-attribute-hydration) had become valid-time attribute hydration. The content is restored here as [§5.9](s5-modules.md#59-vector--embeddings-the-model-registry-and-search) rather than renumbered, because [§5.2](s5-modules.md#52-graphbuilderrs--traversal-valid-time-and-attribute-fidelity)–[§5.8](s5-modules.md#58-integrity--audit-and-rebuild) are cited throughout the decision register and the code; the three stale citations in `search.rs` are repointed at [§5.9](s5-modules.md#59-vector--embeddings-the-model-registry-and-search).
+
+`ModelName` is a validated newtype: a model name becomes a table name (`embeddings_<model>`) and an index name, and a table name is an identifier, which cannot be a bind parameter. Validation is therefore the only option, and [D-037](s13-decision-register.md#d-037) records why that is the opposite of the edge-type case in [§5.2](s5-modules.md#52-graphbuilderrs--traversal-valid-time-and-attribute-fidelity), where binding removes the question. `register_model(conn, &model, dim)` creates the per-model table and its DiskANN index **in one transaction**, and there is no supported way to have one without the other: dimension enforcement is a property of the index rather than of the declared column type ([D-037](s13-decision-register.md#d-037), measured), so a per-model table without its index is a table with no dimension enforcement at all. `declared_dimension` reads `F32_BLOB(n)` back out of `PRAGMA table_info`, so the schema holds the single copy of the dimension and the Rust-side check cannot disagree with the engine-side one.
+
+Plain vector search resolves the target model, then issues the DiskANN-backed query through `vector_top_k` — which yields base-table rowids, so `vector_distance_cos` is evaluated on the k rows the index selected rather than once per concept. An `ORDER BY vector_distance_cos(…)` over the whole table is linear in the corpus no matter how small k is, and would not meet [§9](s6-s10-flows-to-dependencies.md#9-performance-budgets)'s budget of top-10 over 100K concepts in ≤ 20 ms. Results are typed `VectorSearchResult` rows. The search is a read and is served from `read_conn`.
+
+Hybrid search runs FTS5 keyword retrieval and vector top-k in parallel and fuses the two ranked lists with Reciprocal Rank Fusion at k = 60. The keyword half reads a `concepts_fts` shadow table maintained by trigger. RRF is some twenty lines of arithmetic and needs no dependency; the constant is documented and tunable, because retrieval-quality tuning is empirical rather than theoretical. Both retrievals are reads from `read_conn`.
+
+**The write path (0.5.4, [D-048](s13-decision-register.md#d-048)).** `Database::register_model(model, dim)` creates the table and its index on the high-priority tier; `Database::upsert_embeddings(model, rows)` stores vectors on the low-priority tier, chunked at `CHUNK_ROWS`, atomic per chunk, with the declared dimension resolved once per chunk. Both go through the Write Actor, because the write connection is actor-owned and `read_conn` is `query_only` ([D-019](s13-decision-register.md#d-019)) — before 0.5.4 neither had a route to it, so an application could search vectors it had no way to store. Reads are unchanged and still go direct to `read_conn`, never traversing the actor.
+
+**Implementation status (0.5.4, one gap.)**
+
+- **Hybrid search does not exist.** `reciprocal_rank_fusion` is a pure function over two rank lists and is correct. Nothing produces the keyword half, nothing fuses them, and **there is no `concepts_fts` table** — the FTS5 shadow table and its maintaining triggers are described in this section, budgeted in [§9](s6-s10-flows-to-dependencies.md#9-performance-budgets), and absent from [§4](s4-schema.md#4-schema). Adding them is a schema addition to the *periphery* under [D-036](s13-decision-register.md#d-036) (an FTS index over `concepts` is derivative and rebuildable from it), not a change to a frozen ledger table, so the contract permits it; it is nonetheless a schema decision rather than a fill-in and is not taken here.
+

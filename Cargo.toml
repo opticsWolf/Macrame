@@ -1,0 +1,53 @@
+[package]
+name = "macrame"
+version = "0.5.2"
+edition = "2021"
+authors = ["Macrame Contributors"]
+description = "A Bitemporal Graph Ledger on libSQL · Embedded knowledge database"
+
+[dependencies]
+libsql = "0.9.30"
+
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+bincode = "1.3"
+zstd = "0.13"
+thiserror = "1.0"
+tracing = "0.1"
+ulid = "1.1"
+
+[dev-dependencies]
+tempfile = "3.8"
+tokio-test = "0.4"
+proptest = "1"
+
+[features]
+default = []
+
+# The generated-history test binaries. Off by default, as the second half of
+# the R15 mitigation — the first half is `RUST_TEST_THREADS = "1"` in
+# .cargo/config.toml, which alone takes the rest of the suite to 0 bad runs in
+# 30. These do not follow it there: a property case needs its own database, and
+# `doctrine_property_tests` still faults ~3/25 serialised. A suite that fails
+# for reasons unrelated to the code under test trains people to ignore red, so
+# the residue is quarantined rather than tolerated.
+#
+# Quarantined, not silenced. These are the tests that found D-035, they run as
+# their own step, and `.proptest-regressions` replays every failure ever found
+# before a single new case is generated.
+#
+#     cargo test --features property-tests
+property-tests = []
+
+[[test]]
+name = "integrity_property_tests"
+required-features = ["property-tests"]
+
+[[test]]
+name = "doctrine_property_tests"
+required-features = ["property-tests"]
+
+[[test]]
+name = "graph_property_tests"
+required-features = ["property-tests"]

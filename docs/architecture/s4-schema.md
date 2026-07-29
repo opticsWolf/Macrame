@@ -1,0 +1,361 @@
+<!--nav-->
+← [previous](s0-s3-foundations.md) · [index](README.md) · [next](s5-modules.md) →
+<!--/nav-->
+
+## §4 Schema
+
+The schema is the normative core of this document. It encodes the doctrine directly: two clocks on every row (II), immutable assertions (III), a table-based ledger (IV), deletion only by archive (V), and derivative state that is auditable and rebuildable (VI). The 0.4.5 amendment changes no DDL. The 0.5.0 release corrects the DDL's presentation and adds two integrity triggers. The 0.5.1 release adds clarifying comments and corrects prose claims. The 0.5.2 release changes no DDL. No table structure, column set, or primary key is altered in any 0.5.x release.
+
+### Naming convention (0.5.0)
+
+All SQL identifiers — table names, column names, index names, trigger names — use snake_case. All Rust identifiers follow the Rust convention (snake_case for functions and fields, CamelCase for types). This convention is declared here and enforced by review; any identifier introduced in a future migration must conform.
+
+### 4.1 Concepts and per-model embeddings
+```sql
+CREATE TABLE concepts (
+    id               TEXT PRIMARY KEY,          -- ULID, 26-char Crockford base32
+    title            TEXT NOT NULL,
+    content          TEXT NOT NULL DEFAULT '',
+    embedding_model  TEXT,                      -- names the embeddings* table holding the vector
+    valid_from       TEXT NOT NULL,             -- canonical ts (below), valid time
+    valid_to         TEXT NOT NULL DEFAULT '9999-12-31T23:59:59.999999Z',
+    recorded_at      TEXT NOT NULL,             -- transaction time, crate-stamped
+    retired          INTEGER NOT NULL DEFAULT 0, -- soft-delete flag (see note below)
+
+    -- Canonical timestamp form, 0.5.4 (D-029). Fixed width is what makes
+    -- lexicographic comparison equal chronological comparison; the 'Z' suffix
+    -- alone is not sufficient. Applies identically to all four tables.
+    CHECK (valid_from  GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'
+       AND valid_to    GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'
+       AND recorded_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z')
+);
+
+-- Semantic distinction between valid_to and retired (0.5.1):
+--
+--   valid_to  = DOMAIN axis. "This concept ceased to be valid in the world
+--               at this time." Participates in temporal queries (as_of,
+--               reconstruct). A concept with valid_to = '2025-01-01' was
+--               valid until Jan 1, 2025.
+--
+--   retired   = APPLICATION axis. "The user has soft-deleted this concept."
+--               Participates in visibility queries (traversals filter
+--               retired = 0). A retired concept is hidden from normal views
+--               but still exists for historical reconstruction.
+--
+-- They are ORTHOGONAL. A concept can be:
+--   - temporally valid (valid_to = 9999...) but retired (user trashed it)
+--   - temporally expired (valid_to < 9999...) but not retired (still visible
+--     as a historical reference)
+--   - both, or neither.
+--
+-- retired is NOT redundant with valid_to. Setting valid_to to a past date is a
+-- domain assertion about the world; setting retired = 1 is an application
+-- action about visibility. They answer different questions and serve different
+-- query paths.
+```
+
+Per-model embedding tables are not part of the baseline schema: `register_model` creates each one, with its DiskANN index, in a single transaction ([§5.9](s5-modules.md#59-vector--embeddings-the-model-registry-and-search), [D-037](s13-decision-register.md#d-037)). The shape is fixed and the name is derived from a validated [`ModelName`](s5-modules.md#59-vector--embeddings-the-model-registry-and-search):
+
+```sql
+CREATE TABLE embeddings_nomic_v1 (
+    concept_id TEXT PRIMARY KEY REFERENCES concepts(id),
+    embedding  F32_BLOB(768) NOT NULL
+);
+
+CREATE INDEX vec_idx_nomic_v1
+    ON embeddings_nomic_v1 (embedding) USING diskann;
+
+-- A new model => a new table + a new index. Nothing about the old model changes.
+-- The index is not optional: dimension enforcement is a property of the index,
+-- not of the declared column type (D-037), so a table without one accepts
+-- vectors of any length.
+```
+
+Concepts are entities with mutable attributes, and are updated in place: a title correction is an UPDATE to the same row, captured for history by the log triggers of [§4.3](s4-schema.md#43-the-transaction-log). Timestamps are stored as ISO-8601 text rather than SQLite's ambiguous DATETIME, because they must sort lexicographically, survive export to any tool, and never be silently reinterpreted as local time.
+
+Canonical timestamp form (0.5.4, normative). Every valid_from, valid_to, and recorded_at in the schema is exactly 27 characters in the form YYYY-MM-DDTHH:MM:SS.ffffffZ — fixed width, microsecond precision, UTC. The width is the requirement; the Z suffix alone is not sufficient and the pre-0.5.4 document was wrong to imply it was. Lexicographic ordering agrees with chronological ordering only when every string has the same shape, and '2026-01-01T00:00:00Z' <= '2026-01-01T00:00:00.000000Z' evaluates to FALSE, because at the first differing byte 'Z' (0x5A) sorts after '.' (0x2E). The second-precision instant therefore compares as later than the identical microsecond-precision instant, and a traversal predicated on valid_from <= :ts silently returns an empty set — no error, no warning, just a missing subgraph. The rule is enforced by a table-level CHECK (a GLOB pattern matching the canonical shape) on all four tables rather than by convention, because this failure mode is silent and a convention cannot be violated loudly. The open-interval sentinel is correspondingly 9999-12-31T23:59:59.999999Z: a sentinel exempt from the canonical width would be the one carve-out that reintroduces the bug the width exists to prevent, and .999999 additionally makes it the maximum representable instant, which is what the half-open interval [valid_from, valid_to) needs. Callers supplying the legacy second-precision form are widened at the boundary by util::timestamp::normalize() rather than rejected; anything else — an offset, a missing Z, millisecond precision — is a typed error, because every silent repair here becomes a wrong answer in a temporal query later. See [D-029](s13-decision-register.md#d-029). recorded_at is stamped by the crate's injectable clock — not by SQL defaults — so that every row written inside one application transaction shares an identical transaction timestamp, and so that tests can control time itself. (When a bulk write is chunked across transactions — [§5.1.5](s5-modules.md#515-cooperative-chunking--the-golden-rule) — "one application transaction" means one chunk: each chunk receives its own stamp, and the fidelity boundary this creates is documented in [§5.1.6](s5-modules.md#516-the-fidelity-boundary-of-chunked-writes).)
+
+F32\BLOB dimension enforcement (0.5.0, corrected 0.5.4 — see [D-037](s13-decision-register.md#d-037)). The 0.5.0–0.5.3 text claimed that libSQL enforces the declared dimension at insert time and concluded that the crate-level check "exists for error quality" while "the engine-level check exists for correctness". That is false as stated, and the correction matters because the conclusion drawn from it was the wrong way round. Measured against libSQL 0.9.30: a vector of the wrong length inserted into a column declared F32\_BLOB(768) is **accepted** while the table carries no vector index, and rejected — with the row not written — once a libsql\_vector\_idx index exists. Enforcement belongs to the DiskANN index, not to the column type.
+
+Two rules follow. The index is created in the same transaction as the table it indexes and is never optional: a per-model table without its index has no dimension enforcement at all, so dropping the index to accelerate a bulk load silently disarms the only storage-layer check and is not a supported operation. And the crate-level check in embedding.rs is a correctness boundary rather than a courtesy, so it must be a real comparison against a real number: the dimension is resolved by reading F32\_BLOB(n) back out of PRAGMA table\_info for the model's table, which keeps exactly one copy of it — the one the engine will itself enforce. The caller still receives a typed DimMismatch ([§7](s6-s10-flows-to-dependencies.md#7-errors)) naming both dimensions. Both halves of the asymmetry are pinned by tests in tests/vector\_tests.rs, the negative half included, so if libSQL ever begins enforcing the column type on its own the test fails and [D-037](s13-decision-register.md#d-037) is revisited rather than quietly outgrown.
+
+Embeddings are stored apart from concept rows, in tables named for their model, because the alternative — a single F32_BLOB(768) column on concepts — makes model migration structurally dangerous. The day the project moves to a 1536-dimensional model, a single shared column would hold mixed dimensions during the transition, and every vector operation on a not-yet-migrated row would fault against the type constraint. With per-model tables, migration is additive: the new table and its DiskANN index are created, rows are embedded into it at leisure, embedding_model is flipped per concept, and the old index remains fully valid until the old table is finally dropped. The DiskANN index itself is maintained entirely by libSQL — inserts into the embedding table update the index automatically — and this crate never touches index mechanics.
+
+### 4.2 Links: assertion history and current-belief materialization
+```sql
+-- Full bitemporal history. One row per assertion; assertions are immutable.
+CREATE TABLE links (
+    source_id   TEXT NOT NULL REFERENCES concepts(id),
+    target_id   TEXT NOT NULL REFERENCES concepts(id),
+    edge_type   TEXT NOT NULL,                  -- validated [A-Z0-9]+ at the API boundary
+    valid_from  TEXT NOT NULL,
+    recorded_at TEXT NOT NULL,
+    valid_to    TEXT NOT NULL DEFAULT '9999-12-31T23:59:59.999999Z',
+    weight      REAL NOT NULL DEFAULT 1.0,
+    properties  TEXT NOT NULL DEFAULT '{}',     -- JSON: provenance, confidence, external IDs
+    PRIMARY KEY (source_id, target_id, edge_type, valid_from, recorded_at)
+);
+
+-- Materialized current belief: the latest assertion per interval.
+-- Traversals read ONLY this table.
+--
+-- Foreign keys are deliberately omitted (0.5.0 rationale): links_current is
+-- derivative state (Doctrine VI). It is rebuilt from links by
+-- rebuild_current(), which inserts in arbitrary order; FK constraints would
+-- require insertion-order discipline on a table whose only integrity
+-- requirement is "matches the latest-belief projection of links." Adding FKs
+-- would create a second failure mode (FK violation during rebuild) on a
+-- disposable cache, and would couple the rebuild path to the concepts table's
+-- population order for no gain. Referential integrity is enforced at the
+-- source: links carries FKs to concepts, and links_current mirrors links.
+CREATE TABLE links_current (
+    source_id   TEXT NOT NULL,
+    target_id   TEXT NOT NULL,
+    edge_type   TEXT NOT NULL,
+    valid_from  TEXT NOT NULL,
+    valid_to    TEXT NOT NULL,
+    weight      REAL NOT NULL,
+    properties  TEXT NOT NULL,
+    recorded_at TEXT NOT NULL,
+    PRIMARY KEY (source_id, target_id, edge_type, valid_from)
+);
+
+-- Traversal covering index (0.5.4, D-042). Column order is measured, not
+-- guessed: source_id is the seek column, the valid-time range follows it so
+-- the recursive step walks only the slice that can match, and edge_type sits
+-- after the range columns because `edge_types` is empty in the default
+-- traversal. Everything the CTE reads is present, so the walk is index-only.
+CREATE INDEX idx_lc_traversal_cover ON links_current
+    (source_id, valid_from, valid_to, weight, edge_type, target_id);
+
+-- Subsumes the former idx_lc_src_active (source_id, valid_to), dropped by the
+-- v3 -> v4 rung: same seek column, strictly more payload, and keeping both
+-- costs a second index write on every assertion.
+CREATE INDEX idx_lc_tgt_active ON links_current (target_id, valid_to);
+
+-- Every assertion upserts current belief; an out-of-order insert
+-- cannot clobber a newer belief.
+-- Requires SQLite >= 3.24.0 (2018) for ON CONFLICT ... DO UPDATE ... WHERE.
+-- libSQL inherits this; the minimum version is noted here because a
+-- dependency regression that drops partial-upsert support would silently
+-- ignore the WHERE clause and permit belief rollback.
+CREATE TRIGGER trg_links_current_sync
+AFTER INSERT ON links
+BEGIN
+    INSERT INTO links_current
+        (source_id, target_id, edge_type, valid_from, valid_to,
+         weight, properties, recorded_at)
+    VALUES
+        (NEW.source_id, NEW.target_id, NEW.edge_type, NEW.valid_from,
+         NEW.valid_to, NEW.weight, NEW.properties, NEW.recorded_at)
+    ON CONFLICT(source_id, target_id, edge_type, valid_from) DO UPDATE SET
+        valid_to    = excluded.valid_to,
+        weight      = excluded.weight,
+        properties  = excluded.properties,
+        recorded_at = excluded.recorded_at
+    WHERE excluded.recorded_at > links_current.recorded_at;
+END;
+
+-- At most ONE open interval per (source, target, type).
+--
+-- The valid_from <> NEW.valid_from predicate is load-bearing and subtle:
+-- it permits re-assertion of the SAME interval (correction after mistaken
+-- retirement — same valid_from, newer recorded_at) while blocking a SECOND
+-- distinct open interval for the same edge. Removing or "simplifying" this
+-- predicate breaks the re-assertion path. See §4.2 edge lifecycle table,
+-- row 3. Do not simplify.
+CREATE TRIGGER trg_links_single_open
+BEFORE INSERT ON links
+WHEN NEW.valid_to = '9999-12-31T23:59:59.999999Z'
+     AND EXISTS (
+         SELECT 1 FROM links_current
+         WHERE source_id  = NEW.source_id
+           AND target_id  = NEW.target_id
+           AND edge_type  = NEW.edge_type
+           AND valid_from <> NEW.valid_from   -- allows same-interval re-assertion
+           AND valid_to   = '9999-12-31T23:59:59.999999Z'
+     )
+BEGIN
+    SELECT RAISE(ABORT, 'macrame: edge already has an open interval; retire it first');
+END;
+```
+
+The primary key of links deserves its history, because it was the site of the project's most instructive design failure. The natural first draft keys edges by (source, target, type, valid_from) — and then cannot express correction. A user who asserts an edge, retires it, and later discovers the retirement was mistaken will try to re-assert the same interval with the original valid_from; under the 4-column key that insert collides with the historical row, and the only escape is mutating history — exactly what [Doctrine III](s0-s3-foundations.md#doctrine-iii) forbids. Adding recorded_at to the key resolves this cleanly: the same interval may be asserted any number of times, each assertion a distinct row, and the row with the greatest recorded_at is the current belief. Retroactive retirement, mistaken-retirement recovery, and belief correction all become plain inserts.
+
+That fix, however, moves the cost of "what is the current belief?" from write time to read time — and the read path that cannot afford it is the recursive traversal, where the edge table is joined once per hop. Resolving latest-belief with a window function inside every hop join would have traded a schema flaw for a latency flaw. The resolution is links_current: a trigger-maintained materialization holding exactly one row per interval, always the latest assertion. Traversals read it with the same index profile the original schema had; history reads links; and because the materialization is derivative ([Doctrine VI](s0-s3-foundations.md#doctrine-vi)), its corruption is detectable by audit_current() and recoverable by rebuild_current() ([§5.8](s5-modules.md#58-integrity--audit-and-rebuild)). The upsert's WHERE excluded.recorded_at > links_current.recorded_at clause closes the last hole: even out-of-order inserts — replayed imports, restored backups — cannot roll belief backward.
+
+The edge lifecycle under this schema consists entirely of inserts; nothing is ever updated:
+
+| Action | Insert into links | Effect on links_current |
+|---|---|---|
+| Assert edge, effective T0 | (vf=T0, vt=9999…, ra=now) | upsert → open |
+| Retroactive retirement, effective T1 | (vf=T0, vt=T1, ra=now) | upsert → closed [T0, T1) |
+| Re-assert after mistaken retirement | (vf=T0, vt=9999…, ra=now₂) | upsert → open again |
+| Correct a past belief (e.g. weight) | same key, corrected fields, ra=now₃ | upsert → corrected |
+
+The properties column exists from day one because composite-primary-key tables are the most expensive place in SQLite to add a column later — ALTER TABLE requires a full rebuild — and because edge metadata (provenance, confidence, external identifiers) is not a speculative concern but an inevitability of graph work.
+
+### 4.3 The transaction log
+```sql
+CREATE TABLE transaction_log (
+    seq_id      INTEGER PRIMARY KEY AUTOINCREMENT,  -- strictly monotonic (see note below)
+    table_name  TEXT NOT NULL,                      -- 'concepts' | 'links'
+    entity_id   TEXT NOT NULL,                      -- ULID, or s|t|type|vf for links
+    operation   TEXT NOT NULL,                      -- 'I' | 'U' | 'D'
+    payload     TEXT NOT NULL,                      -- json_object(...), versioned ('v')
+    recorded_at TEXT NOT NULL                       -- inherited from the app transaction
+);
+
+-- seq_id monotonicity note (0.5.1):
+-- AUTOINCREMENT guarantees that seq_id is strictly monotonic and that no
+-- rowid is ever reused. It does NOT guarantee a gap-free sequence. If a
+-- transaction is rolled back (trigger abort, disk error, deadlock), the
+-- sqlite_sequence counter is still incremented, leaving a gap. All replay
+-- and delta-fold logic MUST use inequality comparisons (seq_id > :anchor),
+-- never equality or successor arithmetic (seq_id = :anchor + 1). The
+-- anchored fold in §5.5 and the snapshot composition rule both satisfy
+-- this requirement. Future maintainers: do not build gap-free assumptions.
+--
+-- 0.5.4 (D-049): the anchored fold now exists, so this rule finally binds
+-- something. The mechanism above is wrong, though, and the correction is
+-- worth keeping: a rolled-back transaction does NOT leave a gap, because
+-- sqlite_sequence is written inside the transaction and rolls back with it
+-- (measured on libSQL 0.9.30). Gaps are real all the same -- the archive
+-- deletes superseded rows from this table, scattered through the sequence
+-- rather than as a prefix. Right rule, wrong reason.
+
+-- Index rationale (0.5.0):
+--   idx_txlog_time serves the unanchored cold-start fold (no snapshot;
+--     scan by recorded_at to find the starting point).
+--   idx_txlog_entity serves entity-scoped hydration (§5.2 AtTime) and
+--     the per-entity partition in the anchored fold.
+--   The anchored fold itself (seq_id > :anchor AND recorded_at <= :ts) is a
+--     rowid scan with a filter: because seq_id is INTEGER PRIMARY KEY
+--     AUTOINCREMENT, it IS the rowid, so SQLite walks it in order and applies
+--     the recorded_at predicate per row. No secondary index is needed.
+```
+
+**The trigger set (restored 0.5.4, from `schema::ddl` — see the note below).**
+
+```sql
+CREATE TRIGGER trg_concepts_log_insert AFTER INSERT ON concepts
+BEGIN
+    INSERT INTO transaction_log (table_name, entity_id, operation, payload, recorded_at)
+    VALUES ('concepts', NEW.id, 'I',
+            json_object('v', 1, 'title', NEW.title, 'content', NEW.content,
+                        'valid_from', NEW.valid_from, 'valid_to', NEW.valid_to,
+                        'retired', NEW.retired),
+            NEW.recorded_at);
+END;
+
+CREATE TRIGGER trg_concepts_log_update AFTER UPDATE ON concepts
+BEGIN
+    INSERT INTO transaction_log (table_name, entity_id, operation, payload, recorded_at)
+    VALUES ('concepts', NEW.id, 'U', json_object(/* same shape as above */),
+            NEW.recorded_at);
+END;
+
+CREATE TRIGGER trg_links_log_insert AFTER INSERT ON links
+BEGIN
+    INSERT INTO transaction_log (table_name, entity_id, operation, payload, recorded_at)
+    VALUES ('links',
+            NEW.source_id || '|' || NEW.target_id || '|' || NEW.edge_type || '|' || NEW.valid_from,
+            'I',
+            json_object('v', 1, 'source_id', NEW.source_id, 'target_id', NEW.target_id,
+                        'edge_type', NEW.edge_type, 'valid_from', NEW.valid_from,
+                        'valid_to', NEW.valid_to, 'weight', NEW.weight,
+                        'properties', json(NEW.properties)),
+            NEW.recorded_at);
+END;
+
+-- Enforce recorded_at monotonicity on concept updates (0.5.0, D-018).
+-- Doctrine II requires the two clocks to be independent; a code path issuing an
+-- UPDATE with a stale recorded_at would capture the new state under the old
+-- timestamp, and reconstruct() between the two would return the new state. This
+-- is a constraint, not a default: the crate still supplies the value.
+CREATE TRIGGER trg_concepts_monotonic_ra
+BEFORE UPDATE ON concepts
+WHEN NEW.recorded_at <= OLD.recorded_at
+BEGIN
+    SELECT RAISE(ABORT, 'macrame: concept recorded_at must be strictly increasing');
+END;
+
+-- Deletion is legal only inside a declared archive session. The guard probes
+-- main.sqlite_master for the marker rather than selecting from the marker
+-- itself, so an illegal delete is a typed ArchiveViolation rather than a
+-- "no such table" nobody can act on (D-008 revised, §5.7).
+CREATE TRIGGER trg_links_guard_delete
+BEFORE DELETE ON links
+WHEN NOT EXISTS (
+    SELECT 1 FROM sqlite_master
+    WHERE type = 'table' AND name = 'macrame_archive_session'
+)
+BEGIN
+    SELECT RAISE(ABORT, 'macrame: physical delete blocked outside archive session');
+END;
+
+-- Identical guard on transaction_log (0.5.3, D-008b): the archive removes
+-- superseded log rows, so the ledger itself is a hot table an ad-hoc DELETE
+-- could otherwise truncate.
+CREATE TRIGGER trg_txlog_guard_delete BEFORE DELETE ON transaction_log
+WHEN NOT EXISTS (SELECT 1 FROM sqlite_master
+                 WHERE type = 'table' AND name = 'macrame_archive_session')
+BEGIN
+    SELECT RAISE(ABORT, 'macrame: physical delete blocked outside archive session');
+END;
+
+-- Concepts are never physically archived (D-022), so their guard is
+-- unconditional rather than session-scoped: there is no legal path at all.
+CREATE TRIGGER trg_concepts_guard_delete BEFORE DELETE ON concepts
+BEGIN
+    SELECT RAISE(ABORT, 'macrame: concepts are never physically archived (D-022)');
+END;
+```
+
+> **Three corrections this restoration surfaced (0.5.4).** The trigger DDL above was lost entirely to the transport corruption and is recovered from `schema::ddl`, which is the implementation rather than the pre-0.5.4 prose — and the two disagree in three ways worth naming rather than quietly reconciling.
+>
+> **Names.** The document called these `trg_concepts_log_i` / `_u` and `trg_links_log_i`. The schema calls them `trg_concepts_log_insert`, `trg_concepts_log_update`, `trg_links_log_insert`. Prose elsewhere in this document still uses the short forms; the schema's names are the real ones.
+>
+> **There is no delete-logging trigger, on either table.** The pre-0.5.4 text described `trg_links_log_d` and "`trg_concepts_log_d` is analogous", writing `'D'` rows into the log. Neither exists. That is defensible — concepts are never deleted at all, and a link leaves the hot table only by being archived, where the row itself moves to the cold file rather than vanishing — but it means **no `'D'` row is ever written by this schema**, so the fold's deletion handling ([D-049](s13-decision-register.md#d-049)) is correct and currently unreachable. If archiving ever needs to be visible to a reconstruction as a deletion, that is where the trigger belongs.
+>
+> **Concept payloads do not carry `embedding_model`.** The prose below says they do. They carry title, content, valid_from, valid_to and retired. [Doctrine VII](s0-s3-foundations.md#doctrine-vii) is unaffected — a model *name* is not a vector — but a reconstruction cannot currently tell which model a concept was embedded under.
+
+Several details of the log are load-bearing. `AUTOINCREMENT` on `seq_id` guarantees strict monotonicity without rowid reuse, which makes the sequence a trustworthy tie-breaker for entries sharing a `recorded_at` within one transaction. **It does not guarantee a gap-free sequence**, though not for the reason the 0.5.1 text gave — see the DDL comment above and [D-049](s13-decision-register.md#d-049). All replay logic uses inequality comparisons (`seq_id > :anchor`), which skip gaps correctly; no code path may assume `seq_id + 1` is the next event. The composite `entity_id` for links uses `|` as separator, which is safe because ULIDs are Crockford base32 and edge types are validated against `[A-Z0-9]+` at the API boundary — the separator cannot appear in any component. Payloads carry a version field (`'v', 1`) because the log outlives every schema migration: entries written under schema v1 must still deserialize under v7, so the deserializer branches on version and old payloads are never rewritten. Concept payloads include `content` — a reconstruction that silently drops document text is not a ledger state — but exclude embeddings per [Doctrine VII](s0-s3-foundations.md#doctrine-vii): vectors are large, immutable per version, and reconstructable from the per-model tables, which are themselves not logged.
+
+The delete guards close the loop on [Doctrine V](s0-s3-foundations.md#doctrine-v). The archive process creates the marker table first and drops it last, so the window in which deletion is legal is exactly the window in which the verified archive transaction runs.
+
+One property of the log interacts directly with the 0.4.5 amendment: chunked write-backs ([§5.1.5](s5-modules.md#515-cooperative-chunking--the-golden-rule)) produce log entries across many transactions, but seq_id remains strictly monotonic across the chunks (gaps are possible only on rollback, not on successful commit), because each chunk's trigger inserts land inside its own committed transaction in AUTOINCREMENT order. The ledger never sees the seams; only the granularity of "learned" changes.
+
+### 4.4 Asymmetric versioning, deliberately
+
+The schema versions its two entity kinds differently, and the asymmetry is a decision, not an oversight. links keep full assertion history with a 5-column key; concepts are updated in place with history captured only in the log. The justification is workload-shaped. The bitemporal hot path of this system is relationships: edges are interval assertions that get corrected, re-asserted, and retroactively retired as a matter of routine, and the re-assertion trap that motivated the 5-column key applies precisely to intervals. Concept attributes — titles, text — are properties of entities, where in-place update plus log capture yields identical reconstruction fidelity at strictly lower cost. And the cost argument is decisive on the read side: every traversal hop joins the edge table, so latest-belief resolution there would tax every query forever, while the terminal join to concepts happens once per result set and stays trivial against single rows.
+
+The honest price of this asymmetry is that a valid-time traversal over live tables returns past topology with present attributes unless the caller asks otherwise. A node whose title changed on Wednesday, traversed as_of(Tuesday), appears in Tuesday's edges wearing its Wednesday name. [§5.2](s5-modules.md#52-graphbuilderrs--traversal-valid-time-and-attribute-fidelity) addresses this with AttributeMode: the default Current is fast and loudly documented (including a runtime tracing::warn! when combined with as_of), AtTime hydrates attributes from the log for the result set only, and Omit skips attributes entirely. The alternative — full 5-column versioning of concepts with a concepts_current twin — would make AtTime free at the cost of a permanent join tax on every query in the system, and for a ledger whose bitemporal center of gravity is edges, that is the wrong trade. The boundary is pinned by tests: callers who need belief-at-ts fidelity for retroactive assertions use reconstruct(ts) and traverse the materialized state ([§5.5](s5-modules.md#55-temporalreplayrs-and-temporalsnapshotrs--reconstruction-and-snapshots)), and the distinction between the two paths is stated in the rustdoc of both.
+
+### 4.5 Analytics annotations — the second derivative table (0.5.4, D-041)
+
+```sql
+CREATE TABLE IF NOT EXISTS analytics_annotations (
+    concept_id  TEXT NOT NULL REFERENCES concepts(id),
+    label       TEXT NOT NULL,     -- namespaced: 'louvain.community', 'kcore.shell'
+    value       TEXT NOT NULL,     -- JSON payload, opaque to this crate
+    computed_at TEXT NOT NULL,     -- when the derivation last ran; NOT a clock axis
+    PRIMARY KEY (concept_id, label),
+    CHECK (computed_at GLOB '<canonical form>' AND 1)
+);
+
+CREATE INDEX IF NOT EXISTS idx_annotations_label ON analytics_annotations (label);
+```
+
+Everything about this table is the opposite of the four above, and each opposite is deliberate.
+
+**No log trigger.** Nothing in the trigger set fires on it, so an annotation never reaches `transaction_log`. That is [Doctrine VII](s0-s3-foundations.md#doctrine-vii)'s reasoning about embeddings applied to the other derived artifact. A community label is a function of an algorithm, a version of that algorithm, and a graph — not a statement about the world. A ledger that carries it records the analytics schedule as though it were history, and a reconstruction that wants labels should recompute them: a stored label answers what some past run of some past version of the algorithm produced, which is a different question wearing the same name.
+
+**No delete guard.** [Doctrine V](s0-s3-foundations.md#doctrine-v) protects the hot ledger tables. This one is [Doctrine VI](s0-s3-foundations.md#doctrine-vi)'s second category, so wiping it must remain an ordinary legal operation — a rerun replaces the previous pass, and dropping the table entirely costs a recomputation and nothing else.
+
+**`computed_at` is not a third clock.** It carries the canonical form ([D-029](s13-decision-register.md#d-029)) so it sorts like every other timestamp in the file, but it is a note about when a derivation last ran, not a transaction-time axis: it is subject to no monotonicity guard and participates in no temporal query. [Doctrine II](s0-s3-foundations.md#doctrine-ii)'s "two clocks, never mixed" is unaffected precisely because this is neither of them.
+
+**The foreign key is safe here in a way `links_current`'s omitted ones are not.** [§4.2](s4-schema.md#42-links-assertion-history-and-current-belief-materialization) leaves `links_current` FK-free because `rebuild_current()` inserts in arbitrary order and a FK would impose insertion-order discipline on a disposable cache. There is no such problem here: concepts are never physically deleted ([D-022](s13-decision-register.md#d-022)), and this table is rebuilt by re-running an algorithm that read `concepts` in the first place.
+
+Under [D-036](s13-decision-register.md#d-036) this table is periphery, not frozen core — it may be dropped, reshaped or recreated by any minor version, and the migration that does so simply reruns the analytics. It arrived on the ladder's first second rung, `v2 → v3` ([D-032](s13-decision-register.md#d-032), [D-041](s13-decision-register.md#d-041)).
+

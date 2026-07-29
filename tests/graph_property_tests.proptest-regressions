@@ -1,0 +1,12 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+# Provenance: this seed was found against a deliberately mutated `scc` whose
+# second pass walked `out_edges` instead of `in_edges` — i.e. Kosaraju without
+# the transpose. The defect never shipped; the mutation was run to confirm the
+# oracle could detect it (D-039). The case is kept because it is the minimal
+# graph that distinguishes the two, and so remains worth replaying.
+cc e5e1eefa7faf3280d57252631831be9dc434d00f2bfc5a6e4091a3c655395e75 # shrinks to (n, edges) = (2, [(1, 0, 0.25)])
