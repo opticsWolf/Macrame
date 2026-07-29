@@ -1,0 +1,27 @@
+# Test-harness settings for R15 (see the risk register in docs/).
+#
+# libSQL faults with STATUS_ACCESS_VIOLATION (0xc0000005) when several local
+# databases are opened and dropped concurrently in one process. It is not a
+# Macrame defect: it reproduces with no Macrame types in the loop, it is not
+# confined to any one test binary — replay_snapshot, write_path, temporal and
+# doctrine binaries have all died mid-run — and upgrading 0.6.0 -> 0.9.30 did
+# not change it.
+#
+# Measured on 0.9.30, full suite, 0.5.4:
+#
+#     libtest default (parallel)   1/20 bad runs
+#     --test-threads=1             0/30 bad runs
+#
+# One binary in isolation showed the same split: 2/40 parallel, 0/40 serial.
+# So the trigger is concurrency, not volume, and serialising libtest removes it.
+#
+# `[env]` does not override a value already in the environment, so setting
+# RUST_TEST_THREADS yourself still works — which is how you reproduce the fault
+# if you are chasing it or checking whether an upstream release has fixed it.
+#
+# The residual case is `doctrine_property_tests`, which still faults ~3/25 even
+# serialised because generated histories open a database per case. That binary
+# is behind the `property-tests` feature for exactly this reason, and is run as
+# its own step rather than as part of `cargo test`.
+[env]
+RUST_TEST_THREADS = "1"
