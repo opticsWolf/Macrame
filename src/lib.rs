@@ -23,7 +23,8 @@ pub mod prelude {
     };
     pub use crate::util::{Clock, FakeClock, SystemClock};
     pub use crate::vector::{
-        declared_dimension, register_model, registered_models, search_vector, upsert_embedding,
-        EmbeddingCodec, ModelName, VectorSearchResult,
+        declared_dimension, escape_fts5_query, keyword_search, reciprocal_rank_fusion,
+        register_model, registered_models, search_vector, upsert_embedding, EmbeddingCodec,
+        HybridHit, HybridSearch, ModelName, VectorSearchResult, RRF_K,
     };
 }

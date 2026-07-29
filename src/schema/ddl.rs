@@ -224,6 +224,42 @@ CREATE TABLE IF NOT EXISTS analytics_annotations (
 "#
 );
 
+/// The keyword half of hybrid search: an FTS5 index over concept text (§5.9).
+///
+/// **External content.** The table declares `content='concepts'`, so the tokens
+/// are indexed but the text itself is not duplicated — FTS5 reads it back from
+/// `concepts` by rowid when it needs a column value. Two reasons beyond the
+/// storage saving, and the second is the one that decided it:
+///
+/// * There is exactly one copy of the text, so the index cannot disagree with
+///   the concept about what the concept says. A standalone FTS table would be a
+///   second description of data the ledger already holds, which is the failure
+///   class D-030 and D-035 exist to prevent.
+/// * `INSERT INTO concepts_fts(concepts_fts) VALUES('rebuild')` reconstructs the
+///   whole index from the content table in one statement. D-036 requires every
+///   derivative table to be rebuildable from the ledger, and here that is the
+///   engine's own operation rather than code of ours that has to be kept honest.
+///
+/// The cost is that external-content tables do not maintain themselves: an
+/// `UPDATE` must retract the *old* terms before adding the new ones, using the
+/// old column values. That is what `trg_concepts_fts_update` does, and getting
+/// it wrong leaves an index that still matches text no concept contains.
+pub const CREATE_CONCEPTS_FTS: &str = r#"
+CREATE VIRTUAL TABLE IF NOT EXISTS concepts_fts USING fts5(
+    title,
+    content,
+    content='concepts',
+    content_rowid='rowid'
+);
+"#;
+
+/// Reconstruct the FTS index from `concepts` (§5.9, D-036).
+///
+/// The engine's own operation, so the rebuild path is not a second
+/// implementation of the triggers that could drift from them.
+pub const REBUILD_CONCEPTS_FTS: &str =
+    "INSERT INTO concepts_fts (concepts_fts) VALUES ('rebuild');";
+
 pub const CREATE_INDICES: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS idx_annotations_label ON analytics_annotations (label);",
     // Covering index for the traversal CTE (§5.2, D-042).
@@ -384,6 +420,43 @@ pub const CREATE_TRIGGERS: &[&str] = &[
     END;
     "#
     ),
+    // --- FTS sync (§5.9) ------------------------------------------------
+    //
+    // These write to `concepts_fts` and to nothing else. In particular they do
+    // not touch `transaction_log`: an FTS index is derived from concept text
+    // the ledger already records, so logging it would record the same fact
+    // twice — the reasoning Doctrine VII applies to embeddings, and the reason
+    // `doctrine_static_tests` scans this array.
+    r#"
+    CREATE TRIGGER IF NOT EXISTS trg_concepts_fts_insert
+    AFTER INSERT ON concepts
+    BEGIN
+        INSERT INTO concepts_fts (rowid, title, content)
+        VALUES (NEW.rowid, NEW.title, NEW.content);
+    END;
+    "#,
+    // The retraction is not optional and not symmetric with the insert. An
+    // external-content FTS5 index stores terms, not text, so replacing a row
+    // means telling it which terms to *remove* — and it needs the old column
+    // values to work that out. Omit this and the index keeps matching words the
+    // concept no longer contains, with no error and no way to notice except by
+    // searching for something that is no longer there.
+    r#"
+    CREATE TRIGGER IF NOT EXISTS trg_concepts_fts_update
+    AFTER UPDATE ON concepts
+    BEGIN
+        INSERT INTO concepts_fts (concepts_fts, rowid, title, content)
+        VALUES ('delete', OLD.rowid, OLD.title, OLD.content);
+        INSERT INTO concepts_fts (rowid, title, content)
+        VALUES (NEW.rowid, NEW.title, NEW.content);
+    END;
+    "#,
+    // There is deliberately no delete trigger. `trg_concepts_guard_delete` is
+    // unconditional (D-022) — concepts are never physically deleted, not even
+    // inside an archive session — so a delete path does not exist to keep in
+    // sync. If that guard ever becomes conditional, this array needs a third
+    // trigger issuing the same `'delete'` command, and the index is silently
+    // stale until it gets one.
 ];
 
 #[cfg(test)]

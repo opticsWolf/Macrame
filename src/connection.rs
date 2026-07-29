@@ -178,6 +178,14 @@ pub enum LowPriCommand {
         archive_path: PathBuf,
         responder: oneshot::Sender<Result<ArchiveReport>>,
     },
+    /// Reconstruct the FTS index from `concepts` (§5.9, D-036, D-051).
+    ///
+    /// Low priority: it is maintenance on a derivative table, and a search index
+    /// that is a few seconds stale is a smaller cost than an interactive write
+    /// that waits behind a full reindex.
+    RebuildFts {
+        responder: oneshot::Sender<Result<()>>,
+    },
 }
 
 enum LoopCtl {
@@ -459,6 +467,22 @@ impl Database {
                 .await?;
         }
         Ok(written)
+    }
+
+    /// Reconstruct the concept-text search index from the ledger (§5.9, D-036).
+    ///
+    /// The FTS index is derivative: D-036 promises every derivative table can be
+    /// rebuilt from the ledger tables, and this is that promise made callable
+    /// for `concepts_fts`. Needed after a restore that skipped the shadow
+    /// tables, or if the index is ever suspected of drifting from the text —
+    /// and, as a matter of policy, cheaper to run than to reason about.
+    ///
+    /// The work is `INSERT INTO concepts_fts(concepts_fts) VALUES('rebuild')`,
+    /// which is FTS5's own operation over the content table, so this is not a
+    /// second implementation of the sync triggers that could disagree with them.
+    pub async fn rebuild_fts(&self) -> Result<()> {
+        self.low(|responder| LowPriCommand::RebuildFts { responder })
+            .await
     }
 
     /// Write derived analytics results on the background channel, chunked
@@ -765,6 +789,14 @@ impl LowPriCommand {
                 responder,
             } => {
                 let _ = responder.send(archive(conn, &cutoff, &archive_path).await);
+            }
+            LowPriCommand::RebuildFts { responder } => {
+                let res = conn
+                    .execute(crate::schema::ddl::REBUILD_CONCEPTS_FTS, ())
+                    .await
+                    .map(|_| ())
+                    .map_err(Into::into);
+                let _ = responder.send(res);
             }
         }
         LoopCtl::Continue

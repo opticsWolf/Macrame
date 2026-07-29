@@ -180,6 +180,18 @@ pub fn reciprocal_rank_fusion(
     }
 
     let mut sorted: Vec<_> = scores.into_iter().collect();
-    sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    // Score descending, then id ascending. The tie-break is not cosmetic: ties
+    // are the *common* case here, because two documents at the same pair of
+    // ranks in the two arms score identically by construction, and symmetric
+    // inputs (a document at rank 3 in one arm, another at rank 3 in the other)
+    // tie exactly. Sorting on the score alone left those in `HashMap` iteration
+    // order, so the same query could return the same set in a different order on
+    // the next run — the procedural-versus-structural determinism trap D-047
+    // names, arriving here as a search result that will not sit still.
+    sorted.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(&b.0))
+    });
     sorted
 }

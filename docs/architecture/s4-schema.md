@@ -357,5 +357,26 @@ Everything about this table is the opposite of the four above, and each opposite
 
 **The foreign key is safe here in a way `links_current`'s omitted ones are not.** [§4.2](s4-schema.md#42-links-assertion-history-and-current-belief-materialization) leaves `links_current` FK-free because `rebuild_current()` inserts in arbitrary order and a FK would impose insertion-order discipline on a disposable cache. There is no such problem here: concepts are never physically deleted ([D-022](s13-decision-register.md#d-022)), and this table is rebuilt by re-running an algorithm that read `concepts` in the first place.
 
+### 4.6 The concept-text index — the third derivative table (0.5.5, D-051)
+
+```sql
+CREATE VIRTUAL TABLE IF NOT EXISTS concepts_fts USING fts5(
+    title,
+    content,
+    content='concepts',       -- external content: index the tokens, not the text
+    content_rowid='rowid'
+);
+```
+
+The keyword half of hybrid search ([§5.9](s5-modules.md#59-vector--embeddings-the-model-registry-and-search)). Like `analytics_annotations` it is [Doctrine VI](s0-s3-foundations.md#doctrine-vi)'s second category — disposable, rebuildable, carrying no log trigger and no delete guard — and it arrives on the ladder's `v4 → v5` rung.
+
+**External content is the whole design.** `content='concepts'` means FTS5 stores the inverted index and reads column values back from `concepts` by rowid when it needs them. There is therefore exactly one copy of the text, and the index cannot come to disagree with the concept about what the concept says. A standalone FTS table would be a second description of data the ledger already holds — the failure class [D-030](s13-decision-register.md#d-030) and [D-035](s13-decision-register.md#d-035) exist to prevent — and it would also make [D-036](s13-decision-register.md#d-036)'s rebuild a piece of our code rather than the engine's own `'rebuild'` command.
+
+**Two triggers, and the second is the one that is easy to get wrong.** `trg_concepts_fts_insert` adds a new concept's terms. `trg_concepts_fts_update` must first issue FTS5's `'delete'` command **with the old column values**, because an external-content index stores terms rather than text and cannot work out what to retract on its own. Omit that half and the index goes on matching words the concept no longer contains, with no error and no symptom except a search that returns something that is no longer there.
+
+**No delete trigger, by consequence rather than by choice.** `trg_concepts_guard_delete` is unconditional ([D-022](s13-decision-register.md#d-022)) — concepts are never physically deleted, not even inside an archive session — so there is no delete path to keep in sync. Should that guard ever become conditional, this index needs a third trigger and is silently stale until it gets one. The note is here because the dependency runs the wrong way round to be obvious: a change to the *archive* would break the *search index*.
+
+**Retirement is filtered at query time, not indexed.** An external-content index covers only the columns it declares, so `retired` is not among them and `keyword_search` filters it on the join back to `concepts`. That makes "a retired concept is not a search result" a property of one query rather than of the schema, which is exactly the kind of thing that silently stops happening — hence its own test.
+
 Under [D-036](s13-decision-register.md#d-036) this table is periphery, not frozen core — it may be dropped, reshaped or recreated by any minor version, and the migration that does so simply reruns the analytics. It arrived on the ladder's first second rung, `v2 → v3` ([D-032](s13-decision-register.md#d-032), [D-041](s13-decision-register.md#d-041)).
 

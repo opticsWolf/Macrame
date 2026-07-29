@@ -192,7 +192,7 @@ No GPL-licensed components. No `chrono` or `time` dependency.
 | Snapshot composition (D-049) | **Delivered** — anchored fold + tombstone merge; two carve-outs open (archive boundary, cadence) |
 | Phase 5 — Test matrix | **Delivered** — Doctrine VIII divergence (both directions), archive crash safety (D-012), Doctrine VII property suite, and empirical cost estimates via D-050 |
 | Filtered vector search | **Delivered (D-050)** — `FilteredVectorSearch`; two strategies, both with bodies, held together by a test requiring them to agree; `TwoPhaseTempTable` removed, its two mechanisms being absent from libSQL 0.9.30 |
-| Hybrid search | **Open** — design specified (§5.9), waiting on go/defer call |
+| Hybrid search | **Delivered (D-051)** — `concepts_fts` FTS5 external-content index on a `v4 → v5` rung; `HybridSearch` fuses vector and keyword arms by RRF; `rebuild_fts()` satisfies D-036 |
 | `Subgraph` integer-index rewrite | **Deferred** — pending Louvain/Dijkstra benchmark on budget-sized graph |
 
 ## Documentation

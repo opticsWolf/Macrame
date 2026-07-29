@@ -2,11 +2,11 @@
 
 | | |
 |---|---|
-| Plan version | 1.11 |
+| Plan version | 1.12 |
 | Against document | Macrame v0.5.4 — [docs/architecture/](architecture/README.md) |
 | Date | 2026-07-28 |
-| Test baseline | 163 passing (`--features property-tests`, `--no-fail-fast`), 1 failing — the failure is in `concurrency_tests.rs`, owned by a parallel session. Earlier plan revisions understated this count: the arithmetic summed a `test result` line whose fields shift when a binary reports `FAILED`. **`--no-fail-fast` is not optional for reading this number**: without it cargo stops at `concurrency_tests` and eleven binaries never run, which is how the archive defect below sat unnoticed. Separately, `doctrine_property_tests` faults under R15 on roughly 15% of runs and takes the suite with it when it does. |
-| Status | Phases 0–3 and the native-graph work delivered, and Phase 3 is now reachable from the public API (D-048). Phase 4 is complete: §5.2–§5.9, §6 and Appendix A restored, and the rest of the architecture document de-corrupted. Snapshot composition landed (D-049). **Phase 5 is complete** — Doctrine VIII divergence, archive crash safety, the Doctrine VII property suite, and empirical cost estimates, the last arriving with D-050. **Filtered vector search is implemented** and `TwoPhaseTempTable` is removed as unimplementable on libSQL 0.9.30. Open: hybrid search (a go/defer call), the two §5.4 carve-outs, the `Subgraph` integer-index rewrite, and the R15 upstream report. |
+| Test baseline | **177 passing, 0 failing** (`--features property-tests`, `--no-fail-fast`) — green for the first time in several cycles. The last red, `a_high_priority_write_completes_while_the_backlog_is_still_queued`, turned out to be asserting something §5.1.5 does not promise rather than catching a defect; see §8.1c. **`--no-fail-fast` is not optional for reading this number**: without it cargo stops at the first failing binary and everything alphabetically behind it never runs, which is how the archive defect below sat unnoticed. Separately, `doctrine_property_tests` faults under R15 on roughly 15% of runs and takes the suite with it when it does. |
+| Status | Phases 0–3 and the native-graph work delivered, and Phase 3 is now reachable from the public API (D-048). Phase 4 is complete: §5.2–§5.9, §6 and Appendix A restored, and the rest of the architecture document de-corrupted. Snapshot composition landed (D-049). **Phase 5 is complete** — Doctrine VIII divergence, archive crash safety, the Doctrine VII property suite, and empirical cost estimates, the last arriving with D-050. **Filtered vector search is implemented** and `TwoPhaseTempTable` is removed as unimplementable on libSQL 0.9.30. **Hybrid search is implemented** (D-051), closing the last capability gap Appendix A.2 recorded. Open: the two §5.4 carve-outs, the `Subgraph` integer-index rewrite, the `write_annotations` rename, and the R15 upstream report. |
 
 ---
 
@@ -32,7 +32,7 @@
 | **`VectorFilterStrategy` implementations** | **Done (D-050)** | `FilteredVectorSearch`; two strategies with bodies, `TwoPhaseTempTable` removed as unimplementable on this engine; `byte_budget` read; estimates returned |
 | §5.2–§5.8, §6, Appendix A | **Restored** | recovered from a v0.5.1 copy and forward-ported; Appendix A rewritten against the crate (D-040) |
 | Architecture document | **De-corrupted** | headings, fences, identifiers and eaten `<…>` spans repaired throughout; §4.3 trigger DDL recovered from `schema::ddl` |
-| **Hybrid search** | **Absent** | `reciprocal_rank_fusion` only; no FTS5 table exists — §5.3 below |
+| **Hybrid search** | **Done (D-051)** | `concepts_fts` FTS5 external-content index on a v4 → v5 rung; `HybridSearch` builder; `rebuild_fts()` for D-036 |
 | Snapshot composition | **Done (D-049)** | anchored fold + tombstone merge; `Database::reconstruct` composes by default. Off across the archive boundary, and no cadence yet — §5.4 |
 | Subgraph loader | **Done, now linear** | per-row byte check made loading O(E²); fixed with incremental accounting (D-047) |
 | `Subgraph` internals | **Deferred** | integer-index rewrite waits on a benchmark — §5.5 below (D-047) |
@@ -121,7 +121,7 @@ Four regression tests in `write_path_tests.rs` pin content-untouched, log-unchan
 
 **Two follow-ups this left behind.**
 
-- `Database::write_annotations` still takes `Vec<ConceptUpsert>` and is the bulk *concept* path — an on-ledger write with a name that now means the opposite of what it does. Renaming it (`bulk_upsert_concepts`) is the right call and is deliberately deferred: `tests/concurrency_tests.rs` calls it in two places and is being rewritten in a parallel session. Rename once that lands.
+- `Database::write_annotations` still takes `Vec<ConceptUpsert>` and is the bulk *concept* path — an on-ledger write with a name that now means the opposite of what it does. Renaming it (`bulk_upsert_concepts`) is the right call and was deferred pending the `concurrency_tests.rs` rewrite. **That rewrite has landed, so the rename is unblocked** — it is now five test call sites and the method itself, and it is the last entry in Appendix A.2 that is a naming problem rather than a missing capability.
 - `verification_counts_every_declared_object` in `migration_tests.rs` asserted `4 tables, 9 triggers, 4 indices` as literals and failed the moment a fifth table arrived — **D-038's exact mistake, in the test that guards D-038.** Rewritten to check tables by name and derive trigger/index counts from `CREATE_TRIGGERS` / `CREATE_INDICES`, and renamed to `the_baseline_leaves_every_declared_object_behind`. Worth a sweep for other count-based assertions on `sqlite_master`.
 
 ### 5.4 Snapshots were written and never read *(FIXED — D-049; two carve-outs open)*
@@ -187,7 +187,17 @@ Fixed with a running total threaded through the load and into `hydrate`, which n
 
 Two tests, both mutation-verified. The agreement test sets the budget one byte under the derived total, so an undercount fails. The growth test asserts a ratio, not a duration, at **8× sizes** — deliberately, because at 4× the quadratic term does not dominate and no CI-safe bound catches it. Measured: fixed **8.0×**, mutated **21.3×**, bound **16×**.
 
-### 5.3 Hybrid search does not exist *(open, new)*
+### 5.3 Hybrid search does not exist *(FIXED — D-051)*
+
+**Shipped, with the go/defer call taken as go.** `concepts_fts` is an FTS5 external-content index over `concepts(title, content)` on a `v4 → v5` rung, with two sync triggers; `HybridSearch` is the public builder; `Database::rebuild_fts()` satisfies D-036's rebuildability using FTS5's own `'rebuild'` command rather than a reimplementation of the triggers. The rung backfills, which D-041's could not — the index is a pure function of text the ledger already holds.
+
+**Three things worth carrying forward.** External content means the update trigger must *retract* old terms using the OLD values, and omitting that half leaves an index matching words the concept no longer contains — silent, and detectable only by searching for something that should be gone. Arbitrary text is escaped before reaching MATCH, because FTS5's syntax is a language in which a malformed query is an exception and `NOT` is a *wrong answer*. And there is no delete trigger because D-022's guard is unconditional — a dependency that runs the wrong way round to notice later, so it is recorded in §4.6: a change to the archive would break the search index.
+
+**One defect fixed in passing.** `reciprocal_rank_fusion` sorted on score alone, leaving ties in `HashMap` order — and ties are the common case, since two documents at the same pair of ranks score identically by construction. The same query could answer in a different order twice. Now broken by id.
+
+Mutation-verified: dropping the FTS retraction, dropping the `retired` filter, and bypassing the escaping each failed exactly its own test.
+
+### 5.3b Original write-up *(superseded, kept for the inventory)*
 
 Surfaced by the Appendix A rewrite. `reciprocal_rank_fusion` is a pure function over two rank lists. Nothing produces the keyword half, nothing fuses them, and **there is no FTS5 table in the schema** — `grep -ci fts5 src/schema/ddl.rs` returns 0. §9 budgets hybrid search at ≤ 50 ms for top-10 over 100K concepts. It is not reachable.
 
@@ -284,9 +294,18 @@ It broke six binaries' worth of assertions (`temporal_tests`, `integrity_propert
 
 Two process notes, since the same shape has now occurred twice. Mutation testing is the practice this project relies on most and the only one with a destructive step, and nothing distinguishes "mutation in flight" from a commit. A `MUTATION` marker is a comment — `grep -rn MUTATION src/` is what found this one, days late. Worth considering a `#[cfg(test)]`-gated form, or simply a pre-commit grep.
 
+### 8.1c The last failing test was wrong, not the code *(FIXED)*
+
+`a_high_priority_write_completes_while_the_backlog_is_still_queued` failed deterministically — every run, 40 backlog chunks of 40 committed before the probe, which is far too many to explain as one chunk already in flight. It was nonetheless the test at fault, in two layers:
+
+- It `.await`ed the probe directly. That yields, so the probe's command had not reached the channel when the actor woke; the actor saw only low-priority work and drained the lot. The probe must be *enqueued* before the actor runs, which is what `poll_once_each` exists for and what its passing sibling already did. The helper's own doc comment explains the mechanism — it simply was not applied here.
+- Even enqueued, `COUNT(BACKLOG) == 0` after the probe resolves is a wall-clock race: the actor keeps draining while the assertion's own `SELECT` awaits. §8 says this invariant is "stated as an ordering property over committed `seq_id`s, not a wall-clock timing measurement, so it is deterministic" — a count is a timing measurement wearing an ordering's clothes.
+
+Restated as ordering and renamed `a_lone_high_priority_write_is_still_serviced_before_a_saturated_backlog`. Its distinct contribution from the sibling is the shape: one probe against a saturated low queue, the worst case for a biased select. **Preempting already-accepted work is not something two-tier channels can do** — a queued command cannot be retracted — and §5.1.5's guarantee is about what the actor picks up next, which is what the test now says.
+
 ### 8.2 Coverage gaps where green means nothing
 
-- **`tests/concurrency_tests.rs` is one `assert!(true)`.** The binary reports `ok` in every run while testing nothing; clippy flags the assertion as always true. §5.1's priority guarantee, §9's WAL-reader claim, and the per-chunk atomicity of `bulk_import` are all uncovered. *(Spun off as a separate task.)*
+- ~~**`tests/concurrency_tests.rs` is one `assert!(true)`.**~~ **Closed** — the binary now holds six real tests, the last of which is fixed in §8.1c above. The `write_annotations` rename it was blocking is therefore unblocked. Original note: The binary reports `ok` in every run while testing nothing; clippy flags the assertion as always true. §5.1's priority guarantee, §9's WAL-reader claim, and the per-chunk atomicity of `bulk_import` are all uncovered. *(Spun off as a separate task.)*
 - **`FakeClock` is constructed in `harness.rs` and never injected.** §5 claims "every test uses `FakeClock`"; no test does. The compiler warns about the dead field on every build, which is how long this has been true.
 - **`RecordedAtRegression` is mapped by the classifier but unreachable through the public API.** `SystemClock` is strictly increasing by contract, so no test can provoke the trigger without raw SQL. Good news about the clock, real gap in coverage.
 - **`seq_id` gap tolerance (D-024)** — §8 names this test and it does not exist. **And it currently cannot exist**, which is worse than it being unwritten: no fold in the crate carries a `seq_id > :anchor` term, so there is nothing for gap tolerance to be a property *of*. D-024's guarantee is vacuous rather than satisfied. This test becomes writable when §5.4 lands, and it should land with it — the first anchored fold is precisely the code the rule binds, and writing the rule's test afterwards is how the `audit_current` defect happened.
@@ -327,8 +346,9 @@ Phase 4 restoration      — DONE (§5.2–§5.9, §6, Appendix A)
 Phase 4b de-corruption   — DONE
 Phase 5 (test matrix)    — mostly independent; §5.4 owes it one test
 8.2 coverage gaps        — independent; concurrency_tests spun off
-5.2 vector_filter        — blocked on (a) query_only/temp and (c) selectivity
-5.3 hybrid search        — design now specified (§5.9); needs a go/defer call
+5.2 vector_filter        — DONE (D-050)
+5.3 hybrid search        — DONE (D-051)
+8.1c concurrency test    — DONE; suite green, and the rename it blocked is free
 ```
 
 **Recommended order:** §5.1, 7.2, §5.4 and the de-corruption pass are done. Next is **Phase 5** — the test matrix §8 specifies, now that §8 itself is legible and its 0.5.4 additions are recorded. The two carve-outs §5.4 leaves — composing across the archive boundary, and the snapshot cadence — are both decisions rather than transcription, and belong with whoever settles the maintenance-task lifecycle. §5.2's strategy work waits on the two premises above; §5.3 waits on a go/defer call now that its design is no longer missing.
@@ -360,7 +380,8 @@ Severity is about silence: a defect that returns a wrong answer without erroring
 | O | `graph/builder.rs` | `attribute_mode` stored, exposed, never read; `AtTime` silently returned `Current` | **Fixed** (D-039) |
 | P | `graph/algorithms.rs` | `louvain_communities` returned one community per node — not Louvain | **Fixed** (D-039) |
 | Q | `error.rs` | `SubgraphTooLarge` constructed nowhere; D-007's byte budget unenforced | **Fixed** (D-039) |
-| R | `tests/concurrency_tests.rs` | entire binary is `assert!(true)`; reports green, tests nothing | **Open** |
+| R | `tests/concurrency_tests.rs` | entire binary is `assert!(true)`; reports green, tests nothing | **Fixed** (rewritten; last red resolved §8.1c) |
+| X | `vector/search.rs` | `reciprocal_rank_fusion` sorted on score alone, leaving ties to `HashMap` order — the same query could answer in a different order twice | **Fixed** (D-051) |
 | S | `vector/vector_filter.rs` | `CostEstimator` selects among strategies with no implementations | **Fixed** (D-050) |
 | V | `vector/vector_filter.rs` | `CostEstimator` carried `byte_budget` unread; `select_strategy` was a candidate-count heuristic wearing a cost model's name | **Fixed** (D-050) |
 | W | `graph/vector_filter.rs` | `PostFilter` under-returns silently when the filter is tight — a wrong answer shaped like a small result | **Fixed** (D-050, escalation) |

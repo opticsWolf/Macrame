@@ -618,8 +618,8 @@ fn vector(dim: usize, seed: u8) -> Vec<f32> {
 /// `open_db`, plus both models registered through the handle.
 async fn open_db_with_models(harness: &TestHarness) -> Database {
     let db = open_db(harness).await;
-    for i in 0..MODELS.len() {
-        db.register_model(&model_name(i), MODELS[i].1).await.unwrap();
+    for (i, (_, dim)) in MODELS.iter().enumerate() {
+        db.register_model(&model_name(i), *dim).await.unwrap();
     }
     db
 }

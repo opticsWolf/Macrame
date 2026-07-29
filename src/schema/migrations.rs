@@ -13,7 +13,7 @@ use crate::schema::ddl::*;
 /// guarantee D-029 buys would be void on it while `user_version` insisted all
 /// was well. Reserving 1 as a value this build refuses by name is what makes
 /// "no legacy support" an enforced property instead of a README sentence.
-pub const SCHEMA_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = 5;
 
 type StepFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
 
@@ -50,6 +50,12 @@ const STEPS: &[Step] = &[
         to: 4,
         name: "traversal-covering-index",
         apply: |conn| Box::pin(add_traversal_cover(conn)),
+    },
+    Step {
+        from: 4,
+        to: 5,
+        name: "concepts-fts",
+        apply: |conn| Box::pin(add_concepts_fts(conn)),
     },
 ];
 
@@ -194,6 +200,9 @@ async fn baseline(conn: &libsql::Connection) -> Result<()> {
     conn.execute(CREATE_TRANSACTION_LOG_TABLE, ()).await?;
     // Derivative, and last: every index in CREATE_INDICES must have its table.
     conn.execute(CREATE_ANALYTICS_ANNOTATIONS_TABLE, ()).await?;
+    // Before the triggers, not after: `trg_concepts_fts_*` name this table, and
+    // SQLite resolves a trigger body's tables at CREATE TRIGGER time.
+    conn.execute(CREATE_CONCEPTS_FTS, ()).await?;
 
     for index_ddl in CREATE_INDICES {
         conn.execute(index_ddl, ()).await?;
@@ -203,6 +212,28 @@ async fn baseline(conn: &libsql::Connection) -> Result<()> {
         conn.execute(trigger_ddl, ()).await?;
     }
 
+    Ok(())
+}
+
+/// v4 → v5: add the FTS5 index over concept text (§5.9, D-051).
+///
+/// Derivative and additive, so D-036 permits it — an FTS index over `concepts`
+/// is Doctrine VI's second category, disposable and reconstructible. The two
+/// triggers land on `concepts`, which *is* a frozen ledger table, but a trigger
+/// changes neither its columns nor its rows; the compat contract freezes the
+/// table's shape, and that is untouched.
+///
+/// Unlike the v2 → v3 rung this one **does** backfill, and can: the index is a
+/// pure function of text the ledger already holds, so `'rebuild'` reconstructs
+/// exactly what the triggers would have written had they always existed. That is
+/// the difference between this and D-041's annotations, where the old data was
+/// destroyed and no recovery existed.
+async fn add_concepts_fts(conn: &libsql::Connection) -> Result<()> {
+    conn.execute(CREATE_CONCEPTS_FTS, ()).await?;
+    for trigger_ddl in CREATE_TRIGGERS {
+        conn.execute(trigger_ddl, ()).await?;
+    }
+    conn.execute(REBUILD_CONCEPTS_FTS, ()).await?;
     Ok(())
 }
 
@@ -246,6 +277,7 @@ pub(crate) const BASELINE_TABLES: &[&str] = &[
     "links_current",
     "transaction_log",
     "analytics_annotations",
+    "concepts_fts",
 ];
 
 /// Confirm the database actually holds what the DDL claims to create.

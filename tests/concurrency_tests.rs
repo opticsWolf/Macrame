@@ -164,16 +164,40 @@ async fn high_priority_writes_are_serviced_before_a_low_priority_backlog() {
     );
 }
 
-/// The same setup, read as a claim about *starvation* rather than ordering: the
-/// backlog is not merely later, it is still entirely unserviced when the
-/// high-priority work finishes.
+/// The same guarantee at its worst shape for a biased select: **one** probe
+/// against a saturated low-priority queue, rather than the eight above.
 ///
 /// `bulk_import` awaits each chunk before sending the next, so a single caller
 /// can only ever have one command in flight. The backlog here is therefore built
-/// from 60 concurrent callers — which is also the realistic shape of the
-/// problem: background importers and the UI are different tasks.
+/// from concurrent callers — which is also the realistic shape of the problem:
+/// background importers and the UI are different tasks.
+///
+/// **This test asserted something the design does not promise, and failed for
+/// that reason rather than from a defect.** It used to `.await` the probe
+/// directly and then require `COUNT(BACKLOG) == 0`. Two things were wrong with
+/// that, and the second is the interesting one:
+///
+/// * `.await` yields. The probe's command had not reached the channel yet, so
+///   the actor woke with *only* low-priority work queued and drained all forty
+///   chunks before the probe ever arrived — measured 40/40, which is why the
+///   failure could not be explained away as one chunk already in flight. The
+///   probe has to be *enqueued* before the actor runs, which is precisely what
+///   [`poll_once_each`] exists for and what the test above already does.
+/// * A count taken after the probe resolves is a wall-clock race in any case:
+///   the actor keeps draining the backlog while the assertion's own `SELECT`
+///   awaits. §8 is explicit that this invariant is "stated as an ordering
+///   property over committed `seq_id`s, not a wall-clock timing measurement, so
+///   it is deterministic" — and a count is a timing measurement wearing an
+///   ordering's clothes.
+///
+/// So the claim is restated as ordering, which is both what the architecture
+/// specifies and what is actually true: the probe, enqueued while forty chunks
+/// sit unserviced, is stamped before every one of them. Preempting work already
+/// accepted is not something two-tier channels can do — a queued command cannot
+/// be retracted — and §5.1.5's guarantee is about what the actor picks up next,
+/// not about cancelling what it already holds.
 #[tokio::test]
-async fn a_high_priority_write_completes_while_the_backlog_is_still_queued() {
+async fn a_lone_high_priority_write_is_still_serviced_before_a_saturated_backlog() {
     const BACKLOG: usize = 40;
 
     let harness = TestHarness::new();
@@ -192,23 +216,25 @@ async fn a_high_priority_write_completes_while_the_backlog_is_still_queued() {
         .collect();
     poll_once_each(&mut backlog).await;
 
-    // One high-priority round trip, run to completion on its own.
-    tokio::time::timeout(
-        Duration::from_secs(5),
-        db.assert_edge(edge("SRC", "PROBE", "PROBE", T1)),
-    )
-    .await
-    .expect("high-priority write never completed behind the backlog")
-    .unwrap();
+    // Enqueued, not awaited: the actor must not get to run between the backlog
+    // being queued and this command landing in the high-priority channel.
+    let mut probe: Vec<Pin<Box<dyn Future<Output = Result<()>>>>> =
+        vec![Box::pin(db.assert_edge(edge("SRC", "PROBE", "PROBE", T1)))
+            as Pin<Box<dyn Future<Output = _>>>];
+    poll_once_each(&mut probe).await;
+
+    // The timeout is the deadlock guard, not the assertion: the probe must not
+    // need the backlog's callers to be polled before it can finish.
+    for p in probe {
+        tokio::time::timeout(Duration::from_secs(5), p)
+            .await
+            .expect("high-priority write never completed behind the backlog")
+            .unwrap();
+    }
 
     assert_eq!(
         count(&db, "SELECT COUNT(*) FROM links WHERE edge_type = 'PROBE'").await,
         1
-    );
-    assert_eq!(
-        count(&db, "SELECT COUNT(*) FROM links WHERE edge_type = 'BACKLOG'").await,
-        0,
-        "the actor serviced background chunks before finishing the high-priority write"
     );
 
     for chunk in backlog {
@@ -218,6 +244,24 @@ async fn a_high_priority_write_completes_while_the_backlog_is_still_queued() {
         count(&db, "SELECT COUNT(*) FROM links WHERE edge_type = 'BACKLOG'").await,
         BACKLOG as i64,
         "the backlog must still be serviced, only later"
+    );
+
+    // The claim itself, as an ordering over the actor's own stamps: the single
+    // probe was serviced before every one of the forty chunks that were already
+    // queued when it arrived.
+    let probe_at = scalar(&db, "SELECT MAX(recorded_at) FROM links WHERE edge_type = 'PROBE'")
+        .await
+        .unwrap();
+    let first_backlog = scalar(
+        &db,
+        "SELECT MIN(recorded_at) FROM links WHERE edge_type = 'BACKLOG'",
+    )
+    .await
+    .unwrap();
+    assert!(
+        probe_at < first_backlog,
+        "a lone high-priority write queued behind {BACKLOG} background chunks was serviced \
+         after one of them: probe {probe_at} >= first backlog chunk {first_backlog}"
     );
 }
 
