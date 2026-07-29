@@ -17,17 +17,59 @@ const SNAP_MAGIC: [u8; 4] = *b"MACR";
 /// does not make an old file fail to parse, it makes it parse into the wrong
 /// values — and a snapshot is the first thing a restart reaches for, so the
 /// wrong values arrive labelled as the newest state anyone believed.
-const SNAP_FORMAT_VERSION: u16 = 1;
+/// **v2 (0.5.5)** adds the snapshot's own instant to the header (D-054).
+const SNAP_FORMAT_VERSION: u16 = 2;
 
-/// `magic (4) + format_version (2) + schema_version (4)`, little-endian.
-const SNAP_HEADER_LEN: usize = 10;
+/// `magic (4) + format_version (2) + schema_version (4) + taken_at_micros (8)`,
+/// little-endian.
+const SNAP_HEADER_LEN: usize = 18;
 
-fn snapshot_header(schema_version: u32) -> [u8; SNAP_HEADER_LEN] {
+/// Microseconds since the Unix epoch, from the snapshot's own `timestamp`.
+///
+/// The instant is already in the payload — this is a *copy* in the header, which
+/// is the kind of second description this codebase usually refuses. It earns the
+/// exception by what reads it: retention has to bucket every snapshot by day, and
+/// the alternative is decompressing and deserializing a full `MaterializedState`
+/// per file on every pass, which would make the cadence's own maintenance cost
+/// more than the work it exists to save. Eighteen bytes read without touching
+/// zstd is the whole point of having a header at all (D-043).
+///
+/// It cannot drift from the payload because both are written from the same value
+/// in the same statement, and nothing rewrites a snapshot in place.
+fn taken_at_micros(state: &MaterializedState) -> u64 {
+    crate::util::timestamp::parse(&state.timestamp)
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_micros() as u64)
+        .unwrap_or(0)
+}
+
+fn snapshot_header(schema_version: u32, taken_at: u64) -> [u8; SNAP_HEADER_LEN] {
     let mut h = [0u8; SNAP_HEADER_LEN];
     h[0..4].copy_from_slice(&SNAP_MAGIC);
     h[4..6].copy_from_slice(&SNAP_FORMAT_VERSION.to_le_bytes());
     h[6..10].copy_from_slice(&schema_version.to_le_bytes());
+    h[10..18].copy_from_slice(&taken_at.to_le_bytes());
     h
+}
+
+/// The instant a snapshot reflects, read from its header alone.
+///
+/// `None` for anything this build would refuse to load anyway — a foreign file,
+/// an older container, a truncated one. Retention treats that as "no date" and
+/// falls back to the newest-N rule for it rather than guessing.
+fn header_taken_at(path: &Path) -> Option<u64> {
+    let mut file = fs::File::open(path).ok()?;
+    let mut head = [0u8; SNAP_HEADER_LEN];
+    file.read_exact(&mut head).ok()?;
+    if head[0..4] != SNAP_MAGIC {
+        return None;
+    }
+    if u16::from_le_bytes([head[4], head[5]]) != SNAP_FORMAT_VERSION {
+        return None;
+    }
+    let micros = u64::from_le_bytes(head[10..18].try_into().ok()?);
+    (micros > 0).then_some(micros)
 }
 
 /// Zero-padding width for the `seq_id` in a snapshot filename.
@@ -85,8 +127,11 @@ pub fn save_snapshot(snapshots_dir: &Path, state: &MaterializedState) -> Result<
         fs::File::create(&tmp_path).map_err(|e| fail("failed to create snapshot temp file", e))?;
     // Header first, uncompressed: it has to be readable without committing to
     // decompressing a payload this build may not understand (D-043).
-    file.write_all(&snapshot_header(crate::schema::migrations::SCHEMA_VERSION))
-        .map_err(|e| fail("failed to write snapshot header", e))?;
+    file.write_all(&snapshot_header(
+        crate::schema::migrations::SCHEMA_VERSION,
+        taken_at_micros(state),
+    ))
+    .map_err(|e| fail("failed to write snapshot header", e))?;
     file.write_all(&compressed)
         .map_err(|e| fail("failed to write snapshot bytes", e))?;
     // Before the rename, or the rename can land ahead of the data.
@@ -184,16 +229,36 @@ pub async fn write_final(
     Ok(path)
 }
 
-/// Snapshots kept by [`cleanup_expired_snapshots`] (§5.5).
+/// Snapshots kept unconditionally, newest first, by [`cleanup_expired_snapshots`] (§5.5).
 const RETAIN: usize = 5;
 
-/// Retention policy cleanup for snapshot files: retain the newest [`RETAIN`] (§5.5).
+/// Days for which one snapshot each is kept beyond [`RETAIN`] (§5.5, D-054).
+const RETAIN_DAYS: i64 = 30;
+
+const MICROS_PER_DAY: u64 = 86_400_000_000;
+
+/// Retention: the newest [`RETAIN`], **plus one per day for [`RETAIN_DAYS`]**
+/// (§5.5, D-054).
+///
+/// **Why the daily tier exists, and why it did not matter until now.** Through
+/// 0.5.4 a snapshot was written once per clean shutdown, so "newest five" was
+/// five shutdowns — days or weeks of coverage, and the daily rule §5.5 specifies
+/// bought nothing. The cadence ([D-053](../../docs/architecture/s13-decision-register.md))
+/// writes one every 10,000 log entries, so under load five anchors can span
+/// minutes: every instant older than that falls back to folding the whole log,
+/// which is the cost snapshots exist to avoid. The flat rule went from harmless
+/// to actively defeating the feature that had just been added.
 ///
 /// Ordered by the `seq_id` parsed out of each filename, not by the filename
 /// itself. A lexicographic sort over names is only `seq_id` order while every
 /// name is the same width, and "delete the oldest" reading from a mis-sorted
 /// list deletes the wrong files — quietly, and preferentially the newest ones.
 /// Parsing removes the dependency on [`SEQ_WIDTH`] entirely.
+///
+/// A snapshot whose header carries no readable instant survives only under the
+/// newest-[`RETAIN`] rule. That is deliberate: it is a file this build would
+/// refuse to *load* anyway, so keeping it for its date would be keeping it for a
+/// date nothing will ever use.
 pub fn cleanup_expired_snapshots(snapshots_dir: &Path) -> Result<usize> {
     if !snapshots_dir.exists() {
         return Ok(0);
@@ -204,7 +269,8 @@ pub fn cleanup_expired_snapshots(snapshots_dir: &Path) -> Result<usize> {
         reason: format!("failed to read snapshot dir: {e}"),
     })?;
 
-    let mut snapshots: Vec<(i64, PathBuf)> = Vec::new();
+    // (seq_id, path, day since epoch — None when the header carries no instant)
+    let mut snapshots: Vec<(i64, PathBuf, Option<i64>)> = Vec::new();
     for entry in read_dir.flatten() {
         let path = entry.path();
         match path.extension().and_then(|e| e.to_str()) {
@@ -215,7 +281,10 @@ pub fn cleanup_expired_snapshots(snapshots_dir: &Path) -> Result<usize> {
                 let _ = fs::remove_file(&path);
             }
             Some("zst") => match seq_from_filename(&path) {
-                Some(seq) => snapshots.push((seq, path)),
+                Some(seq) => {
+                    let day = header_taken_at(&path).map(|micros| (micros / MICROS_PER_DAY) as i64);
+                    snapshots.push((seq, path, day));
+                }
                 // Not ours, or a name we cannot order. Deleting on a guess is
                 // how retention turns into data loss.
                 None => tracing::warn!("snapshot cleanup: unparseable filename {path:?}, skipping"),
@@ -224,15 +293,47 @@ pub fn cleanup_expired_snapshots(snapshots_dir: &Path) -> Result<usize> {
         }
     }
 
-    snapshots.sort_by_key(|(seq, _)| *seq);
-    let mut removed = 0;
-    if snapshots.len() > RETAIN {
-        for (_, path) in &snapshots[..snapshots.len() - RETAIN] {
-            if let Err(e) = fs::remove_file(path) {
-                tracing::warn!("failed to remove expired snapshot {path:?}: {e}");
-            } else {
-                removed += 1;
+    snapshots.sort_by_key(|(seq, _, _)| *seq);
+
+    let mut keep: std::collections::HashSet<&PathBuf> = snapshots
+        .iter()
+        .rev()
+        .take(RETAIN)
+        .map(|(_, path, _)| path)
+        .collect();
+
+    // One per day, for the last RETAIN_DAYS days. "Today" is the newest
+    // snapshot's own day rather than the wall clock: retention is then a
+    // function of the directory's contents and nothing else, so it is
+    // deterministic and testable — and a database left untouched for a year does
+    // not have its entire history deleted by the first write after it wakes up.
+    if let Some(today) = snapshots.iter().filter_map(|(_, _, day)| *day).max() {
+        let horizon = today - (RETAIN_DAYS - 1);
+        let mut newest_of_day: std::collections::BTreeMap<i64, &PathBuf> =
+            std::collections::BTreeMap::new();
+        // Ascending by seq, so the last write for a day wins its slot.
+        for (_, path, day) in &snapshots {
+            if let Some(day) = *day {
+                if day >= horizon {
+                    newest_of_day.insert(day, path);
+                }
             }
+        }
+        keep.extend(newest_of_day.into_values());
+    }
+
+    let doomed: Vec<PathBuf> = snapshots
+        .iter()
+        .filter(|(_, path, _)| !keep.contains(path))
+        .map(|(_, path, _)| path.clone())
+        .collect();
+
+    let mut removed = 0;
+    for path in doomed {
+        if let Err(e) = fs::remove_file(&path) {
+            tracing::warn!("failed to remove expired snapshot {path:?}: {e}");
+        } else {
+            removed += 1;
         }
     }
 

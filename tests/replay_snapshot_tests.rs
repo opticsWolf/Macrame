@@ -307,7 +307,8 @@ async fn a_snapshot_carries_its_header_and_reloads() {
 
     let raw = std::fs::read(&path).unwrap();
     assert_eq!(&raw[0..4], b"MACR", "missing magic: {:?}", &raw[0..4]);
-    assert_eq!(u16::from_le_bytes([raw[4], raw[5]]), 1, "format version");
+    // v2 as of D-054: the header gained the snapshot's own instant.
+    assert_eq!(u16::from_le_bytes([raw[4], raw[5]]), 2, "format version");
     assert_eq!(
         u32::from_le_bytes([raw[6], raw[7], raw[8], raw[9]]),
         migrations::SCHEMA_VERSION,
@@ -1090,4 +1091,157 @@ async fn a_disabled_cadence_writes_nothing_until_close() {
 
     db.close().await.unwrap();
     assert_eq!(snapshot_count(&dir), 1, "close() still writes the final anchor");
+}
+
+// ---------------------------------------------------------------------------
+// Retention: the newest five, plus one per day (§5.5, D-054)
+// ---------------------------------------------------------------------------
+
+/// A state anchored at `seq`, reflecting midday on epoch-day `day`.
+///
+/// Built by epoch arithmetic rather than by formatting a day number into a
+/// date string. The first version of this helper wrote
+/// `format!("2026-01-{:02}", day + 1)`, which produces `2026-01-41` past day 39
+/// — a shape-valid, calendar-invalid timestamp that `parse` correctly refuses.
+/// Those snapshots landed with *no* instant in their header, so the two tests
+/// that used them were measuring the dateless path instead of the daily one, and
+/// one of them passed for the wrong reason.
+fn state_on_day(seq: i64, day: u64) -> MaterializedState {
+    let at = std::time::UNIX_EPOCH + std::time::Duration::from_secs(day * 86_400 + 12 * 3_600);
+    MaterializedState {
+        seq_anchor: seq,
+        timestamp: macrame::util::timestamp::format(at),
+        concepts: Default::default(),
+        edges: Vec::new(),
+    }
+}
+
+/// **The daily tier keeps history the flat rule threw away.**
+///
+/// Ten snapshots across ten days. Newest-five alone keeps days 5–9 and deletes
+/// the rest, so every instant older than five anchors folds the whole log — which
+/// is precisely the cost the cadence was added to avoid, defeated by the
+/// retention rule it inherited.
+#[tokio::test]
+async fn retention_keeps_one_snapshot_per_day_beyond_the_newest_five() {
+    let harness = TestHarness::new();
+    let dir = harness.temp_dir.path().join("snapshots");
+
+    for day in 0..10u64 {
+        save_snapshot(&dir, &state_on_day(day as i64 + 1, day)).unwrap();
+    }
+
+    cleanup_expired_snapshots(&dir).unwrap();
+
+    assert_eq!(
+        surviving_anchors(&dir),
+        (1..=10).collect::<Vec<i64>>(),
+        "each of the ten days is inside the thirty-day window, so all ten survive"
+    );
+}
+
+/// Several snapshots on one day collapse to one — the newest — while the daily
+/// coverage either side is untouched.
+#[tokio::test]
+async fn retention_collapses_a_busy_day_to_its_newest_snapshot() {
+    let harness = TestHarness::new();
+    let dir = harness.temp_dir.path().join("snapshots");
+
+    // Day 0: four anchors. Days 1..8: one each. The newest five are all on the
+    // later days, so day 0's survivor is decided by the daily rule alone.
+    for seq in 1..=4 {
+        save_snapshot(&dir, &state_on_day(seq, 0)).unwrap();
+    }
+    for day in 1..9u64 {
+        save_snapshot(&dir, &state_on_day(4 + day as i64, day)).unwrap();
+    }
+
+    cleanup_expired_snapshots(&dir).unwrap();
+
+    let survivors = surviving_anchors(&dir);
+    assert!(
+        survivors.contains(&4),
+        "day 0 must keep its newest anchor: {survivors:?}"
+    );
+    for gone in [1, 2, 3] {
+        assert!(
+            !survivors.contains(&gone),
+            "day 0's superseded anchor {gone} should have been collapsed: {survivors:?}"
+        );
+    }
+    assert_eq!(survivors.len(), 9, "one per day, nine days: {survivors:?}");
+}
+
+/// Beyond the window, the daily tier stops protecting anything — otherwise
+/// "thirty days" would mean "forever" and the directory would grow without
+/// bound, which is the failure retention exists to prevent.
+#[tokio::test]
+async fn retention_drops_days_past_the_window() {
+    let harness = TestHarness::new();
+    let dir = harness.temp_dir.path().join("snapshots");
+
+    // One snapshot 40 days before the newest, well outside the thirty-day
+    // window, and six recent ones so the newest-five rule cannot rescue it.
+    save_snapshot(&dir, &state_on_day(1, 0)).unwrap();
+    for i in 0..6u64 {
+        save_snapshot(&dir, &state_on_day(10 + i as i64, 40 + i)).unwrap();
+    }
+
+    cleanup_expired_snapshots(&dir).unwrap();
+
+    let survivors = surviving_anchors(&dir);
+    assert!(
+        !survivors.contains(&1),
+        "a snapshot 40 days older than the newest is outside the window: {survivors:?}"
+    );
+    assert_eq!(survivors.len(), 6, "the six recent days survive: {survivors:?}");
+}
+
+/// The newest five survive regardless of date, so a burst inside a single day
+/// still leaves a usable ladder of recent anchors — which is the tier the
+/// cadence actually depends on.
+#[tokio::test]
+async fn the_newest_five_survive_even_within_one_day() {
+    let harness = TestHarness::new();
+    let dir = harness.temp_dir.path().join("snapshots");
+
+    for seq in 1..=8 {
+        save_snapshot(&dir, &state_on_day(seq, 0)).unwrap();
+    }
+
+    cleanup_expired_snapshots(&dir).unwrap();
+
+    assert_eq!(
+        surviving_anchors(&dir),
+        vec![4, 5, 6, 7, 8],
+        "the newest five, all on the same day"
+    );
+}
+
+/// The header carries the snapshot's own instant so retention can bucket by day
+/// without decompressing anything — and it must agree with the payload, or the
+/// two descriptions have already drifted.
+#[tokio::test]
+async fn the_header_instant_matches_the_payload() {
+    let harness = TestHarness::new();
+    let dir = harness.temp_dir.path().join("snapshots");
+
+    let state = state_on_day(7, 3);
+    let path = save_snapshot(&dir, &state).unwrap();
+
+    let loaded = macrame::temporal::load_snapshot(&path).unwrap();
+    assert_eq!(loaded.timestamp, state.timestamp);
+
+    // Read the header alone: magic, format, schema, then the instant.
+    let raw = std::fs::read(&path).unwrap();
+    let micros = u64::from_le_bytes(raw[10..18].try_into().unwrap());
+    let expected = macrame::util::timestamp::parse(&state.timestamp)
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_micros() as u64;
+    assert_eq!(
+        micros, expected,
+        "the header instant must be the payload's timestamp, not an approximation"
+    );
 }
