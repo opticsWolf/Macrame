@@ -8,4 +8,6 @@ pub use archive::{archive, ArchiveReport};
 pub use as_of::{hydrate_attributes, query_as_of_edges, NodeAttributes};
 pub use interval::Interval;
 pub use replay::{reconstruct, MaterializedState};
-pub use snapshot::{cleanup_expired_snapshots, load_snapshot, save_snapshot, write_final};
+pub use snapshot::{
+    cleanup_expired_snapshots, load_snapshot, save_snapshot, write_final, SnapshotCadence,
+};

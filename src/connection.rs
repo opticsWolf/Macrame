@@ -7,7 +7,7 @@ use crate::graph::edge::EdgeAssertion;
 use crate::integrity::{rebuild_current, RebuildReport};
 use crate::schema::migrations;
 use crate::temporal::archive::{archive, ArchiveReport};
-use crate::temporal::snapshot;
+use crate::temporal::snapshot::{self, SnapshotCadence};
 use crate::util::clock::{Clock, SystemClock};
 use crate::util::timestamp;
 use crate::vector::ModelName;
@@ -204,11 +204,33 @@ pub struct Database {
     snapshots_dir: PathBuf,
     schema_version: u32,
     writer: Option<tokio::task::JoinHandle<Result<()>>>,
+    /// Stops the snapshot cadence. Dropping it stops the task too, which is what
+    /// keeps a `Database` that is dropped rather than closed from leaving a task
+    /// running against a connection whose database is going away.
+    cadence_stop: Option<tokio::sync::watch::Sender<bool>>,
+    cadence: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Database {
     /// Open a database file at `path`, configuring pragmas, running migrations, and spawning the Write Actor.
+    ///
+    /// The snapshot cadence runs with [`SnapshotCadence::default`]. Use
+    /// [`Database::open_with_cadence`] to tune or disable it.
     pub async fn open(path: impl AsRef<Path>) -> Result<Self> {
+        Self::open_with_cadence(path, Some(SnapshotCadence::default())).await
+    }
+
+    /// Open with an explicit snapshot cadence, or `None` to run without one
+    /// (§5.5, D-053).
+    ///
+    /// `None` restores the pre-0.5.5 behaviour, where `close()` is the only
+    /// thing that ever writes an anchor. That is the right setting for a
+    /// short-lived process that will not accumulate a delta worth bounding, and
+    /// for tests that assert on the contents of the snapshot directory.
+    pub async fn open_with_cadence(
+        path: impl AsRef<Path>,
+        cadence: Option<SnapshotCadence>,
+    ) -> Result<Self> {
         let path = path.as_ref();
         let db = libsql::Builder::new_local(path).build().await?;
         let write_conn = configure(db.connect()?).await?;
@@ -233,6 +255,25 @@ impl Database {
         let archive_path = derive_archive_path(path);
         let snapshots_dir = derive_snapshots_dir(path);
 
+        // The task shares `read_conn` rather than opening a third connection:
+        // `libsql::Connection` is an Arc-backed handle, and R15 makes every
+        // additional local connection in one process a cost worth not paying
+        // for nothing.
+        let (cadence_stop, cadence) = match cadence {
+            Some(cadence) => {
+                let (tx, rx) = tokio::sync::watch::channel(false);
+                let handle = tokio::spawn(snapshot::run_cadence(
+                    read_conn.clone(),
+                    snapshots_dir.clone(),
+                    archive_path.clone(),
+                    cadence,
+                    rx,
+                ));
+                (Some(tx), Some(handle))
+            }
+            None => (None, None),
+        };
+
         Ok(Self {
             db,
             read_conn,
@@ -243,6 +284,8 @@ impl Database {
             snapshots_dir,
             schema_version: migrations::current_version(),
             writer: Some(writer),
+            cadence_stop,
+            cadence,
         })
     }
 
@@ -569,7 +612,24 @@ impl Database {
     /// durability loss — the ledger is in the WAL and the log replays without
     /// it — but it means the next open starts from an older anchor, and a caller
     /// that never hears about it cannot know why startup got slower.
+    ///
+    /// **The cadence stops first (§5.5, D-053).** Both it and `write_final` end
+    /// by running retention over the snapshot directory, and retention deletes
+    /// files. Letting them overlap would mean one pass enumerating the directory
+    /// while the other removes from it — not a correctness problem for the
+    /// ledger, which is why the ordering is stated rather than locked, but a
+    /// source of spurious warnings and of a final anchor that could be deleted
+    /// by a cleanup that started before it existed. Stopping the cadence, then
+    /// the actor, then taking the snapshot leaves exactly one writer at each
+    /// step.
     pub async fn close(mut self) -> Result<()> {
+        if let Some(stop) = self.cadence_stop.take() {
+            let _ = stop.send(true);
+        }
+        if let Some(handle) = self.cadence.take() {
+            let _ = handle.await;
+        }
+
         let (tx, rx) = oneshot::channel();
         let _ = self
             .highpri_tx

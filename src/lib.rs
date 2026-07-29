@@ -20,6 +20,7 @@ pub mod prelude {
     pub use crate::integrity::{audit_current, rebuild_current, RebuildReport};
     pub use crate::temporal::{
         archive, query_as_of_edges, reconstruct, ArchiveReport, Interval, MaterializedState,
+        SnapshotCadence,
     };
     pub use crate::util::{Clock, FakeClock, SystemClock};
     pub use crate::vector::{

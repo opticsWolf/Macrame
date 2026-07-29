@@ -587,21 +587,21 @@ async fn an_incompatible_snapshot_is_skipped_and_the_fold_still_answers() {
     db.close().await.unwrap();
 }
 
-/// **Composition is off once an archive exists, and that is correctness.**
+/// **Composition is no longer disabled by an archive (0.5.5).**
 ///
-/// `LOG_ARCHIVABLE` removes *superseded* rows, which are scattered through the
-/// sequence rather than forming a prefix, so a row above the anchor and at or
-/// before `ts` can be gone from the hot log while a newer row for the same
-/// entity — recorded after `ts`, and so invisible to the fold — keeps it out.
-/// The delta would miss it and the snapshot would answer with the older value.
+/// It used to be, and the refusal was load-bearing: with the delta folded over
+/// the hot log alone, a row above the anchor and at or before `ts` could be in
+/// cold while a newer row for the same entity kept it out of hot, so the
+/// snapshot answered with a stale value. `ANCHORED_COLD_FOLD` puts the cold log
+/// in the delta, which removes the reason rather than the symptom.
 ///
-/// Observed by planting a snapshot that is *wrong*: it claims a concept the
-/// database never had. With no archive the anchor is used and the ghost shows
-/// through; with an archive file present composition is skipped and it does
-/// not. Testing the switch rather than the consequence, because the consequence
-/// is a wrong answer that only a specific archive interleaving produces.
+/// This test is the old one inverted, and it keeps the old one's virtue: the
+/// snapshot is planted *wrong*, claiming a concept the database never had, so
+/// its presence in the result proves the anchor was actually consulted. A test
+/// that only checked the answer was right could not tell composition from a
+/// silent fall back to the full fold.
 #[tokio::test]
-async fn an_existing_archive_disables_composition() {
+async fn an_archive_no_longer_disables_composition() {
     use macrame::prelude::*;
     use macrame::temporal::as_of::NodeAttributes;
 
@@ -636,13 +636,81 @@ async fn an_existing_archive_disables_composition() {
     );
 
     make_cold_archive(&archive, &[]).await;
-    let skipped = reconstruct(db.read_conn(), &now, Some(&archive), Some(&snaps))
+    let with_archive = reconstruct(db.read_conn(), &now, Some(&archive), Some(&snaps))
         .await
         .unwrap();
     assert!(
-        !skipped.concepts.contains_key("GHOST"),
-        "composition must be skipped once an archive database exists"
+        with_archive.concepts.contains_key("GHOST"),
+        "the anchor must still be consulted once an archive database exists; \
+         if this is empty, composition has silently fallen back to a full fold"
     );
+
+    db.close().await.unwrap();
+}
+
+/// **The acceptance gate for composing across the archive boundary.**
+///
+/// Two mechanisms, one question — the D-049 shape, now extended to the case
+/// D-049 carved out. Composing a snapshot with an anchored hot+cold delta must
+/// agree with folding hot+cold from genesis, at instants on both sides of the
+/// archive cutoff. Instants *before* the cutoff are the ones that matter: that
+/// is where rows have actually moved to the cold file, and where a delta folded
+/// over hot alone would answer with a stale snapshot value.
+#[tokio::test]
+async fn composing_across_the_archive_boundary_equals_folding_from_genesis() {
+    use macrame::prelude::*;
+
+    let harness = TestHarness::new();
+    let db = macrame::Database::open(&harness.db_path).await.unwrap();
+    let snaps = harness.temp_dir.path().join("snaps");
+
+    // A history in which both entities are written repeatedly, so the archive
+    // has superseded rows to move and every instant has a distinct answer.
+    let mut stamps = Vec::new();
+    for round in 0..4 {
+        for id in ["A", "B"] {
+            db.upsert_concept(
+                ConceptUpsert::new(id, format!("{id} round {round}")).valid_from(CTS),
+            )
+            .await
+            .unwrap();
+            stamps.push(max_recorded_at(&db).await);
+        }
+    }
+
+    // Anchor taken mid-history, so the delta spans the rows that later move.
+    let mid = stamps[3].clone();
+    let base = db.reconstruct(&mid).await.unwrap();
+    save_snapshot(&snaps, &base).unwrap();
+
+    let cutoff = stamps[5].clone();
+    let report = db.archive(&cutoff).await.unwrap();
+    assert!(
+        report.log_entries_archived > 0,
+        "the fixture must actually move rows to cold: {report:?}"
+    );
+
+    let archive = db.archive_path().to_path_buf();
+    for ts in &stamps {
+        let composed = reconstruct(db.read_conn(), ts, Some(&archive), Some(&snaps))
+            .await
+            .unwrap();
+        let folded = reconstruct(db.read_conn(), ts, Some(&archive), None)
+            .await
+            .unwrap();
+
+        let titles = |s: &MaterializedState| {
+            s.concepts
+                .iter()
+                .map(|(k, v)| (k.clone(), v.title.clone()))
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
+        assert_eq!(
+            titles(&composed),
+            titles(&folded),
+            "composed and full-fold disagree at {ts} (cutoff {cutoff})"
+        );
+    }
 
     db.close().await.unwrap();
 }
@@ -676,4 +744,350 @@ async fn the_handle_reconstructs_through_its_own_snapshot_directory() {
         "close() should have left an anchor for this to compose from"
     );
     db.close().await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// The archive read path — `hot_log_covers` was not a completeness test
+// ---------------------------------------------------------------------------
+
+/// **A reconstruction of a pre-cutoff instant used to silently lose entities.**
+///
+/// `hot_log_covers` decided whether the cold file was needed by asking
+/// `MIN(recorded_at) <= ts`. That is a test of how far back the hot log *reaches*,
+/// not of whether it is *complete*, and `LOG_ARCHIVABLE` removes superseded rows
+/// scattered through the sequence rather than a prefix. The two come apart as
+/// soon as one entity is archived and another is not:
+///
+/// * `E` is written three times. The archive moves its first two log rows to
+///   cold and keeps the third, because the newest per entity always stays hot.
+/// * `F` is written once. Nothing supersedes it, so it stays hot — and it is the
+///   *oldest* surviving row, so `MIN(recorded_at)` still points before the
+///   archive cutoff.
+///
+/// Ask for belief at `E`'s second write. `MIN <= ts` says the hot log covers it,
+/// so the fold runs over hot alone; `E`'s winning row is in cold and its third
+/// row is later than `ts`, so **`E` disappears from the result entirely**. No
+/// error, no missing file — just a state that has quietly forgotten a concept it
+/// was asked about, which is the failure Doctrine II exists to prevent.
+#[tokio::test]
+async fn reconstructing_before_the_archive_cutoff_keeps_every_entity() {
+    use macrame::prelude::*;
+
+    let harness = TestHarness::new();
+    let db = macrame::Database::open(&harness.db_path).await.unwrap();
+
+    // F first, so its single row is the oldest thing in the log.
+    db.upsert_concept(ConceptUpsert::new("F", "F only ever written once").valid_from(CTS))
+        .await
+        .unwrap();
+
+    let mut stamps = Vec::new();
+    for title in ["E first", "E second", "E third"] {
+        db.upsert_concept(ConceptUpsert::new("E", title).valid_from(CTS))
+            .await
+            .unwrap();
+        stamps.push(max_recorded_at(&db).await);
+    }
+    let at_second_write = stamps[1].clone();
+
+    let truth = db.reconstruct(&at_second_write).await.unwrap();
+    assert_eq!(
+        truth.concepts.get("E").map(|c| c.title.as_str()),
+        Some("E second"),
+        "before any archive, belief at the second write is the second title"
+    );
+
+    // Archive everything superseded. E's first two log rows go cold; E's third
+    // and F's only row stay hot.
+    let report = db.archive("2030-01-01T00:00:00.000000Z").await.unwrap();
+    assert!(
+        report.log_entries_archived >= 2,
+        "the fixture needs superseded log rows to have moved: {report:?}"
+    );
+
+    let after = db.reconstruct(&at_second_write).await.unwrap();
+    assert_eq!(
+        after.concepts.get("E").map(|c| c.title.as_str()),
+        Some("E second"),
+        "archiving changed what was believed at {at_second_write}: reconstruct \
+         answered from the hot log alone while E's winning row was in cold"
+    );
+    assert!(
+        after.concepts.contains_key("F"),
+        "the unsuperseded concept must survive too"
+    );
+    assert_eq!(
+        truth.concepts.get("E"),
+        after.concepts.get("E"),
+        "an archive is a storage move, not a change of belief"
+    );
+
+    db.close().await.unwrap();
+}
+
+/// `reconstruct(now)` must still answer from the hot log after an archive — the
+/// fast path `LOG_ARCHIVABLE` is designed around, and the one the fix must not
+/// trade away in exchange for soundness.
+#[tokio::test]
+async fn reconstructing_now_still_answers_after_an_archive() {
+    use macrame::prelude::*;
+
+    let harness = TestHarness::new();
+    let db = macrame::Database::open(&harness.db_path).await.unwrap();
+    for title in ["one", "two", "three"] {
+        db.upsert_concept(ConceptUpsert::new("E", title).valid_from(CTS))
+            .await
+            .unwrap();
+    }
+
+    db.archive("2030-01-01T00:00:00.000000Z").await.unwrap();
+
+    let now = max_recorded_at(&db).await;
+    let state = db.reconstruct(&now).await.unwrap();
+    assert_eq!(
+        state.concepts.get("E").map(|c| c.title.as_str()),
+        Some("three"),
+        "current belief is the newest write, and it never left the hot log"
+    );
+
+    db.close().await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// The snapshot cadence (§5.5, D-053)
+// ---------------------------------------------------------------------------
+
+/// Wait for `f` to hold, or give up. Polls rather than sleeping a fixed time,
+/// so the test is as fast as the machine allows and still deterministic about
+/// the outcome — a fixed sleep is either flaky or slow, and usually both.
+async fn eventually(mut f: impl FnMut() -> bool) -> bool {
+    for _ in 0..200 {
+        if f() {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    false
+}
+
+fn snapshot_count(dir: &Path) -> usize {
+    std::fs::read_dir(dir)
+        .map(|d| {
+            d.flatten()
+                .filter(|e| e.path().extension().is_some_and(|x| x == "zst"))
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+fn fast_cadence(every: i64) -> macrame::temporal::SnapshotCadence {
+    macrame::temporal::SnapshotCadence {
+        every_entries: every,
+        poll_interval: std::time::Duration::from_millis(20),
+    }
+}
+
+/// **The cadence writes an anchor without anyone asking.**
+///
+/// Before this, `close()` was the only thing that ever wrote one, so a
+/// long-running process accumulated an unbounded delta and §9's "≤200 ms with
+/// snapshot" described a mechanism that only ran at shutdown.
+#[tokio::test]
+async fn the_cadence_anchors_a_running_database() {
+    use macrame::prelude::*;
+
+    let harness = TestHarness::new();
+    let db = macrame::Database::open_with_cadence(&harness.db_path, Some(fast_cadence(3)))
+        .await
+        .unwrap();
+    let dir = db.snapshots_dir().to_path_buf();
+
+    for i in 0..8 {
+        db.upsert_concept(ConceptUpsert::new(format!("c{i}"), "N").valid_from(CTS))
+            .await
+            .unwrap();
+    }
+
+    assert!(
+        eventually(|| snapshot_count(&dir) > 0).await,
+        "the cadence never wrote an anchor"
+    );
+
+    db.close().await.unwrap();
+}
+
+/// An idle database writes nothing, however long it is left open.
+///
+/// The cadence is a *distance* in log entries, not a schedule — the thing worth
+/// bounding is how much delta a reconstruction folds, and an idle database adds
+/// none. A time-based cadence would rewrite an identical snapshot forever and
+/// call it maintenance.
+#[tokio::test]
+async fn an_idle_database_is_never_anchored() {
+    use macrame::prelude::*;
+
+    let harness = TestHarness::new();
+    let db = macrame::Database::open_with_cadence(&harness.db_path, Some(fast_cadence(3)))
+        .await
+        .unwrap();
+    let dir = db.snapshots_dir().to_path_buf();
+
+    // Two writes, one short of the threshold, then nothing at all.
+    for i in 0..2 {
+        db.upsert_concept(ConceptUpsert::new(format!("c{i}"), "N").valid_from(CTS))
+            .await
+            .unwrap();
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    assert_eq!(
+        snapshot_count(&dir),
+        0,
+        "an idle database below the threshold must not be anchored"
+    );
+
+    db.close().await.unwrap();
+}
+
+/// **A cadence anchor changes no answer.**
+///
+/// The composed and full-fold paths must agree at every instant, exactly as
+/// D-049 requires — the difference here is that the anchor was written by a
+/// background task mid-history rather than by a test that chose the moment. If
+/// the cadence anchored at a `ts` later than anything it actually reflects, or
+/// left the delta straddling its own write, this is where it would show.
+#[tokio::test]
+async fn a_cadence_anchor_does_not_change_what_reconstruct_answers() {
+    use macrame::prelude::*;
+
+    let harness = TestHarness::new();
+    let db = macrame::Database::open_with_cadence(&harness.db_path, Some(fast_cadence(3)))
+        .await
+        .unwrap();
+    let dir = db.snapshots_dir().to_path_buf();
+
+    let mut stamps = Vec::new();
+    for i in 0..6 {
+        db.upsert_concept(ConceptUpsert::new(format!("c{i}"), format!("title {i}")).valid_from(CTS))
+            .await
+            .unwrap();
+        stamps.push(max_recorded_at(&db).await);
+    }
+    assert!(
+        eventually(|| snapshot_count(&dir) > 0).await,
+        "no anchor was written, so this asserts nothing"
+    );
+
+    // More history *after* the anchor, so composition has a real delta to apply.
+    for i in 6..10 {
+        db.upsert_concept(ConceptUpsert::new(format!("c{i}"), format!("title {i}")).valid_from(CTS))
+            .await
+            .unwrap();
+        stamps.push(max_recorded_at(&db).await);
+    }
+
+    for ts in &stamps {
+        let composed = reconstruct(db.read_conn(), ts, None, Some(&dir)).await.unwrap();
+        let folded = reconstruct(db.read_conn(), ts, None, None).await.unwrap();
+        let titles = |s: &MaterializedState| {
+            s.concepts
+                .iter()
+                .map(|(k, v)| (k.clone(), v.title.clone()))
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
+        assert_eq!(
+            titles(&composed),
+            titles(&folded),
+            "a cadence-written anchor changed the answer at {ts}"
+        );
+    }
+
+    db.close().await.unwrap();
+}
+
+/// **`close()` stops the task, and stops it before taking the final snapshot.**
+///
+/// The lifecycle question this feature was left open on. A task nobody stops
+/// outlives the handle that spawned it, holding a connection whose database is
+/// being torn down; and one still running during `write_final` has both of them
+/// enumerating and deleting in the same directory.
+///
+/// **The obvious form of this test asserts nothing**, and did: close the handle,
+/// wait, check no new snapshot appeared. Nothing appears either way, because
+/// nothing is *writing* after close — an idle-but-alive task is indistinguishable
+/// from a stopped one. Verified by mutation: with `close()` leaking its stop
+/// signal, that version still passed.
+///
+/// So the log has to keep growing after `close()` returns. The writes go through
+/// a raw connection rather than a second `Database`: the trigger fires either
+/// way, and a second handle would mean a second actor and a second cadence task
+/// alive in one process, which is precisely the churn R15 punishes.
+#[tokio::test]
+async fn closing_the_handle_stops_the_cadence() {
+    use macrame::prelude::*;
+
+    let harness = TestHarness::new();
+    let db = macrame::Database::open_with_cadence(&harness.db_path, Some(fast_cadence(1)))
+        .await
+        .unwrap();
+    let dir = db.snapshots_dir().to_path_buf();
+
+    for i in 0..4 {
+        db.upsert_concept(ConceptUpsert::new(format!("c{i}"), "N").valid_from(CTS))
+            .await
+            .unwrap();
+    }
+    assert!(eventually(|| snapshot_count(&dir) > 0).await, "cadence never ran");
+
+    db.close().await.unwrap();
+    let settled = snapshot_count(&dir);
+
+    // Keep the log growing. A live task would see the head advance past its
+    // anchor by more than the threshold and write within a few ticks.
+    let outside = libsql::Builder::new_local(&harness.db_path)
+        .build()
+        .await
+        .unwrap();
+    let conn = outside.connect().unwrap();
+    for i in 4..12 {
+        conn.execute(
+            "INSERT INTO concepts (id, title, valid_from, recorded_at) \
+             VALUES (?1, 'N', ?2, ?2)",
+            libsql::params![format!("c{i}"), format!("2027-01-01T00:00:{i:02}.000000Z")],
+        )
+        .await
+        .unwrap();
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    assert_eq!(
+        snapshot_count(&dir),
+        settled,
+        "a snapshot appeared after close() returned, while the log was still \
+         growing: the cadence outlived the handle that spawned it"
+    );
+}
+
+/// Opting out restores the pre-0.5.5 behaviour exactly: `close()` is the only
+/// thing that writes an anchor.
+#[tokio::test]
+async fn a_disabled_cadence_writes_nothing_until_close() {
+    use macrame::prelude::*;
+
+    let harness = TestHarness::new();
+    let db = macrame::Database::open_with_cadence(&harness.db_path, None)
+        .await
+        .unwrap();
+    let dir = db.snapshots_dir().to_path_buf();
+
+    for i in 0..8 {
+        db.upsert_concept(ConceptUpsert::new(format!("c{i}"), "N").valid_from(CTS))
+            .await
+            .unwrap();
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    assert_eq!(snapshot_count(&dir), 0, "no cadence was asked for");
+
+    db.close().await.unwrap();
+    assert_eq!(snapshot_count(&dir), 1, "close() still writes the final anchor");
 }

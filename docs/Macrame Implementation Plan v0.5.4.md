@@ -2,11 +2,11 @@
 
 | | |
 |---|---|
-| Plan version | 1.12 |
+| Plan version | 1.14 |
 | Against document | Macrame v0.5.4 — [docs/architecture/](architecture/README.md) |
 | Date | 2026-07-28 |
-| Test baseline | **177 passing, 0 failing** (`--features property-tests`, `--no-fail-fast`) — green for the first time in several cycles. The last red, `a_high_priority_write_completes_while_the_backlog_is_still_queued`, turned out to be asserting something §5.1.5 does not promise rather than catching a defect; see §8.1c. **`--no-fail-fast` is not optional for reading this number**: without it cargo stops at the first failing binary and everything alphabetically behind it never runs, which is how the archive defect below sat unnoticed. Separately, `doctrine_property_tests` faults under R15 on roughly 15% of runs and takes the suite with it when it does. |
-| Status | Phases 0–3 and the native-graph work delivered, and Phase 3 is now reachable from the public API (D-048). Phase 4 is complete: §5.2–§5.9, §6 and Appendix A restored, and the rest of the architecture document de-corrupted. Snapshot composition landed (D-049). **Phase 5 is complete** — Doctrine VIII divergence, archive crash safety, the Doctrine VII property suite, and empirical cost estimates, the last arriving with D-050. **Filtered vector search is implemented** and `TwoPhaseTempTable` is removed as unimplementable on libSQL 0.9.30. **Hybrid search is implemented** (D-051), closing the last capability gap Appendix A.2 recorded. Open: the two §5.4 carve-outs, the `Subgraph` integer-index rewrite, the `write_annotations` rename, and the R15 upstream report. |
+| Test baseline | **185 passing, 0 failing** (`--features property-tests`, `--no-fail-fast`) — green for the first time in several cycles. The last red, `a_high_priority_write_completes_while_the_backlog_is_still_queued`, turned out to be asserting something §5.1.5 does not promise rather than catching a defect; see §8.1c. **`--no-fail-fast` is not optional for reading this number**: without it cargo stops at the first failing binary and everything alphabetically behind it never runs, which is how the archive defect below sat unnoticed. Separately, `doctrine_property_tests` faults under R15 on roughly 15% of runs and takes the suite with it when it does. |
+| Status | Phases 0–3 and the native-graph work delivered, and Phase 3 is now reachable from the public API (D-048). Phase 4 is complete: §5.2–§5.9, §6 and Appendix A restored, and the rest of the architecture document de-corrupted. Snapshot composition landed (D-049). **Phase 5 is complete** — Doctrine VIII divergence, archive crash safety, the Doctrine VII property suite, and empirical cost estimates, the last arriving with D-050. **Filtered vector search is implemented** and `TwoPhaseTempTable` is removed as unimplementable on libSQL 0.9.30. **Hybrid search is implemented** (D-051), closing the last capability gap Appendix A.2 recorded. **The archive read path is sound** (D-052) — it had been dropping entities from pre-cutoff reconstructions, and closing it also closed D-049's composition carve-out. **The snapshot cadence is implemented** (D-053), closing D-049's second carve-out and with it both. Open: snapshot **retention** (now load-bearing and still newest-five-flat), benchmarks against §9, the `Subgraph` integer-index rewrite, the `write_annotations` rename, and the R15 upstream report. |
 
 ---
 
@@ -33,7 +33,8 @@
 | §5.2–§5.8, §6, Appendix A | **Restored** | recovered from a v0.5.1 copy and forward-ported; Appendix A rewritten against the crate (D-040) |
 | Architecture document | **De-corrupted** | headings, fences, identifiers and eaten `<…>` spans repaired throughout; §4.3 trigger DDL recovered from `schema::ddl` |
 | **Hybrid search** | **Done (D-051)** | `concepts_fts` FTS5 external-content index on a v4 → v5 rung; `HybridSearch` builder; `rebuild_fts()` for D-036 |
-| Snapshot composition | **Done (D-049)** | anchored fold + tombstone merge; `Database::reconstruct` composes by default. Off across the archive boundary, and no cadence yet — §5.4 |
+| Snapshot composition | **Done (D-049, D-052)** | anchored fold + tombstone merge; composes by default, **and now across the archive boundary**. Cadence still open — §5.4 |
+| Archive read path | **Done (D-052)** | `hot_log_covers` replaced by a real completeness test; it had been losing entities from pre-cutoff reconstructions |
 | Subgraph loader | **Done, now linear** | per-row byte check made loading O(E²); fixed with incremental accounting (D-047) |
 | `Subgraph` internals | **Deferred** | integer-index rewrite waits on a benchmark — §5.5 below (D-047) |
 
@@ -134,9 +135,19 @@ Four regression tests in `write_path_tests.rs` pin content-untouched, log-unchan
 
 **A factual correction to D-024.** It attributes `seq_id` gaps to rolled-back transactions. Measured: `INSERT`, `BEGIN…INSERT…ROLLBACK`, `INSERT` yields ids `1, 2` — `sqlite_sequence` is transactional and rolls back too. Gaps are real anyway, from the archive deleting superseded log rows scattered through the sequence. The rule stands, the reason did not, and the gap-tolerance test now builds the state the real mechanism produces (and fails under `seq_id = :anchor + 1`).
 
-**Carve-out 1 — composition is off once an archive exists.** Scattered deletion means a row the delta needs can be gone while a newer row for the same entity, recorded after `ts`, is what displaced it: the composed answer would be silently wrong. Composing across the archive boundary needs the cold log in the anchored fold. **Related and unfixed:** `hot_log_covers` decides the cold path on `MIN(recorded_at)`, which is not a sound completeness test after a scattered archive either. That is a pre-existing weakness in D-026's path, not new here, and it should be looked at with the same work.
+**Carve-out 1 — FIXED (D-052), and the "related and unfixed" half was a live defect.** Composition now folds hot and cold together above the anchor, so the reason for the refusal is gone rather than worked around.
 
-**Carve-out 2 — there is still no cadence.** Only `close()` writes an anchor. A cleanly-shut-down application composes from its shutdown snapshot; a long-running session accumulates an unbounded delta. §5.5 specifies a read-side task at every 10,000 log entries, and that is a spawn whose lifecycle nobody has decided — owner, stop signal, what `close()` does with it. Left as a decision rather than guessed.
+The `hot_log_covers` half turned out to be worse than this entry recorded. It was not merely an unsound completeness test — it was **returning wrong answers on shipped code**. `MIN(recorded_at) <= ts` asks how far back the hot log reaches, not whether it is complete; one entity archived beside one entity never superseded separates the two, and the unarchived one keeps `MIN` pointing before the cutoff while the archived one's winning row sits in cold. Reproduced through the public API: a concept **vanished entirely** from a pre-cutoff reconstruction, with no error. Recording it as a caveat rather than a defect is what let it sit — an unsound test named as a limitation reads as a known edge, not as a bug.
+
+The sound test is `ts >= MAX(recorded_at)` of the hot log, which rests on the one guarantee the archive makes: the newest row per entity is never archivable. That preserves the `reconstruct(now)` fast path and nothing else; everything earlier pays an ATTACH. Two candidate widenings were rejected as unsound — `ts > MAX(cold.recorded_at)` and `ts >= cutoff` both fail when an entity's rows straddle the mark with the winner below it.
+
+**Carve-out 2 — FIXED (D-053).** The read-side task §5.5 specifies now exists, and the lifecycle is settled: `Database` owns it, a `watch` channel stops it (a dropped sender counts, so a handle dropped rather than closed does not leave it running), and `close()` stops and joins it before stopping the actor and taking the final snapshot — both it and `write_final` end by running retention, which deletes files.
+
+The trigger is a **distance** in log entries, not a schedule, so an idle database is never anchored; a time-based cadence would rewrite an identical snapshot forever and call it maintenance. It anchors at `MAX(recorded_at)` rather than the clock's `now()`, so the file does not claim an instant later than anything it reflects, and it shares `read_conn` rather than opening a third connection.
+
+**The stop test asserted nothing until mutation said so.** Close the handle, wait, check no new snapshot — that passes whether or not the task is alive, because nothing is writing after `close()`. It now keeps the log growing afterwards through a raw connection (not a second `Database`, which would be exactly the churn R15 punishes) and fails under a leaked stop signal with two snapshots where one was expected.
+
+**What this makes newly load-bearing: retention.** §5.5 specifies "last five plus one daily for thirty days"; the implementation is newest-five-flat. That cost nothing when snapshots were written once per shutdown. With a cadence, five anchors can span minutes and every older instant falls back to a full fold — a cost regression only, no answer changes, and it needs a source for each snapshot's date that the filename does not carry.
 
 ### 5.4b Original write-up *(superseded, kept for the inventory)*
 
@@ -382,6 +393,7 @@ Severity is about silence: a defect that returns a wrong answer without erroring
 | Q | `error.rs` | `SubgraphTooLarge` constructed nowhere; D-007's byte budget unenforced | **Fixed** (D-039) |
 | R | `tests/concurrency_tests.rs` | entire binary is `assert!(true)`; reports green, tests nothing | **Fixed** (rewritten; last red resolved §8.1c) |
 | X | `vector/search.rs` | `reciprocal_rank_fusion` sorted on score alone, leaving ties to `HashMap` order — the same query could answer in a different order twice | **Fixed** (D-051) |
+| Y | `temporal/replay.rs` | `hot_log_covers` tested reach, not completeness; after an archive, a pre-cutoff `reconstruct` could **drop an entity entirely**, silently | **Fixed** (D-052) |
 | S | `vector/vector_filter.rs` | `CostEstimator` selects among strategies with no implementations | **Fixed** (D-050) |
 | V | `vector/vector_filter.rs` | `CostEstimator` carried `byte_budget` unread; `select_strategy` was a candidate-count heuristic wearing a cost model's name | **Fixed** (D-050) |
 | W | `graph/vector_filter.rs` | `PostFilter` under-returns silently when the filter is tight — a wrong answer shaped like a small result | **Fixed** (D-050, escalation) |

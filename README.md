@@ -189,7 +189,9 @@ No GPL-licensed components. No `chrono` or `time` dependency.
 | Phase 2 — Temporal core (replay, snapshots) | **Delivered** — ATTACH bracketed on all paths, self-healing (D-044), versioned container (D-043) |
 | Phase 3 — Vector + graph | **Delivered** — `register_model` + `upsert_embeddings` through the actor (D-048); native `Subgraph` with five algorithms (D-039); edge types bound, not interpolated |
 | Phase 4 — Document restoration | **Delivered** — §5.2–§5.9, §6, Appendix A de-corrupted and forward-ported |
-| Snapshot composition (D-049) | **Delivered** — anchored fold + tombstone merge; two carve-outs open (archive boundary, cadence) |
+| Snapshot composition (D-049) | **Delivered** — anchored fold + tombstone merge; composes across the archive boundary as of D-052 |
+| Snapshot cadence (D-053) | **Delivered** — read-side maintenance task, triggered by log distance rather than a clock; `close()` stops and joins it before the final anchor. Retention is still newest-five-flat and now matters |
+| Archive read path (D-052) | **Delivered** — `hot_log_covers` tested how far the hot log *reached*, not whether it was *complete*, so a reconstruction before the archive cutoff could silently drop an entity |
 | Phase 5 — Test matrix | **Delivered** — Doctrine VIII divergence (both directions), archive crash safety (D-012), Doctrine VII property suite, and empirical cost estimates via D-050 |
 | Filtered vector search | **Delivered (D-050)** — `FilteredVectorSearch`; two strategies, both with bodies, held together by a test requiring them to agree; `TwoPhaseTempTable` removed, its two mechanisms being absent from libSQL 0.9.30 |
 | Hybrid search | **Delivered (D-051)** — `concepts_fts` FTS5 external-content index on a `v4 → v5` rung; `HybridSearch` fuses vector and keyword arms by RRF; `rebuild_fts()` satisfies D-036 |

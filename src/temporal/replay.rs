@@ -72,6 +72,26 @@ const ANCHORED_HOT_FOLD: &str = r#"
     ) WHERE rn = 1
 "#;
 
+/// Fold over hot **and cold** above a snapshot anchor (§5.5, 0.5.5).
+///
+/// The union is what lets composition survive an archive. Rows keep their
+/// `seq_id` when they move to cold — the cold schema declares a plain `INTEGER
+/// PRIMARY KEY` precisely so history is not renumbered — so `seq_id > ?2`
+/// partitions the two files consistently and last-writer-wins across them by the
+/// same rule the unanchored folds use.
+const ANCHORED_COLD_FOLD: &str = r#"
+    SELECT seq_id, table_name, entity_id, operation, payload
+    FROM (
+        SELECT seq_id, table_name, entity_id, operation, payload,
+               ROW_NUMBER() OVER (PARTITION BY entity_id ORDER BY seq_id DESC) as rn
+        FROM (
+            SELECT seq_id, table_name, entity_id, operation, payload, recorded_at FROM main.transaction_log
+            UNION ALL
+            SELECT seq_id, table_name, entity_id, operation, payload, recorded_at FROM cold.transaction_log
+        ) WHERE recorded_at <= ?1 AND seq_id > ?2
+    ) WHERE rn = 1
+"#;
+
 /// The winning log rows for one fold, before they are applied to a base state.
 ///
 /// Absence and deletion are different facts, and a merge is where the
@@ -140,8 +160,8 @@ pub async fn reconstruct(
     archive_path: Option<&Path>,
     snapshots_dir: Option<&Path>,
 ) -> Result<MaterializedState> {
-    if hot_log_covers(conn, ts, archive_path).await? {
-        if let Some(base) = snapshot_anchor(snapshots_dir, ts, archive_path) {
+    if hot_log_is_complete(conn, ts, archive_path).await? {
+        if let Some(base) = snapshot_anchor(snapshots_dir, ts) {
             let anchor = base.seq_anchor;
             let delta =
                 fold_delta(conn, ANCHORED_HOT_FOLD, libsql::params![ts, anchor]).await?;
@@ -172,7 +192,18 @@ pub async fn reconstruct(
     )
     .await?;
 
-    let result = fold(conn, ts, COLD_FOLD).await;
+    // Composition works across the archive boundary because the anchored fold
+    // unions both files; before 0.5.5 it was refused here rather than made to
+    // work, and the refusal was the only thing keeping the answer right.
+    let result = match snapshot_anchor(snapshots_dir, ts) {
+        Some(base) => {
+            let anchor = base.seq_anchor;
+            fold_delta(conn, ANCHORED_COLD_FOLD, libsql::params![ts, anchor])
+                .await
+                .map(|delta| delta.apply_to(base, ts))
+        }
+        None => fold(conn, ts, COLD_FOLD).await,
+    };
 
     // Unconditional: see the ATTACH note above.
     if let Err(e) = conn.execute("DETACH DATABASE cold", ()).await {
@@ -184,17 +215,15 @@ pub async fn reconstruct(
 
 /// The newest usable snapshot at or before `ts`, or `None` to fold from genesis.
 ///
-/// **Composition is disabled once an archive database exists, and that is a
-/// correctness requirement rather than caution.** `LOG_ARCHIVABLE` (§5.7)
-/// removes *superseded* log rows, which are scattered through the sequence
-/// rather than forming a prefix. A row above the anchor and at or before `ts`
-/// can therefore have been archived while a newer row for the same entity — one
-/// recorded *after* `ts`, and so invisible to this fold — keeps it out of the
-/// hot log. The delta would miss it, the snapshot would answer with the older
-/// value, and the result would be wrong with nothing to indicate it. Falling
-/// back to the full fold is slow and right. Composition across the archive
-/// boundary needs the cold log in the delta, which is a larger change than this
-/// one and is recorded as open.
+/// **Composition used to be disabled once an archive database existed, and as of
+/// 0.5.5 it is not.** The reason for the refusal was real: `LOG_ARCHIVABLE`
+/// (§5.7) removes superseded rows scattered through the sequence, so a row above
+/// the anchor and at or before `ts` could be in cold while a newer row for the
+/// same entity — recorded *after* `ts`, invisible to the fold — kept it out of
+/// the hot log. The delta missed it and the snapshot answered with a stale
+/// value. The fix is the one that note named: the cold log is now in the delta,
+/// via [`ANCHORED_COLD_FOLD`], so the archived row is visible again and there is
+/// nothing left to refuse.
 ///
 /// Selection loads candidates newest-first and stops at the first whose
 /// timestamp is at or before `ts`, so the common case — `reconstruct(now)` —
@@ -203,15 +232,8 @@ pub async fn reconstruct(
 /// incompatible snapshot is an ordinary consequence of upgrading, and the whole
 /// point of distinguishing it from corruption is that the answer is to carry on
 /// without it.
-fn snapshot_anchor(
-    snapshots_dir: Option<&Path>,
-    ts: &str,
-    archive_path: Option<&Path>,
-) -> Option<MaterializedState> {
+fn snapshot_anchor(snapshots_dir: Option<&Path>, ts: &str) -> Option<MaterializedState> {
     let dir = snapshots_dir?;
-    if archive_path.is_some_and(|p| p.exists()) {
-        return None;
-    }
 
     let mut candidates: Vec<(i64, PathBuf)> = std::fs::read_dir(dir)
         .ok()?
@@ -240,29 +262,67 @@ fn snapshot_anchor(
     None
 }
 
-/// Whether the hot log alone can answer for `ts`.
+/// Whether the hot log alone can answer for `ts` — a *completeness* test.
 ///
-/// An *empty* hot log covers nothing. It means one of two things — a genuinely
-/// empty database, or one whose entire log has been archived — and only the
-/// presence of an archive file tells them apart. Treating empty as "covered"
-/// unconditionally makes a fully-archived database reconstruct to the empty
-/// state: no error, no missing file, just a confident wrong answer.
-async fn hot_log_covers(
+/// **This replaces a reach test that was not one (0.5.5).** The previous version
+/// asked `MIN(recorded_at) <= ts`: whether the hot log stretches back far enough
+/// to contain `ts`. That is a different question from whether it still contains
+/// everything needed to answer at `ts`, and `LOG_ARCHIVABLE` (§5.7) is exactly
+/// what pulls the two apart — it removes *superseded* rows, scattered through
+/// the sequence rather than forming a prefix. One entity archived and another
+/// not is enough: the unarchived one keeps `MIN` pointing before the cutoff
+/// while the archived one's winning row is gone, and the fold silently returns a
+/// state missing an entity. Measured, not theorised — see
+/// `reconstructing_before_the_archive_cutoff_keeps_every_entity`.
+///
+/// The sound test rests on the one guarantee the archive does make: **the newest
+/// row per entity is never archivable**, because archivability requires a later
+/// row to exist. So if `ts` is at or after the newest hot stamp, every entity's
+/// winning row at `ts` is its newest row overall, and every such row is hot.
+/// That covers `reconstruct(now)` — the common case, and the case §5.7 designed
+/// `LOG_ARCHIVABLE` around — and nothing else.
+///
+/// Anything earlier goes to the cold file. That is more ATTACHes than the old
+/// rule performed, and the trade is not close: the old rule was cheaper because
+/// it was answering a question nobody asked.
+///
+/// With no archive database in play the reach test *is* the completeness test —
+/// nothing has been removed, so the hot log is the whole log — and it is kept,
+/// because it is also what distinguishes "before recorded history" from "the
+/// cold file is missing" (D-026).
+async fn hot_log_is_complete(
     conn: &libsql::Connection,
     ts: &str,
     archive_path: Option<&Path>,
 ) -> Result<bool> {
-    let min_recorded_at: Option<String> = conn
-        .query("SELECT MIN(recorded_at) FROM transaction_log", ())
+    let row = conn
+        .query(
+            "SELECT MIN(recorded_at), MAX(recorded_at) FROM transaction_log",
+            (),
+        )
         .await?
         .next()
-        .await?
-        .and_then(|row| row.get(0).ok());
+        .await?;
+    let (min_recorded_at, max_recorded_at): (Option<String>, Option<String>) = match row {
+        Some(r) => (r.get(0).ok(), r.get(1).ok()),
+        None => (None, None),
+    };
+
+    // Sound as string comparisons because every recorded_at is the canonical
+    // fixed width (D-029).
+    if archive_path.is_some_and(|p| p.exists()) {
+        // An empty hot log beside an archive is the fully-archived case and
+        // covers nothing. It cannot arise from `archive()` itself — the newest
+        // row per entity always stays — but answering "covered" here would make
+        // such a file reconstruct to the empty state with no error at all.
+        return Ok(max_recorded_at.is_some_and(|max_ts| max_ts.as_str() <= ts));
+    }
 
     Ok(match min_recorded_at {
-        // Sound because every recorded_at is the canonical fixed width (D-029).
         Some(min_ts) => min_ts.as_str() <= ts,
-        None => !archive_path.is_some_and(|p| p.exists()),
+        // No archive and no log: a genuinely empty database, which the empty
+        // state answers correctly.
+        None => true,
     })
 }
 

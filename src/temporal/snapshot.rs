@@ -238,3 +238,137 @@ pub fn cleanup_expired_snapshots(snapshots_dir: &Path) -> Result<usize> {
 
     Ok(removed)
 }
+
+// ---------------------------------------------------------------------------
+// The maintenance cadence (§5.5, D-053)
+// ---------------------------------------------------------------------------
+
+/// How often the maintenance task writes an anchor (§5.5).
+///
+/// §5.5 specifies "every 10,000 log entries", which is a *distance* rather than
+/// a schedule — the point is to bound how much delta a reconstruction has to
+/// fold, and delta is measured in log entries, not seconds. An idle database
+/// therefore writes nothing at all, however long it stays open.
+///
+/// `poll_interval` is how often that distance is checked, and it is the part
+/// §5.5 does not specify because it is an implementation cost rather than a
+/// property: the check is `SELECT MAX(seq_id)`, an index lookup on an integer
+/// primary key, so the interval trades a negligible read against how promptly a
+/// burst of writes is noticed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SnapshotCadence {
+    /// Write an anchor once the log has grown this many entries past the last.
+    pub every_entries: i64,
+    /// How often to compare the log's head against the last anchor.
+    pub poll_interval: std::time::Duration,
+}
+
+impl Default for SnapshotCadence {
+    fn default() -> Self {
+        Self {
+            every_entries: 10_000,
+            poll_interval: std::time::Duration::from_secs(5),
+        }
+    }
+}
+
+/// The newest anchor already on disk, as a `seq_id`, or 0 if there is none.
+///
+/// Read from the filenames rather than remembered across runs: a process that
+/// starts against a database someone else has been writing should not re-anchor
+/// immediately, and the files are the only record of what has been anchored.
+fn newest_anchor_on_disk(snapshots_dir: &Path) -> i64 {
+    let Ok(entries) = fs::read_dir(snapshots_dir) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .map(|e| e.path())
+        .filter_map(|p| seq_from_filename(&p))
+        .max()
+        .unwrap_or(0)
+}
+
+async fn log_head(conn: &libsql::Connection) -> Result<Option<(i64, String)>> {
+    let mut rows = conn
+        .query(
+            "SELECT MAX(seq_id), MAX(recorded_at) FROM transaction_log",
+            (),
+        )
+        .await?;
+    let Some(row) = rows.next().await? else {
+        return Ok(None);
+    };
+    match (row.get::<i64>(0), row.get::<String>(1)) {
+        (Ok(seq), Ok(ts)) => Ok(Some((seq, ts))),
+        // An empty log yields one row of NULLs, not zero rows.
+        _ => Ok(None),
+    }
+}
+
+/// The read-side maintenance task §5.5 specifies (D-053).
+///
+/// Everything it does is a read plus a file write, so it never touches the write
+/// connection and cannot lengthen the actor's loop — which is the whole reason
+/// §5.5 puts snapshotting on the read side, since §5.1.5's latency bound is a
+/// property of how long that loop can take.
+///
+/// It anchors at `MAX(recorded_at)` rather than at the clock's `now()`. The two
+/// differ by however long it has been since the last write, and anchoring at a
+/// timestamp *after* the newest entry would produce a snapshot whose contents
+/// are identical but whose name and header claim a later instant than anything
+/// it reflects. Anchoring at the newest belief keeps the file honest about what
+/// it is a snapshot *of*.
+///
+/// Failures are logged and retried on the next tick rather than ending the task.
+/// A snapshot is a cache: failing to write one costs a slower reconstruction and
+/// nothing else, and a maintenance task that exits on its first transient error
+/// is indistinguishable from one that was never spawned.
+pub(crate) async fn run_cadence(
+    conn: libsql::Connection,
+    snapshots_dir: PathBuf,
+    archive_path: PathBuf,
+    cadence: SnapshotCadence,
+    mut stop: tokio::sync::watch::Receiver<bool>,
+) {
+    let mut anchored = newest_anchor_on_disk(&snapshots_dir);
+
+    loop {
+        tokio::select! {
+            biased;
+            // Dropped sender counts as a stop, so a `Database` that is dropped
+            // rather than closed does not leave this running against a
+            // connection whose database is going away.
+            _ = stop.changed() => return,
+            _ = tokio::time::sleep(cadence.poll_interval) => {}
+        }
+
+        let head = match log_head(&conn).await {
+            Ok(Some(head)) => head,
+            Ok(None) => continue,
+            Err(e) => {
+                tracing::warn!("snapshot cadence: could not read the log head: {e}");
+                continue;
+            }
+        };
+        let (max_seq, ts) = head;
+
+        if max_seq - anchored < cadence.every_entries {
+            continue;
+        }
+
+        let archive = archive_path.exists().then_some(archive_path.as_path());
+        match write_final(&conn, &snapshots_dir, &ts, archive).await {
+            Ok(path) => {
+                anchored = seq_from_filename(&path).unwrap_or(max_seq);
+                tracing::debug!("snapshot cadence: anchored at seq {anchored} ({path:?})");
+            }
+            Err(e) => {
+                // Deliberately does not advance `anchored`: the next tick
+                // retries rather than waiting another whole interval's worth of
+                // entries after a failure.
+                tracing::warn!("snapshot cadence: failed to write an anchor: {e}");
+            }
+        }
+    }
+}
