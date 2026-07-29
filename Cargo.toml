@@ -21,6 +21,14 @@ ulid = "1.1"
 tempfile = "3.8"
 tokio-test = "0.4"
 proptest = "1"
+# §9's harness (D-055). `default-features = false` drops the plotting and HTML
+# report stack, which is most of criterion's dependency tree and none of the
+# measurement — the numbers come out on stdout and into `target/criterion` either
+# way.
+criterion = { version = "0.5", default-features = false, features = [
+    "async_tokio",
+    "cargo_bench_support",
+] }
 
 [features]
 default = []
@@ -51,3 +59,10 @@ required-features = ["property-tests"]
 [[test]]
 name = "graph_property_tests"
 required-features = ["property-tests"]
+
+# §9's budgets, measured (D-055). Not a CI gate — see the note at the top of the
+# file for why absolute durations on arbitrary hardware are the wrong shape, and
+# what criterion baselines do instead.
+[[bench]]
+name = "budgets"
+harness = false

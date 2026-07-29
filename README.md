@@ -192,6 +192,7 @@ No GPL-licensed components. No `chrono` or `time` dependency.
 | Snapshot composition (D-049) | **Delivered** — anchored fold + tombstone merge; composes across the archive boundary as of D-052 |
 | Snapshot cadence (D-053) | **Delivered** — read-side maintenance task, triggered by log distance rather than a clock; `close()` stops and joins it before the final anchor |
 | Snapshot retention (D-054) | **Delivered** — the newest five plus one per day for thirty days, as §5.5 always specified; container header v2 carries each snapshot's instant so bucketing costs 18 bytes, not a decompression |
+| §9 benchmarks (D-055) | **Delivered** — `cargo bench --bench budgets` measures twelve budget rows. Measurement, not CI gates: absolute durations on arbitrary runners are the wrong shape (D-047's reasoning). **Eleven pass; chunk commit misses by 20×** and that fix is next |
 | Archive read path (D-052) | **Delivered** — `hot_log_covers` tested how far the hot log *reached*, not whether it was *complete*, so a reconstruction before the archive cutoff could silently drop an entity |
 | Phase 5 — Test matrix | **Delivered** — Doctrine VIII divergence (both directions), archive crash safety (D-012), Doctrine VII property suite, and empirical cost estimates via D-050 |
 | Filtered vector search | **Delivered (D-050)** — `FilteredVectorSearch`; two strategies, both with bodies, held together by a test requiring them to agree; `TwoPhaseTempTable` removed, its two mechanisms being absent from libSQL 0.9.30 |
