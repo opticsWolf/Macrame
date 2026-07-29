@@ -13,7 +13,10 @@ pub use error::{DbError, Result};
 pub mod prelude {
     pub use crate::connection::{Annotation, ConceptUpsert, Database, CHUNK_ROWS};
     pub use crate::error::{DbError, Result};
-    pub use crate::graph::{AttributeMode, EdgeAssertion, TraversalBuilder};
+    pub use crate::graph::{
+        AttributeMode, CandidateCount, CostEstimate, CostEstimator, EdgeAssertion,
+        FilteredVectorSearch, TraversalBuilder, VectorFilterStrategy,
+    };
     pub use crate::integrity::{audit_current, rebuild_current, RebuildReport};
     pub use crate::temporal::{
         archive, query_as_of_edges, reconstruct, ArchiveReport, Interval, MaterializedState,

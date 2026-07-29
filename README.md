@@ -190,8 +190,8 @@ No GPL-licensed components. No `chrono` or `time` dependency.
 | Phase 3 — Vector + graph | **Delivered** — `register_model` + `upsert_embeddings` through the actor (D-048); native `Subgraph` with five algorithms (D-039); edge types bound, not interpolated |
 | Phase 4 — Document restoration | **Delivered** — §5.2–§5.9, §6, Appendix A de-corrupted and forward-ported |
 | Snapshot composition (D-049) | **Delivered** — anchored fold + tombstone merge; two carve-outs open (archive boundary, cadence) |
-| Phase 5 — Test matrix | **Delivered but for one item** — Doctrine VIII divergence (both directions), archive crash safety (D-012), Doctrine VII property suite. Empirical cost estimates (D-007) remain blocked behind `VectorFilterStrategy` |
-| `VectorFilterStrategy` implementations | **Open** — blocked on `PRAGMA query_only` rejecting `CREATE TEMP TABLE` and no selectivity source |
+| Phase 5 — Test matrix | **Delivered** — Doctrine VIII divergence (both directions), archive crash safety (D-012), Doctrine VII property suite, and empirical cost estimates via D-050 |
+| Filtered vector search | **Delivered (D-050)** — `FilteredVectorSearch`; two strategies, both with bodies, held together by a test requiring them to agree; `TwoPhaseTempTable` removed, its two mechanisms being absent from libSQL 0.9.30 |
 | Hybrid search | **Open** — design specified (§5.9), waiting on go/defer call |
 | `Subgraph` integer-index rewrite | **Deferred** — pending Louvain/Dijkstra benchmark on budget-sized graph |
 

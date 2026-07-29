@@ -2,11 +2,11 @@
 
 | | |
 |---|---|
-| Plan version | 1.10 |
+| Plan version | 1.11 |
 | Against document | Macrame v0.5.4 — [docs/architecture/](architecture/README.md) |
 | Date | 2026-07-28 |
-| Test baseline | 155 passing (`--features property-tests`, `--no-fail-fast`), 1 failing — the failure is in `concurrency_tests.rs`, owned by a parallel session. Earlier plan revisions understated this count: the arithmetic summed a `test result` line whose fields shift when a binary reports `FAILED`. **`--no-fail-fast` is not optional for reading this number**: without it cargo stops at `concurrency_tests` and eleven binaries never run, which is how the archive defect below sat unnoticed. Separately, `doctrine_property_tests` faults under R15 on roughly 15% of runs and takes the suite with it when it does. |
-| Status | Phases 0–3 and the native-graph work delivered, and Phase 3 is now reachable from the public API (D-048). Phase 4 is complete: §5.2–§5.9, §6 and Appendix A restored, and the rest of the architecture document de-corrupted. Snapshot composition landed (D-049). **Phase 5 is delivered but for one item** — Doctrine VIII divergence, archive crash safety and the Doctrine VII property suite are in; empirical cost estimates stay blocked behind `VectorFilterStrategy`. The two §5.4 carve-outs remain open. |
+| Test baseline | 163 passing (`--features property-tests`, `--no-fail-fast`), 1 failing — the failure is in `concurrency_tests.rs`, owned by a parallel session. Earlier plan revisions understated this count: the arithmetic summed a `test result` line whose fields shift when a binary reports `FAILED`. **`--no-fail-fast` is not optional for reading this number**: without it cargo stops at `concurrency_tests` and eleven binaries never run, which is how the archive defect below sat unnoticed. Separately, `doctrine_property_tests` faults under R15 on roughly 15% of runs and takes the suite with it when it does. |
+| Status | Phases 0–3 and the native-graph work delivered, and Phase 3 is now reachable from the public API (D-048). Phase 4 is complete: §5.2–§5.9, §6 and Appendix A restored, and the rest of the architecture document de-corrupted. Snapshot composition landed (D-049). **Phase 5 is complete** — Doctrine VIII divergence, archive crash safety, the Doctrine VII property suite, and empirical cost estimates, the last arriving with D-050. **Filtered vector search is implemented** and `TwoPhaseTempTable` is removed as unimplementable on libSQL 0.9.30. Open: hybrid search (a go/defer call), the two §5.4 carve-outs, the `Subgraph` integer-index rewrite, and the R15 upstream report. |
 
 ---
 
@@ -29,7 +29,7 @@
 | Graph analytics | **Done (D-039)** | native `Subgraph`; petgraph dropped; five algorithms with brute-force oracles |
 | Traversal builder | **Done (D-039)** | edge types bound, not interpolated; `attribute_mode` now read |
 | Vector write path on `Database` | **Done (D-048)** | `register_model` + `upsert_embeddings` through the actor; Phase 3 reachable from the public API for the first time |
-| **`VectorFilterStrategy` implementations** | **Absent** | the cost estimator selects among strategies with no bodies |
+| **`VectorFilterStrategy` implementations** | **Done (D-050)** | `FilteredVectorSearch`; two strategies with bodies, `TwoPhaseTempTable` removed as unimplementable on this engine; `byte_budget` read; estimates returned |
 | §5.2–§5.8, §6, Appendix A | **Restored** | recovered from a v0.5.1 copy and forward-ported; Appendix A rewritten against the crate (D-040) |
 | Architecture document | **De-corrupted** | headings, fences, identifiers and eaten `<…>` spans repaired throughout; §4.3 trigger DDL recovered from `schema::ddl` |
 | **Hybrid search** | **Absent** | `reciprocal_rank_fusion` only; no FTS5 table exists — §5.3 below |
@@ -91,7 +91,17 @@ Closing it meant:
 
 **Five tests.** The first is the regression test and its constraint is what it *uses*: it touches `Database` and nothing else on the write side, so if the only route to a stored vector becomes a caller-built connection again, it stops compiling. That mattered because the pre-existing 15 vector tests all opened their own connection — which is exactly why this shipped broken and green. The rest pin: re-embedding replaces and never reaches `transaction_log`; a bad vector rolls back its whole chunk rather than leaving a prefix; an unregistered model gives typed `ModelNotRegistered`; a backfill larger than one chunk lands completely.
 
-### 5.2 `VectorFilterStrategy` has no implementations *(open)*
+### 5.2 `VectorFilterStrategy` has no implementations *(FIXED — D-050)*
+
+**Shipped.** `FilteredVectorSearch` is the public surface — a builder mirroring `TraversalBuilder` — with both strategies given execution bodies, `CostEstimator` reading the `byte_budget` it used to carry unused, and the estimate logged at `debug` *and* returned as a `CostEstimate` so a test asserts on the plan rather than scraping log output. That last part also closes Phase 5's fourth item: D-007's empirical-tuning requirement is met by a value, not by a log line.
+
+**Measuring the three premises removed a strategy.** All three are now settled, and premise 2 turned out worse than "not known to exist": `vector_top_k` refuses a fourth argument at runtime, and `vectorIndexSearch` in the bundled amalgamation rejects `argc != 3` outright. Together with premise 1 — `CREATE TEMP TABLE` on `read_conn` returning `SQLITE_READONLY (8)`, re-measured rather than taken on trust — `TwoPhaseTempTable` had *neither* of its two mechanisms. It is removed, on D-039's precedent. Premise 3 is answered by a bounded counting probe that doubles as the candidate set, so the traversal is paid for once; `CandidateCount::Exact` vs `::AtLeast` keeps "measured" and "capped" apart in the type.
+
+**The design decision worth carrying forward.** `PostFilter`'s failure is silence — a top-ten returning four rows and reporting success. So a short result from a *saturated* index scan escalates to the exact strategy, and the acceptance gate is that the two strategies agree across filter tightness and k. Strategy is a performance decision and nothing else, which is the only form in which a planner is safe.
+
+**One of the new tests was wrong before it was trusted.** The chunk-merge test ran 60 candidates against a 500-id statement chunk — one chunk, so the merge it claimed to test was never exercised. Worse, sizing the corpus up would still not have caught it: candidate ids arrive in id order and the fixture made distance monotone in id, so the nearest rows land in the first chunk and a concatenating merge returns the right answer anyway. The fixture now reverses the embedding order. Three mutations were then applied together — merge sort dropped, escalation disabled, old candidate-count heuristic restored — and each failed its own test.
+
+### 5.2b Original write-up *(superseded, kept for the inventory)*
 
 `vector_filter.rs` defines `CostEstimator` and three strategy variants; the estimator selects among strategies that do not exist. The estimator's tests are pure-function tests over the cost model, so they pass without any strategy being implemented. This is the same shape as the pre-D-039 Louvain: a named thing that is not the thing.
 
@@ -292,7 +302,7 @@ Two process notes, since the same shape has now occurred twice. Mutation testing
   **Mutation-verified, and the first attempt was not a valid probe.** Planting an `UPDATE concepts SET embedding_model` inside the embedding chunk made the property fail — via the `recorded_at` monotonicity trigger refusing the write, which tests the schema rather than the assertion. Restamped one microsecond ahead so it actually lands, both new properties fail and **all six pre-existing doctrine properties still pass**, which is the hole they exist to close. Disabling the Rust-side width check separately: the engine still refuses (`dimensions are different: 2 != 4`, confirming D-037's note that the DiskANN index is the storage-layer enforcement), so what the property pins is the *typed* refusal, not merely that the row fails to land.
 
   **Cost, measured.** These are the most database-expensive cases in the crate, and R15 makes database churn the scarce resource. Over 12 runs of the binary at 12 cases: six properties 2/12 faulted, eight 4/12. Reduced to 8 cases and re-measured over 20 runs each: 3/20 and 5/20. The gap narrowed and did not close, and at n = 20 two runs is not a result — what it establishes is a 15% *baseline*, i.e. R15 in both arms.
-- **Empirical cost estimates (D-007)** — **still open, and still blocked.** It needs `VectorFilterStrategy` bodies to have estimates to log, and those wait on §5.2's two unestablished premises. Nothing in Phase 5 unblocks it.
+- **Empirical cost estimates (D-007)** — **DONE, by way of §5.2 (D-050).** It had been blocked on there being no estimates to log. `FilteredVectorSearch` logs the plan at `debug` and returns it as a `CostEstimate`, which is the stronger form: a test asserts on the value rather than scraping `tracing` output, and `the_planner_follows_the_arithmetic_not_a_threshold` does exactly that. **Phase 5 is complete.**
 
 ### 8.4 Small and unscheduled
 
@@ -351,6 +361,8 @@ Severity is about silence: a defect that returns a wrong answer without erroring
 | P | `graph/algorithms.rs` | `louvain_communities` returned one community per node — not Louvain | **Fixed** (D-039) |
 | Q | `error.rs` | `SubgraphTooLarge` constructed nowhere; D-007's byte budget unenforced | **Fixed** (D-039) |
 | R | `tests/concurrency_tests.rs` | entire binary is `assert!(true)`; reports green, tests nothing | **Open** |
-| S | `vector/vector_filter.rs` | `CostEstimator` selects among strategies with no implementations | **Open** |
+| S | `vector/vector_filter.rs` | `CostEstimator` selects among strategies with no implementations | **Fixed** (D-050) |
+| V | `vector/vector_filter.rs` | `CostEstimator` carried `byte_budget` unread; `select_strategy` was a candidate-count heuristic wearing a cost model's name | **Fixed** (D-050) |
+| W | `graph/vector_filter.rs` | `PostFilter` under-returns silently when the filter is tight — a wrong answer shaped like a small result | **Fixed** (D-050, escalation) |
 | T | `vector/search.rs` | no path from `Database` to an embedding; feature unreachable from the public API | **Open** |
 | U | `temporal/archive.rs` | an un-reverted mutation left in the tree: the archive-session marker created *before* `BEGIN`, as committed state, and then created again inside the transaction | **Fixed** (Phase 5) |

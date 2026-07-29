@@ -2,7 +2,7 @@ mod harness;
 
 use harness::TestHarness;
 use macrame::error::DbError;
-use macrame::graph::vector_filter::{CostEstimator, VectorFilterStrategy};
+use macrame::graph::vector_filter::{CandidateCount, CostEstimator, VectorFilterStrategy};
 use macrame::schema::migrations;
 use macrame::vector::{
     declared_dimension, reciprocal_rank_fusion, register_model, registered_models, search_vector,
@@ -420,12 +420,28 @@ fn test_reciprocal_rank_fusion_scoring() {
     assert!(top_doc == "doc_a" || top_doc == "doc_b");
 }
 
+/// The cost model in isolation: a loose filter prices `PostFilter` cheaper, a
+/// tight one prices the exact scan cheaper.
+///
+/// This replaces a test that asserted `select_strategy(100/1000/10000)` returned
+/// the three variants in order — a test of two hard-coded thresholds and of a
+/// `TwoPhaseTempTable` whose mechanisms libSQL does not offer. The strategies it
+/// named are down to two, and the selector now reads the `byte_budget` it used
+/// to carry unused. See `vector_filter_tests.rs` for the executable half.
 #[test]
 fn test_vector_filter_cost_estimator() {
-    let estimator = CostEstimator::new(10_000_000);
-    assert_eq!(estimator.select_strategy(100), VectorFilterStrategy::PostFilter);
-    assert_eq!(estimator.select_strategy(1000), VectorFilterStrategy::PreFilterCTE);
-    assert_eq!(estimator.select_strategy(10000), VectorFilterStrategy::TwoPhaseTempTable);
+    // 100K vectors of 768 dimensions.
+    let estimator = CostEstimator::new(10_000_000, 100_000, 768 * 4);
+
+    let loose = estimator.estimate(10, CandidateCount::Exact(90_000)).unwrap();
+    assert_eq!(loose.strategy, VectorFilterStrategy::PostFilter);
+
+    let tight = estimator.estimate(10, CandidateCount::Exact(50)).unwrap();
+    assert_eq!(tight.strategy, VectorFilterStrategy::PreFilterCTE);
+
+    // The budget is a ceiling on the candidate set, not decoration.
+    let over = estimator.estimate(10, CandidateCount::Exact(10_000_000));
+    assert!(matches!(over, Err(DbError::SubgraphTooLarge { .. })), "got {over:?}");
 }
 
 // -- D-048: the vector write path reaches the actor -------------------------
