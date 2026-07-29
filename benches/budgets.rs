@@ -224,7 +224,83 @@ fn write_path(c: &mut Criterion) {
         )
     });
     group.finish();
+
+    // Where the chunk's time actually goes (D-056).
+    //
+    // Hoisting the prepared statement took 500 rows from ≈62 ms to ≈36 ms, so
+    // preparation was ~40% of it and not, as first guessed, most of it. The
+    // remaining ~72 µs per row is either the engine's three writes or the
+    // triggers' own work — and `trg_links_log_insert` builds a JSON payload per
+    // row with `json_object(…)` including `json(NEW.properties)`, which parses
+    // and re-serialises on every insert.
+    //
+    // This isolates it by dropping the two triggers on a scratch database and
+    // measuring the same 500-row commit. The difference is what Doctrine IV's
+    // ledger payload costs, and it is the number §9's ≤ 3 ms has to be
+    // reconciled against — a budget cannot be met by optimising work that is
+    // definitionally required.
+    let mut group = c.benchmark_group("chunk_commit_diagnostic");
+    group.sample_size(10);
+    group.bench_function("500_rows_no_triggers (trigger cost isolation)", |b| {
+        b.iter_batched(
+            || {
+                rt.block_on(async {
+                    let fx = fixture().await;
+                    seed_concepts(&fx.db, 501).await;
+                    // A second connection: the actor owns the write one. Dropping
+                    // the triggers is legal — the delete guards protect rows, not
+                    // schema — and this database is thrown away immediately.
+                    let raw = libsql::Builder::new_local(&fx.path)
+                        .build()
+                        .await
+                        .unwrap();
+                    let conn = raw.connect().unwrap();
+                    for t in ["trg_links_log_insert", "trg_links_current_sync"] {
+                        conn.execute(&format!("DROP TRIGGER IF EXISTS {t}"), ())
+                            .await
+                            .unwrap();
+                    }
+                    (fx, raw, conn)
+                })
+            },
+            |(fx, _raw, conn)| {
+                rt.block_on(async {
+                    let tx = conn
+                        .transaction_with_behavior(libsql::TransactionBehavior::Immediate)
+                        .await
+                        .unwrap();
+                    let stmt = tx.prepare(INSERT_LINK_SQL).await.unwrap();
+                    for k in 0..500 {
+                        stmt.reset();
+                        stmt.execute(libsql::params![
+                            "c0000000",
+                            format!("c{:07}", k + 1),
+                            "CHUNK",
+                            TS,
+                            OPEN,
+                            1.0f64,
+                            "{}",
+                            TS
+                        ])
+                        .await
+                        .unwrap();
+                    }
+                    drop(stmt);
+                    tx.commit().await.unwrap();
+                });
+                fx
+            },
+            BatchSize::PerIteration,
+        )
+    });
+    group.finish();
 }
+
+/// The same statement `write_edges_atomic` uses, restated for the diagnostic
+/// above because `INSERT_LINK` is private to the crate.
+const INSERT_LINK_SQL: &str = "INSERT INTO links \
+     (source_id, target_id, edge_type, valid_from, valid_to, weight, properties, recorded_at) \
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)";
 
 // ---------------------------------------------------------------------------
 // §9: traversal

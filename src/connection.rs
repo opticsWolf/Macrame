@@ -945,6 +945,26 @@ async fn upsert_concept(
 }
 
 /// Write every edge or none, under a single stamp.
+///
+/// **The statement is prepared once for the whole chunk (§9, D-056).** It used to
+/// be `tx.execute(INSERT_LINK, …)` per row, which re-prepares on every call — and
+/// `links` carries two triggers, so each preparation compiles their bodies along
+/// with the insert.
+///
+/// Measured at 500 rows: **≈62 ms → ≈37 ms, a 41% saving.** Preparation was a
+/// large cost and *not* the dominant one, which the first guess had it as. The
+/// residual is the triggers themselves: the same 500 rows with
+/// `trg_links_log_insert` and `trg_links_current_sync` dropped commit in **2.96
+/// ms**, so trigger amplification is ~92% of what remains. There is no further
+/// win available here without changing what the ledger records, and Doctrine IV
+/// is what says it must be recorded. See D-056 for what that implies about §9's
+/// ≤ 3 ms budget — briefly, 2.96 ms *is* the un-amplified figure, so the budget
+/// appears to have been set without the amplification its own preamble says is
+/// included.
+///
+/// `reset()` between rows is not optional: libsql's `execute` binds and steps
+/// without resetting, so a reused statement must be returned to its initial state
+/// or the second row steps a completed statement.
 async fn write_edges_atomic(
     conn: &libsql::Connection,
     edges: &[EdgeAssertion],
@@ -958,21 +978,21 @@ async fn write_edges_atomic(
         .transaction_with_behavior(libsql::TransactionBehavior::Immediate)
         .await?;
 
+    let stmt = tx.prepare(INSERT_LINK).await?;
+
     for edge in edges {
-        let res = tx
-            .execute(
-                INSERT_LINK,
-                libsql::params![
-                    edge.source.as_str(),
-                    edge.target.as_str(),
-                    edge.edge_type.as_str(),
-                    edge.valid_from.as_str(),
-                    edge.valid_to.as_str(),
-                    edge.weight,
-                    edge.properties.as_str(),
-                    stamp
-                ],
-            )
+        stmt.reset();
+        let res = stmt
+            .execute(libsql::params![
+                edge.source.as_str(),
+                edge.target.as_str(),
+                edge.edge_type.as_str(),
+                edge.valid_from.as_str(),
+                edge.valid_to.as_str(),
+                edge.weight,
+                edge.properties.as_str(),
+                stamp
+            ])
             .await;
 
         if let Err(e) = res {
@@ -986,11 +1006,15 @@ async fn write_edges_atomic(
                 },
             )
             .await;
+            // Released before the rollback: a live statement on the connection
+            // is exactly what makes SQLite refuse to end a transaction.
+            drop(stmt);
             let _ = tx.rollback().await;
             return Err(typed);
         }
     }
 
+    drop(stmt);
     tx.commit().await?;
     Ok(edges.len())
 }
