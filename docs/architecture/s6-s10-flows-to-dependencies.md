@@ -147,7 +147,7 @@ All targets are measured on the reference hardware (Windows 11, NVMe SSD, 32 GB 
 
 | Operation | Target | Mechanism |
 |---|---|---|
-| Single edge assertion (incl. trigger writes) | ≤ 5 ms | One BEGIN IMMEDIATE … COMMIT; three table writes |
+| Single edge assertion (incl. trigger writes) | ≤ 5 ms | One BEGIN IMMEDIATE … COMMIT; three table writes. **Not met at high out-degree** ([D-059](s13-decision-register.md#d-059)): the single-open guard scans the source's whole out-degree, so this is O(degree), not O(1) |
 | Single edge retirement | ≤ 5 ms | Same shape as assertion |
 | Single concept upsert | ≤ 3 ms | One table write + one log entry |
 | 3-hop traversal, warm cache (1K edges) | ≤ 10 ms | Recursive CTE over links_current, indexed |
@@ -166,7 +166,7 @@ All targets are measured on the reference hardware (Windows 11, NVMe SSD, 32 GB 
 | Vector top-10 search (100K concepts) | ≤ 20 ms | DiskANN index scan |
 | Hybrid search, top-10 (100K concepts) | ≤ 50 ms | DiskANN + FTS5 + RRF fusion |
 | Chunk commit, 500 rows, trigger-amplified | ≤ 3 ms | [§5.1.5](s5-modules.md#515-cooperative-chunking--the-golden-rule) golden rule calibration. **Superseded in 0.5.5 ([D-058](s13-decision-register.md#d-058))** — the duration is the budget and the row count is not part of it. See the four rows below |
-| Chunk commit, edges, 90 rows | ≤ 3 ms | 2.39 ms measured. `chunk_rows::EDGES` ([D-058](s13-decision-register.md#d-058)) |
+| Chunk commit, edges, 90 rows | ≤ 3 ms | 2.39 ms measured **on an empty database**; 47.7 ms against an 8,000-edge hub, which is the `trg_links_single_open` index defect ([D-059](s13-decision-register.md#d-059)), not the chunk size. `chunk_rows::EDGES` ([D-058](s13-decision-register.md#d-058)) |
 | Chunk commit, concepts, 70 rows | ≤ 3 ms | 2.35 ms measured. `chunk_rows::CONCEPTS` |
 | Chunk commit, annotations, 600 rows | ≤ 3 ms | 2.36 ms measured. `chunk_rows::ANNOTATIONS` |
 | Chunk commit, embeddings, 30 rows | ≤ 3 ms | 2.06 ms measured. `chunk_rows::EMBEDDINGS` |

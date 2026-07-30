@@ -49,14 +49,31 @@ use crate::vector::ModelName;
 /// As measured by `chunk_budget`, each at its own size: edges **2.39 ms**,
 /// concepts **2.35 ms**, annotations **2.36 ms**, embeddings **2.06 ms**, no
 /// upper estimate above 2.42.
+///
+/// # Known limitation: these are empty-database figures
+///
+/// `chunk_budget` seeds concepts and starts with **no links and no vectors**,
+/// and D-059 established that per-row cost on the edge and embedding paths grows
+/// with the size of the structure being written, not with the chunk. The same
+/// 90-edge chunk takes 47.7 ms against an 8,000-edge hub. So the bound is met as
+/// measured and *not* met on a large database, most of that gap being the schema
+/// defect D-059 documents. Re-deriving these against a realistic fixture needs a
+/// decision about what "realistic" is, which is why it has not been done
+/// silently.
 pub mod chunk_rows {
     /// Edge assertions (`bulk_import`).
     ///
-    /// This path is *superlinear* in chunk size — marginal cost rises from ~11 µs
-    /// to ~103 µs per row between 10 and 1,000 rows — so the old 1,000-row chunk
-    /// was both the slowest to commit and the least efficient per row. Cutting it
-    /// costs no throughput at all; it gains: 1,000 edges take 88.5 ms in one
-    /// chunk against ~27 ms in eleven of these.
+    /// Per-row cost on this path rises with the size of `links_current`, not
+    /// with the chunk (D-059) — so cutting the chunk buys latency and costs
+    /// throughput, ~11% for 1,000 edges. An earlier version of this comment
+    /// claimed it was 3.3× *faster*; that came from multiplying eleven copies of
+    /// a chunk measured into an empty database.
+    ///
+    /// **This size does not meet the 3 ms bound on a large database.** 90 edges
+    /// into an 8,000-edge hub take 47.7 ms, because `trg_links_single_open`'s
+    /// `EXISTS` is served by `idx_lc_traversal_cover` with only `source_id`
+    /// bound and therefore scans the whole out-degree. That is a schema defect
+    /// with a proven fix, recorded in D-059 and not applied here.
     pub const EDGES: usize = 90;
 
     /// Concept upserts (`write_annotations`).
@@ -77,9 +94,12 @@ pub mod chunk_rows {
     /// Embedding vectors (`upsert_embeddings`).
     ///
     /// The smallest by a wide margin, because DiskANN index maintenance makes an
-    /// embedding the most expensive row in the system (~150 µs each at scale) and
-    /// this path superlinear besides. Again no throughput cost: 1,000-row chunks
-    /// ran at 143 µs per row against ~70 µs here.
+    /// embedding the most expensive row in the system. That cost grows with the
+    /// **corpus**, not the chunk (D-059): a fixed 30-vector chunk costs 49 µs per
+    /// vector into an empty corpus and 224 µs into an 8,000-vector one. Graph
+    /// insertion getting dearer as the graph grows is what DiskANN is, so unlike
+    /// [`EDGES`] there is nothing here to fix — but it does mean this size buys
+    /// latency at some throughput, not for free.
     pub const EMBEDDINGS: usize = 30;
 }
 
