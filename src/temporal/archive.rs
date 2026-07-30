@@ -139,7 +139,7 @@ async fn archive_session(
     archived_at: &str,
 ) -> Result<ArchiveReport> {
     for ddl in COLD_SCHEMA {
-        conn.execute(*ddl, ()).await?;
+        conn.execute(ddl, ()).await?;
     }
 
     let tx = conn

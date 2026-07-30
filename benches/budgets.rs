@@ -96,7 +96,7 @@ fn concept(i: usize) -> ConceptUpsert {
 /// `n` concepts, written in bulk rather than one round trip each.
 async fn seed_concepts(db: &Database, n: usize) {
     for chunk in (0..n).collect::<Vec<_>>().chunks(2_000) {
-        db.write_annotations(chunk.iter().map(|i| concept(*i)).collect())
+        db.write_concepts(chunk.iter().map(|i| concept(*i)).collect())
             .await
             .unwrap();
     }
@@ -365,7 +365,7 @@ fn chunk_budget(c: &mut Criterion) {
                                 .valid_from(TS)
                         })
                         .collect();
-                    rt.block_on(fx.db.write_annotations(rows)).unwrap()
+                    rt.block_on(fx.db.write_concepts(rows)).unwrap()
                 },
                 BatchSize::PerIteration,
             )
@@ -501,7 +501,7 @@ fn chunk_scaling(c: &mut Criterion) {
                                 .valid_from(TS)
                         })
                         .collect();
-                    rt.block_on(fx.db.write_annotations(rows)).unwrap()
+                    rt.block_on(fx.db.write_concepts(rows)).unwrap()
                 },
                 BatchSize::PerIteration,
             )
@@ -610,7 +610,7 @@ fn bulk_chunks(c: &mut Criterion) {
                             .valid_from(TS)
                     })
                     .collect();
-                rt.block_on(fx.db.write_annotations(rows)).unwrap()
+                rt.block_on(fx.db.write_concepts(rows)).unwrap()
             },
             BatchSize::PerIteration,
         )

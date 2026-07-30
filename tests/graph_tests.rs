@@ -503,7 +503,7 @@ async fn star(harness: &TestHarness, n: usize) -> Database {
     for i in 0..=n {
         concepts.push(ConceptUpsert::new(format!("N{i:07}"), format!("node {i}")).valid_from(T0));
     }
-    db.write_annotations(concepts).await.unwrap();
+    db.write_concepts(concepts).await.unwrap();
     let mut edges = Vec::with_capacity(n);
     for i in 1..=n {
         edges.push(EdgeAssertion::new("N0000000", format!("N{i:07}"), "KNOWS").valid_from(T0));

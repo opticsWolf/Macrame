@@ -21,6 +21,12 @@ pub struct TestHarness {
     pub clock: Arc<FakeClock>,
 }
 
+impl Default for TestHarness {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TestHarness {
     pub fn new() -> Self {
         Self::starting_at(SystemTime::UNIX_EPOCH)

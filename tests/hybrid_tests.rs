@@ -52,7 +52,7 @@ async fn fixture(harness: &TestHarness) -> Database {
             ConceptUpsert::new(*id, *title).content(*content).valid_from(TS)
         })
         .collect();
-    db.write_annotations(concepts).await.unwrap();
+    db.write_concepts(concepts).await.unwrap();
 
     db.register_model(&model(), 2).await.unwrap();
     let rows: Vec<(String, Vec<f32>)> = docs

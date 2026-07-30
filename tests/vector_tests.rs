@@ -607,7 +607,7 @@ async fn a_backfill_larger_than_one_chunk_lands_completely() {
     for i in 0..n {
         concepts.push(ConceptUpsert::new(format!("c{i:06}"), "N").valid_from(TS));
     }
-    db.write_annotations(concepts).await.unwrap();
+    db.write_concepts(concepts).await.unwrap();
     db.register_model(&m, 2).await.unwrap();
 
     let rows: Vec<(String, Vec<f32>)> = (0..n)

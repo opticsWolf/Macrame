@@ -67,7 +67,7 @@ async fn seed(db: &Database, n: usize) {
         .map(|i| ConceptUpsert::new(format!("c{i:07}"), format!("Concept {i}")).valid_from(TS))
         .collect();
     for c in all.chunks(600) {
-        db.write_annotations(c.to_vec()).await.unwrap();
+        db.write_concepts(c.to_vec()).await.unwrap();
     }
 }
 

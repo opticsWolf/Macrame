@@ -22,7 +22,7 @@ impl EmbeddingCodec {
 
     /// Decode an F32_BLOB byte vector back into Vec<f32>.
     pub fn decode(bytes: &[u8]) -> Result<Vec<f32>> {
-        if bytes.len() % 4 != 0 {
+        if !bytes.len().is_multiple_of(4) {
             return Err(DbError::ReplayCorrupt {
                 seq: 0,
                 reason: "Invalid F32_BLOB byte length".to_string(),

@@ -81,8 +81,8 @@ async fn every_command_answers_its_caller() {
     )
     .unwrap();
     answers!(
-        "write_annotations",
-        db.write_annotations(vec![ConceptUpsert::new("B", "Annotated").valid_from(T1)])
+        "write_concepts",
+        db.write_concepts(vec![ConceptUpsert::new("B", "Annotated").valid_from(T1)])
     )
     .unwrap();
     answers!("archive", db.archive(T3)).unwrap();

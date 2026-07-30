@@ -54,7 +54,7 @@ async fn seed_nodes(db: &Database, ids: impl IntoIterator<Item = String>) {
             ConceptUpsert::new(id, title).valid_from(T1)
         })
         .collect();
-    db.write_annotations(concepts).await.unwrap();
+    db.write_concepts(concepts).await.unwrap();
 }
 
 fn edge(source: &str, target: &str, edge_type: &str, valid_from: &str) -> EdgeAssertion {
@@ -325,7 +325,7 @@ async fn bulk_import_is_atomic_per_chunk_not_overall() {
 /// one stamp, so a chunk that upserts the same id twice makes the second write
 /// an UPDATE whose `recorded_at` does not advance.
 #[tokio::test]
-async fn write_annotations_commits_earlier_chunks_when_a_later_one_fails() {
+async fn write_concepts_commits_earlier_chunks_when_a_later_one_fails() {
     let harness = TestHarness::new();
     let db = Database::open(&harness.db_path).await.unwrap();
 
@@ -337,7 +337,7 @@ async fn write_annotations_commits_earlier_chunks_when_a_later_one_fails() {
     concepts.push(ConceptUpsert::new("DUP", "First").valid_from(T1));
     concepts.push(ConceptUpsert::new("DUP", "Second").valid_from(T1));
 
-    let err = db.write_annotations(concepts).await.unwrap_err();
+    let err = db.write_concepts(concepts).await.unwrap_err();
     assert!(
         matches!(err, DbError::RecordedAtRegression { .. }),
         "got {err:?}"

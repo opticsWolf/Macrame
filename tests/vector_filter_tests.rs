@@ -62,7 +62,7 @@ async fn fixture_sized(
     for i in 0..corpus {
         concepts.push(ConceptUpsert::new(node_id(i), "N").valid_from(TS));
     }
-    db.write_annotations(concepts).await.unwrap();
+    db.write_concepts(concepts).await.unwrap();
 
     db.register_model(&m, 2).await.unwrap();
     let rows: Vec<(String, Vec<f32>)> = (0..corpus)

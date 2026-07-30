@@ -77,7 +77,7 @@ pub mod chunk_rows {
     /// with a proven fix, recorded in D-059 and not applied here.
     pub const EDGES: usize = 90;
 
-    /// Concept upserts (`write_annotations`).
+    /// Concept upserts (`write_concepts`).
     ///
     /// Linear at ~23 µs per row, so unlike [`EDGES`] this size *is* a genuine
     /// throughput sacrifice: 1,000-row chunks ran at 23.6 µs per row against
@@ -273,10 +273,16 @@ pub enum HighPriCommand {
 
 /// Commands sent to the Write Actor on the low-priority channel (background work).
 pub enum LowPriCommand {
-    WriteAnnotationsChunk {
+    /// One chunk of **concepts** — a ledger write, logged and versioned.
+    WriteConceptsChunk {
         chunk: Vec<ConceptUpsert>,
         responder: oneshot::Sender<Result<usize>>,
     },
+    /// One chunk of **derived annotations** — off-ledger, no log trigger (D-041).
+    ///
+    /// The pair is named apart deliberately: this variant was `WriteAnalyticsChunk`
+    /// beside a `WriteAnnotationsChunk` that carried concepts, which is the
+    /// crossing D-075 undid.
     WriteAnalyticsChunk {
         chunk: Vec<Annotation>,
         responder: oneshot::Sender<Result<usize>>,
@@ -678,9 +684,14 @@ impl Database {
     /// This is the bulk concept path, and every row it writes is a ledger write:
     /// it versions the concept and lands in `transaction_log`. Derived analytics
     /// output does not belong here — see
-    /// [`Database::write_analytics_annotations`] and D-041. The name is a
-    /// holdover from when the two were the same call and is due to change.
-    pub async fn write_annotations(&self, concepts: Vec<ConceptUpsert>) -> Result<usize> {
+    /// [`Database::write_analytics_annotations`] and D-041.
+    ///
+    /// Called `write_annotations` through 0.5.6, from when the two writes were
+    /// one call. D-041 split them and the name stayed on the wrong one for three
+    /// releases, so the crate had a `write_annotations` that wrote concepts
+    /// sitting beside a `write_analytics_annotations` that wrote annotations
+    /// (D-075).
+    pub async fn write_concepts(&self, concepts: Vec<ConceptUpsert>) -> Result<usize> {
         let concepts: Vec<ConceptUpsert> = concepts
             .into_iter()
             .map(ConceptUpsert::normalized)
@@ -689,7 +700,7 @@ impl Database {
         for chunk in concepts.chunks(chunk_rows::CONCEPTS) {
             let chunk = chunk.to_vec();
             written += self
-                .low(|responder| LowPriCommand::WriteAnnotationsChunk { chunk, responder })
+                .low(|responder| LowPriCommand::WriteConceptsChunk { chunk, responder })
                 .await?;
         }
         Ok(written)
@@ -1208,7 +1219,7 @@ impl LowPriCommand {
                 let stamp = clock.now();
                 let _ = responder.send(write_edges_atomic(conn, &chunk, &stamp).await);
             }
-            LowPriCommand::WriteAnnotationsChunk { chunk, responder } => {
+            LowPriCommand::WriteConceptsChunk { chunk, responder } => {
                 let stamp = clock.now();
                 let _ = responder.send(write_concepts_atomic(conn, &chunk, &stamp).await);
             }
@@ -1435,13 +1446,15 @@ async fn check_prepared(stmt: &libsql::Statement, edge: &EdgeAssertion) -> Resul
         }
         if proposed.overlaps(&existing) {
             return Err(DbError::OverlappingInterval {
-                source_id: edge.source.clone(),
-                target_id: edge.target.clone(),
-                edge_type: edge.edge_type.clone(),
-                valid_from: edge.valid_from.clone(),
-                valid_to: edge.valid_to.clone(),
-                existing_from: existing.valid_from,
-                existing_to: existing.valid_to,
+                overlap: Box::new(crate::error::Overlap {
+                    source_id: edge.source.clone(),
+                    target_id: edge.target.clone(),
+                    edge_type: edge.edge_type.clone(),
+                    valid_from: edge.valid_from.clone(),
+                    valid_to: edge.valid_to.clone(),
+                    existing_from: existing.valid_from,
+                    existing_to: existing.valid_to,
+                }),
             });
         }
     }
@@ -1478,13 +1491,15 @@ fn reject_overlaps_within(edges: &[EdgeAssertion]) -> Result<()> {
             }
             if ia.overlaps(&ib) {
                 return Err(DbError::OverlappingInterval {
-                    source_id: a.source.clone(),
-                    target_id: a.target.clone(),
-                    edge_type: a.edge_type.clone(),
-                    valid_from: a.valid_from.clone(),
-                    valid_to: a.valid_to.clone(),
-                    existing_from: ib.valid_from,
-                    existing_to: ib.valid_to,
+                    overlap: Box::new(crate::error::Overlap {
+                        source_id: a.source.clone(),
+                        target_id: a.target.clone(),
+                        edge_type: a.edge_type.clone(),
+                        valid_from: a.valid_from.clone(),
+                        valid_to: a.valid_to.clone(),
+                        existing_from: ib.valid_from,
+                        existing_to: ib.valid_to,
+                    }),
                 });
             }
         }

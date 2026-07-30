@@ -1,5 +1,24 @@
 use thiserror::Error;
 
+/// The two intervals of a [`DbError::OverlappingInterval`], boxed out of the
+/// error enum (D-075).
+///
+/// Both are reported because neither alone identifies the conflict: the caller
+/// knows what they asserted and not what it collided with, and a message naming
+/// only the stored interval reads as though the assertion were the innocent one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Overlap {
+    pub source_id: String,
+    pub target_id: String,
+    pub edge_type: String,
+    /// The interval the caller asserted.
+    pub valid_from: String,
+    pub valid_to: String,
+    /// The interval already stored that it collides with.
+    pub existing_from: String,
+    pub existing_to: String,
+}
+
 /// Central error type for the Macrame bitemporal ledger database.
 #[derive(Debug, Error)]
 pub enum DbError {
@@ -108,19 +127,21 @@ pub enum DbError {
     /// The consequence of allowing one is not an error later but a wrong answer:
     /// `query_as_of_edges` at an instant inside both returns the relationship
     /// twice, and every weighted algorithm downstream double-counts that edge.
+    ///
+    /// **Boxed, and it is the only variant that is (D-075).** Seven `String`s is
+    /// 168 bytes, which made `DbError` — and therefore every `Result` in the
+    /// crate, on the `Ok` path too — larger than `clippy::result_large_err`'s
+    /// threshold the moment D-060 added it. The other variants are well under.
+    /// Boxing the rarest one keeps the whole error small rather than trimming
+    /// what a caller is told; `matches!(err, OverlappingInterval { .. })` is
+    /// unaffected, which is how every call site uses it.
     #[error(
-        "edge {source_id} -> {target_id} ({edge_type}) already holds [{existing_from}, {existing_to}), \
-         which overlaps the asserted [{valid_from}, {valid_to})"
+        "edge {} -> {} ({}) already holds [{}, {}), which overlaps the asserted [{}, {})",
+        .overlap.source_id, .overlap.target_id, .overlap.edge_type,
+        .overlap.existing_from, .overlap.existing_to,
+        .overlap.valid_from, .overlap.valid_to
     )]
-    OverlappingInterval {
-        source_id: String,
-        target_id: String,
-        edge_type: String,
-        valid_from: String,
-        valid_to: String,
-        existing_from: String,
-        existing_to: String,
-    },
+    OverlappingInterval { overlap: Box<Overlap> },
 
     #[error("links_current drift detected: {n} intervals diverge")]
     CurrentDrift { n: usize },
@@ -252,4 +273,46 @@ async fn current_recorded_at(conn: &libsql::Connection, id: &str) -> Option<Stri
     .ok()??
     .get(0)
     .ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `DbError` stays under `clippy::result_large_err`'s 128-byte threshold.
+    ///
+    /// Every fallible function in the crate returns `Result<T, DbError>`, so the
+    /// enum's size is paid on the `Ok` path too. D-060 pushed it to 168 bytes with
+    /// one seven-`String` variant and nobody noticed until D-075 read the lint
+    /// output; boxing that variant brought it back. This is the tripwire, because
+    /// the failure mode is a warning in a build log rather than a broken test —
+    /// the kind this cycle has spent its whole length finding.
+    #[test]
+    fn the_error_enum_stays_small_enough_to_return_by_value() {
+        let size = std::mem::size_of::<DbError>();
+        assert!(
+            size <= 128,
+            "DbError is {size} bytes. Some variant has grown past what a Result \n             should carry — box it, as OverlappingInterval is boxed (D-075)."
+        );
+    }
+
+    /// The boxed variant still reports both intervals.
+    #[test]
+    fn an_overlap_names_the_asserted_interval_and_the_stored_one() {
+        let err = DbError::OverlappingInterval {
+            overlap: Box::new(Overlap {
+                source_id: "a".into(),
+                target_id: "b".into(),
+                edge_type: "KNOWS".into(),
+                valid_from: "2026-03-01T00:00:00.000000Z".into(),
+                valid_to: "2026-09-01T00:00:00.000000Z".into(),
+                existing_from: "2026-01-01T00:00:00.000000Z".into(),
+                existing_to: "2026-06-01T00:00:00.000000Z".into(),
+            }),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("a -> b (KNOWS)"), "{msg}");
+        assert!(msg.contains("already holds [2026-01-01"), "{msg}");
+        assert!(msg.contains("asserted [2026-03-01"), "{msg}");
+    }
 }

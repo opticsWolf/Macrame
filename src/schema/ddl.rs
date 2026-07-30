@@ -1,4 +1,4 @@
-/// DDL statements for the Macrame bitemporal schema as specified in §4.
+//! DDL statements for the Macrame bitemporal schema as specified in §4.
 
 /// GLOB pattern matching the canonical timestamp form `YYYY-MM-DDTHH:MM:SS.ffffffZ`.
 ///

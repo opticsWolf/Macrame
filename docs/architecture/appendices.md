@@ -53,7 +53,7 @@ db.upsert_concept(concept).await?;
 // -- Bulk writes: the fidelity boundary of §5.1.6 --
 db.write_bulk_atomic(edges).await?;    // one transaction, one stamp, one stall
 db.bulk_import(edges).await?;          // chunked at chunk_rows::EDGES, atomic per chunk
-db.write_annotations(concepts).await?; // chunked at chunk_rows::CONCEPTS, atomic per chunk
+db.write_concepts(concepts).await?;    // chunked at chunk_rows::CONCEPTS, atomic per chunk
 
 // -- Traversal (read side; takes a connection, not the handle) --
 let ids = TraversalBuilder::new(root)
@@ -135,14 +135,14 @@ Recorded so that "the API says so" cannot be cited against the code. Each line i
 | `db.hybrid_search(text, &v).rrf_k(60)` | **Closed in 0.5.5 ([D-051](s13-decision-register.md#d-051))**, as a builder rather than a handle method: `HybridSearch::new(model, text, vector).rrf_k(60).top_k(k).execute(conn)`. Hybrid search is a read, and reads are served from `read_conn` without traversing the actor, so it follows `TraversalBuilder` and `FilteredVectorSearch` rather than hanging off the handle. `rrf_k` is spelled as the sketch proposed. |
 | `db.set_embedding(id, model, vec)` | **Closed in 0.5.4 ([D-048](s13-decision-register.md#d-048))**, under a different name and shape: `db.upsert_embeddings(&model, rows)`, plural and chunked, because a single-vector method invites a per-row loop that is a channel round trip per vector. `db.register_model(&model, dim)` came with it. |
 | `db.audit_current()` | Free function `audit_current(conn)`. |
-| `db.write_analytics_results{,_atomic}` | Three distinct calls, not a pair: `write_analytics_annotations` (derived output, chunked, off-ledger — [D-041](s13-decision-register.md#d-041)), `write_annotations` (bulk **concepts**, chunked, on-ledger; the name is a holdover and is due to change), and `write_bulk_atomic` (**edges**, atomic). There is still no atomic variant of either chunked path. |
+| `db.write_analytics_results{,_atomic}` | Three distinct calls, not a pair: `write_analytics_annotations` (derived output, chunked, off-ledger — [D-041](s13-decision-register.md#d-041)), `write_concepts` (bulk **concepts**, chunked, on-ledger — called `write_annotations` through 0.5.6, renamed in [D-075](s13-decision-register.md#d-075)), and `write_bulk_atomic` (**edges**, atomic). There is still no atomic variant of either chunked path. |
 
 Two of these were gaps rather than naming differences. **Both are now closed**, and both are left in the table rather than deleted, because A.2 exists to record what was promised and whether it arrived — each arrived under a different signature than the sketch proposed, and that is the part worth keeping:
 
 - ~~**The vector write path.**~~ **Closed in 0.5.4 ([D-048](s13-decision-register.md#d-048)).** `Database::register_model` and `Database::upsert_embeddings` route through the actor; the free functions remain for callers already holding a connection.
 - ~~**Hybrid search.**~~ **Closed in 0.5.5 ([D-051](s13-decision-register.md#d-051)).** [§5.9](s5-modules.md#59-vector--embeddings-the-model-registry-and-search) and [§9](s6-s10-flows-to-dependencies.md#9-performance-budgets) had both budgeted for a path where only the fusion arithmetic existed. `concepts_fts` ([§4.6](s4-schema.md#46-the-concept-text-index--the-third-derivative-table-055-d-051)) supplies the keyword half and `HybridSearch` fuses the two arms. The remaining honest caveat is that [§9](s6-s10-flows-to-dependencies.md#9-performance-budgets)'s ≤ 50 ms is still not a gate and nothing measures it — the path now exists, but the budget is as unverified as every other one in that table.
 
-The entry that remains open in this table is naming rather than capability: `write_annotations` is the bulk **concept** path and its name says otherwise.
+~~The entry that remains open in this table is naming rather than capability: `write_annotations` is the bulk **concept** path and its name says otherwise.~~ **Closed in 0.5.6 ([D-075](s13-decision-register.md#d-075))** — it is `write_concepts`, and the actor variant behind it is `WriteConceptsChunk`. Nothing in A.2 is now open.
 
 A third, cosmetic one: `macrame::prelude` re-exports `AttributeMode`, `EdgeAssertion` and `TraversalBuilder` from `graph`, but not `Subgraph`, `EdgeRef`, `NodeData`, the five algorithms, `modularity`, `CostEstimator`, or `reciprocal_rank_fusion` — so the documented analytics flow does not compile from the prelude alone.
 
