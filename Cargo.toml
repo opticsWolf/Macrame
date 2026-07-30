@@ -48,6 +48,39 @@ default = []
 #     cargo test --features property-tests
 property-tests = []
 
+# Write-actor latency counters (T1.4, D-079). Off by default.
+#
+# Off is the right default because the crate's contract is a latency bound and
+# the instrumentation is not free of *risk* even where it is free of cost — but
+# it is close to free of cost: with the feature off `HoldTimer` reads no clock
+# and `ActorMetrics` is a ZST whose methods are empty, so the actor loop compiles
+# to what it compiled to before. See `src/metrics.rs` for why that is arranged as
+# two impls of one type rather than `#[cfg]` inside the loop.
+#
+#     cargo test --features metrics
+metrics = []
+
+[[test]]
+name = "actor_metrics_tests"
+required-features = ["metrics"]
+
+# T1.1's evidence. Needs `metrics` because the question is what the *actor* held
+# for, and wall time on the caller's side includes queueing.
+[[example]]
+name = "archive_window_diag"
+required-features = ["metrics"]
+
+# T1.3's evidence, for the same reason.
+[[example]]
+name = "bulk_atomic_diag"
+required-features = ["metrics"]
+
+# T1.2's evidence. The question is the longest single *turn*, which only the
+# actor's own counters can answer.
+[[example]]
+name = "shadow_rebuild_diag"
+required-features = ["metrics"]
+
 [[test]]
 name = "integrity_property_tests"
 required-features = ["property-tests"]

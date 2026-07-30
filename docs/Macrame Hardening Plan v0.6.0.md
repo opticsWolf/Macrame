@@ -251,12 +251,88 @@ pre-migration reads, with a comment saying it is unreachable from this crate's w
 
 ---
 
-## Tier 1 — Bounded actor latency
+## Tier 1 — Bounded actor latency · ✅ **COMPLETE (D-079, D-080, D-081, D-082)**
 
 The actor is the right design. Its problem is that three operations are exempt from the
 latency bound by contract, and two of the three did not have to be.
 
-### T1.1 — Window the archive *(no schema change)*
+> **All four delivered 2026-07-30**, in the order T1.4 → T1.1 → T1.3 → T1.2, because the item's
+> own claim that T1.4 is "a precondition for the rest of the plan" turned out to be literally
+> true: every measurement below is read from the counters T1.4 added, and the alternative —
+> wall time on the caller's side of the channel — includes queueing and answers a different
+> question.
+>
+> **The recurring finding, in three of the four items: the loop must live on the handle.** T1.1
+> spells this out for `archive_windowed` and T1.2 names it for `CREATE TABLE … AS SELECT`, but
+> it is one fact and it applies to every "chunk it" item in this tier. The actor is
+> single-threaded, so N small transactions inside one command produce N small transactions
+> inside **one hold** — smaller transactions, identical latency. Only sending N commands returns
+> the actor to its `select!`, which is where a high-priority assertion gets to jump the queue.
+> `actor_metrics_tests` pins it for both by asserting turn counts, which is the one fact about
+> chunking invisible from outside the actor.
+>
+> **What Tier 1 bought, measured:** the archive's longest hold 3,326 → 768 ms (4.3×); the
+> rebuild's 353 → 47 ms (7.6×), and 2.3× cheaper in total as well; `write_bulk_atomic` still
+> uncapped but no longer unpredictable, with an 18-second case now visible in a log line before
+> it happens rather than in a support ticket after.
+>
+> **What it did not buy.** None of the three exempt operations now fits `CHUNK_BUDGET` — the
+> rebuild's swap is still 15× over it, and windowing the archive trades total throughput for
+> latency at small sizes. The exemptions remain exemptions; what changed is that their cost is
+> measured, bounded by something the caller chooses, and stated in numbers.
+
+### T1.1 — Window the archive — ✅ **DELIVERED, D-080**
+
+> **Delivered 2026-07-30.** `archive_windowed(cutoff, window)`, no schema change, `archive()`
+> kept. Boundaries derive from the oldest `recorded_at` actually present rather than from a
+> fixed epoch, and the last boundary is `cutoff` itself rather than `start + n·window`, which
+> would overshoot and archive rows the caller excluded.
+>
+> **The item does not say where the loop goes, and that is the whole decision.** Putting it
+> inside the actor's `Archive` arm would produce N small transactions inside **one** hold —
+> smaller transactions, identical latency, since the actor is single-threaded and nothing else
+> writes until its turn returns however many `COMMIT`s that turn contains. The loop is on the
+> handle, one command per session, which is what returns the actor to its `select!` in between.
+> `actor_metrics_tests` asserts `Archive` *turns* equals sessions reported — the one fact about
+> windowing invisible from outside the actor. This is the same trap the item itself names for
+> `CREATE TABLE … AS SELECT` in T1.2, met one item earlier.
+>
+> **A prerequisite the item does not mention.** D-077 established that `rebuild_within` costs
+> O(*surviving* `links`) regardless of how much the session archived. Windowing therefore
+> multiplies the repair term by the session count, and a naive implementation makes the archive
+> *several times slower in total*. `archive_session` now skips the rebuild when its `DELETE`
+> removed nothing — sound, because `links_current` is a function of `links`. Without it,
+> windowing is a latency improvement paid for with an unacceptable throughput regression.
+>
+> **Measured, and the trade inverts with size.** Longest hold read from the actor's per-kind
+> high-water mark (T1.4), not from the caller's side of the channel:
+>
+> | fixture | window | sessions | longest hold | total |
+> |---|---|---|---|---|
+> | 8,000 keys | one session | 1 | 3,326 ms | 3,326 ms |
+> | 8,000 keys | 1 h | 9 | **768 ms** | 4,160 ms |
+> | 2,000 keys | one session | 1 | 260 ms | 260 ms |
+> | 2,000 keys | 1 h | 9 | **117 ms** | 671 ms |
+>
+> At 8,000 keys: 4.3× less hold, total flat within noise (two runs: 3,362 / 4,160 ms against
+> 3,730 / 3,326 ms single-session), and the intermediate windows were repeatedly *faster* than
+> one session — the dominant terms are superlinear in the surviving table, so each session
+> leaves less for the next. At 2,000 keys the same change costs 2.6× the total work to halve
+> the hold.
+>
+> So the item's "it should stop being an escape hatch and become the default" is **not taken**.
+> Windowing pays when the backlog is large, which is when the unwindowed hold is a problem in
+> the first place; making it the default would make small databases 2.6× slower to fix a
+> latency they were not suffering. Both are public, both are measured, and the numbers are
+> published beside each other so the choice is informed rather than defaulted.
+>
+> A window is refused, not clamped, when it is zero or would need more than
+> `MAX_ARCHIVE_SESSIONS` (4,096) — clamping would archive over boundaries the caller did not
+> choose, invisibly.
+
+---
+
+### T1.1 — original text
 
 `archive(cutoff)` is one transaction whose size is set by how long since the last one.
 Replace with `archive_windowed(cutoff, window)`: archive to *T₁*, then *T₂*, … each a complete
@@ -269,7 +345,56 @@ run leaves a coherent intermediate state, which it does: each session commits a 
 This is scheduling, not schema, and it is what Appendix C already names as the escape hatch
 (*"phased, per-table archiving"*). It should stop being an escape hatch and become the default.
 
-### T1.2 — Chunked shadow rebuild
+### T1.2 — Chunked shadow rebuild — ✅ **DELIVERED, D-082**
+
+> **Delivered 2026-07-30.** `rebuild_current_chunked`, with `rebuild_current` kept — the two
+> differ in contract, not only in speed. All three mechanical facts re-probed on libSQL 0.9.30
+> and all three hold, including the rename/trigger trap and transactional DDL.
+>
+> **A fourth the item does not name, and it is silent.** Step 2 says to build the shadow with
+> `CREATE TABLE … AS SELECT` and reasons only about that statement's duration. It copies rows
+> and **nothing else** — no primary key, no `CHECK`s. The swap succeeds, the row count is
+> right, and the next `INSERT INTO links` dies inside `trg_links_current_sync` with
+> "ON CONFLICT clause does not match any PRIMARY KEY or UNIQUE constraint". Probed. The shadow
+> is built from `CREATE_LINKS_CURRENT_TABLE` with the name substituted, and every swap test
+> writes afterwards rather than only counting rows.
+>
+> **The item's step 3 asks the right question and the answer forces the design.** Index names
+> are global and SQLite has no `ALTER INDEX … RENAME`, so the shadow cannot carry
+> `idx_lc_traversal_cover` while the live table holds it — and temporary names would leave
+> `links_current` indexed under names absent from `CREATE_INDICES`, so the next migration would
+> create a second copy of each. `DROP TABLE` frees the names, reusable in the same transaction
+> (probed), so the swap pays the index build. The chunking moves the **projection** off the
+> lock, not everything. Step 5's "microseconds" is not achievable and was not achieved.
+>
+> | `links` | `rebuild_current` | turns | chunked, longest turn | chunked, total |
+> |---|---|---|---|---|
+> | 4,000 | 26.0 ms | 7 | **11.1 ms** | 20.4 ms |
+> | 16,000 | 110.6 ms | 19 | **16.6 ms** | 65.6 ms |
+> | 40,000 | 353.5 ms | 43 | **46.8 ms** | 152.6 ms |
+>
+> 7.6× less hold at the largest size, and the advantage grows with the table. The unexpected
+> result is the last column — the chunked path is also **2.3× cheaper in total**, where T1.1's
+> windowing cost more. Same cause as the index constraint: the shadow fills *unindexed* and
+> pays one bulk index build instead of maintaining three indexes per row. Still not within
+> budget: 46.8 ms is 15× `CHUNK_BUDGET`, so `ShadowRebuild` is deliberately not exempt from the
+> violation count.
+>
+> **An interlock the item does not call for.** The catch-up finds work by `recorded_at`, which
+> cannot see a *deletion* — so an `archive` interleaving with the build would let the shadow
+> resurrect archived history. The actor counts archives; `Begin` reports the count, `Swap`
+> compares, and a mismatch drops the shadow and returns a new `RebuildInterrupted` — distinct
+> from `RebuildFailed`, because "the repair did not run, `links_current` is untouched, retry" is
+> a different fact from "the repair ran and did not repair". Verifying instead would cost
+> O(E log E) under the lock, which is what this exists to remove.
+>
+> The item's "keep the current in-place `rebuild_within` as well" is taken, and for its stated
+> reason plus two more: `rebuild_current` is one act, audits itself, and works inside a caller's
+> transaction. The chunked path does none of the three and cannot decline to.
+
+---
+
+### T1.2 — original text
 
 The shadow-swap idea is right and the naive form does not work. Two things must be true that
 are easy to miss:
@@ -302,7 +427,44 @@ are easy to miss:
 already-open transaction and cannot interleave. Two paths, one for repair-while-live and one
 for repair-inside-a-transaction, is the honest answer.
 
-### T1.3 — `write_bulk_atomic` stays uncapped
+### T1.3 — `write_bulk_atomic` stays uncapped — ✅ **DELIVERED, D-081**
+
+> **Delivered 2026-07-30.** Uncapped, warned, and predictable: a `tracing::warn!` above
+> `BULK_ATOMIC_WARN_HOLD` (250 ms — fifteen frames, deliberately far above `CHUNK_BUDGET`,
+> since this path is exempt by contract and a warning that fires on correct behaviour gets
+> filtered out), plus a public `estimated_bulk_hold` so a caller can ask *before* committing
+> to a size. The warning fires on the caller's task, before the send, so it carries their span
+> and names the call site that chose the batch.
+>
+> **The prescribed model is wrong twice, and measuring it is what showed both.** "Rows ×
+> measured per-row cost" assumes linearity. `write_edges_atomic` opens with
+> `reject_overlaps_within`, which compares every **pair** in the batch — and the quadratic
+> term's constant depends on the batch's *shape*, because the loop's early `continue` on
+> mismatched `(source, target, type)` is 16× cheaper than the pairs that fall through to
+> `Interval::overlaps`.
+>
+> | rows | fan-out to distinct targets | corrections to one relationship |
+> |---|---|---|
+> | 5,000 | 414 ms | 1,386 ms |
+> | 20,000 | **2,618 ms** | **18,057 ms** |
+>
+> Two batches of one length, 7× apart — and a size-only model errs toward *under*-prediction,
+> the only direction that matters for a warning. So the estimate counts matching pairs with one
+> `HashMap` pass: `73 µs · rows + 5.5 ns · mismatched + 86 ns · matching`, within 1.03–1.11× of
+> measurement over 500–20,000 rows in both shapes. A unit test pins both measured figures, so a
+> coefficient edited without re-measuring fails.
+>
+> **This item's diagnostic found a defect in T1.4's instrumentation.** The hold was timed around
+> the whole `execute` call, so it was recorded *after* each arm answered its `oneshot` — two
+> tasks, so a caller reading `metrics()` right after its own write could be scheduled first and
+> miss it. `bulk_atomic_diag` reported a 20,000-row batch as a **0 ms** hold, every time.
+> Invisible to a dashboard, which is worse: the instrumentation would have been believed while
+> being wrong precisely when someone tried to verify it. Timing now lives in a `Turn` type whose
+> `answer` records and *then* sends.
+
+---
+
+### T1.3 — original text
 
 D-014 is correct: the batch is one act under one stamp, and capping breaks the guarantee the
 method exists to provide. But "uncapped and undocumented at the call site" is not the same as
@@ -311,7 +473,43 @@ method exists to provide. But "uncapped and undocumented at the call site" is no
 milliseconds rather than in prose. A caller who stalls the UI for 8 seconds should have been
 able to predict it from the signature.
 
-### T1.4 — Make the actor observable *(the item that makes "future-proof" mean something)*
+### T1.4 — Make the actor observable — ✅ **DELIVERED, D-079**
+
+> **Delivered 2026-07-30.** `cargo test --features metrics`. All four counters shipped:
+> queue depth per channel (mean and high-water, sampled *before* the turn), a per-kind hold
+> histogram whose `3_000 µs` bucket boundary **is** `CHUNK_BUDGET` so "fraction within budget"
+> is a prefix sum, an over-budget count per kind, and the longest hold since open with the
+> command that caused it. Reached through `Database::metrics()`.
+>
+> **Taken further than the item asked in one place, and it turned out to matter.** The three
+> contractual exemptions (`write_bulk_atomic`, `archive`, `rebuild_current`) are excluded from
+> the *violation* count but not from measurement. Counting them as violations would have made
+> the violation count noise on any database that archives — and their durations are exactly
+> what T1.1 and T1.2 exist to shrink, so they must still be recorded.
+>
+> **Two defects of my own, both caught by tests rather than by review, and the second is the
+> interesting one.** `turns` was incremented where the depth sample is taken — at the top of
+> the loop, which is right for depth and wrong for turns, since an idle actor had already
+> counted a command that had not arrived. The total disagreed with the sum of its own
+> breakdown by one, permanently. Now two fields: `depth_samples` and `turns`, both exposed.
+>
+> Then: the longest hold and its kind are packed into one `AtomicU64` so a reader cannot see a
+> duration from one turn beside a kind from another. The first packing put the kind in the
+> **high** bits — and the update is a `fetch_max` on the packed word, so the "longest hold"
+> became the hold with the largest *enum index*. A 3 ms `write_concepts_chunk` outranked a
+> 10 ms `rebuild_current` because its variant is declared later. The unit test passed: its
+> slowest hold was also its highest-indexed kind. Only the integration test, running real
+> commands whose cost and declaration order disagree, exposed it. There is now a unit test
+> whose two orderings deliberately conflict.
+>
+> **The loop has one shape with the feature on or off** — `HoldTimer` reads no clock and
+> `ActorMetrics` is a ZST when `metrics` is absent — arranged as two impls of one type rather
+> than `#[cfg]` in the loop body. That is not about the nanoseconds; a conditional in the loop
+> is how the instrumented and uninstrumented paths drift until only one of them is real.
+
+---
+
+### T1.4 — original text
 
 Everything the crate knows about its own latency lives in `benches/`. In production there is
 no way to answer "is the 3 ms bound holding?" — and D-059 already established that it does

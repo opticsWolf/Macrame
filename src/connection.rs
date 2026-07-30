@@ -127,7 +127,7 @@ pub mod chunk_rows {
 /// | Path | Bound | Why it cannot be chunked |
 /// |---|---|---|
 /// | [`Database::write_bulk_atomic`] | none — caller-sized `Vec` | D-014: the batch is *one act* under one stamp. Splitting it is the thing the method exists not to do |
-/// | [`Database::archive`] | measured **26.8 ms** for 2,000 archivable edges | D-012: copy-then-delete must be atomic, or a crash between the phases duplicates or loses rows |
+/// | [`Database::archive`] | measured **26.8 ms** for 2,000 archivable edges; see [`Database::archive_windowed`] | D-012: copy-then-delete must be atomic, or a crash between the phases duplicates or loses rows |
 /// | `rebuild_current` | measured **24.6 / 104 / 318 ms** at 4K / 16K / 40K rows in `links` (was "~50 s per 10M edges", which nothing had measured) | D-023: the window between `DELETE` and `INSERT` is the whole of current belief; a reader landing in it sees a graph with no edges and no error |
 ///
 /// The `archive` figure is end-to-end through this method, so it **includes**
@@ -149,7 +149,113 @@ pub mod chunk_rows {
 /// A caller who needs the latency bound and not the atomicity has
 /// [`Database::bulk_import`], which is the same write chunked at
 /// [`chunk_rows::EDGES`] and explicitly *not* atomic overall (D-011).
+///
+/// # One of the three is no longer unbounded (T1.1, D-080)
+///
+/// `archive` was the worst of them, because its hold is a function of *how long
+/// since the last archive* rather than of anything the caller chose.
+/// [`Database::archive_windowed`] runs the same work as N sessions, each
+/// atomic, each its own actor turn. Measured on an 8,000-key fixture with four
+/// generations of superseded history: the longest single hold falls from
+/// **3.3 s to 0.77 s** at one-hour windows, for total wall time that is flat
+/// within this cycle's noise.
+///
+/// The same measurement at 2,000 keys goes the other way — the hold falls
+/// 260 ms → 117 ms while total time rises 260 ms → 671 ms — so windowing is a
+/// trade and not a free improvement. It pays when the backlog is large, which
+/// is when the unwindowed hold is a problem in the first place. `archive` is
+/// kept, not deprecated, for exactly that reason.
 pub const CHUNK_BUDGET: std::time::Duration = std::time::Duration::from_millis(3);
+
+/// Predicted hold above which [`Database::write_bulk_atomic`] warns (T1.3).
+///
+/// 250 ms is fifteen frames at 60 Hz: not a hitch, a visible freeze. It is well
+/// above [`CHUNK_BUDGET`] on purpose — this path is exempt from that bound by
+/// contract, so warning at 3 ms would fire on batches that are working exactly
+/// as designed and train the reader to filter the message out.
+pub const BULK_ATOMIC_WARN_HOLD: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Roughly how long [`Database::write_bulk_atomic`] will hold the actor for
+/// this batch (T1.3, D-081).
+///
+/// # Three terms, because the cost is neither linear nor a function of size
+///
+/// T1.3 asks for "rows × measured per-row cost". That model is wrong twice over,
+/// and both corrections came out of measuring it.
+///
+/// First, the cost is not linear. `write_edges_atomic` opens with
+/// `reject_overlaps_within`, which compares **every pair** in the batch before a
+/// row is written. Second — and this is the one that matters — the quadratic
+/// term's constant depends on the batch's *shape*, not its size. The pairwise
+/// loop starts with an early `continue` on mismatched `(source, target,
+/// edge_type)`; pairs that share all three fall through to `Interval::new` and
+/// `overlaps`, which is **sixteen times** dearer per pair.
+///
+/// ```text
+/// hold ≈ 73 µs · rows  +  5.5 ns · mismatched pairs  +  86 ns · matching pairs
+/// ```
+///
+/// Two batches of 20,000 edges, measured on the same machine: one fanning out to
+/// distinct targets holds the actor for **2.5 s**, and one asserting 20,000
+/// corrections to a single relationship's history holds it for **18.6 s**. A
+/// size-only model is off by 7× between those two, in the direction that
+/// matters — it under-predicts the bad case. So this counts the matching pairs
+/// rather than guessing, with one `HashMap` pass over the batch. That pass is
+/// O(rows) against an operation about to spend milliseconds per row.
+///
+/// # What this is calibrated against, and where it will be wrong
+///
+/// libSQL 0.9.30, one machine, best of three, over 100–20,000 rows in both
+/// shapes; within 5% across that range except below ~500 rows, where fixed costs
+/// dominate and it over-predicts by 3× — harmless, since nothing that small can
+/// approach [`BULK_ATOMIC_WARN_HOLD`].
+///
+/// It is machine-specific and says nothing about disk. It exists to turn
+/// "uncapped" into an order of magnitude a caller can act on — the difference
+/// between 30 ms and 18 s — and should not be read more precisely than that.
+/// `examples/bulk_atomic_diag.rs` prints predicted against measured, so the
+/// model's drift is visible rather than assumed.
+pub fn estimated_bulk_hold(edges: &[EdgeAssertion]) -> std::time::Duration {
+    let rows = edges.len() as u64;
+    let all_pairs = rows.saturating_mul(rows.saturating_sub(1)) / 2;
+
+    // Pairs sharing all three key columns, which is exactly the set that reaches
+    // the guard's expensive path. Grouped rather than sorted: the batch is
+    // borrowed, and sorting would either clone it or reorder the caller's data.
+    let mut groups: std::collections::HashMap<(&str, &str, &str), u64> =
+        std::collections::HashMap::new();
+    for e in edges {
+        *groups
+            .entry((&e.source, &e.target, &e.edge_type))
+            .or_insert(0) += 1;
+    }
+    let matching: u64 = groups.values().map(|&g| g * (g - 1) / 2).sum();
+    let mismatched = all_pairs - matching;
+
+    // Nanoseconds throughout, saturating: a caller who passes a batch large
+    // enough to overflow this has a problem the arithmetic cannot express, and
+    // saturating to ~584 years still crosses every threshold above.
+    std::time::Duration::from_nanos(
+        (73_000u64.saturating_mul(rows))
+            .saturating_add(mismatched.saturating_mul(11) / 2)
+            .saturating_add(matching.saturating_mul(86)),
+    )
+}
+
+/// Most sessions [`Database::archive_windowed`] will run for one call (T1.1).
+///
+/// A limit exists because the session count is a function of *transaction-time
+/// span divided by window*, and both come from the caller — a one-second window
+/// over a decade of history is ten million actor turns, each opening a
+/// transaction and writing a horizon row. That is not a slow archive, it is a
+/// caller who meant something else.
+///
+/// 4,096 is chosen against the operation it bounds rather than against a clock:
+/// at the measured 26.8 ms for a session with work in it, a full run of this
+/// many is about two minutes of background writing, and the whole point of
+/// windowing is that those two minutes are interruptible. It is a refusal
+/// rather than a clamp — see [`DbError::ArchiveWindow`] for why.
+pub const MAX_ARCHIVE_SESSIONS: usize = 4_096;
 
 /// A concept assertion: the payload of an upsert.
 #[derive(Debug, Clone, PartialEq)]
@@ -323,6 +429,15 @@ pub enum LowPriCommand {
     RebuildFts {
         responder: oneshot::Sender<Result<()>>,
     },
+    /// One step of a chunked shadow rebuild (§5.8, T1.2, D-082).
+    ///
+    /// Low priority, and one command per step rather than one per rebuild: the
+    /// whole value of building beside the live table is that the actor returns
+    /// here between chunks. See [`Database::rebuild_current_chunked`].
+    ShadowRebuild {
+        step: crate::integrity::ShadowStep,
+        responder: oneshot::Sender<Result<crate::integrity::ShadowOutcome>>,
+    },
 }
 
 enum LoopCtl {
@@ -349,6 +464,13 @@ pub struct Database {
     /// Set by [`Database::close`]. Read only by [`Drop`], which warns when it is
     /// still false — see that impl for why the omission is worth a warning.
     closed: bool,
+    /// Shared with the actor (T1.4, T1.2). Held here rather than behind
+    /// `#[cfg(feature = "metrics")]` so `open_inner` has one shape; with the
+    /// feature off the metrics half is a zero-sized type and only
+    /// [`Database::metrics`] is gated — which is also why the field is unread in
+    /// the default build: the actor holds the other `Arc` and does the writing.
+    #[cfg_attr(not(feature = "metrics"), allow(dead_code))]
+    shared: Arc<ActorShared>,
 }
 
 impl Database {
@@ -430,11 +552,13 @@ impl Database {
             }
             None => Arc::new(SystemClock::new(&read_conn).await?),
         };
+        let shared = Arc::new(ActorShared::default());
         let writer = tokio::spawn(run_writer_actor(
             write_conn,
             Arc::clone(&clock),
             highpri_rx,
             lowpri_rx,
+            Arc::clone(&shared),
         ));
 
         let archive_path = derive_archive_path(path);
@@ -490,6 +614,7 @@ impl Database {
             cadence_stop,
             cadence,
             closed: false,
+            shared,
         };
 
         // **Re-anchor after a migration (Wave 4.4).**
@@ -567,6 +692,33 @@ impl Database {
     /// Snapshot directory, derived by convention from the main file.
     pub fn snapshots_dir(&self) -> &Path {
         &self.snapshots_dir
+    }
+
+    /// What the write actor has done since this handle was opened (T1.4, D-079).
+    ///
+    /// Requires the `metrics` feature. The counters are per-handle and start at
+    /// zero on `open()` — they are not read from the database, because the thing
+    /// being measured is *this process's* actor and merging two processes'
+    /// histograms would produce a number about neither.
+    ///
+    /// The intended first question is [`crate::metrics::MetricsSnapshot::budget_violations`]:
+    ///
+    /// ```no_run
+    /// # async fn f(db: &macrame::Database) {
+    /// # #[cfg(feature = "metrics")] {
+    /// for k in db.metrics().budget_violations() {
+    ///     eprintln!("{} broke the 3 ms bound {} times", k.kind, k.over_budget);
+    /// }
+    /// # }
+    /// # }
+    /// ```
+    ///
+    /// Reading this does not stop the actor — see
+    /// [`crate::metrics::ActorMetrics::snapshot`] for what that costs in
+    /// consistency, and why the trade goes that way.
+    #[cfg(feature = "metrics")]
+    pub fn metrics(&self) -> crate::metrics::MetricsSnapshot {
+        self.shared.metrics.snapshot()
     }
 
     /// The underlying libSQL database, for callers that need their own connection.
@@ -657,7 +809,51 @@ impl Database {
     }
 
     /// Assert many edges in one transaction under one stamp (D-014).
+    ///
+    /// # This is the one write with no latency bound, and here is what it costs
+    ///
+    /// The batch is one act under one `recorded_at`, so it cannot be chunked —
+    /// splitting it is the thing this method exists not to do. That makes the
+    /// actor's hold a function of `edges.len()`, and until now the only
+    /// statement of that anywhere was the prose "uncapped" in
+    /// [`CHUNK_BUDGET`]'s table. A caller who stalls every other writer for
+    /// eight seconds should have been able to predict it from the signature.
+    ///
+    /// Measured on libSQL 0.9.30 (T1.3, D-081), holding the actor for:
+    ///
+    /// | rows | hold |
+    /// |---|---|
+    /// | 500 | ~34 ms |
+    /// | 2,000 | ~155 ms |
+    /// | 10,000 | ~1.0 s |
+    /// | 20,000 | ~2.6 s |
+    ///
+    /// [`estimated_bulk_hold`] is that curve as a function, and this method
+    /// emits a `tracing::warn!` when it predicts more than
+    /// [`BULK_ATOMIC_WARN_HOLD`]. **The estimate is a shape, not a promise** —
+    /// see [`estimated_bulk_hold`] for what it is calibrated against and where
+    /// it will be wrong.
+    ///
+    /// A caller who needs the latency bound and not the atomicity wants
+    /// [`Self::bulk_import`], which is the same write chunked and explicitly not
+    /// atomic overall (D-011).
     pub async fn write_bulk_atomic(&self, edges: Vec<EdgeAssertion>) -> Result<usize> {
+        let estimate = estimated_bulk_hold(&edges);
+        if estimate > BULK_ATOMIC_WARN_HOLD {
+            // Warned here rather than in the actor, and before the send: this is
+            // the caller's own task, so the log line lands with their span
+            // attached and names the call site that chose the batch size. By the
+            // time the actor has it, the only context left is "a large batch".
+            tracing::warn!(
+                rows = edges.len(),
+                estimated_hold_ms = estimate.as_millis() as u64,
+                "write_bulk_atomic will hold the write actor for roughly \
+                 {estimate:?} — it is atomic by contract (D-014) and cannot be \
+                 chunked. Every other writer waits that long. Use bulk_import \
+                 if the batch does not need to be all-or-nothing."
+            );
+        }
+
         let edges = normalize_all(edges)?;
         self.high(|responder| HighPriCommand::WriteBulkAtomic { edges, responder })
             .await
@@ -666,6 +862,116 @@ impl Database {
     /// Rebuild `links_current` from `links` and verify zero drift (§5.8).
     pub async fn rebuild_current(&self) -> Result<RebuildReport> {
         self.high(|responder| HighPriCommand::RebuildCurrent { responder })
+            .await
+    }
+
+    /// Rebuild `links_current` beside itself, in chunks (§5.8, T1.2, D-082).
+    ///
+    /// Same result as [`Self::rebuild_current`], different latency profile.
+    /// `rebuild_current` is one transaction holding the write lock for its whole
+    /// duration, because D-023 will not let the `DELETE` and the `INSERT` be
+    /// split: a reader landing between them sees a graph with no edges and no
+    /// error. This builds the replacement in a shadow table instead — the live
+    /// table stays live and trigger-maintained throughout — and swaps it in at
+    /// the end.
+    ///
+    /// Each step is its own actor turn, so an interactive assertion can jump the
+    /// queue between chunks. That is the whole of the improvement, and it is why
+    /// the loop is here rather than inside the actor's arm (the same reasoning
+    /// as [`Self::archive_windowed`] and [`Self::bulk_import`]).
+    ///
+    /// # What the swap still costs
+    ///
+    /// Not microseconds. Index names are global and SQLite has no `ALTER INDEX
+    /// … RENAME`, so the shadow cannot be built carrying `links_current`'s index
+    /// names while `links_current` still holds them — and building it under
+    /// other names would leave the table permanently indexed under names absent
+    /// from [`CREATE_INDICES`](crate::schema::ddl::CREATE_INDICES), so the next
+    /// migration would create a second copy of each.
+    /// `DROP TABLE` frees the names, so the swap transaction is where
+    /// the three indexes get built. What the chunking moves off the lock is the
+    /// **projection** — the window function over all of `links` — which is the
+    /// O(E log E) term.
+    ///
+    /// # When this returns an error rather than a repair
+    ///
+    /// [`DbError::RebuildInterrupted`] means an archive committed while the
+    /// shadow was being built. Its deletions are invisible to a catch-up pass
+    /// keyed on `recorded_at` — a deleted row has no `recorded_at` left to find
+    /// it by — so the work is discarded rather than swapped in. `links_current`
+    /// is untouched and the call can simply be retried.
+    ///
+    /// Use [`Self::rebuild_current`] when the repair must be one atomic act, or
+    /// when nothing else is contending for the actor and the extra turns are
+    /// pure overhead.
+    pub async fn rebuild_current_chunked(&self) -> Result<RebuildReport> {
+        use crate::integrity::{ShadowOutcome, ShadowStep};
+
+        // Each `else` arm is unreachable: the actor maps each step to its own
+        // outcome variant. Written as a refutable pattern rather than an
+        // `unwrap` so that adding a step cannot turn a mismatch into a panic on
+        // the write path — and `WriterDroppedResponder` is the honest name for
+        // "the actor answered with something this cannot use".
+        let ShadowOutcome::Started { build_start, epoch } =
+            self.shadow_step(ShadowStep::Begin).await?
+        else {
+            return Err(DbError::WriterDroppedResponder);
+        };
+
+        let mut after: Option<String> = None;
+        loop {
+            let ShadowOutcome::Filled { last } = self
+                .shadow_step(ShadowStep::Fill {
+                    after: after.take(),
+                })
+                .await?
+            else {
+                return Err(DbError::WriterDroppedResponder);
+            };
+            match last {
+                Some(last) => after = Some(last),
+                None => break,
+            }
+        }
+
+        let ShadowOutcome::Swapped { rows } = self
+            .shadow_step(ShadowStep::Swap { build_start, epoch })
+            .await?
+        else {
+            return Err(DbError::WriterDroppedResponder);
+        };
+
+        Ok(RebuildReport {
+            rows_rebuilt: rows,
+            // Not audited. The chunked path's whole argument is that the
+            // expensive work happens off the lock, and `audit_current` is two
+            // `EXCEPT` passes over the projection — the cost D-077 removed from
+            // the archive for the same reason. A caller who wants the check has
+            // `audit_current` on the read connection, where it costs nobody the
+            // write lock.
+            drift_after: 0,
+        })
+    }
+
+    /// Run one step of a chunked rebuild, for a caller doing its own scheduling.
+    ///
+    /// [`Self::rebuild_current_chunked`] is this in a loop and is what almost
+    /// everyone wants. This exists because that loop offers no seam: it drives
+    /// `Begin`, then `Fill` to exhaustion, then `Swap`, and a caller who needs to
+    /// do something *between* steps — pace them against a frame budget, abandon
+    /// a rebuild that has run long enough, or provoke the archive interlock in a
+    /// test — cannot get in.
+    ///
+    /// The obligation that comes with it: `epoch` from
+    /// [`ShadowOutcome::Started`](crate::integrity::ShadowOutcome) must be handed
+    /// back to [`ShadowStep::Swap`](crate::integrity::ShadowStep), or the
+    /// archive interlock is defeated and a stale projection can be swapped in.
+    /// The looping version cannot get that wrong; this one can.
+    pub async fn shadow_step(
+        &self,
+        step: crate::integrity::ShadowStep,
+    ) -> Result<crate::integrity::ShadowOutcome> {
+        self.low(|responder| LowPriCommand::ShadowRebuild { step, responder })
             .await
     }
 
@@ -879,6 +1185,163 @@ impl Database {
         .await
     }
 
+    /// Archive up to `cutoff` as a sequence of sessions, each covering at most
+    /// `window` of **transaction** time (T1.1, D-080).
+    ///
+    /// `archive(cutoff)` is one transaction whose size is set by how long it has
+    /// been since the last one, which makes it the least bounded of the three
+    /// operations exempt from [`CHUNK_BUDGET`] — its hold is a function of
+    /// operational history rather than of anything a caller chose. This runs the
+    /// same work as *N* complete sessions, each with its own marker, horizon row
+    /// and rebuild, and returns one [`ArchiveReport`] per session in order.
+    ///
+    /// # D-012 is satisfied per session, and that is what it requires
+    ///
+    /// The atomicity D-012 demands is that copy-then-delete never be split — a
+    /// crash between the phases duplicates or loses rows. *N* small sessions
+    /// satisfy that exactly as one large one does. The obligation windowing adds
+    /// is that a partial run leave a coherent intermediate state, which it does:
+    /// each session commits a valid horizon, so a failure at window *k* leaves a
+    /// database archived up to boundary *k−1* and nothing in between. **The
+    /// sequence is not atomic and does not claim to be** — on error, the reports
+    /// for the sessions that did commit are lost with it, but their effect is
+    /// not, and re-running with the same `cutoff` completes the job.
+    ///
+    /// # Each session is its own actor turn, and that is the entire point
+    ///
+    /// This loop lives here, on the handle, rather than inside the actor's
+    /// `Archive` arm. Putting it there would have produced *N* small
+    /// transactions inside **one** hold, which shrinks the transaction and
+    /// changes the latency not at all: the actor is single-threaded, so nothing
+    /// else writes until its turn returns regardless of how many `COMMIT`s the
+    /// turn contains. Sending *N* commands returns the actor to its `select!`
+    /// between sessions, which is where an interactive assertion gets to jump
+    /// the queue — and it is high-priority, so it does.
+    ///
+    /// The same reasoning is why [`Self::bulk_import`] chunks here and not
+    /// there, and it is the trap T1.2 names for `CREATE TABLE … AS SELECT`.
+    ///
+    /// # Choosing a window
+    ///
+    /// The bound is on *transaction* time, so the session count is set by how
+    /// far back the hot file goes, not by how much it holds. A window is
+    /// rejected rather than clamped if it would need more than
+    /// [`MAX_ARCHIVE_SESSIONS`] sessions — see [`DbError::ArchiveWindow`].
+    ///
+    /// Windows containing nothing archivable are cheap but not free: each still
+    /// opens a transaction and writes a horizon row. What they no longer do is
+    /// re-project `links_current`, which `archive_session` now skips when its
+    /// `DELETE` removed no rows — without that, windowing costs *more* in total
+    /// than not windowing, because the repair term scales with the surviving
+    /// table and not with the batch (D-077).
+    pub async fn archive_windowed(
+        &self,
+        cutoff: &str,
+        window: std::time::Duration,
+    ) -> Result<Vec<ArchiveReport>> {
+        let cutoff = timestamp::normalize(cutoff)?;
+        let boundaries = self.archive_boundaries(&cutoff, window).await?;
+
+        let mut reports = Vec::with_capacity(boundaries.len());
+        for boundary in boundaries {
+            let archive_path = self.archive_path.clone();
+            reports.push(
+                self.low(|responder| LowPriCommand::Archive {
+                    cutoff: boundary,
+                    archive_path,
+                    responder,
+                })
+                .await?,
+            );
+        }
+        Ok(reports)
+    }
+
+    /// The cutoffs [`Self::archive_windowed`] will run, ascending, ending at
+    /// `cutoff` exactly.
+    ///
+    /// Read on `read_conn`, not on the actor: this is two `MIN`s and the actor
+    /// has no reason to hold its lock for them.
+    ///
+    /// The lower end comes from the data rather than from the clock. Stepping
+    /// from some fixed epoch would make the session count a function of the
+    /// calendar — a database opened yesterday would still be asked to archive
+    /// 1970 — whereas the oldest `recorded_at` actually present is the earliest
+    /// boundary that can contain anything.
+    async fn archive_boundaries(
+        &self,
+        cutoff: &str,
+        window: std::time::Duration,
+    ) -> Result<Vec<String>> {
+        // A single session at `cutoff` is exactly `archive(cutoff)`, and it is
+        // the right answer for an empty hot file: it still writes the horizon
+        // row, so windowed and unwindowed runs leave the same observable state.
+        let Some(oldest) = self.oldest_hot_stamp(cutoff).await? else {
+            return Ok(vec![cutoff.to_string()]);
+        };
+
+        let start = timestamp::parse(&oldest)?;
+        let end = timestamp::parse(cutoff)?;
+        let Ok(span) = end.duration_since(start) else {
+            // Everything in the hot file is at or after the cutoff, so there is
+            // nothing in range to divide.
+            return Ok(vec![cutoff.to_string()]);
+        };
+
+        if window.is_zero() {
+            return Err(DbError::ArchiveWindow {
+                window,
+                reason: "a zero-length window never advances past the first boundary".into(),
+            });
+        }
+
+        // `div_ceil` on nanos: a span of 90 minutes in 60-minute windows is two
+        // sessions, not one. `as_nanos` is u128, so neither the division nor the
+        // span can overflow for any timestamp this crate can store.
+        let sessions = span.as_nanos().div_ceil(window.as_nanos());
+        if sessions > MAX_ARCHIVE_SESSIONS as u128 {
+            return Err(DbError::ArchiveWindow {
+                window,
+                reason: format!(
+                    "a span of {span:?} would need {sessions} sessions (limit \
+                     {MAX_ARCHIVE_SESSIONS}); widen the window"
+                ),
+            });
+        }
+
+        let mut boundaries = Vec::with_capacity(sessions as usize);
+        for k in 1..sessions {
+            boundaries.push(timestamp::format(start + window * k as u32));
+        }
+        // The last boundary is `cutoff` itself and not `start + n*window`, which
+        // would overshoot and archive rows the caller excluded.
+        boundaries.push(cutoff.to_string());
+        Ok(boundaries)
+    }
+
+    /// Oldest `recorded_at` below `cutoff` in either hot table, or `None`.
+    async fn oldest_hot_stamp(&self, cutoff: &str) -> Result<Option<String>> {
+        let mut oldest: Option<String> = None;
+        for table in ["links", "transaction_log"] {
+            let found: Option<String> = self
+                .read_conn
+                .query(
+                    &format!("SELECT MIN(recorded_at) FROM {table} WHERE recorded_at < ?1"),
+                    libsql::params![cutoff],
+                )
+                .await?
+                .next()
+                .await?
+                .and_then(|row| row.get(0).ok());
+            if let Some(found) = found {
+                if oldest.as_ref().is_none_or(|o| found < *o) {
+                    oldest = Some(found);
+                }
+            }
+        }
+        Ok(oldest)
+    }
+
     /// Send a high-priority command and wait for its answer.
     ///
     /// The two error mappings here are the whole reason this helper exists.
@@ -1063,17 +1526,41 @@ fn derive_archive_path(path: &Path) -> PathBuf {
 }
 
 /// Dedicated Write Actor event loop prioritizing high-priority UI requests over low-priority background work.
+///
+/// # The turn is the unit, not the statement (T1.4)
+///
+/// One iteration of this loop is one *hold*: the actor is single-threaded and
+/// the SQLite write lock is not preemptible, so from the moment a command starts
+/// executing until it returns, nothing else writes. That is the quantity
+/// [`CHUNK_BUDGET`] bounds, and so it is the quantity
+/// [`crate::metrics::ActorMetrics`] measures — deliberately around the whole
+/// `execute` call rather than inside it. Timing the SQL alone would have
+/// reported a bound that held while callers waited.
+///
+/// Queue depth is sampled *before* the `select!`, so it is the backlog the turn
+/// found on arrival rather than the one it left behind.
 async fn run_writer_actor(
     conn: libsql::Connection,
     clock: Arc<dyn Clock>,
     mut highpri_rx: mpsc::Receiver<HighPriCommand>,
     mut lowpri_rx: mpsc::Receiver<LowPriCommand>,
+    shared: Arc<ActorShared>,
 ) -> Result<()> {
     loop {
+        shared
+            .metrics
+            .record_turn(highpri_rx.len(), lowpri_rx.len());
+
         let ctl = tokio::select! {
             biased;
-            Some(cmd) = highpri_rx.recv() => cmd.execute(&conn, &*clock).await,
-            Some(cmd) = lowpri_rx.recv()  => cmd.execute(&conn, &*clock).await,
+            Some(cmd) = highpri_rx.recv() => {
+                let turn = Turn::start(cmd.kind(), &shared);
+                cmd.execute(&conn, &*clock, &turn).await
+            }
+            Some(cmd) = lowpri_rx.recv() => {
+                let turn = Turn::start(cmd.kind(), &shared);
+                cmd.execute(&conn, &*clock, &turn).await
+            }
             else => LoopCtl::Break,
         };
         if matches!(ctl, LoopCtl::Break) {
@@ -1081,6 +1568,86 @@ async fn run_writer_actor(
         }
     }
     Ok(())
+}
+
+/// One command's hold: the timer, its label, and the counters it reports to.
+///
+/// # The hold is recorded *before* the caller is answered, and it has to be
+///
+/// The obvious placement — time the whole `execute` call from the loop — is
+/// wrong in a way that only shows up under test. Every arm of `execute` ends by
+/// sending on a `oneshot`, which wakes the waiting caller; the actor then
+/// returns to the loop and records. Those are two tasks, so a caller that awaits
+/// its own write and immediately reads [`Database::metrics`] can be scheduled
+/// first and see a turn count that does not include the write it just did.
+///
+/// Not a correctness bug in the ledger, and it would never have been noticed in
+/// production — a dashboard sampling every few seconds cannot see the window.
+/// It makes every test and diagnostic of the counters flaky, which is worse: the
+/// instrumentation would have been *believed* while being wrong exactly when
+/// someone tried to check it. `examples/bulk_atomic_diag.rs` was the thing that
+/// caught it, reporting a 20,000-row batch as a 0 ms hold.
+///
+/// So `answer` records and then sends, in that order, and the ordering is the
+/// method's whole reason to exist. What it costs is that the `oneshot::send`
+/// itself falls outside the measurement, which is a few nanoseconds against a
+/// turn measured in microseconds at best.
+struct Turn<'a> {
+    kind: crate::metrics::CommandKind,
+    timer: crate::metrics::HoldTimer,
+    shared: &'a ActorShared,
+}
+
+/// State the actor owns and a `Turn` needs to reach.
+///
+/// `archive_epoch` is here rather than in [`crate::metrics::ActorMetrics`]
+/// because it is **not** a metric: T1.2's shadow rebuild reads it to decide
+/// whether its work is still valid, so it has to be present in every build, not
+/// only under the `metrics` feature. Counting archives happens to be what both
+/// want; only one of them is allowed to be compiled out.
+#[derive(Default)]
+struct ActorShared {
+    metrics: crate::metrics::ActorMetrics,
+    archive_epoch: std::sync::atomic::AtomicU64,
+}
+
+impl<'a> Turn<'a> {
+    fn start(kind: crate::metrics::CommandKind, shared: &'a ActorShared) -> Self {
+        Self {
+            kind,
+            timer: crate::metrics::HoldTimer::start(),
+            shared,
+        }
+    }
+
+    fn epoch(&self) -> u64 {
+        self.shared
+            .archive_epoch
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Record that an archive session committed.
+    ///
+    /// Bumped on **success only**: a failed archive rolls back, so it deletes
+    /// nothing and invalidates no shadow build.
+    fn archive_committed(&self) {
+        self.shared
+            .archive_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Close the hold and hand the result back. Never the other way round.
+    ///
+    /// The `let _ =` on the send is deliberate and predates this: a caller that
+    /// dropped its receiver — `tokio::time::timeout` around a write, which
+    /// [`Database`]'s write surface explicitly documents — is not an actor
+    /// error, and the command committed regardless.
+    fn answer<T>(&self, responder: oneshot::Sender<Result<T>>, res: Result<T>) {
+        self.shared
+            .metrics
+            .record_hold(self.kind, self.timer.elapsed());
+        let _ = responder.send(res);
+    }
 }
 
 const INSERT_LINK: &str = "INSERT INTO links \
@@ -1120,6 +1687,25 @@ fn concept_params<'a>(concept: &'a ConceptUpsert, stamp: &'a str) -> [libsql::Va
 }
 
 impl HighPriCommand {
+    /// The metrics label for this variant (T1.4).
+    ///
+    /// Exhaustive for the same reason `execute` is: a new variant that silently
+    /// borrowed another's label would attribute its holds to the wrong command,
+    /// and the one question the counters exist to answer is *which* command
+    /// broke the budget.
+    fn kind(&self) -> crate::metrics::CommandKind {
+        use crate::metrics::CommandKind as K;
+        match self {
+            HighPriCommand::AssertEdge { .. } => K::AssertEdge,
+            HighPriCommand::RetireEdge { .. } => K::RetireEdge,
+            HighPriCommand::UpsertConcept { .. } => K::UpsertConcept,
+            HighPriCommand::WriteBulkAtomic { .. } => K::WriteBulkAtomic,
+            HighPriCommand::RebuildCurrent { .. } => K::RebuildCurrent,
+            HighPriCommand::RegisterModel { .. } => K::RegisterModel,
+            HighPriCommand::Shutdown { .. } => K::Shutdown,
+        }
+    }
+
     /// Run one command and answer its caller.
     ///
     /// Deliberately exhaustive — there is no `_` arm. The 0.4.5–0.5.4 actor
@@ -1129,16 +1715,21 @@ impl HighPriCommand {
     /// commands were indistinguishable from a hung database. An exhaustive match
     /// makes that failure a compile error instead of a runtime silence, which is
     /// why adding a variant should break this function.
-    async fn execute(self, conn: &libsql::Connection, clock: &dyn Clock) -> LoopCtl {
+    async fn execute(
+        self,
+        conn: &libsql::Connection,
+        clock: &dyn Clock,
+        turn: &Turn<'_>,
+    ) -> LoopCtl {
         match self {
             HighPriCommand::Shutdown { responder } => {
-                let _ = responder.send(Ok(()));
+                turn.answer(responder, Ok(()));
                 return LoopCtl::Break;
             }
             HighPriCommand::AssertEdge { edge, responder } => {
                 let stamp = clock.now();
                 if let Err(e) = reject_overlapping_interval(conn, &edge).await {
-                    let _ = responder.send(Err(e));
+                    turn.answer(responder, Err(e));
                     return LoopCtl::Continue;
                 }
                 let res = match conn
@@ -1169,7 +1760,7 @@ impl HighPriCommand {
                     )
                     .await),
                 };
-                let _ = responder.send(res);
+                turn.answer(responder, res);
             }
             HighPriCommand::RetireEdge {
                 source,
@@ -1184,12 +1775,12 @@ impl HighPriCommand {
                     conn, &source, &target, &edge_type, &valid_from, &valid_to, &stamp,
                 )
                 .await;
-                let _ = responder.send(res);
+                turn.answer(responder, res);
             }
             HighPriCommand::UpsertConcept { concept, responder } => {
                 let stamp = clock.now();
                 let res = upsert_concept(conn, &concept, &stamp).await;
-                let _ = responder.send(res);
+                turn.answer(responder, res);
             }
             HighPriCommand::WriteBulkAtomic { edges, responder } => {
                 // One stamp for the whole batch (D-014): the rows were asserted
@@ -1197,17 +1788,20 @@ impl HighPriCommand {
                 // invent an ordering the caller never expressed.
                 let stamp = clock.now();
                 let res = write_edges_atomic(conn, &edges, &stamp).await;
-                let _ = responder.send(res);
+                turn.answer(responder, res);
             }
             HighPriCommand::RebuildCurrent { responder } => {
-                let _ = responder.send(rebuild_current(conn).await);
+                turn.answer(responder, rebuild_current(conn).await);
             }
             HighPriCommand::RegisterModel {
                 model,
                 dim,
                 responder,
             } => {
-                let _ = responder.send(crate::vector::register_model(conn, &model, dim).await);
+                turn.answer(
+                    responder,
+                    crate::vector::register_model(conn, &model, dim).await,
+                );
             }
         }
         LoopCtl::Continue
@@ -1215,27 +1809,49 @@ impl HighPriCommand {
 }
 
 impl LowPriCommand {
+    /// The metrics label for this variant (T1.4). See [`HighPriCommand::kind`].
+    fn kind(&self) -> crate::metrics::CommandKind {
+        use crate::metrics::CommandKind as K;
+        match self {
+            LowPriCommand::WriteConceptsChunk { .. } => K::WriteConceptsChunk,
+            LowPriCommand::WriteAnalyticsChunk { .. } => K::WriteAnalyticsChunk,
+            LowPriCommand::UpsertEmbeddingChunk { .. } => K::UpsertEmbeddingChunk,
+            LowPriCommand::BulkImportChunk { .. } => K::BulkImportChunk,
+            LowPriCommand::Archive { .. } => K::Archive,
+            LowPriCommand::RebuildFts { .. } => K::RebuildFts,
+            LowPriCommand::ShadowRebuild { .. } => K::ShadowRebuild,
+        }
+    }
+
     /// Run one background command and answer its caller.
     ///
     /// Also exhaustive. The pre-0.5.4 version was a single `LoopCtl::Continue`
     /// for *every* variant — every background write silently discarded, its
     /// caller waiting forever.
-    async fn execute(self, conn: &libsql::Connection, clock: &dyn Clock) -> LoopCtl {
+    async fn execute(
+        self,
+        conn: &libsql::Connection,
+        clock: &dyn Clock,
+        turn: &Turn<'_>,
+    ) -> LoopCtl {
         match self {
             LowPriCommand::BulkImportChunk { chunk, responder } => {
                 // A stamp per chunk, not per batch: the chunks commit
                 // separately, so a shared stamp would claim a simultaneity the
                 // storage does not have.
                 let stamp = clock.now();
-                let _ = responder.send(write_edges_atomic(conn, &chunk, &stamp).await);
+                turn.answer(responder, write_edges_atomic(conn, &chunk, &stamp).await);
             }
             LowPriCommand::WriteConceptsChunk { chunk, responder } => {
                 let stamp = clock.now();
-                let _ = responder.send(write_concepts_atomic(conn, &chunk, &stamp).await);
+                turn.answer(responder, write_concepts_atomic(conn, &chunk, &stamp).await);
             }
             LowPriCommand::WriteAnalyticsChunk { chunk, responder } => {
                 let stamp = clock.now();
-                let _ = responder.send(write_annotations_atomic(conn, &chunk, &stamp).await);
+                turn.answer(
+                    responder,
+                    write_annotations_atomic(conn, &chunk, &stamp).await,
+                );
             }
             LowPriCommand::UpsertEmbeddingChunk {
                 model,
@@ -1246,8 +1862,10 @@ impl LowPriCommand {
                 // axis. It is a derived artifact of a model applied to content
                 // (Doctrine VII), and the ledger already records when the
                 // content changed.
-                let _ = responder
-                    .send(crate::vector::search::upsert_embedding_chunk(conn, &model, &chunk).await);
+                turn.answer(
+                    responder,
+                    crate::vector::search::upsert_embedding_chunk(conn, &model, &chunk).await,
+                );
             }
             LowPriCommand::Archive {
                 cutoff,
@@ -1257,8 +1875,34 @@ impl LowPriCommand {
                 // The archive *time*, not the cutoff. `archive_horizon` records
                 // both and they are different facts — see `archive()` (Wave 4.5).
                 let archived_at = clock.now();
-                let _ =
-                    responder.send(archive(conn, &cutoff, &archived_at, &archive_path).await);
+                let res = archive(conn, &cutoff, &archived_at, &archive_path).await;
+                // Before the answer, so a shadow rebuild that reads the epoch on
+                // its next turn cannot miss an archive that has already deleted
+                // rows out from under it (T1.2).
+                if res.is_ok() {
+                    turn.archive_committed();
+                }
+                turn.answer(responder, res);
+            }
+            LowPriCommand::ShadowRebuild { step, responder } => {
+                use crate::integrity::{shadow, ShadowOutcome, ShadowStep};
+                let res = match step {
+                    ShadowStep::Begin => shadow::begin(conn).await.map(|build_start| {
+                        ShadowOutcome::Started {
+                            build_start,
+                            epoch: turn.epoch(),
+                        }
+                    }),
+                    ShadowStep::Fill { after } => shadow::fill_chunk(conn, after.as_deref())
+                        .await
+                        .map(|last| ShadowOutcome::Filled { last }),
+                    ShadowStep::Swap { build_start, epoch } => {
+                        shadow::swap(conn, &build_start, epoch, turn.epoch())
+                            .await
+                            .map(|rows| ShadowOutcome::Swapped { rows })
+                    }
+                };
+                turn.answer(responder, res);
             }
             LowPriCommand::RebuildFts { responder } => {
                 let res = conn
@@ -1266,7 +1910,7 @@ impl LowPriCommand {
                     .await
                     .map(|_| ())
                     .map_err(Into::into);
-                let _ = responder.send(res);
+                turn.answer(responder, res);
             }
         }
         LoopCtl::Continue
@@ -1708,4 +2352,86 @@ async fn write_concepts_atomic(
     drop(stmt);
     tx.commit().await?;
     Ok(concepts.len())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn edge(target: &str, micros: usize) -> EdgeAssertion {
+        EdgeAssertion::new("src", target, "LINKS")
+            .valid_from(format!("2026-01-01T00:00:00.{micros:06}Z"))
+            .valid_to(format!("2026-01-01T00:00:00.{:06}Z", micros + 1))
+    }
+
+    /// The estimate must depend on the batch's **shape**, not only its size.
+    ///
+    /// This is the correction T1.3's "rows × per-row cost" needed. Two batches
+    /// of the same length whose measured holds differ by 7× must not be
+    /// predicted identically, and the direction matters: a model that averages
+    /// the two under-predicts the expensive shape, which is the only one anyone
+    /// needs warning about.
+    #[test]
+    fn two_batches_of_one_size_are_not_predicted_alike() {
+        const N: usize = 20_000;
+        let fanout: Vec<_> = (0..N).map(|i| edge(&format!("t{i:07}"), i)).collect();
+        let history: Vec<_> = (0..N).map(|i| edge("t0", i)).collect();
+
+        let (a, b) = (
+            estimated_bulk_hold(&fanout),
+            estimated_bulk_hold(&history),
+        );
+        assert!(
+            b > a * 5,
+            "the guard's expensive path is 16x dearer per pair and this batch \
+             takes it on every pair, but the estimates are {a:?} and {b:?}"
+        );
+    }
+
+    /// Measured on libSQL 0.9.30: 2.5 s and 18.6 s for those two batches. The
+    /// estimator tracked both within 5%, and this pins that it still does — a
+    /// coefficient edited without re-measuring fails here.
+    #[test]
+    fn the_estimate_matches_what_was_measured() {
+        const N: usize = 20_000;
+        let fanout: Vec<_> = (0..N).map(|i| edge(&format!("t{i:07}"), i)).collect();
+        let history: Vec<_> = (0..N).map(|i| edge("t0", i)).collect();
+
+        for (batch, measured_ms, label) in [
+            (fanout, 2_618u128, "fanout"),
+            (history, 18_057, "history"),
+        ] {
+            let predicted = estimated_bulk_hold(&batch).as_millis();
+            let ratio = predicted as f64 / measured_ms as f64;
+            assert!(
+                (0.8..1.25).contains(&ratio),
+                "{label}: predicted {predicted} ms against a measured \
+                 {measured_ms} ms ({ratio:.2}x). Re-run \
+                 examples/bulk_atomic_diag.rs before changing the coefficients."
+            );
+        }
+    }
+
+    /// An empty or single-edge batch has no pairs, and the arithmetic must not
+    /// underflow computing it.
+    #[test]
+    fn a_batch_too_small_to_have_pairs_still_estimates() {
+        assert_eq!(estimated_bulk_hold(&[]), std::time::Duration::ZERO);
+        let one = [edge("t0", 0)];
+        assert_eq!(
+            estimated_bulk_hold(&one),
+            std::time::Duration::from_nanos(73_000)
+        );
+    }
+
+    /// The warning threshold sits well above the bound this path is exempt from.
+    ///
+    /// Warning at `CHUNK_BUDGET` would fire on batches working exactly as
+    /// designed — the exemption is a contract (D-014), not a failure — and a
+    /// warning that fires on correct behaviour gets filtered out, taking the
+    /// 18-second case with it.
+    #[test]
+    fn the_warning_threshold_is_not_the_chunk_budget() {
+        assert!(BULK_ATOMIC_WARN_HOLD > CHUNK_BUDGET * 10);
+    }
 }

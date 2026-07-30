@@ -1,8 +1,10 @@
 pub mod audit;
 pub mod rebuild;
+pub mod shadow;
 
 pub use audit::audit_current;
 pub use rebuild::{rebuild_current, RebuildReport};
+pub use shadow::{ShadowOutcome, ShadowStep};
 
 /// The latest-belief projection of `links` — **the single definition** (T0.2).
 ///

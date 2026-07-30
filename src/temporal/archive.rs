@@ -164,7 +164,7 @@ async fn archive_session(
         )
         .await? as usize;
 
-    delete_guarded(
+    let links_deleted = delete_guarded(
         &tx,
         conn,
         &format!("DELETE FROM links WHERE {LINKS_ARCHIVABLE}"),
@@ -184,11 +184,22 @@ async fn archive_session(
     // audit could explain, from a compensation that had quietly stopped being
     // the image of the thing it compensated for. Doctrine II: two clocks, never
     // mixed. Deriving from the definition cannot drift from the definition.
-    crate::integrity::rebuild::rebuild_within(
-        &tx,
-        crate::integrity::rebuild::Verify::No,
-    )
-    .await?;
+    //
+    // **Skipped when the DELETE removed nothing (T1.1, D-080).** `links_current`
+    // is a function of `links`, so if `links` did not change its projection did
+    // not either, and there is no drift for a rebuild to repair. This was
+    // harmless while `archive()` was called once against a whole backlog,
+    // because the one session always had work. It stops being harmless the
+    // moment the caller windows: `rebuild_within` costs O(surviving `links`)
+    // regardless of how much the session archived (D-077), so without this a run
+    // of twenty windows over a quiet stretch of history pays twenty full
+    // reprojections to delete nothing — and windowing makes the archive slower
+    // in total than not windowing. `log_entries_archived` deliberately does not
+    // enter into it: archiving the transaction log cannot change `links`.
+    if links_deleted > 0 {
+        crate::integrity::rebuild::rebuild_within(&tx, crate::integrity::rebuild::Verify::No)
+            .await?;
+    }
 
     let log_entries_archived = tx
         .execute(

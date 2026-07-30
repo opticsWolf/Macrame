@@ -90,6 +90,23 @@ pub enum DbError {
 
     #[error("physical delete blocked outside archive session ({table})")]
     ArchiveViolation { table: String },
+    /// [`crate::Database::archive_windowed`] was given a window it cannot use
+    /// (T1.1, D-080).
+    ///
+    /// Carries a `reason` rather than the numbers as fields because the two
+    /// cases it covers are not the same shape — a zero-length window never
+    /// advances at all, while a merely narrow one produces a session count that
+    /// has to be quoted against the limit to mean anything. A caller reading
+    /// this needs the sentence, not the struct.
+    ///
+    /// It is an error rather than a silent clamp on purpose. Rounding a
+    /// one-second window up to something workable would archive over boundaries
+    /// the caller did not choose, and the caller cannot see that it happened.
+    #[error("archive window {window:?} is unusable: {reason}")]
+    ArchiveWindow {
+        window: std::time::Duration,
+        reason: String,
+    },
 
     /// A timestamp that is not in canonical form (§4.1, D-029).
     ///
@@ -148,6 +165,16 @@ pub enum DbError {
 
     #[error("rebuild verification failed: {n} intervals still diverge")]
     RebuildFailed { n: usize },
+    /// A chunked shadow rebuild was abandoned rather than committed (T1.2, D-082).
+    ///
+    /// Distinct from [`Self::RebuildFailed`], and the distinction is the whole
+    /// point: `RebuildFailed` means the repair ran and did not repair, which is
+    /// a reason to distrust the ledger. This means the repair **did not run** —
+    /// something invalidated the work in progress and it was discarded before it
+    /// could be swapped in. `links_current` is untouched and whatever was true
+    /// of it before is still true. The action is to retry.
+    #[error("chunked rebuild abandoned: {reason}")]
+    RebuildInterrupted { reason: String },
 
     // -- 0.4.5: writer-actor containment --
     #[error("write actor is not running (reopen the Database)")]
