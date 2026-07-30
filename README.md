@@ -149,7 +149,7 @@ cargo test --features property-tests --no-fail-fast
 | Scenario tests | Attribute fidelity across `AttributeMode` values; corrupt-then-rebuild roundtrip |
 | Regression tests | `tests/wave1_regression_tests.rs` — one per Wave 1 defect, each verified to fail against the pre-fix tree. Its header names the three that pass either way and says why, rather than letting them look like coverage they are not |
 
-**Current baseline: 211 passing, 0 failing** on plain `cargo test`; 230 with `--features property-tests --no-fail-fast`.
+**Current baseline: 216 passing, 0 failing** on plain `cargo test`; 235 with `--features property-tests --no-fail-fast`.
 
 Benchmarks are separate and are **measurements, not gates** — §9's numbers are stated for named hardware, so an absolute threshold in CI would gate on whichever runner picked up the job:
 
@@ -171,13 +171,13 @@ Two things to know before reading a red or a green here. **A green means "no tes
 
 ### Known defects
 
-Severity rule: **a wrong answer outranks a crash.** Full evidence, reproductions and remediation order are in the [implementation plan §8.5](docs/Macrame%20Implementation%20Plan%20v0.5.4.md); the letters are that document's register.
+Severity rule: **a wrong answer outranks a crash.** Full evidence, reproductions and remediation order are in the [implementation plan §8.5](docs/Macrame%20Implementation%20Plan%20v0.5.6.md); the letters are that document's register.
 
 **Open:**
 
 | # | Location | Defect | Wave |
 |---|---|---|---|
-| Subgraph filters | `graph/subgraph.rs` | `load_subgraph` takes neither `edge_types` nor `min_weight` while `TraversalBuilder` takes both. A feature gap, not a wrong answer — but a reachability limit, because filtering after the fact cannot help a caller whose *unfiltered* neighbourhood exceeds the byte budget | — |
+| Louvain phase two | `graph/algorithms.rs` | Local-moving only; no community aggregation, so coarse structure is missed. Deferred on the byte budget's ceiling, which Wave 3's measurements weakened — 28 ms at 10K nodes leaves room. Open pending a caller who loads graphs where it pays | — |
 | Snapshot cross-check | `temporal/snapshot.rs` | Chains compound: `write_final` composes onto the previous snapshot, so an error propagates forward with nothing verifying a composed result against a fold from genesis | — |
 | No `verify_fts()` | `connection.rs` | `rebuild_fts()` is the repair with no way to ask whether it is needed. FTS5's `integrity-check` cannot answer — it verifies the index's internal consistency, not its agreement with `concepts` — so none was written rather than one that would call an empty index healthy (D-071) | — |
 | R15 | libSQL 0.9.30 | Intermittent `STATUS_ACCESS_VIOLATION` when local databases are opened concurrently in one process; mitigated by `RUST_TEST_THREADS = "1"` and the `property-tests` feature gate | — |
@@ -267,7 +267,7 @@ Every item the previous plan sequenced is delivered. What comes next is set by t
 
 ## Roadmap
 
-Four waves, ordered by the project's own severity rule — a wrong answer outranks a crash, and both outrank a slow one. Full detail, evidence and per-item acceptance tests are in the [implementation plan §9](docs/Macrame%20Implementation%20Plan%20v0.5.4.md).
+Four waves, ordered by the project's own severity rule — a wrong answer outranks a crash, and both outrank a slow one. Full detail, evidence and per-item acceptance tests are in the [implementation plan §9](docs/Macrame%20Implementation%20Plan%20v0.5.6.md).
 
 | Wave | Theme | Scope | Size |
 |---|---|---|---|
@@ -276,7 +276,7 @@ Four waves, ordered by the project's own severity rule — a wrong answer outran
 | **3** ✅ | Measure what the bounds claim | Six bench groups covering every previously unmeasured path. Found one defect (**AI**), retired two proposed optimisations, confirmed the four chunk constants. Delivered 2026-07-30; 202 → 203 passing | done |
 | **4** ✅ | Hardening | The ATTACH race, `close()`'s discarded error, `raw()`'s surface, the migration re-anchor, three mis-named errors, and Wave 3's unexplained superlinearity. Delivered 2026-07-30; 203 → 205 passing | done |
 
-| **5** ⬅ | The last silent-wrong-answer paths | The unreachable `'D'` branch (done, D-072); the FTS5 `VACUUM` hazard (investigated, **nothing built** — it isn't reachable, D-071); then R15, the subgraph filter, one consolidated §4 statement, and the rename | in progress |
+| **5** ⬅ | The last silent-wrong-answer paths | The unreachable `'D'` branch (D-072); the FTS5 `VACUUM` hazard (investigated, **nothing built** — it isn't reachable, D-071); `load_subgraph_with`, which found two accounting defects older than itself (D-073). Remaining: R15, one consolidated §4 statement, the rename | in progress |
 
 **Waves 1–4 are delivered; Wave 5 is under way.** What remains open is in the table above, and none of it returns a wrong answer.
 
@@ -306,7 +306,7 @@ Independent of all four: the **R15 upstream report** against libSQL 0.9.30, outs
 ## Documentation
 
 - [Architecture specification](docs/architecture/README.md) — normative surfaces: §4 (schema) and Appendix A (API). One file per section.
-- [Implementation plan](docs/Macrame%20Implementation%20Plan%20v0.5.4.md) — delivery status, open items, defect register. Start at **§8.5** (the 2026-07-30 review, with reproductions), **§8.6** (bounds that are stated and not bounded) and **§9** (the four waves).
+- [Implementation plan](docs/Macrame%20Implementation%20Plan%20v0.5.6.md) — delivery status, open items, defect register. Start at **§8.5** (the 2026-07-30 review, with reproductions), **§8.6** (bounds that are stated and not bounded) and **§9** (the four waves).
 - [Decision register](docs/architecture/s13-decision-register.md) — D-001 … D-059, each with its rationale and the disqualifying flaw of the alternative
 
 ## License

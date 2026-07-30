@@ -1,6 +1,6 @@
 [package]
 name = "macrame"
-version = "0.5.5"
+version = "0.5.6"
 edition = "2021"
 authors = ["Macrame Contributors"]
 description = "A Bitemporal Graph Ledger on libSQL · Embedded knowledge database"

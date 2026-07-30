@@ -281,20 +281,23 @@ impl Database {
     /// into [`DbError::SubgraphTooLarge`] rather than into an allocation
     /// failure.
     ///
-    /// # Not filtered
+    /// Unfiltered: every edge type, **every weight**. See
+    /// [`Self::load_subgraph_with`] for the filtered form, which this delegates
+    /// to.
     ///
-    /// **This takes neither `edge_types` nor `min_weight`, while
-    /// [`super::TraversalBuilder`] takes both** — the same walk, over the same
-    /// table, with two fewer knobs. Recorded rather than fixed in Wave 4.5,
-    /// because it is a feature gap and not a defect: nothing here returns a wrong
-    /// answer, and a caller who needs a filtered neighbourhood can get the ids
-    /// from `TraversalBuilder` today.
+    /// `min_weight` is `NEG_INFINITY` rather than [`TraversalBuilder`]'s default
+    /// of `0.0`, and the difference is load-bearing. A floor of `0.0` silently
+    /// drops negative-weight edges — which is precisely the input
+    /// [`DbError::NegativeEdgeWeight`] exists to *report*, since Dijkstra and A*
+    /// are unsound over them and D-039 chose to refuse at the boundary rather
+    /// than return a shortest path that is merely a path. Delegating with the
+    /// builder default turned that typed refusal into a graph quietly missing
+    /// edges; `a_negative_edge_weight_is_refused_at_load` caught it.
     ///
-    /// The reason it is worth closing eventually is the byte budget. Filtering
-    /// after the fact cannot help a caller whose *unfiltered* neighbourhood
-    /// exceeds the budget, so `SubgraphTooLarge` currently refuses loads that a
-    /// filtered walk would have fitted comfortably — which makes this a
-    /// reachability limit rather than a convenience one.
+    /// So the two mechanisms are made to agree instead of overlapping: an edge a
+    /// caller has **not** filtered out reaches the weight guard, and an edge they
+    /// have is theirs to exclude. See [`Self::load_subgraph_with`] for what that
+    /// means when a caller passes a default builder.
     pub async fn load_subgraph(
         &self,
         start_node: &str,
@@ -302,15 +305,92 @@ impl Database {
         now_ts: &str,
         byte_budget: usize,
     ) -> Result<Subgraph> {
+        self.load_subgraph_with(
+            &super::TraversalBuilder::new(start_node)
+                .max_depth(max_hops as usize)
+                .min_weight(f64::NEG_INFINITY),
+            now_ts,
+            byte_budget,
+        )
+        .await
+    }
+
+    /// Load the topology a [`TraversalBuilder`] describes, as a [`Subgraph`]
+    /// (§5.4, D-073).
+    ///
+    /// `load_subgraph` took neither `edge_types` nor `min_weight` while
+    /// `TraversalBuilder` took both — the same walk over the same table with two
+    /// fewer knobs. That was a **reachability** limit rather than a convenience
+    /// one: the byte budget bounds the *unfiltered* neighbourhood, so a caller
+    /// wanting one edge type out of a hub got [`DbError::SubgraphTooLarge`] for a
+    /// graph whose filtered form would have fitted easily, and filtering the
+    /// returned `Subgraph` afterwards cannot help because the refusal happens
+    /// during the walk.
+    ///
+    /// # The filters apply to the walk *and* to the returned edges
+    ///
+    /// This is the decision the change turned on, and the two are separable.
+    /// `TraversalBuilder` applies its filters to the **recursive step** — which
+    /// edges are followed — while this loader's final projection returns every
+    /// edge of every node it reached. Wiring the two together naively gives a
+    /// caller who asked for `CITES` a graph reached via `CITES` and populated
+    /// with `KNOWS` edges as well, which is surprising enough to be read as a
+    /// bug.
+    ///
+    /// So both halves filter. If a caller names edge types or a minimum weight,
+    /// they are asking for a subgraph **of those edges**: the walk uses them to
+    /// bound which nodes are reached, and the projection uses them to decide
+    /// which adjacency lands in the result. `load_subgraph` passes a default
+    /// builder — no types, weight ≥ 0 — so its behaviour is unchanged.
+    ///
+    /// # `min_weight` and the negative-weight guard
+    ///
+    /// [`TraversalBuilder`] defaults `min_weight` to `0.0`, so a **default
+    /// builder passed here filters negative-weight edges out** rather than
+    /// letting them reach [`DbError::NegativeEdgeWeight`]. That is a real
+    /// difference from [`Self::load_subgraph`], which passes `NEG_INFINITY`.
+    ///
+    /// It is deliberate and it is the coherent reading: a caller who states a
+    /// weight floor has asked to exclude what falls below it, and excluding it
+    /// is not an error. A caller who states none should be told, because
+    /// Dijkstra and A* are unsound over negative weights. Pass
+    /// `.min_weight(f64::NEG_INFINITY)` to get the guard with a filtered builder.
+    ///
+    /// `attribute_mode` is ignored: hydration here is always the live concept
+    /// row, which is what a `Subgraph` has always carried.
+    pub async fn load_subgraph_with(
+        &self,
+        traversal: &super::TraversalBuilder,
+        now_ts: &str,
+        byte_budget: usize,
+    ) -> Result<Subgraph> {
+        let start_node = traversal.start_node.as_str();
+        let max_hops = traversal.max_depth as u32;
         let conn = self.read_conn();
         let mut graph = Subgraph::default();
         // Running payload total, carried through the load and into `hydrate`.
         // See `estimated_bytes` for why this is not recomputed per row (D-047).
         let mut bytes = 0usize;
 
+        // `?1..?4` are start, depth, ts and min_weight; edge types take `?5`
+        // onwards. Bound, never spliced — an edge type is a value, and the only
+        // validation in the crate runs on the *write* path (D-039), so a
+        // traversal never passes through it. Same numbering as
+        // `TraversalBuilder::build_sql`, deliberately, so the two are legible
+        // side by side.
+        let edge_filter = if traversal.edge_types.is_empty() {
+            String::new()
+        } else {
+            let placeholders: Vec<String> = (0..traversal.edge_types.len())
+                .map(|i| format!("?{}", i + 5))
+                .collect();
+            format!(" AND l.edge_type IN ({})", placeholders.join(", "))
+        };
+
         // Topology first: the walk is over links_current, bounded by hop count
         // and by the path check that stops it revisiting a node.
-        let sql = r#"
+        let sql = format!(
+            r#"
 -- The path is `/a/b/c/` — leading and trailing delimiter, so the cycle check
 -- can ask for a *delimited* id and match a whole element rather than a
 -- substring. `INSTR(path, id)` was correct only while every id was the same
@@ -345,6 +425,11 @@ impl Database {
 -- 62.2 ms for the same code — identical builds varied ~29% across runs in that
 -- session, which is a caution about the absolute figures in §8.8 rather than
 -- about this query.
+-- The filters appear **twice**, and that is the contract (D-073). The walk uses
+-- them to bound which nodes are reached; the projection uses them to decide
+-- which adjacency lands in the result. Filtering only the walk would hand a
+-- caller who asked for `CITES` a graph reached via `CITES` and populated with
+-- every other edge type those nodes happen to have.
 WITH RECURSIVE walk(node_id, depth, path) AS (
     SELECT ?1, 0, '/' || CAST(?1 AS BLOB) || '/'
     UNION ALL
@@ -353,18 +438,29 @@ WITH RECURSIVE walk(node_id, depth, path) AS (
     JOIN links_current l ON l.source_id = w.node_id
     WHERE w.depth < ?2
       AND l.valid_from <= ?3 AND ?3 < l.valid_to
+      AND l.weight >= ?4
+      {edge_filter}
       AND INSTR(w.path, '/' || CAST(l.target_id AS BLOB) || '/') = 0
 )
 SELECT DISTINCT l.source_id, l.target_id, l.edge_type, l.weight, l.valid_from, l.valid_to
 FROM walk w
 JOIN links_current l ON l.source_id = w.node_id
 WHERE l.valid_from <= ?3 AND ?3 < l.valid_to
+  AND l.weight >= ?4
+  {edge_filter}
 ORDER BY l.source_id, l.target_id, l.edge_type
-"#;
+"#
+        );
 
-        let mut rows = conn
-            .query(sql, libsql::params![start_node, max_hops as i64, now_ts])
-            .await?;
+        let mut params: Vec<libsql::Value> = vec![
+            start_node.into(),
+            (max_hops as i64).into(),
+            now_ts.into(),
+            traversal.min_weight.into(),
+        ];
+        params.extend(traversal.edge_types.iter().map(|t| t.as_str().into()));
+
+        let mut rows = conn.query(&sql, params).await?;
 
         while let Some(row) = rows.next().await? {
             let source: String = row.get(0)?;
@@ -390,11 +486,26 @@ ORDER BY l.source_id, l.target_id, l.edge_type
                 valid_from: row.get(4)?,
                 valid_to: row.get(5)?,
             };
-            // Accounted before the move, and doubled: `add_edge` stores the
-            // entry in `out_adj` and a clone of it in `in_adj`, so an edge costs
-            // two adjacency entries. Counting one is the kind of undercount that
-            // makes a budget hold in tests and not in production.
-            bytes += 2 * Subgraph::edge_bytes(&edge);
+            // Accounted before the move, and *not* simply doubled.
+            //
+            // `add_edge` stores this entry in `out_adj` and a clone in `in_adj`
+            // with `node` rewritten to the **source**, so the two differ by
+            // exactly the two id lengths — `edge_bytes` sums `e.node.len()`.
+            // `2 * edge_bytes(&edge)` counted the target twice and the source
+            // never, so the running total drifted from `estimated_bytes()` by
+            // `target.len() - source.len()` per edge, in whichever direction the
+            // ids happened to differ.
+            //
+            // A byte an edge, and it made the loader refuse a graph sized at its
+            // own `estimated_bytes()` — found by `a_filtered_load_fits_a_budget_
+            // the_unfiltered_one_exceeds`, and invisible to
+            // `load_subgraph_totals_agree_with_the_derivation` because that one
+            // asserts refusal at *half* the budget, where a one-byte-per-edge
+            // drift cannot show. The doc on `node_bytes` claims the loader's
+            // arithmetic and the caller's are the same; now they are.
+            let outgoing = Subgraph::edge_bytes(&edge);
+            let incoming = outgoing - target.len() + source.len();
+            bytes += outgoing + incoming;
             graph.add_edge(source, target, edge);
 
             if bytes > byte_budget {

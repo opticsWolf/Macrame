@@ -417,6 +417,60 @@ async fn the_overlap_guard_seeks_on_all_three_equality_columns() {
     );
 }
 
+/// **The filtered subgraph walk still uses the traversal index (D-073).**
+///
+/// Adding `edge_types` and `min_weight` to this query lands in exactly the code
+/// where D-064 found that a *narrowing* predicate can push the planner off the
+/// index it was written for — a covering index is chosen for containing the
+/// columns, not for discriminating between rows. That defect returned the right
+/// answer throughout, so only a plan test can see it.
+///
+/// Both arms are checked, because the filtered one is the new shape and the
+/// unfiltered one is what `load_subgraph` still compiles to: a filter that made
+/// SQLite abandon `idx_lc_traversal_cover` would slow the walk without changing
+/// a single returned row.
+#[tokio::test]
+async fn the_filtered_subgraph_walk_stays_on_the_traversal_index() {
+    let harness = TestHarness::new();
+    let conn = connect(&harness).await;
+    migrations::run(&conn).await.unwrap();
+
+    // The recursive step as `load_subgraph_with` emits it, with and without the
+    // edge-type filter.
+    let step = |edge_filter: &str| {
+        format!(
+            "SELECT l.target_id FROM links_current l \
+             WHERE l.source_id = ?1 \
+               AND l.valid_from <= ?3 AND ?3 < l.valid_to \
+               AND l.weight >= ?4{edge_filter}"
+        )
+    };
+
+    for (label, sql) in [
+        ("unfiltered", step("")),
+        ("edge-type filtered", step(" AND l.edge_type IN (?5)")),
+    ] {
+        let mut rows = conn
+            .query(&format!("EXPLAIN QUERY PLAN {sql}"), ())
+            .await
+            .unwrap();
+        let mut plan = Vec::new();
+        while let Some(r) = rows.next().await.unwrap() {
+            plan.push(r.get::<String>(3).unwrap());
+        }
+        let step = plan.join(" | ");
+
+        assert!(
+            step.contains("idx_lc_traversal_cover"),
+            "{label}: the filtered walk left its index: {step}"
+        );
+        assert!(
+            step.contains("COVERING INDEX"),
+            "{label}: the walk is no longer index-only: {step}"
+        );
+    }
+}
+
 /// The predicate the plan test models is still the predicate the trigger runs.
 ///
 /// Guards the one weakness of testing a reproduced query: a trigger body is not

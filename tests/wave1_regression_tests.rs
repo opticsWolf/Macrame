@@ -549,6 +549,16 @@ async fn load_subgraph_totals_agree_with_the_derivation() {
         "half the graph's own size must not fit"
     );
 
+    // **At exactly its own size it must fit.** `budget / 2` above cannot see a
+    // small drift between the loader's running total and `estimated_bytes()`,
+    // and there was one: the loader doubled the *outgoing* edge estimate while
+    // `add_edge` stores the incoming copy keyed on the source, so the two
+    // disagreed by `target.len() - source.len()` per edge (D-073). One byte an
+    // edge, enough to refuse a graph sized at its own estimate.
+    db.load_subgraph("n000", 50, NOW, budget)
+        .await
+        .expect("a graph must fit a budget equal to its own estimated_bytes()");
+
     db.close().await.unwrap();
 }
 
@@ -995,6 +1005,176 @@ async fn an_injected_clock_is_floored_against_an_existing_database() {
     );
 
     reopened.close().await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Wave 5 — load_subgraph_with: the missing filter (D-073)
+// ---------------------------------------------------------------------------
+
+/// Build `hub` with two edge types out of it, at two weights.
+async fn mixed_graph(db: &Database) {
+    for id in ["hub", "a", "b", "c", "d"] {
+        db.upsert_concept(ConceptUpsert::new(id, id).valid_from(T0))
+            .await
+            .unwrap();
+    }
+    for (target, ty, w) in [
+        ("a", "CITES", 1.0),
+        ("b", "CITES", 0.2),
+        ("c", "KNOWS", 1.0),
+        ("d", "KNOWS", 0.2),
+    ] {
+        db.assert_edge(
+            EdgeAssertion::new("hub", target, ty)
+                .valid_from(T0)
+                .weight(w),
+        )
+        .await
+        .unwrap();
+    }
+}
+
+/// **The filters bound the walk *and* the edges returned.**
+///
+/// This is the decision the change turned on. `TraversalBuilder` filters the
+/// recursive step; `load_subgraph`'s projection returned every edge of every
+/// reached node. Filtering only the walk would hand a caller who asked for
+/// `CITES` a graph reached via `CITES` and populated with `KNOWS` edges too.
+#[tokio::test]
+async fn load_subgraph_with_filters_the_returned_edges_not_only_the_walk() {
+    let harness = TestHarness::new();
+    let db = Database::open(&harness.db_path).await.unwrap();
+    mixed_graph(&db).await;
+
+    let graph = db
+        .load_subgraph_with(
+            &macrame::graph::TraversalBuilder::new("hub")
+                .max_depth(3)
+                .edge_types(vec!["CITES".into()]),
+            NOW,
+            1 << 20,
+        )
+        .await
+        .unwrap();
+
+    let types: Vec<&str> = graph
+        .out_edges("hub")
+        .iter()
+        .map(|e| e.edge_type.as_str())
+        .collect();
+    assert_eq!(types, ["CITES", "CITES"], "only the asked-for type: {types:?}");
+    assert!(graph.is_closed());
+    assert!(
+        !graph.nodes.contains_key("c") && !graph.nodes.contains_key("d"),
+        "KNOWS-only neighbours are not reached either: {:?}",
+        graph.nodes.keys().collect::<Vec<_>>()
+    );
+
+    db.close().await.unwrap();
+}
+
+/// `min_weight` applies on both halves as well.
+#[tokio::test]
+async fn load_subgraph_with_honours_min_weight() {
+    let harness = TestHarness::new();
+    let db = Database::open(&harness.db_path).await.unwrap();
+    mixed_graph(&db).await;
+
+    let graph = db
+        .load_subgraph_with(
+            &macrame::graph::TraversalBuilder::new("hub")
+                .max_depth(3)
+                .min_weight(0.5),
+            NOW,
+            1 << 20,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(graph.edge_count(), 2, "only the weight-1.0 edges survive");
+    assert!(graph.out_edges("hub").iter().all(|e| e.weight >= 0.5));
+    assert!(graph.is_closed());
+
+    db.close().await.unwrap();
+}
+
+/// **The reachability limit this closes**: the byte budget bounds the
+/// *unfiltered* neighbourhood, so a filtered load succeeds where the plain one
+/// is refused.
+///
+/// This is the whole reason the gap was worth closing rather than documenting —
+/// filtering the returned `Subgraph` afterwards cannot help, because the refusal
+/// happens during the walk.
+#[tokio::test]
+async fn a_filtered_load_fits_a_budget_the_unfiltered_one_exceeds() {
+    let harness = TestHarness::new();
+    let db = Database::open(&harness.db_path).await.unwrap();
+
+    db.upsert_concept(ConceptUpsert::new("hub", "hub").valid_from(T0))
+        .await
+        .unwrap();
+    for i in 0..60 {
+        let id = format!("n{i:03}");
+        db.upsert_concept(ConceptUpsert::new(&id, &id).valid_from(T0))
+            .await
+            .unwrap();
+        // Half CITES, half KNOWS.
+        let ty = if i % 2 == 0 { "CITES" } else { "KNOWS" };
+        db.assert_edge(EdgeAssertion::new("hub", &id, ty).valid_from(T0))
+            .await
+            .unwrap();
+    }
+
+    // A budget that the CITES half fits inside and the whole graph does not.
+    let filtered = db
+        .load_subgraph_with(
+            &macrame::graph::TraversalBuilder::new("hub")
+                .max_depth(1)
+                .edge_types(vec!["CITES".into()]),
+            NOW,
+            1 << 20,
+        )
+        .await
+        .unwrap();
+    let budget = filtered.estimated_bytes();
+
+    assert!(
+        matches!(
+            db.load_subgraph("hub", 1, NOW, budget).await,
+            Err(macrame::DbError::SubgraphTooLarge { .. })
+        ),
+        "the unfiltered load must exceed a budget sized for the filtered one"
+    );
+    assert_eq!(
+        db.load_subgraph_with(
+            &macrame::graph::TraversalBuilder::new("hub")
+                .max_depth(1)
+                .edge_types(vec!["CITES".into()]),
+            NOW,
+            budget,
+        )
+        .await
+        .unwrap()
+        .edge_count(),
+        30,
+        "and the filtered one fits it"
+    );
+
+    db.close().await.unwrap();
+}
+
+/// `load_subgraph` is unchanged: a default builder means no filter at all.
+#[tokio::test]
+async fn the_unfiltered_loader_still_returns_everything() {
+    let harness = TestHarness::new();
+    let db = Database::open(&harness.db_path).await.unwrap();
+    mixed_graph(&db).await;
+
+    let graph = db.load_subgraph("hub", 3, NOW, 1 << 20).await.unwrap();
+    assert_eq!(graph.edge_count(), 4, "all four edges, both types, both weights");
+    assert_eq!(graph.nodes.len(), 5);
+
+    db.close().await.unwrap();
 }
 
 // ---------------------------------------------------------------------------
