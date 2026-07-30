@@ -253,6 +253,22 @@ CREATE VIRTUAL TABLE IF NOT EXISTS concepts_fts USING fts5(
 );
 "#;
 
+/// FTS5's own consistency check — **and it cannot see the failure that matters**
+/// (§5.9, D-071).
+///
+/// Kept as a named constant so the finding has somewhere to live, and used by
+/// `an_emptied_fts_index_still_passes_integrity_check`, which is a tripwire
+/// rather than a guarantee.
+///
+/// On this libSQL build (0.9.30), `'integrity-check'` verifies the index's
+/// *internal* consistency and not its agreement with the content table. Measured:
+/// after `'delete-all'` the index answers zero matches where it answered ten, and
+/// both `'integrity-check'` and `'integrity-check', 0` still report success. So a
+/// `verify_fts()` built on this would report a healthy index for an empty one —
+/// which is why there is no `verify_fts()`. See D-071.
+pub const VERIFY_CONCEPTS_FTS: &str =
+    "INSERT INTO concepts_fts (concepts_fts) VALUES ('integrity-check');";
+
 /// Reconstruct the FTS index from `concepts` (§5.9, D-036).
 ///
 /// The engine's own operation, so the rebuild path is not a second

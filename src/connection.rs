@@ -330,6 +330,9 @@ pub struct Database {
     /// running against a connection whose database is going away.
     cadence_stop: Option<tokio::sync::watch::Sender<bool>>,
     cadence: Option<tokio::task::JoinHandle<()>>,
+    /// Set by [`Database::close`]. Read only by [`Drop`], which warns when it is
+    /// still false — see that impl for why the omission is worth a warning.
+    closed: bool,
 }
 
 impl Database {
@@ -395,7 +398,7 @@ impl Database {
         // PRAGMA query_only = ON on reader connection (§5.1.2)
         read_conn.execute("PRAGMA query_only = ON", ()).await?;
 
-        migrations::run(&write_conn).await?;
+        let migration = migrations::run(&write_conn).await?;
 
         let (highpri_tx, highpri_rx) = mpsc::channel(256);
         let (lowpri_tx, lowpri_rx) = mpsc::channel(64);
@@ -421,15 +424,33 @@ impl Database {
         let archive_path = derive_archive_path(path);
         let snapshots_dir = derive_snapshots_dir(path);
 
-        // The task shares `read_conn` rather than opening a third connection:
-        // `libsql::Connection` is an Arc-backed handle, and R15 makes every
-        // additional local connection in one process a cost worth not paying
-        // for nothing.
+        // **The cadence gets its own connection (Wave 4.1).** It used to share
+        // `read_conn`, on the reasoning that `libsql::Connection` is an
+        // Arc-backed handle and R15 makes every extra local connection a cost worth
+        // not paying for nothing. The cost it was not paying for turned out to be
+        // real: `reconstruct` brackets a fold with `ATTACH cold … DETACH cold`,
+        // that region is per-connection state, and it is not synchronised. Two
+        // folds on one connection can therefore interleave so that one DETACHes
+        // the handle the other is mid-fold on.
+        //
+        // Recorded in §8.5 as a hazard rather than a defect because it **did not
+        // reproduce**: 200 concurrent reconstructions against a 1 ms cadence with
+        // an archive present produced zero errors, since the cadence anchors at
+        // `MAX(recorded_at)` and so almost always takes the hot path. Narrow, and
+        // real — a write landing between `log_head` and the fold opens it.
+        //
+        // Separate connections remove the interleaving rather than ordering it,
+        // which is why this is preferred to a mutex around the region: there is
+        // no shared state left to race on, and nothing to remember to hold. The
+        // R15 objection does not apply — that fault is about *concurrent* opens,
+        // and this is one more sequential open during `open()`.
         let (cadence_stop, cadence) = match cadence {
             Some(cadence) => {
+                let cadence_conn = configure(db.connect()?).await?;
+                cadence_conn.execute("PRAGMA query_only = ON", ()).await?;
                 let (tx, rx) = tokio::sync::watch::channel(false);
                 let handle = tokio::spawn(snapshot::run_cadence(
-                    read_conn.clone(),
+                    cadence_conn,
                     snapshots_dir.clone(),
                     archive_path.clone(),
                     cadence,
@@ -440,7 +461,7 @@ impl Database {
             None => (None, None),
         };
 
-        Ok(Self {
+        let handle = Self {
             db,
             read_conn,
             highpri_tx,
@@ -452,7 +473,59 @@ impl Database {
             writer: Some(writer),
             cadence_stop,
             cadence,
-        })
+            closed: false,
+        };
+
+        // **Re-anchor after a migration (Wave 4.4).**
+        //
+        // D-043 makes a `SCHEMA_VERSION` bump invalidate every snapshot on disk,
+        // which is correct — a snapshot is a serialised `MaterializedState` and a
+        // schema change can change what that means. What was missing is the other
+        // half: nothing wrote a replacement, so the first `reconstruct` after an
+        // upgrade skipped every file as incompatible and folded from genesis. On
+        // a database with a large log that is the difference between reading one
+        // snapshot and folding the whole history, and the only trace was a
+        // `warn!` per skipped file.
+        //
+        // Written here rather than left to the cadence because the cadence fires
+        // on log *growth* (D-053): an upgraded database that is then read but not
+        // written would never re-anchor at all.
+        //
+        // Failure is logged, not returned. A missing anchor costs time and no
+        // information — snapshots are derivative under Doctrine VI — so refusing
+        // to open a database because its optimisation could not be rebuilt would
+        // trade a real capability for a performance one.
+        //
+        // Gated on the cadence being enabled, as well as on an actual upgrade:
+        // `open_with_cadence(None)` means *this handle writes no snapshots except
+        // at close()*, and a one-off write at open would contradict that for a
+        // caller who asked for the quiet mode precisely to control when files
+        // appear. They still get an anchor from `close()`.
+        if migration.upgraded() && handle.cadence.is_some() {
+            let ts = handle.clock.now();
+            let archive = handle
+                .archive_path
+                .exists()
+                .then_some(handle.archive_path.as_path());
+            match snapshot::write_final(&handle.read_conn, &handle.snapshots_dir, &ts, archive).await
+            {
+                Ok(path) => tracing::info!(
+                    "schema moved v{} -> v{}; re-anchored snapshots at {:?}",
+                    migration.from,
+                    migration.to,
+                    path
+                ),
+                Err(e) => tracing::warn!(
+                    "schema moved v{} -> v{} but the re-anchor failed: {e}. \
+                     Reconstruction stays correct and folds from genesis until the \
+                     cadence writes one.",
+                    migration.from,
+                    migration.to
+                ),
+            }
+        }
+
+        Ok(handle)
     }
 
     /// Read connection handle for queries, traversals, and folds.
@@ -481,6 +554,34 @@ impl Database {
     }
 
     /// The underlying libSQL database, for callers that need their own connection.
+    ///
+    /// # Actor containment is a convention above this line, not a guarantee
+    ///
+    /// **Kept public, and the honest statement of what that costs (Wave 4.3).**
+    /// §5.1 says the write actor is the sole writer, and two mechanisms make that
+    /// true of the handle: every write method goes through a channel, and
+    /// [`Self::read_conn`] carries `PRAGMA query_only = ON`. **Nothing protects a
+    /// connection obtained from here.** A caller can open one, write to `links`
+    /// directly, and the actor will not know — the triggers still fire and the
+    /// ledger stays internally consistent, but the single-writer property that
+    /// [`crate::CHUNK_BUDGET`]'s latency argument rests on is gone, and so is the
+    /// serialisation the overlap guard (D-060) relies on.
+    ///
+    /// This is the same shape as the limit stated in §4.2 for that guard, and it
+    /// is one fact rather than two: **the storage layer permits what this API
+    /// refuses.** Making it private would not change that — the database file is
+    /// reachable by any SQLite client on the machine — it would only remove the
+    /// supported way to do the thing, which is how escape hatches become
+    /// `unsafe`-adjacent folklore.
+    ///
+    /// The free functions [`crate::register_model`] and
+    /// [`crate::upsert_embedding`] take a bare connection for the same reason and
+    /// carry the same caveat; prefer [`Self::register_model`] and
+    /// [`Self::upsert_embeddings`], which go through the actor.
+    ///
+    /// Legitimate uses: `EXPLAIN QUERY PLAN` and other diagnostics, read-only
+    /// reporting queries that want their own connection rather than sharing the
+    /// reader, and provoking a guard in a test. Writing through it is not one.
     pub fn raw(&self) -> &libsql::Database {
         &self.db
     }
@@ -699,6 +800,22 @@ impl Database {
             .await
     }
 
+    // **There is deliberately no `verify_fts()` (§5.9, D-071).**
+    //
+    // `rebuild_fts` is the repair with no way to ask whether it is needed, and
+    // Wave 5 set out to add the missing half. FTS5 offers `'integrity-check'`,
+    // which looked like exactly the engine-provided answer this crate prefers.
+    // It is not: on libSQL 0.9.30 it verifies the index's *internal* consistency
+    // and not its agreement with the content table. Measured — after
+    // `'delete-all'` the index matches nothing where it matched ten rows, and
+    // both `'integrity-check'` and `'integrity-check', 0` still report success.
+    //
+    // A `verify_fts()` on that footing would answer "healthy" for an empty
+    // index, which is worse than having no method at all: it is the shape of
+    // defect AC, a function that looks like it checks something and does not.
+    // `an_emptied_fts_index_still_passes_integrity_check` pins the limitation so
+    // that if a later libSQL fixes it, the test fails and says so.
+
     /// Write derived analytics results on the background channel, chunked
     /// (§5.4, D-041).
     ///
@@ -810,8 +927,26 @@ impl Database {
             .await;
         let _ = rx.await;
 
+        // **The writer's `Result` is propagated, not discarded (Wave 4.2).**
+        // It used to be `let _ = handle.await`, so an actor that had panicked or
+        // returned an error closed "successfully" and the caller's last chance to
+        // learn that the write path had died was spent silently. A `JoinError`
+        // here means the actor panicked; the inner `Result` is whatever it
+        // returned.
+        //
+        // Ordered before the final snapshot on purpose: a snapshot written after
+        // a failed writer records a state the caller has no reason to trust, and
+        // returning the writer's error while also having written that file is
+        // worse than not writing it.
         if let Some(handle) = self.writer.take() {
-            let _ = handle.await;
+            match handle.await {
+                Ok(res) => res?,
+                Err(e) => {
+                    return Err(DbError::WriterStopped(format!(
+                        "the write actor did not exit cleanly: {e}"
+                    )))
+                }
+            }
         }
 
         let ts = self.clock.now();
@@ -821,7 +956,48 @@ impl Database {
             .then_some(self.archive_path.as_path());
         snapshot::write_final(&self.read_conn, &self.snapshots_dir, &ts, archive).await?;
 
+        // Marks the handle closed so `Drop` knows not to complain.
+        self.closed = true;
         Ok(())
+    }
+}
+
+/// Notes a missed `close()` at `warn!`, and deliberately does **not** assert.
+///
+/// **§7.3 offered option B — document `close()` as mandatory and `debug_assert`
+/// in `Drop` — and Wave 4.2 implemented it, measured the consequence, and
+/// reduced it to a warning.** The assert fired on roughly thirty tests on its
+/// first run. That is the signal it was built to produce, and the right reading
+/// of it was not "thirty tests are wrong".
+///
+/// What dropping actually costs is one final snapshot. Nothing else: every
+/// public write method awaits its responder, so by the time a caller *can* drop
+/// the handle, every write it issued has already committed; and the cadence stops
+/// on its own, because `cadence_stop` is a `watch::Sender` whose drop signals the
+/// task. A snapshot is derivative state under Doctrine VI — disposable,
+/// reconstructible, and never the only copy of anything. Losing one makes the
+/// next `reconstruct` fold from an older anchor, which is **slower, not wrong**.
+///
+/// A `debug_assert` aborts a test run. Spending that on a performance loss, in a
+/// project whose own notes say a suite that fails for reasons unrelated to the
+/// code under test trains people to ignore red, is the wrong trade — and paying
+/// it in thirty places would have made `close()` look mandatory by ceremony
+/// rather than by consequence. `close()` remains the right thing to call, and
+/// the two reasons to call it are now stated where they can be acted on: the
+/// snapshot, and the writer's `Result`, which only `close()` can return.
+///
+/// Option A ("abort the actor and log") stays rejected, for the reason it was
+/// rejected twice before: `Drop` cannot await, so it cannot drain, and cleanup
+/// that cannot clean up is worse than none — it looks like cleanup.
+impl Drop for Database {
+    fn drop(&mut self) {
+        if !self.closed {
+            tracing::warn!(
+                "Database dropped without close(): the final snapshot was not written, \
+                 so the next reconstruct folds from an older anchor, and the write \
+                 actor's exit status was not checked. Prefer close().await."
+            );
+        }
     }
 }
 
@@ -1057,7 +1233,11 @@ impl LowPriCommand {
                 archive_path,
                 responder,
             } => {
-                let _ = responder.send(archive(conn, &cutoff, &archive_path).await);
+                // The archive *time*, not the cutoff. `archive_horizon` records
+                // both and they are different facts — see `archive()` (Wave 4.5).
+                let archived_at = clock.now();
+                let _ =
+                    responder.send(archive(conn, &cutoff, &archived_at, &archive_path).await);
             }
             LowPriCommand::RebuildFts { responder } => {
                 let res = conn

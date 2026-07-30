@@ -75,7 +75,37 @@ const STEPS: &[Step] = &[
 /// the case that matters: an object that exists with a *different* definition is
 /// silently kept, so a legacy table would survive with none of its constraints
 /// while the stamp claimed otherwise.
-pub async fn run(conn: &libsql::Connection) -> Result<()> {
+/// What [`run`] did, so a caller can react to the schema having moved.
+///
+/// The one caller that must is `Database::open`: a `SCHEMA_VERSION` bump
+/// invalidates every snapshot on disk (D-043), and until Wave 4.4 nothing
+/// noticed — the first `reconstruct` after an upgrade skipped every snapshot as
+/// incompatible and folded from genesis, correctly and expensively, with the
+/// only trace a `warn!` per skipped file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MigrationOutcome {
+    /// The version the file carried on the way in.
+    pub from: u32,
+    /// [`SCHEMA_VERSION`], always — `run` either reaches it or fails.
+    pub to: u32,
+}
+
+impl MigrationOutcome {
+    /// Whether an **existing** database moved between versions.
+    ///
+    /// A fresh file (`from == 0`) is deliberately not an upgrade. It has no
+    /// snapshots to invalidate, so there is nothing to re-anchor — and treating
+    /// it as one made `Database::open` write a snapshot on every first open,
+    /// which broke two contracts the suite already pins: an idle database is
+    /// never anchored, and a handle opened with no cadence writes nothing until
+    /// `close()`. Both are worth keeping. `open()` touching the disk when it was
+    /// not asked to is surprising in its own right.
+    pub fn upgraded(&self) -> bool {
+        self.from != 0 && self.from != self.to
+    }
+}
+
+pub async fn run(conn: &libsql::Connection) -> Result<MigrationOutcome> {
     let found = read_user_version(conn).await?;
 
     if found > SCHEMA_VERSION {
@@ -103,7 +133,11 @@ pub async fn run(conn: &libsql::Connection) -> Result<()> {
         current = step.to;
     }
 
-    verify(conn).await
+    verify(conn).await?;
+    Ok(MigrationOutcome {
+        from: found,
+        to: SCHEMA_VERSION,
+    })
 }
 
 /// Version this build stamps on databases it creates.

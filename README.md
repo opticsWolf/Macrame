@@ -149,7 +149,7 @@ cargo test --features property-tests --no-fail-fast
 | Scenario tests | Attribute fidelity across `AttributeMode` values; corrupt-then-rebuild roundtrip |
 | Regression tests | `tests/wave1_regression_tests.rs` — one per Wave 1 defect, each verified to fail against the pre-fix tree. Its header names the three that pass either way and says why, rather than letting them look like coverage they are not |
 
-**Current baseline: 203 passing, 0 failing** on plain `cargo test`; 222 with `--features property-tests --no-fail-fast`.
+**Current baseline: 211 passing, 0 failing** on plain `cargo test`; 230 with `--features property-tests --no-fail-fast`.
 
 Benchmarks are separate and are **measurements, not gates** — §9's numbers are stated for named hardware, so an absolute threshold in CI would gate on whichever runner picked up the job:
 
@@ -177,8 +177,20 @@ Severity rule: **a wrong answer outranks a crash.** Full evidence, reproductions
 
 | # | Location | Defect | Wave |
 |---|---|---|---|
-| `load_subgraph` growth | `graph/subgraph.rs` | Superlinear — 12.5× for 10× the nodes (4.97 → 62.2 ms, 1K → 10K). Surfaced by Wave 3 and **not explained**; larger than anything the retired `Subgraph` rewrite would have recovered | 4 |
+| Subgraph filters | `graph/subgraph.rs` | `load_subgraph` takes neither `edge_types` nor `min_weight` while `TraversalBuilder` takes both. A feature gap, not a wrong answer — but a reachability limit, because filtering after the fact cannot help a caller whose *unfiltered* neighbourhood exceeds the byte budget | — |
+| Snapshot cross-check | `temporal/snapshot.rs` | Chains compound: `write_final` composes onto the previous snapshot, so an error propagates forward with nothing verifying a composed result against a fold from genesis | — |
+| No `verify_fts()` | `connection.rs` | `rebuild_fts()` is the repair with no way to ask whether it is needed. FTS5's `integrity-check` cannot answer — it verifies the index's internal consistency, not its agreement with `concepts` — so none was written rather than one that would call an empty index healthy (D-071) | — |
 | R15 | libSQL 0.9.30 | Intermittent `STATUS_ACCESS_VIOLATION` when local databases are opened concurrently in one process; mitigated by `RUST_TEST_THREADS = "1"` and the `property-tests` feature gate | — |
+
+**Closed by Wave 4 (2026-07-30)** — hardening, recorded as D-066 … D-070:
+
+| # | Was | Resolution |
+|---|---|---|
+| `load_subgraph` growth | Superlinear, 12.5× for 10× the nodes, unexplained | **Explained, not fixed** (D-070): an O(E log E) `DISTINCT` sort, load-bearing. Two fixes tried — deduplicating the walk first is 36% *slower*; removing the redundant second sort measures 85.95 vs 86.76 ms, i.e. nothing |
+| ATTACH race | The cadence shared `read_conn`, so two folds could interleave in the unsynchronised `ATTACH cold … DETACH cold` region | The cadence gets its own connection (D-066) — removes the shared state rather than ordering access to it |
+| `close()` swallowed failure | The writer's `Result` was discarded, so a `Database` whose actor had panicked closed "successfully" | Returns `DbError::WriterStopped`, *before* the final snapshot is written |
+| Stale snapshots after upgrade | A `SCHEMA_VERSION` bump invalidates every snapshot and nothing wrote a replacement, so the first reconstruct folded from genesis | Re-anchored at open (D-067), gated on it being a real upgrade *and* the cadence being enabled |
+| Errors naming the wrong subject | `timestamp::normalize` reported caller input as `ReplayCorrupt { seq: 0 }`; `archive_horizon.archived_at` was written with the cutoff | `DbError::InvalidTimestamp`; the archive time comes from the clock (D-069) |
 
 **Closed by Wave 3 (2026-07-30)** — the measurement wave, recorded as D-063, D-064 and D-065:
 
@@ -262,7 +274,13 @@ Four waves, ordered by the project's own severity rule — a wrong answer outran
 | **1** ✅ | The six silent defects | V, W, Z, AB, AC, AE, plus documentation drift. **No schema change.** Delivered 2026-07-30; thirteen new tests, 171 → 184 passing | done |
 | **2** ✅ | Decisions deferred a full cycle | D-059's index shipped as the v5 → v6 rung; valid-time overlap (**AA**/**AG**), identity (**AD**/**J**) and the injectable clock (**K**) all decided. Delivered 2026-07-30; 184 → 202 passing | done |
 | **3** ✅ | Measure what the bounds claim | Six bench groups covering every previously unmeasured path. Found one defect (**AI**), retired two proposed optimisations, confirmed the four chunk constants. Delivered 2026-07-30; 202 → 203 passing | done |
-| **4** ⬅ | Hardening | Serialise the `ATTACH cold` region; `Drop` + propagate `close()`'s error; settle whether `raw()` stays public; re-anchor snapshots after a migration; explain `load_subgraph`'s superlinearity | — |
+| **4** ✅ | Hardening | The ATTACH race, `close()`'s discarded error, `raw()`'s surface, the migration re-anchor, three mis-named errors, and Wave 3's unexplained superlinearity. Delivered 2026-07-30; 203 → 205 passing | done |
+
+| **5** ⬅ | The last silent-wrong-answer paths | The unreachable `'D'` branch (done, D-072); the FTS5 `VACUUM` hazard (investigated, **nothing built** — it isn't reachable, D-071); then R15, the subgraph filter, one consolidated §4 statement, and the rename | in progress |
+
+**Waves 1–4 are delivered; Wave 5 is under way.** What remains open is in the table above, and none of it returns a wrong answer.
+
+Wave 5's first two items are worth reading as a pair, because both ended by *removing* something rather than adding it: an unreachable branch and the set that served it (D-072), and two mechanisms declined after measurement showed one hazard unreachable and one check unable to see it (D-071). The output was a smaller crate and three facts nobody had written down.
 
 Why correctness preceded the performance work: D-059's index is the largest measured win in the tree and it moves `user_version`, so it wants a stable base and its own migration test. Wave 1's defects needed no schema movement, so they landed while that rung was still being decided — **Wave 2 is now what's next.**
 
@@ -278,6 +296,10 @@ Recorded here because they constrain future work rather than merely describing p
 - **A `Clock` can be told its floor.** `raise_floor` is a required trait method, not a defaulted one, because "strictly increasing across restarts" depends on what the database already holds and no clock can see that by itself.
 - **`CHUNK_BUDGET`'s 3 ms has exactly three exemptions**, and they are stated with the bound rather than scattered across rustdoc: `write_bulk_atomic`, `archive()` and `rebuild_current` are atomic by contract and cannot be chunked without breaking the guarantee each exists to provide. Callers who need the latency bound instead of the atomicity have `bulk_import`.
 - **A narrowing predicate is not free if it changes the plan.** A covering index is chosen for containing the columns, not for discriminating between rows, so the more columns one carries the more queries it silently captures. This has now bitten the same codebase three times; index-sensitive queries get a test that asserts their `EXPLAIN QUERY PLAN`.
+- **`close()` is how you learn the write actor died.** It propagates the writer's `Result` and writes the final snapshot; dropping instead is legal and costs one snapshot, which is slower rather than wrong (Doctrine VI), so `Drop` warns and does not assert.
+- **Concepts are never deleted, and that guard protects more than the ledger.** `trg_concepts_guard_delete` is unconditional (D-022), so `concepts.rowid` stays dense — which is the only reason the external-content FTS index survives a `VACUUM`. Any future concept archival or erasure has to rebuild the index (D-071).
+- **A `'D'` row in `transaction_log` is corruption.** Nothing writes one: Doctrine V forbids the delete and the archive moves rows rather than logging their removal. The fold refuses it rather than folding it as a tombstone (D-072).
+- **`raw()` is an escape hatch, and actor containment above it is a convention.** `query_only` protects `read_conn()`; nothing protects a connection you open yourself. This is the same limit §4.2 states for the overlap guard — one fact, not two: the storage layer permits what this API refuses.
 
 Independent of all four: the **R15 upstream report** against libSQL 0.9.30, outstanding longest and blocked by nothing.
 

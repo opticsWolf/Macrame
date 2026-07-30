@@ -997,6 +997,401 @@ async fn an_injected_clock_is_floored_against_an_existing_database() {
     reopened.close().await.unwrap();
 }
 
+// ---------------------------------------------------------------------------
+// Wave 5 — the FTS index, and why VACUUM cannot disturb it (D-071)
+// ---------------------------------------------------------------------------
+
+/// **`VACUUM` does not renumber `concepts.rowid`, so the FTS index survives it.**
+///
+/// External-content FTS5 is keyed on `concepts.rowid`, which is implicit, and
+/// `VACUUM` renumbers implicit rowids — the standard hazard, and the one this
+/// schema was flagged for by inspection.
+///
+/// It does not arise, and this pins why: `concepts` can never be deleted from
+/// (D-022, `trg_concepts_guard_delete`, unconditional) and upserts go through
+/// `ON CONFLICT DO UPDATE`, which preserves rowids. So the rowids are dense
+/// `1..n` and `VACUUM`'s renumbering is the identity map.
+///
+/// **The delete guard is therefore load-bearing for the search index**, not only
+/// for the ledger — which nothing recorded before D-071. If concept archival or
+/// GDPR erasure ever lands (both deferred in Appendix C), rowids go sparse, this
+/// test fails, and whichever change made them sparse owes a rebuild.
+#[tokio::test]
+async fn vacuum_does_not_disturb_the_fts_index() {
+    let harness = TestHarness::new();
+    let db = Database::open(&harness.db_path).await.unwrap();
+
+    for i in 0..20 {
+        db.upsert_concept(
+            ConceptUpsert::new(format!("c{i:03}"), format!("Title {i}"))
+                .content("searchable body text")
+                .valid_from(T0),
+        )
+        .await
+        .unwrap();
+    }
+    // Updates too: the upsert path must not churn rowids either.
+    for i in [3usize, 7, 11] {
+        db.upsert_concept(
+            ConceptUpsert::new(format!("c{i:03}"), "Updated")
+                .content("searchable body text")
+                .valid_from(T0),
+        )
+        .await
+        .unwrap();
+    }
+
+    let rowids = |db: &Database| {
+        let conn = db.read_conn().clone();
+        async move {
+            let mut rows = conn
+                .query("SELECT rowid, id FROM concepts ORDER BY rowid", ())
+                .await
+                .unwrap();
+            let mut v = Vec::new();
+            while let Some(r) = rows.next().await.unwrap() {
+                v.push((r.get::<i64>(0).unwrap(), r.get::<String>(1).unwrap()));
+            }
+            v
+        }
+    };
+
+    let before = rowids(&db).await;
+    assert!(
+        before.iter().enumerate().all(|(i, (r, _))| *r == i as i64 + 1),
+        "rowids must be dense for the argument to hold: {before:?}"
+    );
+    assert_eq!(hits(&db).await, 20, "every concept is indexed to begin with");
+
+    // Through `raw()`: VACUUM is an operator action, not something the API does.
+    db.raw()
+        .connect()
+        .unwrap()
+        .execute("VACUUM", ())
+        .await
+        .unwrap();
+
+    assert_eq!(rowids(&db).await, before, "VACUUM renumbered the rowids");
+    // Asserted as *search behaviour*, not as an integrity check: FTS5's own
+    // check cannot see this class of breakage — see the test below.
+    assert_eq!(
+        hits(&db).await,
+        20,
+        "the index must still find every concept after VACUUM"
+    );
+
+    db.close().await.unwrap();
+}
+
+/// How many concepts the FTS index actually matches — the only honest signal.
+async fn hits(db: &Database) -> i64 {
+    db.read_conn()
+        .query(
+            "SELECT COUNT(*) FROM concepts_fts WHERE concepts_fts MATCH 'searchable'",
+            (),
+        )
+        .await
+        .unwrap()
+        .next()
+        .await
+        .unwrap()
+        .unwrap()
+        .get(0)
+        .unwrap()
+}
+
+/// **A tripwire, not a guarantee: FTS5's `integrity-check` cannot see a stale
+/// index on this build.**
+///
+/// Wave 5 set out to add `Database::verify_fts()` as the missing half of
+/// `rebuild_fts()`, using FTS5's own `'integrity-check'` — the engine-provided
+/// answer this crate prefers over a hand-rolled one. It does not answer the
+/// question: on libSQL 0.9.30 it verifies the index's *internal* consistency and
+/// not its agreement with the content table.
+///
+/// So no `verify_fts()` shipped, because one built on this would report a
+/// healthy index for an empty one — defect AC's shape, a function that looks
+/// like it checks something and does not.
+///
+/// **This test fails when that stops being true**, which is the point: if a
+/// later libSQL cross-checks content, `integrity-check` starts erroring here and
+/// the failure says the method can now be built.
+#[tokio::test]
+async fn an_emptied_fts_index_still_passes_integrity_check() {
+    let harness = TestHarness::new();
+    let db = Database::open(&harness.db_path).await.unwrap();
+
+    for i in 0..10 {
+        db.upsert_concept(
+            ConceptUpsert::new(format!("c{i:03}"), format!("Title {i}"))
+                .content("searchable body text")
+                .valid_from(T0),
+        )
+        .await
+        .unwrap();
+    }
+    assert_eq!(hits(&db).await, 10);
+
+    let raw = db.raw().connect().unwrap();
+    raw.execute(
+        "INSERT INTO concepts_fts (concepts_fts) VALUES ('delete-all')",
+        (),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(hits(&db).await, 0, "the index is now empty — genuinely stale");
+
+    let checked = raw
+        .execute(macrame::schema::ddl::VERIFY_CONCEPTS_FTS, ())
+        .await;
+    assert!(
+        checked.is_ok(),
+        "integrity-check now detects content desync — verify_fts() can be built \
+         (D-071 says why it was not): {checked:?}"
+    );
+
+    // And the repair still works, which is what makes the missing check bearable.
+    db.rebuild_fts().await.unwrap();
+    assert_eq!(hits(&db).await, 10, "rebuild_fts restores the index");
+
+    db.close().await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Wave 5 — a 'D' row is corruption, not a tombstone (D-072)
+// ---------------------------------------------------------------------------
+
+/// `reconstruct` refuses a `'D'` operation instead of folding it as a tombstone.
+///
+/// Doctrine V permits no physical delete outside an archive session, and the
+/// archive *moves* rows rather than logging their removal — so nothing in the
+/// schema writes a `'D'` and nothing in the crate can produce one. The fold used
+/// to handle it anyway, which read as a claim that deletions are recorded and
+/// reconstructible. Injected here through a raw connection, which is the only
+/// way such a row can exist at all.
+#[tokio::test]
+async fn a_delete_row_in_the_log_is_refused_as_corruption() {
+    let harness = TestHarness::new();
+    let db = libsql::Builder::new_local(&harness.db_path)
+        .build()
+        .await
+        .unwrap();
+    let conn = db.connect().unwrap();
+    migrations::run(&conn).await.unwrap();
+
+    conn.execute(
+        "INSERT INTO transaction_log (table_name, entity_id, operation, payload, recorded_at) \
+         VALUES ('concepts', 'c1', 'D', '{}', ?1)",
+        libsql::params![T0],
+    )
+    .await
+    .unwrap();
+
+    let err = macrame::temporal::reconstruct(&conn, NOW, None, None)
+        .await
+        .expect_err("a 'D' row must not fold as a tombstone");
+
+    match err {
+        macrame::DbError::ReplayCorrupt { seq, reason } => {
+            assert!(seq > 0, "the error must name the offending row, got seq {seq}");
+            assert!(
+                reason.contains("Doctrine V"),
+                "the refusal should say which rule it enforces: {reason}"
+            );
+        }
+        other => panic!("expected ReplayCorrupt, got {other:?}"),
+    }
+}
+
+/// The refusal covers links as well as concepts, and names the table.
+#[tokio::test]
+async fn a_delete_row_for_a_link_is_refused_too() {
+    let harness = TestHarness::new();
+    let db = libsql::Builder::new_local(&harness.db_path)
+        .build()
+        .await
+        .unwrap();
+    let conn = db.connect().unwrap();
+    migrations::run(&conn).await.unwrap();
+
+    conn.execute(
+        "INSERT INTO transaction_log (table_name, entity_id, operation, payload, recorded_at) \
+         VALUES ('links', 'a|b|KNOWS|x', 'D', '{}', ?1)",
+        libsql::params![T0],
+    )
+    .await
+    .unwrap();
+
+    let err = macrame::temporal::reconstruct(&conn, NOW, None, None)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, macrame::DbError::ReplayCorrupt { ref reason, .. } if reason.contains("links")),
+        "got {err:?}"
+    );
+}
+
+/// **Retirement still removes a concept from a composed state.**
+///
+/// The control for the two tests above, and the reason `concepts_gone` survives
+/// while `edges_gone` did not: a concept disappears by being *retired*, which
+/// writes a `'U'` row carrying `retired = 1` — not a `'D'`. If refusing `'D'`
+/// had broken this, the fold would have stopped honouring retirement and no
+/// other test would have said so.
+#[tokio::test]
+async fn retirement_still_removes_a_concept_from_a_composed_fold() {
+    let harness = TestHarness::new();
+    let db = Database::open(&harness.db_path).await.unwrap();
+
+    db.upsert_concept(ConceptUpsert::new("keep", "Keep").valid_from(T0))
+        .await
+        .unwrap();
+    db.upsert_concept(ConceptUpsert::new("gone", "Gone").valid_from(T0))
+        .await
+        .unwrap();
+    db.upsert_concept(ConceptUpsert::new("gone", "Gone").valid_from(T0).retired(true))
+        .await
+        .unwrap();
+
+    let state = db.reconstruct(NOW).await.unwrap();
+    assert!(state.concepts.contains_key("keep"));
+    assert!(
+        !state.concepts.contains_key("gone"),
+        "retirement is the mechanism that removes a concept, and it still works"
+    );
+
+    db.close().await.unwrap();
+}
+
+/// **An edge is superseded in place, never removed** — which is why there is no
+/// `edges_gone`.
+///
+/// Retiring an edge asserts a successor over the same interval key, so the log
+/// row is an `'I'` under the *same* `entity_id` and last-writer-wins replaces the
+/// tuple. This pins that reasoning: after a retirement the fold shows one edge,
+/// closed — not zero, and not two.
+#[tokio::test]
+async fn a_retired_edge_is_superseded_rather_than_removed() {
+    let harness = TestHarness::new();
+    let db = Database::open(&harness.db_path).await.unwrap();
+
+    for id in ["a", "b"] {
+        db.upsert_concept(ConceptUpsert::new(id, id).valid_from(T0))
+            .await
+            .unwrap();
+    }
+    db.assert_edge(EdgeAssertion::new("a", "b", "KNOWS").valid_from(T0))
+        .await
+        .unwrap();
+    db.retire_edge("a", "b", "KNOWS", T0, T2).await.unwrap();
+
+    let state = db.reconstruct(NOW).await.unwrap();
+    let edges: Vec<_> = state
+        .edges
+        .iter()
+        .filter(|e| e.0 == "a" && e.1 == "b")
+        .collect();
+
+    assert_eq!(edges.len(), 1, "one interval key, one edge: {edges:?}");
+    assert_eq!(edges[0].4, T2, "and it is closed, not absent");
+
+    db.close().await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Wave 4 — hardening
+// ---------------------------------------------------------------------------
+
+/// An upgraded database is re-anchored at open, so the next reconstruct does
+/// not fold from genesis (Wave 4.4).
+///
+/// D-043 makes a `SCHEMA_VERSION` bump invalidate every snapshot, which is
+/// correct. What was missing is the other half: nothing wrote a replacement, so
+/// the first `reconstruct` after an upgrade skipped every file as incompatible
+/// and folded the whole log — correctly, and at the cost the snapshot existed to
+/// avoid.
+#[tokio::test]
+async fn an_upgraded_database_is_re_anchored_at_open() {
+    let harness = TestHarness::new();
+
+    // A populated database, closed cleanly so it has an anchor.
+    let db = Database::open(&harness.db_path).await.unwrap();
+    for i in 0..5 {
+        db.upsert_concept(ConceptUpsert::new(format!("c{i}"), "T").valid_from(T0))
+            .await
+            .unwrap();
+    }
+    // Where the snapshots are, captured before `close()` consumes the handle.
+    let snaps_dir = db.snapshots_dir().to_path_buf();
+    db.close().await.unwrap();
+
+    let count = |dir: &std::path::Path| {
+        std::fs::read_dir(dir).map(|d| d.flatten().count()).unwrap_or(0)
+    };
+    assert!(count(&snaps_dir) > 0, "close() must leave an anchor");
+
+    // Clear the directory and roll the stamp back a rung. Clearing is what makes
+    // the assertion unambiguous: a snapshot's filename is its `seq_id`, and no
+    // writes happen between the close and the reopen, so a re-anchor would
+    // otherwise overwrite the existing file and leave the count unchanged —
+    // which is exactly what the first version of this test could not tell apart
+    // from doing nothing.
+    for entry in std::fs::read_dir(&snaps_dir).unwrap().flatten() {
+        std::fs::remove_file(entry.path()).unwrap();
+    }
+    assert_eq!(count(&snaps_dir), 0);
+
+    {
+        let raw = libsql::Builder::new_local(&harness.db_path)
+            .build()
+            .await
+            .unwrap();
+        let conn = raw.connect().unwrap();
+        conn.execute("DROP INDEX IF EXISTS idx_lc_open_interval", ())
+            .await
+            .unwrap();
+        conn.execute("PRAGMA user_version = 5", ()).await.unwrap();
+    }
+
+    let reopened = Database::open(&harness.db_path).await.unwrap();
+    assert_eq!(reopened.schema_version(), 6, "the rung must have run");
+
+    assert!(
+        count(&snaps_dir) > 0,
+        "an upgraded database must be re-anchored at open, or the next \
+         reconstruct folds from genesis"
+    );
+
+    reopened.close().await.unwrap();
+}
+
+/// A *fresh* database is not an upgrade, and `open()` writes nothing.
+///
+/// The companion to the test above and the reason `MigrationOutcome::upgraded`
+/// excludes `from == 0`: an `open()` that touches the disk when it was not asked
+/// to is surprising, and two existing tests already pin that it does not.
+#[tokio::test]
+async fn a_fresh_database_is_not_re_anchored() {
+    let harness = TestHarness::new();
+    let db = Database::open(&harness.db_path).await.unwrap();
+    assert_eq!(
+        count_snapshots(&db),
+        0,
+        "opening a new database must not write a snapshot"
+    );
+    db.close().await.unwrap();
+}
+
+/// Asks the handle where its snapshots live rather than rebuilding the naming
+/// convention here — `derive_snapshots_dir` is private and a second copy of it
+/// would be one more thing to keep in step.
+fn count_snapshots(db: &Database) -> usize {
+    std::fs::read_dir(db.snapshots_dir())
+        .map(|d| d.flatten().count())
+        .unwrap_or(0)
+}
+
 /// The archive still succeeds through the classified delete path.
 ///
 /// Wiring `classify` into `archive()` must not change what a legal archive does;

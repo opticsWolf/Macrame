@@ -203,7 +203,13 @@ async fn bad_input_is_rejected_at_the_boundary() {
         .assert_edge(EdgeAssertion::new("A", "B", "KNOWS").valid_from("2026-01-01"))
         .await
         .unwrap_err();
-    assert!(matches!(err, DbError::ReplayCorrupt { .. }), "got {err:?}");
+    // `InvalidTimestamp`, not `ReplayCorrupt` (Wave 4.5). The caller passed a
+    // malformed string; nothing in the ledger is damaged, and the old variant
+    // carried `seq: 0` — a sequence number `AUTOINCREMENT` never issues.
+    assert!(
+        matches!(err, DbError::InvalidTimestamp { .. }),
+        "a bad caller timestamp must not be reported as ledger corruption: got {err:?}"
+    );
 }
 
 /// A caller passing the legacy second-precision form succeeds and the row lands

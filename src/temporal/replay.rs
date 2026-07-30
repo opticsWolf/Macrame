@@ -115,21 +115,43 @@ const ANCHORED_COLD_FOLD: &str = r#"
 
 /// The winning log rows for one fold, before they are applied to a base state.
 ///
-/// Absence and deletion are different facts, and a merge is where the
-/// difference starts to matter. A full fold from nothing can treat "the winning
-/// row is a delete" and "there is no row" identically — both end as absence.
-/// Composed onto a snapshot they are opposites: a delete must *remove* the
-/// entity the snapshot carries, and skipping it leaves the snapshot's stale row
-/// standing as though nothing had happened. So the tombstones are collected
-/// rather than dropped, and the full fold applies them to an empty base, which
-/// keeps one code path for both cases (D-049).
+/// Absence and disappearance are different facts, and a merge is where the
+/// difference starts to matter. A full fold from nothing can treat "this entity
+/// went away" and "there is no row for it" identically — both end as absence.
+/// Composed onto a snapshot they are opposites: a disappearance must *remove*
+/// the entity the snapshot carries, and skipping it leaves the snapshot's stale
+/// row standing as though nothing had happened. So they are collected rather
+/// than dropped, and the full fold applies them to an empty base, which keeps
+/// one code path for both cases (D-049).
+///
+/// **There is one such set, not two (D-072).** It used to carry `edges_gone`
+/// beside `concepts_gone`, and both were populated only from the `'D'` branch of
+/// [`fold_delta`] — so when that branch became an error, `edges_gone` was left
+/// reachable by nothing. Closing one unreachable path by opening another is not
+/// a fix, so it went too.
+///
+/// The asymmetry is real and worth stating, because "concepts can vanish and
+/// edges cannot" looks like an oversight until you follow it:
+///
+/// * A **concept** disappears by being *retired*, which writes a `'U'` row whose
+///   payload has `retired = 1`. That is a genuine removal from a composed state
+///   and `concepts_gone` carries it.
+/// * An **edge** never disappears. It is retired by asserting a successor over
+///   the same interval key — same `source|target|type|valid_from`, later
+///   `recorded_at` — so the log row is an `'I'` under the *same* `entity_id`, and
+///   last-writer-wins in [`Self::apply_to`] replaces the tuple in place. There is
+///   nothing to remove because nothing left; the interval simply closed.
+///
+/// That is Doctrine III showing through: an edge assertion is immutable and
+/// superseded, never deleted.
 #[derive(Default)]
 struct Delta {
     concepts: HashMap<String, NodeAttributes>,
     /// Keyed by `transaction_log.entity_id`: `source|target|type|valid_from`.
     edges: HashMap<String, (String, String, String, String, String)>,
+    /// Concepts retired as of the fold's instant. See the type's note for why
+    /// there is no edge equivalent.
     concepts_gone: HashSet<String>,
-    edges_gone: HashSet<String>,
     max_seq: i64,
 }
 
@@ -374,15 +396,30 @@ async fn fold_delta(
             *max_seq = seq_id;
         }
 
+        // A `'D'` row is corruption, not a tombstone (D-072).
+        //
+        // Doctrine V permits no physical delete outside an archive session, and
+        // the archive *moves* rows rather than logging their removal — so no
+        // trigger in the schema writes a `'D'`, and no code path in the crate
+        // can produce one. This arm used to treat it as a tombstone, which read
+        // as a claim that deletions are recorded and reconstructible. They are
+        // not. Refusing here makes the doctrine enforced at the fold rather than
+        // assumed by it, and is the same call D-060 made for overlap: the layer
+        // that can notice should.
+        //
+        // Retirement is unaffected and is the mechanism that actually removes a
+        // concept from a composed state — see the `retired != 0` branch below,
+        // which is where `concepts_gone` is populated in practice.
         if op == "D" {
-            // A tombstone, not a no-op: on an empty base it is absence, on a
-            // snapshot it is a removal.
-            if table_name == "concepts" {
-                d.concepts_gone.insert(_entity_id);
-            } else if table_name == "links" {
-                d.edges_gone.insert(_entity_id);
-            }
-            continue;
+            return Err(DbError::ReplayCorrupt {
+                seq: seq_id,
+                reason: format!(
+                    "transaction_log carries a 'D' operation for {table_name} \
+                     entity {_entity_id:?}; Doctrine V permits no physical delete \
+                     outside an archive session, and the archive logs none. This \
+                     row was not written by this crate."
+                ),
+            });
         }
 
         let payload: serde_json::Value = serde_json::from_str(&payload_str).map_err(|e| DbError::ReplayCorrupt {
@@ -431,7 +468,7 @@ impl Delta {
     ///
     /// The delta is by construction newer than the base — it is the fold of
     /// everything above the base's anchor — so every row it carries wins, and
-    /// every tombstone it carries removes. This is the same rule
+    /// every retirement it carries removes. This is the same rule
     /// `trg_links_current_sync`'s upsert applies and the same rule the cold
     /// fold applies; that the three agree is asserted by test rather than by
     /// this comment (§8).
@@ -443,9 +480,8 @@ impl Delta {
         for id in self.concepts_gone {
             concepts.remove(&id);
         }
-        for key in self.edges_gone {
-            edges.remove(&key);
-        }
+        // No edge equivalent: an edge is superseded in place under the same
+        // `entity_id`, never removed — see [`Delta`] (D-072).
         concepts.extend(self.concepts);
         edges.extend(self.edges);
 

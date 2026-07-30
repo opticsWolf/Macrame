@@ -97,9 +97,19 @@ const LOG_ARCHIVABLE: &str = r#"
 /// on the way out, including on error: ATTACH is not transactional and survives
 /// ROLLBACK, so a leaked handle would make every later archive or cold-DB
 /// reconstruct fail with "database cold is already in use".
+/// `archived_at` is **when the session ran**; `cutoff` is the boundary it used.
+///
+/// Both go into `cold.archive_horizon`, and until Wave 4.5 both columns were
+/// written with the cutoff — so the table recorded that every archive had run at
+/// the instant it was archiving *up to*, which is the one time it certainly did
+/// not run. The two are different clocks (Doctrine II) and the row exists to
+/// carry both: the cutoff says what was moved, `archived_at` says when the
+/// decision was taken, and only the second can answer "how stale is this cold
+/// file". The column was there, correctly named, holding the wrong value.
 pub async fn archive(
     conn: &libsql::Connection,
     cutoff: &str,
+    archived_at: &str,
     archive_path: &Path,
 ) -> Result<ArchiveReport> {
     crate::temporal::replay::detach_stale_cold(conn).await;
@@ -111,7 +121,7 @@ pub async fn archive(
     )
     .await?;
 
-    let result = archive_session(conn, cutoff).await;
+    let result = archive_session(conn, cutoff, archived_at).await;
 
     // Unconditional: see the DETACH note above.
     if let Err(e) = conn.execute("DETACH DATABASE cold", ()).await {
@@ -123,7 +133,11 @@ pub async fn archive(
 
 /// `conn` is passed alongside `tx` only so [`delete_guarded`] can hand it to
 /// `classify`, which queries on the error path. Both name the same connection.
-async fn archive_session(conn: &libsql::Connection, cutoff: &str) -> Result<ArchiveReport> {
+async fn archive_session(
+    conn: &libsql::Connection,
+    cutoff: &str,
+    archived_at: &str,
+) -> Result<ArchiveReport> {
     for ddl in COLD_SCHEMA {
         conn.execute(*ddl, ()).await?;
     }
@@ -204,7 +218,7 @@ async fn archive_session(conn: &libsql::Connection, cutoff: &str) -> Result<Arch
 
     tx.execute(
         "INSERT INTO cold.archive_horizon (archived_at, cutoff, horizon) VALUES (?1, ?2, ?3)",
-        libsql::params![cutoff, cutoff, horizon],
+        libsql::params![archived_at, cutoff, horizon],
     )
     .await?;
 

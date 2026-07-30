@@ -1,5 +1,9 @@
 mod harness;
 
+/// When the archive session ran, as distinct from the cutoff it used. Any
+/// canonical stamp does; the point is that it is not the cutoff (Wave 4.5).
+const ARCHIVED_AT: &str = "2026-07-30T12:00:00.000000Z";
+
 use std::path::{Path, PathBuf};
 
 use harness::TestHarness;
@@ -409,7 +413,7 @@ async fn a_leaked_cold_attachment_does_not_poison_the_connection() {
     reconstruct(&conn, "2026-06-01T00:00:00.000000Z", Some(&cold_path), None)
         .await
         .expect("reconstruct must survive a leaked cold handle");
-    macrame::temporal::archive(&conn, "2026-06-01T00:00:00.000000Z", &cold_path)
+    macrame::temporal::archive(&conn, "2026-06-01T00:00:00.000000Z", ARCHIVED_AT, &cold_path)
         .await
         .expect("archive must survive a leaked cold handle");
 }

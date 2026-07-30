@@ -48,6 +48,10 @@
 
 mod harness;
 
+/// When the archive session ran, as distinct from the cutoff it used. Any
+/// canonical stamp does; the point is that it is not the cutoff (Wave 4.5).
+const ARCHIVED_AT: &str = "2026-07-30T12:00:00.000000Z";
+
 use std::collections::BTreeSet;
 use std::future::Future;
 
@@ -475,7 +479,7 @@ proptest! {
             prop_assume!(audit_count(&conn).await == 0);
 
             let cold = harness.temp_dir.path().join("cold.db");
-            macrame::temporal::archive(&conn, TS[cutoff], &cold).await.unwrap();
+            macrame::temporal::archive(&conn, TS[cutoff], ARCHIVED_AT, &cold).await.unwrap();
 
             let links = read_rows(&conn, "links").await;
             let current = read_rows(&conn, "links_current").await;

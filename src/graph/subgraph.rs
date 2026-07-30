@@ -280,6 +280,21 @@ impl Database {
     /// most of the database in three hops, and the budget is what turns that
     /// into [`DbError::SubgraphTooLarge`] rather than into an allocation
     /// failure.
+    ///
+    /// # Not filtered
+    ///
+    /// **This takes neither `edge_types` nor `min_weight`, while
+    /// [`super::TraversalBuilder`] takes both** — the same walk, over the same
+    /// table, with two fewer knobs. Recorded rather than fixed in Wave 4.5,
+    /// because it is a feature gap and not a defect: nothing here returns a wrong
+    /// answer, and a caller who needs a filtered neighbourhood can get the ids
+    /// from `TraversalBuilder` today.
+    ///
+    /// The reason it is worth closing eventually is the byte budget. Filtering
+    /// after the fact cannot help a caller whose *unfiltered* neighbourhood
+    /// exceeds the budget, so `SubgraphTooLarge` currently refuses loads that a
+    /// filtered walk would have fitted comfortably — which makes this a
+    /// reachability limit rather than a convenience one.
     pub async fn load_subgraph(
         &self,
         start_node: &str,
@@ -301,6 +316,35 @@ impl Database {
 -- substring. `INSTR(path, id)` was correct only while every id was the same
 -- fixed width (D-061): with variable-length ids, visiting `abc` would prune a
 -- live branch to `b`. Ids may not contain `/`, which is what makes this exact.
+-- **The `DISTINCT` is why this query is superlinear, and it is not removable.**
+--
+-- Wave 3 measured `load_subgraph` at 12.5x for 10x the nodes and could not say
+-- why; Wave 4 answered it from the plan. `EXPLAIN` reports
+-- `USE TEMP B-TREE FOR DISTINCT`: an O(E log E) sort over the output, and
+-- n log n predicts ~13.3x for 10x, against the 12.5x measured. That is the term.
+--
+-- It is load-bearing. The cycle check stops a path revisiting a node; it does
+-- not stop two branches reaching the same node, so `walk` holds a node once per
+-- path that reaches it and the join multiplies that node's edges accordingly.
+-- Without `DISTINCT` a caller gets an edge once per path to its source.
+--
+-- Two fixes were tried and neither is here:
+--
+--   * Deduplicating the walk first (`SELECT DISTINCT node_id FROM walk`, then
+--     joining) moves the sort to nodes rather than edges — and is **36% slower**,
+--     because on a hub-shaped graph `walk` has far more rows than the join emits.
+--   * Aligning `ORDER BY` with the full `DISTINCT` key elides the *second*
+--     temp b-tree (`USE TEMP B-TREE FOR ORDER BY` disappears from the plan,
+--     verified). Measured back-to-back: **85.95 ms against 86.76 ms** — no
+--     effect. The `DISTINCT` b-tree dominates and the second pass is over rows
+--     already nearly in order. Reverted, because it widens the ordering contract
+--     to `weight` and the timestamps in exchange for nothing measurable.
+--
+-- So the growth is explained, inherent to producing a deduplicated result, and
+-- left alone. Note that both A/B arms above sit near 86 ms where Wave 3 recorded
+-- 62.2 ms for the same code — identical builds varied ~29% across runs in that
+-- session, which is a caution about the absolute figures in §8.8 rather than
+-- about this query.
 WITH RECURSIVE walk(node_id, depth, path) AS (
     SELECT ?1, 0, '/' || CAST(?1 AS BLOB) || '/'
     UNION ALL

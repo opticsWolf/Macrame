@@ -1,5 +1,9 @@
 mod harness;
 
+/// When the archive session ran, as distinct from the cutoff it used. Any
+/// canonical stamp does; the point is that it is not the cutoff (Wave 4.5).
+const ARCHIVED_AT: &str = "2026-07-30T12:00:00.000000Z";
+
 use std::path::Path;
 use harness::TestHarness;
 use macrame::error::DbError;
@@ -181,7 +185,7 @@ async fn test_archive_moves_closed_intervals_and_leaves_no_drift() {
     ).await.unwrap();
 
     let archive_path = harness.temp_dir.path().join("test_macrame_archive.db");
-    let report = archive(&conn, "2026-06-01T00:00:00.000000Z", &archive_path)
+    let report = archive(&conn, "2026-06-01T00:00:00.000000Z", ARCHIVED_AT, &archive_path)
         .await
         .expect("archive session should succeed");
 
@@ -205,7 +209,7 @@ async fn test_archive_moves_closed_intervals_and_leaves_no_drift() {
     assert!(conn.execute("DELETE FROM links", ()).await.is_err());
 
     // DETACH ran, so a second session can still attach.
-    archive(&conn, "2026-06-01T00:00:00.000000Z", &archive_path)
+    archive(&conn, "2026-06-01T00:00:00.000000Z", ARCHIVED_AT, &archive_path)
         .await
         .expect("second archive session should succeed (cold DB detached)");
 }
@@ -536,7 +540,7 @@ async fn a_failed_archive_session_leaves_the_hot_database_untouched_and_the_guar
         assert!(!before_links.is_empty(), "the fixture must have rows to lose");
 
         let cutoff = "2026-06-01T00:00:00.000000Z";
-        let err = archive(&conn, cutoff, &cold)
+        let err = archive(&conn, cutoff, ARCHIVED_AT, &cold)
             .await
             .expect_err(
                 "the session was supposed to fail on the incompatible cold table; \
@@ -591,7 +595,7 @@ async fn a_failed_archive_session_leaves_the_hot_database_untouched_and_the_guar
 
         // No leaked ATTACH and no leaked transaction: a real session still runs.
         let good = harness.temp_dir.path().join("good_cold.db");
-        let report = archive(&conn, cutoff, &good)
+        let report = archive(&conn, cutoff, ARCHIVED_AT, &good)
             .await
             .expect("a later archive session must still succeed after a failed one");
         assert_eq!(

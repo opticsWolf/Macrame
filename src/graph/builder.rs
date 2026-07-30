@@ -9,6 +9,18 @@ pub enum AttributeMode {
     /// Attributes as believed at ts, hydrated from transaction_log.
     AtTime,
     /// Topology only; concepts join is omitted.
+    ///
+    /// **Use [`TraversalBuilder::execute_ids`], not [`TraversalBuilder::execute`].**
+    /// `execute` returns `Vec<NodeAttributes>`, and there are no attributes to
+    /// return under this mode, so it answers `Ok(vec![])` — which a caller
+    /// cannot tell apart from a traversal that reached nothing. `execute_ids`
+    /// returns exactly what this mode is for, and distinguishes the two cases by
+    /// construction.
+    ///
+    /// Kept rather than removed (Wave 4.5) because it is meaningful where the
+    /// mode is a *parameter* — `hydrate_attributes` and `FilteredVectorSearch`
+    /// both take one and are right to accept "no attributes" as a choice. It is
+    /// only `execute`'s return type that cannot express it.
     Omit,
 }
 
@@ -127,6 +139,12 @@ ORDER BY w.node_id;
     /// attributes with no indication that the mode had been ignored. That is the
     /// exact failure Doctrine II exists to prevent, arriving as a silent wrong
     /// answer rather than as an error.
+    ///
+    /// **[`AttributeMode::Omit`] returns `Ok(vec![])` here**, which is
+    /// indistinguishable from a traversal that reached nothing. That is a
+    /// limitation of this method's return type rather than of the mode; callers
+    /// wanting topology only should use [`Self::execute_ids`], which says what it
+    /// found.
     pub async fn execute(
         &self,
         conn: &libsql::Connection,

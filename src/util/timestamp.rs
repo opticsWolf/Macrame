@@ -86,11 +86,9 @@ pub fn normalize(s: &str) -> Result<String> {
             return Ok(widened);
         }
     }
-    Err(DbError::ReplayCorrupt {
-        seq: 0,
-        reason: format!(
-            "timestamp {s:?} is not canonical (expected YYYY-MM-DDTHH:MM:SS.ffffffZ)"
-        ),
+    Err(DbError::InvalidTimestamp {
+        value: s.to_string(),
+        reason: "expected YYYY-MM-DDTHH:MM:SS.ffffffZ".to_string(),
     })
 }
 
@@ -149,9 +147,9 @@ pub fn parse(s: &str) -> Result<SystemTime> {
     let micros = num(20, 26);
     debug_assert_eq!(b[26], b'Z');
 
-    let bad = |why: &str| DbError::ReplayCorrupt {
-        seq: 0,
-        reason: format!("timestamp {s:?}: {why}"),
+    let bad = |why: &str| DbError::InvalidTimestamp {
+        value: s.to_string(),
+        reason: why.to_string(),
     };
     if !(1..=12).contains(&month) {
         return Err(bad("month out of range"));

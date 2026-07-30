@@ -72,6 +72,23 @@ pub enum DbError {
     #[error("physical delete blocked outside archive session ({table})")]
     ArchiveViolation { table: String },
 
+    /// A timestamp that is not in canonical form (§4.1, D-029).
+    ///
+    /// **Distinct from [`Self::ReplayCorrupt`], which is what this used to be
+    /// (Wave 4.5).** `timestamp::normalize` and `timestamp::parse` reported bad
+    /// *caller input* as `ReplayCorrupt { seq: 0 }` — a claim that the ledger is
+    /// damaged, carrying a sequence number that cannot exist because
+    /// `AUTOINCREMENT` starts at 1. The same mistake as defect J: an error that
+    /// names the wrong subject sends a caller to fix the wrong thing.
+    ///
+    /// The value is reported rather than the provenance, because one function
+    /// serves both directions — a caller passing `2026-01-01T00:00:00Z` and a
+    /// stored `recorded_at` that will not parse produce the same complaint about
+    /// the same string. `SystemClock::new` is where the second case is
+    /// interpreted, and it already logs and floors to the wall clock (D-027).
+    #[error("timestamp {value:?} is not canonical: {reason}")]
+    InvalidTimestamp { value: String, reason: String },
+
     /// An identifier the crate's own encodings cannot represent (D-061).
     ///
     /// Distinct from [`Self::NotFound`], and the distinction is defect J: this
@@ -117,6 +134,15 @@ pub enum DbError {
 
     #[error("write actor dropped the response channel mid-request")]
     WriterDroppedResponder,
+
+    /// The actor's task did not join cleanly at [`crate::Database::close`].
+    ///
+    /// Distinct from [`Self::WriterUnavailable`], which means the channel is
+    /// gone while the handle is still in use. This is the shutdown path telling
+    /// a caller that the write actor panicked — which `close()` used to swallow,
+    /// so a database whose write path had died closed "successfully" (Wave 4.2).
+    #[error("write actor did not shut down cleanly: {0}")]
+    WriterStopped(String),
 
     // -- 0.5.0: concept integrity --
     #[error("recorded_at must advance on concept update (got {got}, had {had})")]
