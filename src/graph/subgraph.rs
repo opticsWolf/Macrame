@@ -20,6 +20,32 @@ const NO_EDGES: &[EdgeRef] = &[];
 /// Every algorithm in [`super::algorithms`] inherits its determinism from that
 /// choice, and Louvain in particular returns a different partition under a
 /// randomised iteration order.
+///
+/// # Closure
+///
+/// **Every id appearing in `out_adj` or `in_adj` — as a key or as an
+/// [`EdgeRef::node`] — is a key of `nodes`.** [`Subgraph::drop_dangling_adjacency`]
+/// establishes it and [`Subgraph::is_closed`] checks it; every algorithm in
+/// [`super::algorithms`] is written assuming it and none of them re-checks.
+///
+/// It did not hold before Wave 1 (defect Z), and the way it failed is the reason
+/// it is now stated on the type rather than left to the loader. Adjacency comes
+/// from `links_current`, which carries edges to retired concepts; `hydrate`
+/// filters `retired = 0`. So a retired neighbour left an `EdgeRef` pointing at
+/// an id with no `NodeData`, and the five algorithms each met that differently:
+/// `louvain` panicked on the missing map entry, `scc` emitted the absent node as
+/// a phantom component of its own, `k_core` counted a degree of 2 where one edge
+/// was in the graph, and `dijkstra` returned a finite distance to a node the
+/// caller could not then look up. Four handlings of one violated invariant, none
+/// of them chosen — and the panic was the least damaging, because the other
+/// three answer.
+///
+/// Dangling entries are **dropped** rather than admitted with a tombstone node.
+/// A retired concept is not visible (§4.1), analytics over a graph is analytics
+/// over what is visible, and the alternative pushes a three-state node onto
+/// every present and future algorithm to preserve edges whose endpoint the
+/// caller is not entitled to read. Retirement is the supported path — concepts
+/// are never deleted (D-022) — so this is ordinary use, not a corner.
 #[derive(Debug, Clone, Default)]
 pub struct Subgraph {
     pub nodes: BTreeMap<String, NodeData>,
@@ -83,6 +109,57 @@ impl Subgraph {
 
     pub fn edge_count(&self) -> usize {
         self.out_adj.values().map(Vec::len).sum()
+    }
+
+    /// Remove adjacency entries whose endpoint is not a hydrated node.
+    ///
+    /// This is what establishes the closure invariant on the type's docs, and it
+    /// runs after `hydrate` because that is the first moment the set of visible
+    /// nodes is known — the walk is over `links_current`, which does not record
+    /// retirement.
+    ///
+    /// A node left with no edges keeps its (now empty) entry only if it had one;
+    /// entries emptied by the prune are removed outright, so `out_adj` and
+    /// `in_adj` do not accumulate keys for nodes that turned out to have nothing.
+    /// Keys that are themselves not hydrated go too, which covers the case where
+    /// the *source* is the retired concept rather than the target.
+    ///
+    /// The byte accounting is deliberately not rewound. `bytes` bounded the load
+    /// as it ran and refused early on that basis, so a graph that would have fit
+    /// after pruning can still be refused before it. That is conservative in the
+    /// safe direction — the budget exists to stop an allocation, and the
+    /// allocation happens during the walk, not after it.
+    fn drop_dangling_adjacency(&mut self) {
+        // Destructured so `nodes` is borrowed separately from the two maps being
+        // mutated — the same borrow through `self` inside the closure would not
+        // compile.
+        let Subgraph {
+            nodes,
+            out_adj,
+            in_adj,
+        } = self;
+
+        for adj in [out_adj, in_adj] {
+            adj.retain(|id, edges| {
+                if !nodes.contains_key(id) {
+                    return false;
+                }
+                edges.retain(|e| nodes.contains_key(&e.node));
+                !edges.is_empty()
+            });
+        }
+    }
+
+    /// Whether the closure invariant holds. Used by tests and `debug_assert`s.
+    ///
+    /// Cheap enough to call in a test and O(V + E), so not on any hot path.
+    pub fn is_closed(&self) -> bool {
+        self.out_adj
+            .iter()
+            .chain(self.in_adj.iter())
+            .all(|(id, edges)| {
+                self.nodes.contains_key(id) && edges.iter().all(|e| self.nodes.contains_key(&e.node))
+            })
     }
 
     /// Record an edge in both directions.
@@ -219,15 +296,20 @@ impl Database {
         // Topology first: the walk is over links_current, bounded by hop count
         // and by the path check that stops it revisiting a node.
         let sql = r#"
+-- The path is `/a/b/c/` — leading and trailing delimiter, so the cycle check
+-- can ask for a *delimited* id and match a whole element rather than a
+-- substring. `INSTR(path, id)` was correct only while every id was the same
+-- fixed width (D-061): with variable-length ids, visiting `abc` would prune a
+-- live branch to `b`. Ids may not contain `/`, which is what makes this exact.
 WITH RECURSIVE walk(node_id, depth, path) AS (
-    SELECT ?1, 0, CAST(?1 AS BLOB)
+    SELECT ?1, 0, '/' || CAST(?1 AS BLOB) || '/'
     UNION ALL
-    SELECT l.target_id, w.depth + 1, w.path || '/' || CAST(l.target_id AS BLOB)
+    SELECT l.target_id, w.depth + 1, w.path || CAST(l.target_id AS BLOB) || '/'
     FROM walk w
     JOIN links_current l ON l.source_id = w.node_id
     WHERE w.depth < ?2
       AND l.valid_from <= ?3 AND ?3 < l.valid_to
-      AND INSTR(w.path, CAST(l.target_id AS BLOB)) = 0
+      AND INSTR(w.path, '/' || CAST(l.target_id AS BLOB) || '/') = 0
 )
 SELECT DISTINCT l.source_id, l.target_id, l.edge_type, l.weight, l.valid_from, l.valid_to
 FROM walk w
@@ -292,17 +374,27 @@ ORDER BY l.source_id, l.target_id, l.edge_type
         ids.dedup();
 
         hydrate(conn, &mut graph, &ids, bytes, byte_budget).await?;
+        graph.drop_dangling_adjacency();
         Ok(graph)
     }
 }
+
+/// How many ids go into one `IN (…)` list. See `as_of::HYDRATE_CHUNK`.
+const HYDRATE_CHUNK: usize = 400;
 
 /// Fill in `nodes` from `concepts` for the ids the topology touched.
 /// Attach node attributes, continuing the caller's byte accounting.
 ///
 /// `bytes_so_far` is the topology's payload total; this adds each node as it
-/// lands and refuses inside the loop rather than after it. Checking once at the
-/// end would allocate the whole oversized result before declining to return it,
-/// which is the failure the budget exists to prevent rather than to report.
+/// lands and refuses as soon as the running total passes the budget rather than
+/// after the whole set is in hand. Checking once at the end would allocate the
+/// whole oversized result before declining to return it, which is the failure
+/// the budget exists to prevent rather than to report.
+///
+/// **One query per [`HYDRATE_CHUNK`] ids, not one per node (defect AE).** The
+/// previous version issued a round trip per id: 400 nodes cost 400 of them and
+/// 13.2 ms, essentially all of it latency rather than work, and linear in node
+/// count on a path whose whole purpose is to bound the result by *bytes*.
 async fn hydrate(
     conn: &libsql::Connection,
     graph: &mut Subgraph,
@@ -311,25 +403,34 @@ async fn hydrate(
     byte_budget: usize,
 ) -> Result<()> {
     let mut bytes = bytes_so_far;
-    for id in ids {
-        let mut rows = conn
-            .query(
-                "SELECT title, content, embedding_model, valid_from, valid_to \
-                 FROM concepts WHERE id = ?1 AND retired = 0",
-                libsql::params![id.as_str()],
-            )
-            .await?;
 
-        if let Some(row) = rows.next().await? {
+    for chunk in ids.chunks(HYDRATE_CHUNK) {
+        // Only the placeholders are built; the ids themselves are bound.
+        let list = (1..=chunk.len())
+            .map(|i| format!("?{i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT id, title, content, embedding_model, valid_from, valid_to \
+             FROM concepts WHERE retired = 0 AND id IN ({list})"
+        );
+        let params: Vec<libsql::Value> = chunk
+            .iter()
+            .map(|id| libsql::Value::Text(id.clone()))
+            .collect();
+
+        let mut rows = conn.query(&sql, params).await?;
+        while let Some(row) = rows.next().await? {
+            let id: String = row.get(0)?;
             let data = NodeData {
-                title: row.get(0)?,
-                content: row.get(1)?,
-                embedding_model: row.get(2).ok(),
-                valid_from: row.get(3)?,
-                valid_to: row.get(4)?,
+                title: row.get(1)?,
+                content: row.get(2)?,
+                embedding_model: row.get(3).ok(),
+                valid_from: row.get(4)?,
+                valid_to: row.get(5)?,
             };
-            bytes += Subgraph::node_bytes(id, &data);
-            graph.nodes.insert(id.clone(), data);
+            bytes += Subgraph::node_bytes(&id, &data);
+            graph.nodes.insert(id, data);
 
             if bytes > byte_budget {
                 return Err(DbError::SubgraphTooLarge {

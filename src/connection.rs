@@ -7,6 +7,7 @@ use crate::graph::edge::EdgeAssertion;
 use crate::integrity::{rebuild_current, RebuildReport};
 use crate::schema::migrations;
 use crate::temporal::archive::{archive, ArchiveReport};
+use crate::temporal::interval::Interval;
 use crate::temporal::snapshot::{self, SnapshotCadence};
 use crate::util::clock::{Clock, SystemClock};
 use crate::util::timestamp;
@@ -116,6 +117,28 @@ pub mod chunk_rows {
 /// see [`HighPriCommand`]) and then runs its own write (≤ 5 ms, §9), so ≤ 8 ms
 /// worst case. That fits inside a 60 Hz frame with room, which is the standard
 /// this bound is ultimately answerable to.
+///
+/// # Three operations are exempt, and the exemption is a contract, not an oversight
+///
+/// This was recorded in three separate rustdoc notes and nowhere near the bound
+/// itself, which is where a reader looks for its scope (§8.6). Stated here, with
+/// Wave 3's measurements:
+///
+/// | Path | Bound | Why it cannot be chunked |
+/// |---|---|---|
+/// | [`Database::write_bulk_atomic`] | none — caller-sized `Vec` | D-014: the batch is *one act* under one stamp. Splitting it is the thing the method exists not to do |
+/// | [`Database::archive`] | measured **26.8 ms** for 2,000 archivable edges | D-012: copy-then-delete must be atomic, or a crash between the phases duplicates or loses rows |
+/// | `rebuild_current` | ~50 s per 10M edges | D-023: the window between `DELETE` and `INSERT` is the whole of current belief; a reader landing in it sees a graph with no edges and no error |
+///
+/// All three are atomic **by contract**, which is why "cap the batch" and "add a
+/// third tier" were both considered and neither was taken: capping breaks the
+/// guarantee the operation exists to provide, and a third tier changes which
+/// caller waits without changing how long the lock is held. What was wrong was
+/// never the exemption — it was that the bound was stated as though it had none.
+///
+/// A caller who needs the latency bound and not the atomicity has
+/// [`Database::bulk_import`], which is the same write chunked at
+/// [`chunk_rows::EDGES`] and explicitly *not* atomic overall (D-011).
 pub const CHUNK_BUDGET: std::time::Duration = std::time::Duration::from_millis(3);
 
 /// A concept assertion: the payload of an upsert.
@@ -170,6 +193,7 @@ impl ConceptUpsert {
 
     /// Put the timestamps in canonical form (D-029) before they cross the channel.
     pub fn normalized(mut self) -> Result<Self> {
+        crate::util::ids::validate_id(&self.id)?;
         self.valid_from = timestamp::normalize(&self.valid_from)?;
         self.valid_to = timestamp::normalize(&self.valid_to)?;
         Ok(self)
@@ -328,7 +352,42 @@ impl Database {
         path: impl AsRef<Path>,
         cadence: Option<SnapshotCadence>,
     ) -> Result<Self> {
-        let path = path.as_ref();
+        Self::open_inner(path.as_ref(), cadence, None).await
+    }
+
+    /// Open with an injected clock (§5.1.2, **defect K**, D-062).
+    ///
+    /// The reason this exists is testing: `recorded_at` is the transaction-time
+    /// axis, and until now every test that wanted to assert on one had to either
+    /// avoid it or drive a raw connection, because `open()` hardcoded
+    /// [`SystemClock`]. `FakeClock` has been public and constructed in the test
+    /// harness since 0.5.2 with nothing to inject it into — the compiler warned
+    /// about the dead field on every build for three releases.
+    ///
+    /// **The clock is floored against the database before the actor starts.**
+    /// [`Clock::raise_floor`] is called with the newest `recorded_at` in the
+    /// ledger, so an injected clock cannot issue a stamp below what is already
+    /// stored — which would abort the next concept write on
+    /// `trg_concepts_monotonic_ra` rather than merely being odd. This is the
+    /// step whose absence kept the defect open: the obvious implementation
+    /// (take an `Arc<dyn Clock>`, use it) produces a `Database` that fails on
+    /// its first write against any non-empty file.
+    ///
+    /// On a fresh database there is no floor, so an injected `FakeClock` issues
+    /// exactly the stamps it was given.
+    pub async fn open_with_clock(
+        path: impl AsRef<Path>,
+        cadence: Option<SnapshotCadence>,
+        clock: Arc<dyn Clock>,
+    ) -> Result<Self> {
+        Self::open_inner(path.as_ref(), cadence, Some(clock)).await
+    }
+
+    async fn open_inner(
+        path: &Path,
+        cadence: Option<SnapshotCadence>,
+        injected: Option<Arc<dyn Clock>>,
+    ) -> Result<Self> {
         let db = libsql::Builder::new_local(path).build().await?;
         let write_conn = configure(db.connect()?).await?;
         let read_conn = configure(db.connect()?).await?;
@@ -341,7 +400,17 @@ impl Database {
         let (highpri_tx, highpri_rx) = mpsc::channel(256);
         let (lowpri_tx, lowpri_rx) = mpsc::channel(64);
 
-        let clock: Arc<dyn Clock> = Arc::new(SystemClock::new(&read_conn).await?);
+        // Floored after `migrations::run`, so the tables the floor is read from
+        // are guaranteed to exist.
+        let clock: Arc<dyn Clock> = match injected {
+            Some(clock) => {
+                if let Some(floor) = crate::util::clock::recorded_at_floor(&read_conn).await? {
+                    clock.raise_floor(floor);
+                }
+                clock
+            }
+            None => Arc::new(SystemClock::new(&read_conn).await?),
+        };
         let writer = tokio::spawn(run_writer_actor(
             write_conn,
             Arc::clone(&clock),
@@ -871,6 +940,10 @@ impl HighPriCommand {
             }
             HighPriCommand::AssertEdge { edge, responder } => {
                 let stamp = clock.now();
+                if let Err(e) = reject_overlapping_interval(conn, &edge).await {
+                    let _ = responder.send(Err(e));
+                    return LoopCtl::Continue;
+                }
                 let res = match conn
                     .execute(
                         INSERT_LINK,
@@ -1058,6 +1131,187 @@ async fn upsert_concept(
     }
 }
 
+/// Every recorded interval for one relationship key, for [`Interval::overlaps`]
+/// to judge.
+///
+/// **Three equalities and nothing else, deliberately — and the "and nothing
+/// else" was measured, not assumed.** The first version added
+/// `AND valid_from < :new_valid_to`, a provably safe narrowing (overlap requires
+/// `max(start) < min(end)`, so an interval starting at or after the new one's end
+/// cannot overlap it). It cost **9.8 ms on a 90-edge chunk into a 2,000-edge
+/// hub**, because it walked the planner straight into D-059's trap:
+///
+/// ```text
+/// with the range:     SEARCH links_current USING COVERING INDEX
+///                     idx_lc_traversal_cover (source_id=? AND valid_from<?)
+/// without it:         SEARCH links_current USING COVERING INDEX
+///                     idx_lc_open_interval (source_id=? AND target_id=? AND edge_type=?)
+/// ```
+///
+/// `idx_lc_traversal_cover` leads on `(source_id, valid_from, …)` and contains
+/// every column this query mentions, so with a `valid_from` range available it
+/// wins as a covering index while binding **one** equality column — and the
+/// guard scans the source's entire out-degree. That is the same shape as the
+/// defect D-059 diagnosed in `trg_links_single_open`, reintroduced by an
+/// optimisation, one wave after it was fixed.
+///
+/// Dropping the range makes the query a pure three-column point lookup that
+/// `idx_lc_open_interval` serves exactly, and the rows it returns are the
+/// intervals recorded for one `(source, target, edge_type)` — a version count,
+/// not an out-degree. **A narrowing predicate is not free if it changes the
+/// plan**, which is the general lesson and the reason this constant carries its
+/// own `EXPLAIN` output.
+const OVERLAP_CANDIDATES: &str = "SELECT valid_from, valid_to FROM links_current \
+     WHERE source_id = ?1 AND target_id = ?2 AND edge_type = ?3 \
+       AND valid_from <> ?4";
+
+/// Whether this pair is the storage layer's case rather than this guard's.
+///
+/// Two **open** intervals overlap — they share every instant from the later
+/// start onwards — so a naive overlap check reports them, and reporting them
+/// here would leave `DbError::SingleOpenViolation` constructible by nothing.
+/// That variant is the more specific error, it is enforced by
+/// `trg_links_single_open` rather than by this function, and its field names
+/// were ratified in §1.2. Shadowing it with a general one would be defect Q's
+/// shape reintroduced by a fix: a typed error that no code path can produce.
+///
+/// So the two guards partition the space rather than overlapping it. Both open
+/// belongs to the trigger. Everything else — open against closed, closed against
+/// closed — is unguarded at the storage layer and belongs here. That the split
+/// is exactly the trigger's `WHEN` clause is not a coincidence; it is the
+/// definition of what was missing.
+fn defer_to_single_open(proposed: &Interval, existing: &Interval) -> bool {
+    proposed.is_open() && existing.is_open()
+}
+
+/// Refuse an assertion whose valid-time interval overlaps one already recorded
+/// for the same `(source, target, edge_type)` — **defect AA, D-060**.
+///
+/// `trg_links_single_open` fires only `WHEN NEW.valid_to = '9999-…'`, so it
+/// guards the open sentinel and nothing else. Two *closed* intervals that
+/// overlap were accepted without complaint, and `query_as_of_edges` at an
+/// instant inside both returned one relationship as two edges.
+///
+/// **This runs in the write actor, which is what makes it sound.** The obvious
+/// place is `EdgeAssertion::normalized`, and it cannot go there — `normalized`
+/// is a pure function with no connection, and doing the read at the API boundary
+/// instead would leave a check-then-write race between the read and the actor's
+/// insert. Inside the actor there is one writer by construction (D-014), and for
+/// the batch paths this runs inside the same transaction as the insert, so the
+/// window does not exist rather than being small.
+///
+/// **What it does not cover, and §4.2 now says so:** raw SQL against the same
+/// file. The storage layer permits what this API refuses, which is the honest
+/// cost of not putting the check in a trigger. The alternative was a second
+/// index probe inside `trg_links_single_open` on every insert — on the path
+/// D-059 has just finished making fast — for a guarantee that only holds against
+/// callers who were going through the actor anyway.
+///
+/// `valid_from <> ?4` excludes the row being re-asserted. Re-assertion at the
+/// same `valid_from` is Doctrine III's ordinary case — a new belief about the
+/// same interval — and is settled by the primary key and the single-open
+/// trigger, not here.
+/// The single-assertion path prepares one statement for one check, which is what
+/// `AssertEdge` needs; the batch path prepares once and calls
+/// [`check_prepared`] per row.
+async fn reject_overlapping_interval(
+    conn: &libsql::Connection,
+    edge: &EdgeAssertion,
+) -> Result<()> {
+    let stmt = conn.prepare(OVERLAP_CANDIDATES).await?;
+    check_prepared(&stmt, edge).await
+}
+
+/// The guard's body, against a statement the caller has already prepared.
+///
+/// **Split out because preparing per row was worth 10.4 ms on a 90-edge chunk**
+/// (§8.8) — the same defect D-056 and D-057 diagnosed and fixed for
+/// `INSERT_LINK`, reintroduced by the Wave 2 guard that was written beside it.
+/// Measured with and without the guard, on a 2,000-edge hub: 8.65 ms → 19.25 ms,
+/// and *identical* with and without `idx_lc_open_interval`, which is what
+/// identified preparation rather than a scan as the cost. A guard that reads an
+/// index correctly and prepares its statement 90 times is indistinguishable, at
+/// the call site, from one that scans.
+///
+/// `reset()` between rows is not optional: libsql binds and steps without
+/// resetting, so a reused statement must be returned to its initial state.
+async fn check_prepared(stmt: &libsql::Statement, edge: &EdgeAssertion) -> Result<()> {
+    let proposed = Interval::new(edge.valid_from.clone(), edge.valid_to.clone());
+
+    stmt.reset();
+    let mut rows = stmt
+        .query(libsql::params![
+            edge.source.as_str(),
+            edge.target.as_str(),
+            edge.edge_type.as_str(),
+            edge.valid_from.as_str()
+        ])
+        .await?;
+
+    while let Some(row) = rows.next().await? {
+        let existing = Interval::new(row.get::<String>(0)?, row.get::<String>(1)?);
+        if defer_to_single_open(&proposed, &existing) {
+            continue;
+        }
+        if proposed.overlaps(&existing) {
+            return Err(DbError::OverlappingInterval {
+                source_id: edge.source.clone(),
+                target_id: edge.target.clone(),
+                edge_type: edge.edge_type.clone(),
+                valid_from: edge.valid_from.clone(),
+                valid_to: edge.valid_to.clone(),
+                existing_from: existing.valid_from,
+                existing_to: existing.valid_to,
+            });
+        }
+    }
+
+    Ok(())
+}
+
+/// The same guard applied *within* a batch, before any of it is written.
+///
+/// The database check cannot see rows that are not in the database yet, so a
+/// batch carrying two overlapping intervals for one relationship would pass
+/// every per-row check and commit the overlap in one transaction. Quadratic in
+/// the batch, which is affordable because the chunk is bounded at
+/// [`chunk_rows::EDGES`] = 90 and because the comparison is a pair of string
+/// compares — and because grouping first means the inner loop only ever runs
+/// over edges sharing a key, which is normally one.
+fn reject_overlaps_within(edges: &[EdgeAssertion]) -> Result<()> {
+    for (i, a) in edges.iter().enumerate() {
+        let ia = Interval::new(a.valid_from.clone(), a.valid_to.clone());
+        for b in &edges[i + 1..] {
+            if a.source != b.source || a.target != b.target || a.edge_type != b.edge_type {
+                continue;
+            }
+            // Identical valid_from is re-assertion within one batch: the last
+            // writer wins by seq_id, as it does across batches. Not an overlap.
+            if a.valid_from == b.valid_from {
+                continue;
+            }
+            let ib = Interval::new(b.valid_from.clone(), b.valid_to.clone());
+            // Both open is the trigger's case; it fires during the insert and
+            // rolls the batch back with the more specific error.
+            if defer_to_single_open(&ia, &ib) {
+                continue;
+            }
+            if ia.overlaps(&ib) {
+                return Err(DbError::OverlappingInterval {
+                    source_id: a.source.clone(),
+                    target_id: a.target.clone(),
+                    edge_type: a.edge_type.clone(),
+                    valid_from: a.valid_from.clone(),
+                    valid_to: a.valid_to.clone(),
+                    existing_from: ib.valid_from,
+                    existing_to: ib.valid_to,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Write every edge or none, under a single stamp.
 ///
 /// **The statement is prepared once for the whole chunk (§9, D-056).** It used to
@@ -1088,9 +1342,29 @@ async fn write_edges_atomic(
         return Ok(0);
     }
 
+    // Before the transaction opens: a batch that contradicts itself is refused
+    // without taking the write lock at all (D-060).
+    reject_overlaps_within(edges)?;
+
     let tx = conn
         .transaction_with_behavior(libsql::TransactionBehavior::Immediate)
         .await?;
+
+    // Inside the transaction, so the rows this checks against cannot change
+    // between the check and the insert.
+    // One preparation for the whole chunk, not one per row — see
+    // `check_prepared`, and D-056 for the same lesson learned on `INSERT_LINK`.
+    let guard = tx.prepare(OVERLAP_CANDIDATES).await?;
+    for edge in edges {
+        if let Err(e) = check_prepared(&guard, edge).await {
+            // Released before the rollback: a live statement on the connection
+            // is what makes SQLite refuse to end a transaction.
+            drop(guard);
+            let _ = tx.rollback().await;
+            return Err(e);
+        }
+    }
+    drop(guard);
 
     let stmt = tx.prepare(INSERT_LINK).await?;
 

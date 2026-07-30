@@ -13,7 +13,7 @@ use crate::schema::ddl::*;
 /// guarantee D-029 buys would be void on it while `user_version` insisted all
 /// was well. Reserving 1 as a value this build refuses by name is what makes
 /// "no legacy support" an enforced property instead of a README sentence.
-pub const SCHEMA_VERSION: u32 = 5;
+pub const SCHEMA_VERSION: u32 = 6;
 
 type StepFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
 
@@ -56,6 +56,12 @@ const STEPS: &[Step] = &[
         to: 5,
         name: "concepts-fts",
         apply: |conn| Box::pin(add_concepts_fts(conn)),
+    },
+    Step {
+        from: 5,
+        to: 6,
+        name: "single-open-interval-index",
+        apply: |conn| Box::pin(add_open_interval_index(conn)),
     },
 ];
 
@@ -247,6 +253,29 @@ async fn add_concepts_fts(conn: &libsql::Connection) -> Result<()> {
 /// recovery, and recomputing is what this table exists to make cheap.
 async fn add_analytics_annotations(conn: &libsql::Connection) -> Result<()> {
     conn.execute(CREATE_ANALYTICS_ANNOTATIONS_TABLE, ()).await?;
+    for index_ddl in CREATE_INDICES {
+        conn.execute(index_ddl, ()).await?;
+    }
+    Ok(())
+}
+
+/// v5 → v6: index the single-open-interval probe (D-059).
+///
+/// Index-only and on a derivative table, so D-036 permits it on the same two
+/// grounds the v3 → v4 rung stood on. Nothing is dropped this time: the new
+/// index and `idx_lc_traversal_cover` serve different shapes — one needs three
+/// equality columns bound, the other leads on `source_id` alone — so neither
+/// subsumes the other and keeping both is the point rather than an oversight.
+///
+/// **This is the largest measured win in the tree and it sat proven and
+/// unshipped for a full cycle**, on the stated ground that an index is a schema
+/// change wanting its own rung. That was a description of the work rather than
+/// an objection to it. See [`CREATE_INDICES`] for the numbers.
+///
+/// Nothing is backfilled because an index has nothing to backfill; `CREATE
+/// INDEX` populates it from the table. That makes this the cheapest rung on the
+/// ladder and the only one whose cost is a function of existing row count alone.
+async fn add_open_interval_index(conn: &libsql::Connection) -> Result<()> {
     for index_ddl in CREATE_INDICES {
         conn.execute(index_ddl, ()).await?;
     }

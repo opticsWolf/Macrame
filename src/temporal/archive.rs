@@ -2,7 +2,7 @@ use std::path::Path;
 
 use libsql::TransactionBehavior;
 
-use crate::error::{DbError, Result};
+use crate::error::{Result, WriteOp};
 use crate::schema::ddl::ARCHIVE_SESSION_MARKER;
 
 /// Outcome of one archive session.
@@ -121,6 +121,8 @@ pub async fn archive(
     result
 }
 
+/// `conn` is passed alongside `tx` only so [`delete_guarded`] can hand it to
+/// `classify`, which queries on the error path. Both name the same connection.
 async fn archive_session(conn: &libsql::Connection, cutoff: &str) -> Result<ArchiveReport> {
     for ddl in COLD_SCHEMA {
         conn.execute(*ddl, ()).await?;
@@ -148,9 +150,12 @@ async fn archive_session(conn: &libsql::Connection, cutoff: &str) -> Result<Arch
         )
         .await? as usize;
 
-    tx.execute(
+    delete_guarded(
+        &tx,
+        conn,
         &format!("DELETE FROM links WHERE {LINKS_ARCHIVABLE}"),
-        libsql::named_params! {":cutoff": cutoff},
+        cutoff,
+        "links",
     )
     .await?;
 
@@ -179,9 +184,12 @@ async fn archive_session(conn: &libsql::Connection, cutoff: &str) -> Result<Arch
         )
         .await? as usize;
 
-    tx.execute(
+    delete_guarded(
+        &tx,
+        conn,
         &format!("DELETE FROM transaction_log WHERE {LOG_ARCHIVABLE}"),
-        libsql::named_params! {":cutoff": cutoff},
+        cutoff,
+        "transaction_log",
     )
     .await?;
 
@@ -213,15 +221,33 @@ async fn archive_session(conn: &libsql::Connection, cutoff: &str) -> Result<Arch
     })
 }
 
-/// Report an illegal physical delete as a typed error (§7).
+/// Run one of the archive's `DELETE`s, naming the table if a guard refuses it.
 ///
-/// Delegates to [`crate::error::abort_kind`] rather than matching the message
-/// itself: two independent copies of the same needle is one copy too many.
-pub fn classify_archive_violation(err: &libsql::Error, table: &str) -> Option<DbError> {
-    match crate::error::abort_kind(err) {
-        crate::error::AbortKind::DeleteOutsideArchive => Some(DbError::ArchiveViolation {
-            table: table.to_string(),
-        }),
-        _ => None,
+/// **This is what closes defect AC, and the shape of the fix is the point.**
+/// There used to be a second classifier here — `classify_archive_violation` —
+/// which was defined, delegated correctly to [`crate::error::abort_kind`], and
+/// called from nowhere, so `DbError::ArchiveViolation` was unreachable by any
+/// code path in the crate. It was recorded as defect H, marked Fixed by a commit
+/// that made the *body* delegate rather than making the function *called*, and
+/// so survived its own repair. It is deleted rather than wired up, because
+/// [`crate::error::classify`] with [`WriteOp::Delete`] already did exactly what
+/// it did: the defect was one classifier too many, not one too few.
+///
+/// A guard firing here means the marker table is absent or was dropped early —
+/// the session's invariant broken from inside. That is worth a typed error
+/// naming the table rather than a raw engine message naming a trigger.
+async fn delete_guarded(
+    tx: &libsql::Transaction,
+    conn: &libsql::Connection,
+    sql: &str,
+    cutoff: &str,
+    table: &str,
+) -> Result<u64> {
+    match tx
+        .execute(sql, libsql::named_params! {":cutoff": cutoff})
+        .await
+    {
+        Ok(n) => Ok(n),
+        Err(e) => Err(crate::error::classify(conn, e, WriteOp::Delete { table }).await),
     }
 }

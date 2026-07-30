@@ -284,6 +284,167 @@ async fn a_v2_database_climbs_to_v3_and_gains_the_annotations_table() {
         .expect("the rung must create analytics_annotations");
 }
 
+/// The v5 → v6 rung reaches v6 from a database that stopped at v5, and the
+/// index it adds is actually there afterwards (D-059).
+///
+/// A v5 database is the baseline minus one index, so it is built by laying the
+/// baseline and dropping that index rather than by reconstructing v5's DDL by
+/// hand — a hand-written copy of an old schema is a second description that can
+/// drift from the one the rung is written against.
+#[tokio::test]
+async fn a_v5_database_climbs_to_v6_and_gains_the_open_interval_index() {
+    let harness = TestHarness::new();
+    let conn = connect(&harness).await;
+
+    migrations::run(&conn).await.unwrap();
+    conn.execute("DROP INDEX idx_lc_open_interval", ())
+        .await
+        .unwrap();
+    conn.execute("PRAGMA user_version = 5", ()).await.unwrap();
+
+    migrations::run(&conn).await.unwrap();
+
+    assert_eq!(user_version(&conn).await, SCHEMA_VERSION);
+    assert_eq!(SCHEMA_VERSION, 6, "the ladder's top moved without this test");
+
+    let found: i64 = conn
+        .query(
+            "SELECT COUNT(*) FROM sqlite_master \
+             WHERE type = 'index' AND name = 'idx_lc_open_interval'",
+            (),
+        )
+        .await
+        .unwrap()
+        .next()
+        .await
+        .unwrap()
+        .unwrap()
+        .get(0)
+        .unwrap();
+    assert_eq!(found, 1, "the rung must create idx_lc_open_interval");
+}
+
+/// **The point of the D-059 rung: the single-open-interval probe seeks on all
+/// three equality columns instead of scanning a source's out-degree.**
+///
+/// This is the acceptance test the index exists for, and it has to inspect the
+/// plan rather than time the insert. A timing assertion would need a hub large
+/// enough for the difference to clear the noise — the measured spread only opens
+/// up around 2,000 edges — which is a slow test that fails for machine reasons.
+/// The plan is the causal claim: D-059 diagnosed the cost as `EXISTS` being
+/// served by `idx_lc_traversal_cover` with only `source_id` bound, so what must
+/// be asserted is which index is chosen and how much of it is bound.
+///
+/// The trigger body cannot be handed to `EXPLAIN QUERY PLAN` directly, so the
+/// probe's `SELECT` is reproduced here. That is a second copy of the predicate
+/// and the risk is real — if the trigger's `WHERE` changes and this does not,
+/// the test goes on proving something about a query nobody runs. It is bounded
+/// by `the_open_interval_probe_matches_the_trigger` below, which checks the
+/// trigger DDL still contains the predicate this test models.
+#[tokio::test]
+async fn the_single_open_probe_seeks_rather_than_scans() {
+    let harness = TestHarness::new();
+    let conn = connect(&harness).await;
+    migrations::run(&conn).await.unwrap();
+
+    let probe = "SELECT 1 FROM links_current \
+                 WHERE source_id = ?1 AND target_id = ?2 AND edge_type = ?3 \
+                   AND valid_from <> ?4 AND valid_to = ?5";
+
+    let mut rows = conn
+        .query(&format!("EXPLAIN QUERY PLAN {probe}"), ())
+        .await
+        .unwrap();
+    let mut plan = Vec::new();
+    while let Some(r) = rows.next().await.unwrap() {
+        plan.push(r.get::<String>(3).unwrap());
+    }
+    let step = plan.join(" | ");
+
+    assert!(
+        step.contains("idx_lc_open_interval"),
+        "the probe is not using its own index: {step}"
+    );
+    // Three equality columns bound, not one. `(source_id=?)` alone is the
+    // pre-D-059 plan and the whole defect — it makes the probe O(out-degree).
+    assert!(
+        step.contains("source_id=? AND target_id=? AND edge_type=?"),
+        "the probe binds fewer columns than the index offers, so it still scans: {step}"
+    );
+}
+
+/// **The overlap guard's own query seeks on all three equality columns.**
+///
+/// The guard (D-060) fell into D-059's trap one wave after it was fixed. Its
+/// first version carried `AND valid_from < :new_valid_to` — a provably safe
+/// narrowing — and that range predicate made `idx_lc_traversal_cover` win as a
+/// covering index while binding only `source_id`, so the guard scanned the
+/// source's whole out-degree. Measured at **+9.8 ms** on a 90-edge chunk into a
+/// 2,000-edge hub, and invisible to every correctness test because the answer
+/// was right.
+///
+/// Pinned here because the failure mode is a *plan*, not a result: nothing about
+/// the returned rows changes when this regresses.
+#[tokio::test]
+async fn the_overlap_guard_seeks_on_all_three_equality_columns() {
+    let harness = TestHarness::new();
+    let conn = connect(&harness).await;
+    migrations::run(&conn).await.unwrap();
+
+    // The guard's query, as `connection::OVERLAP_CANDIDATES` states it.
+    let probe = "SELECT valid_from, valid_to FROM links_current \
+                 WHERE source_id = ?1 AND target_id = ?2 AND edge_type = ?3 \
+                   AND valid_from <> ?4";
+
+    let mut rows = conn
+        .query(&format!("EXPLAIN QUERY PLAN {probe}"), ())
+        .await
+        .unwrap();
+    let mut plan = Vec::new();
+    while let Some(r) = rows.next().await.unwrap() {
+        plan.push(r.get::<String>(3).unwrap());
+    }
+    let step = plan.join(" | ");
+
+    assert!(
+        step.contains("idx_lc_open_interval"),
+        "the overlap guard is not using the index added for it: {step}"
+    );
+    assert!(
+        step.contains("source_id=? AND target_id=? AND edge_type=?"),
+        "the guard binds fewer columns than the index offers, so it scans the \
+         source's out-degree — this is D-059's defect in D-060's guard: {step}"
+    );
+}
+
+/// The predicate the plan test models is still the predicate the trigger runs.
+///
+/// Guards the one weakness of testing a reproduced query: a trigger body is not
+/// reachable by `EXPLAIN QUERY PLAN`, so the plan test necessarily works on a
+/// copy, and a copy can outlive its original.
+#[test]
+fn the_open_interval_probe_matches_the_trigger() {
+    let trigger = ddl::CREATE_TRIGGERS
+        .iter()
+        .find(|t| t.contains("trg_links_single_open"))
+        .expect("trg_links_single_open must exist");
+
+    let flat = trigger.split_whitespace().collect::<Vec<_>>().join(" ");
+    for clause in [
+        "source_id = NEW.source_id",
+        "target_id = NEW.target_id",
+        "edge_type = NEW.edge_type",
+        "valid_from <> NEW.valid_from",
+        "valid_to = '9999-12-31T23:59:59.999999Z'",
+    ] {
+        assert!(
+            flat.contains(clause),
+            "the trigger no longer contains {clause:?}; \
+             the_single_open_probe_seeks_rather_than_scans models a stale query:\n{flat}"
+        );
+    }
+}
+
 /// **The test that pins the column order, not merely the index's existence.**
 ///
 /// Two things are asserted and the second is the one with teeth. `COVERING`
@@ -374,3 +535,4 @@ async fn the_subsumed_source_index_is_gone() {
         .unwrap();
     assert_eq!(n, 0, "idx_lc_src_active is subsumed and must not survive");
 }
+

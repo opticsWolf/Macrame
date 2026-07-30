@@ -26,12 +26,33 @@ impl MaterializedState {
     }
 }
 
-/// Fold over the hot log alone.
+/// The newest log payload shape this build writes and the highest it can read.
+///
+/// Kept beside the folds because they are the only readers, and bumped in step
+/// with the `json_object('v', …)` literals in `schema::ddl` — a test asserts the
+/// two agree, since nothing else would notice them drifting apart.
+pub(crate) const PAYLOAD_VERSION: u8 = 2;
+
+/// Every fold partitions on `(table_name, entity_id)`, never `entity_id` alone.
+///
+/// The two namespaces are not disjoint and nothing makes them so. A link's
+/// `entity_id` is the synthetic `source|target|type|valid_from`; a concept's is
+/// whatever the caller passed, unvalidated (defect AD). Partitioning on the id
+/// alone therefore lets a concept and a link contend for one window, and
+/// `ROW_NUMBER() = 1` hands the whole partition to whichever has the greater
+/// `seq_id` — so the loser vanishes from the reconstruction while sitting
+/// plainly in both `concepts` and `transaction_log`. Silent, and on the read
+/// path the ledger exists to make trustworthy.
+///
+/// Validating identifiers would make the collision unreachable and is the
+/// durable fix; this makes it harmless regardless, which is the property worth
+/// having at the fold. `table_name` leads the partition because the log is
+/// already indexed on `entity_id` and the discriminator is two values wide.
 const HOT_FOLD: &str = r#"
     SELECT seq_id, table_name, entity_id, operation, payload
     FROM (
         SELECT seq_id, table_name, entity_id, operation, payload,
-               ROW_NUMBER() OVER (PARTITION BY entity_id ORDER BY seq_id DESC) as rn
+               ROW_NUMBER() OVER (PARTITION BY table_name, entity_id ORDER BY seq_id DESC) as rn
         FROM transaction_log
         WHERE recorded_at <= ?1
     ) WHERE rn = 1
@@ -45,7 +66,7 @@ const COLD_FOLD: &str = r#"
     SELECT seq_id, table_name, entity_id, operation, payload
     FROM (
         SELECT seq_id, table_name, entity_id, operation, payload,
-               ROW_NUMBER() OVER (PARTITION BY entity_id ORDER BY seq_id DESC) as rn
+               ROW_NUMBER() OVER (PARTITION BY table_name, entity_id ORDER BY seq_id DESC) as rn
         FROM (
             SELECT seq_id, table_name, entity_id, operation, payload, recorded_at FROM main.transaction_log
             UNION ALL
@@ -66,7 +87,7 @@ const ANCHORED_HOT_FOLD: &str = r#"
     SELECT seq_id, table_name, entity_id, operation, payload
     FROM (
         SELECT seq_id, table_name, entity_id, operation, payload,
-               ROW_NUMBER() OVER (PARTITION BY entity_id ORDER BY seq_id DESC) as rn
+               ROW_NUMBER() OVER (PARTITION BY table_name, entity_id ORDER BY seq_id DESC) as rn
         FROM transaction_log
         WHERE recorded_at <= ?1 AND seq_id > ?2
     ) WHERE rn = 1
@@ -83,7 +104,7 @@ const ANCHORED_COLD_FOLD: &str = r#"
     SELECT seq_id, table_name, entity_id, operation, payload
     FROM (
         SELECT seq_id, table_name, entity_id, operation, payload,
-               ROW_NUMBER() OVER (PARTITION BY entity_id ORDER BY seq_id DESC) as rn
+               ROW_NUMBER() OVER (PARTITION BY table_name, entity_id ORDER BY seq_id DESC) as rn
         FROM (
             SELECT seq_id, table_name, entity_id, operation, payload, recorded_at FROM main.transaction_log
             UNION ALL
@@ -369,9 +390,13 @@ async fn fold_delta(
             reason: format!("Failed to parse payload JSON: {e}"),
         })?;
 
+        // v1 and v2 differ by one added field, so v1 folds by reading it as
+        // absent — which is what `Option` already means here. A future shape
+        // that *removes* or *retypes* a field would not be able to share this
+        // path, and would want a match on `v` rather than a ceiling.
         let v = payload.get("v").and_then(|v| v.as_u64()).unwrap_or(1);
-        if v > 1 {
-            return Err(DbError::PayloadVersion { got: v as u8, max: 1 });
+        if v > PAYLOAD_VERSION as u64 {
+            return Err(DbError::PayloadVersion { got: v as u8, max: PAYLOAD_VERSION });
         }
 
         if table_name == "concepts" {

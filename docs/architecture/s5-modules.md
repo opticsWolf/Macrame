@@ -265,6 +265,27 @@ The Golden Rule: low-priority workers must chunk their data. Chunk sizes of 500 
 *Correction 3 — two of the four paths are superlinear, and the first explanation of that was wrong.* On the edge path marginal cost rises from ~11 µs per row at n=10 to ~103 µs at n=1,000; on the embedding path from ~35 µs to ~151 µs. This was originally read as a property of *chunk size*, with the conclusion that shrinking those chunks was free — 1,000 edges "88.5 ms as one chunk against ~27 ms as eleven". **That is wrong ([D-059](s13-decision-register.md#d-059)):** the sweep measured every chunk size into a *fresh* database, so chunk size and table size were the same variable, and the 27 ms was eleven copies of the first chunk. Measured end to end with both arms finishing at the same table, 1,000 edges cost **85.5 ms as one transaction and 94.7 ms as eleven chunks** — chunking is ~11% slower. Smaller chunks buy latency and cost throughput on *every* path. The bound and the four constants stand, because those were measured directly; what does not stand is the claim that two of them were free.
 
 The mechanism is diagnosed in [D-059](s13-decision-register.md#d-059) and differs between the two paths. Both are superlinear in the size of the **structure being probed** rather than the chunk: for embeddings that is inherent (DiskANN insertion rewires a graph that grows as the chunk fills it, 49 → 224 µs per vector as the corpus goes 0 → 8,000); for edges it is a **defect** — `trg_links_single_open`'s `EXISTS` is served by `idx_lc_traversal_cover` with only `source_id` bound, so every insert scans the source's whole out-degree. That one is not a chunking problem at all: it slows every interactive `assert_edge` on a high-degree node, and it means these chunk sizes meet the 3 ms bound on an empty database and not on a large one.
+
+**The edge defect is fixed in 0.5.6** — `idx_lc_open_interval`, shipped as the `v5 → v6` rung ([§4.2](s4-schema.md#42-links-and-links_current)). Re-measured with a 90-row chunk, separating the two variables the way [D-059](s13-decision-register.md#d-059) established is necessary:
+
+| | without the index | with it |
+|---|---|---|
+| into an empty table | 3.18 ms | **2.69 ms** |
+| into a 2,000-edge hub | 28.6 ms | **8.58 ms** |
+
+The index is a win at every table size measured, including the empty one, so it costs the write path nothing to carry. The four constants were re-derived against it and **stand unchanged**: 2.76 / 2.57 / 2.56 / 2.26 ms for edges 90, concepts 70, annotations 600, embeddings 30 — all inside the bound, and uniformly ~9% above [D-058](s13-decision-register.md#d-058)'s figures on paths whose code did not change, which is session drift rather than regression.
+
+#### The bound's scope: three operations are exempt
+
+Recorded here because this is where a reader looks for it. Until 0.5.6 the exemptions lived in three separate rustdoc notes, so the rule read as though it had none:
+
+| Path | Bound | Why it cannot be chunked |
+|---|---|---|
+| `write_bulk_atomic` | none — the caller sizes it | [D-014](s13-decision-register.md#d-014): the batch is *one act* under one stamp. Splitting it is the thing the method exists not to do |
+| `archive()` | measured **26.8 ms** for 2,000 archivable edges | [D-012](s13-decision-register.md#d-012): copy-then-delete must be atomic, or a crash between the phases duplicates or loses rows |
+| `rebuild_current()` | ~50 s per 10M edges | [D-023](s13-decision-register.md#d-023): the window between the `DELETE` and the `INSERT` is the whole of current belief |
+
+All three are atomic **by contract**. Capping the batch and adding a third priority tier were both considered and neither taken: capping breaks the guarantee the operation exists to provide, and a third tier changes which caller waits without changing how long the lock is held. The defect was never the exemption — it was stating the bound as though it had none. A caller who needs the latency bound rather than the atomicity has `bulk_import`, which is the same write chunked and explicitly not atomic overall ([D-011](s13-decision-register.md#d-011)).
 ```rust
 // shape only — see Appendix A for normative signatures
 
@@ -423,7 +444,7 @@ The byte-budget model makes the choice arithmetically rather than by rule of thu
 | Strategy | Estimated bytes |
 |---|---|
 | `PostFilter` | `k′ × (vector_bytes + row_bytes)` + the filter pass |
-| `PreFilterCTE` | the filtered scan + `|candidates| × vector_bytes` of exact distance computation |
+| `PreFilterCTE` | the filtered scan + `\|candidates\| × vector_bytes` of exact distance computation |
 
 `vector_bytes` comes from the model's declared dimension (768 × 4 for `nomic_v1`, read from the schema per [D-037](s13-decision-register.md#d-037) rather than from a registry the crate maintains); selectivity is `|candidates| / corpus`, measured by the counting probe below; and the planner takes the minimum. Estimates are logged at `debug` alongside the chosen strategy **and returned to the caller** as a `CostEstimate`, so tuning is empirical and a test can assert on the plan rather than scrape log output. The subgraph byte budget of [§5.4](s5-modules.md#54-graphsubgraphrs-and-graphalgorithmsrs--native-in-memory-analytics) applies as a hard ceiling on the candidate set regardless of strategy, and exceeding it raises `SubgraphTooLarge` rather than silently degrading.
 

@@ -383,6 +383,31 @@ impl FilteredVectorSearch {
     }
 
     /// How many vectors the model holds.
+    ///
+    /// **`COUNT(*)` per query, deliberately, and measured before being left
+    /// alone (defect AF, Wave 3).** The objection was that D-007 argues strategy
+    /// choice should be arithmetic rather than a rule of thumb, and the
+    /// arithmetic's own input is O(corpus) while the thing it selects is not.
+    /// True in mechanism. Measured:
+    ///
+    /// ```text
+    /// corpus     2,000 vectors    5.2 µs
+    /// corpus    20,000 vectors    8.5 µs
+    /// whole filtered search       2.5 ms
+    /// ```
+    ///
+    /// Ten times the corpus costs 1.6 times the time, because ~4.9 µs of it is a
+    /// round trip and statement preparation — `declared_dimension`, which reads
+    /// one `PRAGMA`, costs 5.0 µs flat for the same reason. Extrapolated to §9's
+    /// stated 100K corpus that is ~22 µs against a 2.5 ms search: **under 1%.**
+    ///
+    /// So it is not cached, and the reason is worth stating because the
+    /// implementation plan proposed caching it on the grounds that "neither
+    /// `corpus_size` nor `declared_dimension` can change without DDL". That is
+    /// true of the dimension and **false of the count** — it changes on every
+    /// `upsert_embeddings`. Caching it would trade a real staleness bug for less
+    /// than one percent of a query. `declared_dimension` *is* DDL-fixed and
+    /// could be cached soundly; at 5 µs there is nothing to buy.
     async fn corpus_size(&self, conn: &libsql::Connection) -> Result<usize> {
         let sql = format!("SELECT COUNT(*) FROM {}", self.model.table());
         let n: i64 = conn

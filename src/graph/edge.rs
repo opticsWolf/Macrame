@@ -59,6 +59,10 @@ impl EdgeAssertion {
     /// engine `CHECK` failure from the other side of a channel — by which point
     /// the caller has lost the context that would explain it.
     pub fn normalized(mut self) -> Result<Self> {
+        // Both endpoints, because the log's entity key concatenates both and an
+        // ambiguity in either makes the row unattributable (D-061).
+        crate::util::ids::validate_id(&self.source)?;
+        crate::util::ids::validate_id(&self.target)?;
         validate_edge_type(&self.edge_type)?;
         self.valid_from = timestamp::normalize(&self.valid_from)?;
         self.valid_to = timestamp::normalize(&self.valid_to)?;

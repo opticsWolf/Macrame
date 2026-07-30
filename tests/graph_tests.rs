@@ -51,7 +51,14 @@ fn test_cte_sql_compilation() {
 
     let sql = builder.build_sql();
     assert!(sql.contains("WITH RECURSIVE walk"));
-    assert!(sql.contains("INSTR(w.path, CAST(l.target_id AS BLOB)) = 0"));
+    // Delimited on both sides, so the check matches a whole path element rather
+    // than a substring — ids are variable-length (D-061), and `INSTR(path, id)`
+    // was only correct while they were not.
+    assert!(sql.contains("INSTR(w.path, '/' || CAST(l.target_id AS BLOB) || '/') = 0"));
+    assert!(
+        sql.contains("SELECT ?1, 0, '/' || CAST(?1 AS BLOB) || '/'"),
+        "the seed must carry both delimiters or the first hop cannot match"
+    );
     assert!(sql.contains("w.depth < ?2"));
 }
 

@@ -47,8 +47,9 @@
 use std::path::PathBuf;
 
 use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
+use macrame::graph::{astar, dijkstra, k_core, louvain, scc};
 use macrame::prelude::*;
-use macrame::temporal::{reconstruct, save_snapshot};
+use macrame::temporal::{hydrate_attributes, reconstruct, save_snapshot};
 
 const TS: &str = "2026-01-01T00:00:00.000000Z";
 const OPEN: &str = "9999-12-31T23:59:59.999999Z";
@@ -911,6 +912,378 @@ fn snapshot(c: &mut Criterion) {
     group.finish();
 }
 
+// ---------------------------------------------------------------------------
+// Wave 3: the read paths §9 never budgeted and this file never measured
+// ---------------------------------------------------------------------------
+
+/// **The measurement D-047's deferral has been waiting on since it was written.**
+///
+/// D-047 defers the `Subgraph` integer-index rewrite until Louvain and Dijkstra
+/// are measured on a budget-sized graph. Until Wave 3 nothing here measured an
+/// algorithm, a subgraph load, an archive or a filtered vector search, so the
+/// deferral condition could not be met and the rewrite could neither be
+/// scheduled nor retired — it simply sat.
+///
+/// The load is separated from the algorithms on purpose, and that separation is
+/// the point rather than a convenience: §8.6 predicted the dominant cost of
+/// running analytics is *getting the graph into memory*, not the traversal of
+/// it, and an integer-index representation does not touch the former. Reported
+/// side by side, the two numbers answer D-047 directly.
+fn graph_analytics(c: &mut Criterion) {
+    let rt = runtime();
+    let edges = 1_000 * scale();
+    let fx = rt.block_on(async {
+        let fx = fixture().await;
+        seed_concepts(&fx.db, edges + 1).await;
+        seed_edges(&fx.db, edges).await;
+        fx
+    });
+
+    // Large enough not to refuse the fixture; the budget is not what is being
+    // measured here.
+    let budget = 64 << 20;
+    let graph = rt.block_on(async { fx.db.load_subgraph("c0000000", 3, TS, budget).await.unwrap() });
+    eprintln!(
+        "graph fixture: {} nodes, {} edges",
+        graph.nodes.len(),
+        graph.edge_count()
+    );
+
+    let mut group = c.benchmark_group("graph_analytics");
+    group.sample_size(20);
+
+    // The load, which is where §8.6 expects the time to be.
+    group.bench_function("load_subgraph_3hop", |b| {
+        b.to_async(&rt)
+            .iter(|| async { fx.db.load_subgraph("c0000000", 3, TS, budget).await.unwrap() })
+    });
+
+    // The five algorithms, over an already-loaded graph. Synchronous and pure,
+    // so no runtime is involved and nothing here touches the database.
+    group.bench_function("dijkstra", |b| b.iter(|| dijkstra(&graph, "c0000000")));
+    group.bench_function("astar", |b| {
+        // Zero heuristic: A* with an uninformed heuristic is Dijkstra with a
+        // goal test, which is the honest comparison against the row above —
+        // any other heuristic would measure the heuristic.
+        b.iter(|| astar(&graph, "c0000000", "c0000001", |_, _| 0.0))
+    });
+    group.bench_function("scc", |b| b.iter(|| scc(&graph)));
+    group.bench_function("k_core", |b| b.iter(|| k_core(&graph, 2)));
+    group.bench_function("louvain", |b| b.iter(|| louvain(&graph)));
+
+    group.finish();
+}
+
+/// **AE: the batched hydrate, against the figure the review recorded for the
+/// one-query-per-node version.**
+///
+/// The pre-Wave-1 measurement is on the record — 400 nodes, 400 round trips,
+/// 13.2 ms — so this is a comparison rather than a fresh baseline. It is a
+/// weaker comparison than a criterion baseline would be, because it is against a
+/// number taken by a throwaway probe on the same machine rather than against a
+/// saved run; the honest way to read it is as an order of magnitude, not a
+/// ratio to two figures.
+///
+/// Parameterised by node count because the property that mattered was *linear
+/// in node count*, and a single point cannot show that it no longer is.
+fn hydrate_scaling(c: &mut Criterion) {
+    let rt = runtime();
+    let fx = rt.block_on(async {
+        let fx = fixture().await;
+        seed_concepts(&fx.db, 1_000).await;
+        fx
+    });
+
+    let mut group = c.benchmark_group("hydrate_scaling");
+    group.sample_size(30);
+
+    for n in [100usize, 400, 1_000] {
+        let ids: Vec<String> = (0..n).map(|i| format!("c{i:07}")).collect();
+        group.bench_with_input(BenchmarkId::from_parameter(n), &ids, |b, ids| {
+            b.to_async(&rt).iter(|| async {
+                hydrate_attributes(fx.db.read_conn(), ids, TS, AttributeMode::Current)
+                    .await
+                    .unwrap()
+            })
+        });
+    }
+
+    group.finish();
+}
+
+/// **D-060: what the overlap guard costs on the interactive write path.**
+///
+/// One indexed probe per assertion, added in Wave 2 to a path `CHUNK_BUDGET`'s
+/// 3 ms exists to protect. It rides `idx_lc_open_interval`, shipped in the same
+/// wave, so the expectation is that it is cheap — and an expectation is what
+/// this wave exists to replace.
+///
+/// Measured against a **high-degree source**, because that is where the guard
+/// could plausibly be expensive: the probe binds all three equality columns, so
+/// out-degree should not matter, and if it does the index is not being used the
+/// way `the_single_open_probe_seeks_rather_than_scans` says it is.
+fn overlap_guard(c: &mut Criterion) {
+    let rt = runtime();
+    let hub = 2_000 * scale();
+
+    let mut group = c.benchmark_group("overlap_guard");
+    group.sample_size(20);
+
+    for degree in [0usize, hub] {
+        group.bench_with_input(
+            BenchmarkId::from_parameter(degree),
+            &degree,
+            |b, &degree| {
+                // Synchronous `iter_batched` with `block_on` on both halves,
+                // matching `chunk_budget` above: `to_async` drives the setup
+                // closure on the runtime's own thread, so a `block_on` inside it
+                // panics with "cannot start a runtime from within a runtime".
+                b.iter_batched(
+                    || {
+                        rt.block_on(async {
+                            let fx = fixture().await;
+                            seed_concepts(&fx.db, degree + 2).await;
+                            if degree > 0 {
+                                seed_edges(&fx.db, degree).await;
+                            }
+                            fx
+                        })
+                    },
+                    |fx| {
+                        // A closed interval on a fresh edge type: the guard
+                        // runs, finds nothing, and the insert proceeds. That is
+                        // the common case and the one on the latency path.
+                        rt.block_on(fx.db.assert_edge(
+                            EdgeAssertion::new("c0000000", "c0000001", "PROBED")
+                                .valid_from(TS)
+                                .valid_to("2027-01-01T00:00:00.000000Z"),
+                        ))
+                        .unwrap()
+                    },
+                    BatchSize::PerIteration,
+                )
+            },
+        );
+    }
+
+    group.finish();
+}
+
+/// `archive()` — one `BEGIN IMMEDIATE` holding the write lock for its whole
+/// duration, including a full `rebuild_within` (§8.6).
+///
+/// The reason this is worth a number: it is one of the three paths that sit
+/// *outside* `CHUNK_BUDGET`, and the exemption has only ever been justified by
+/// argument. D-012 says the archive must be atomic, which is why it cannot be
+/// chunked; it does not say how long it takes.
+fn archive_cost(c: &mut Criterion) {
+    let rt = runtime();
+    let edges = 2_000 * scale();
+
+    let mut group = c.benchmark_group("archive");
+    group.sample_size(10);
+
+    group.bench_function("archive_superseded", |b| {
+        b.iter_batched(
+            || {
+                rt.block_on(async {
+                    let fx = fixture().await;
+                    seed_concepts(&fx.db, edges + 1).await;
+                    // Closed intervals whose valid_to precedes the cutoff, so
+                    // LINKS_ARCHIVABLE's second branch matches and the archive
+                    // has real work rather than measuring an empty transaction.
+                    let mut batch = Vec::with_capacity(edges);
+                    for i in 1..=edges {
+                        batch.push(
+                            EdgeAssertion::new("c0000000", format!("c{i:07}"), "LINKS")
+                                .valid_from(TS)
+                                .valid_to("2026-06-01T00:00:00.000000Z"),
+                        );
+                    }
+                    for chunk in batch.chunks(2_000) {
+                        fx.db.bulk_import(chunk.to_vec()).await.unwrap();
+                    }
+                    fx
+                })
+            },
+            |fx| {
+                let report = rt
+                    .block_on(fx.db.archive("2099-01-01T00:00:00.000000Z"))
+                    .unwrap();
+                assert!(report.links_archived > 0, "the fixture archived nothing");
+            },
+            BatchSize::PerIteration,
+        )
+    });
+
+    group.finish();
+}
+
+/// **AF: `corpus_size` runs `COUNT(*)` over the whole model table per query.**
+///
+/// D-007's argument is that strategy choice should be arithmetic rather than a
+/// rule of thumb. The arithmetic is currently O(corpus) per query and the thing
+/// it selects is not, so the planner's input can cost more than the plan. This
+/// measures the search with the planner in the loop; the fix and its effect are
+/// Wave 3.2.
+fn filtered_vector(c: &mut Criterion) {
+    let rt = runtime();
+    let n = 2_000 * scale();
+    let (fx, model) = rt.block_on(async {
+        let fx = fixture().await;
+        seed_concepts(&fx.db, n).await;
+        seed_edges(&fx.db, n.min(1_000)).await;
+        let model = ModelName::new("bench_v1").unwrap();
+        fx.db.register_model(&model, 8).await.unwrap();
+        let rows: Vec<(String, Vec<f32>)> = (0..n)
+            .map(|i| {
+                let t = i as f32 / n as f32;
+                (
+                    format!("c{i:07}"),
+                    (0..8).map(|k| ((t + k as f32) * 0.37).sin()).collect(),
+                )
+            })
+            .collect();
+        fx.db.upsert_embeddings(&model, rows).await.unwrap();
+        (fx, model)
+    });
+
+    let query: Vec<f32> = (0..8).map(|k| ((k as f32) * 0.37).sin()).collect();
+
+    let mut group = c.benchmark_group("filtered_vector");
+    group.sample_size(30);
+
+    // AF's claim, isolated: "the planner's input costs more than the plan".
+    // The two reads `execute` makes before it can price anything, measured
+    // against the whole search they inform.
+    group.bench_function("planner_input/corpus_size", |b| {
+        let sql = format!("SELECT COUNT(*) FROM {}", model.table());
+        b.to_async(&rt).iter(|| async {
+            let n: i64 = fx
+                .db
+                .read_conn()
+                .query(&sql, ())
+                .await
+                .unwrap()
+                .next()
+                .await
+                .unwrap()
+                .unwrap()
+                .get(0)
+                .unwrap();
+            n
+        })
+    });
+
+    group.bench_function("planner_input/declared_dimension", |b| {
+        b.to_async(&rt)
+            .iter(|| async { declared_dimension(fx.db.read_conn(), &model).await.unwrap() })
+    });
+
+    group.bench_function("filtered_top10", |b| {
+        b.to_async(&rt).iter(|| async {
+            FilteredVectorSearch::new(
+                model.clone(),
+                query.clone(),
+                TraversalBuilder::new("c0000000").max_depth(3),
+            )
+            .top_k(10)
+            .execute(fx.db.read_conn(), TS)
+            .await
+            .unwrap()
+        })
+    });
+
+    group.finish();
+}
+
+/// **3.1c: what D-059's index costs the write path, and what it buys.**
+///
+/// D-058's four constants were measured before `idx_lc_open_interval` existed,
+/// and an index is paid for on every insert. This measures the edge chunk with
+/// the index present and absent, into an empty table and into a populated hub —
+/// the two-variable separation D-059 established as necessary, since measuring
+/// chunk size into a fresh database confounds chunk size with table size.
+///
+/// The hub arm is the case the index was added for; the empty arm is the case it
+/// can only cost. Both are needed, because a constant chosen from one alone is
+/// what produced the confound D-059 had to correct.
+fn chunk_index_cost(c: &mut Criterion) {
+    let rt = runtime();
+
+    let mut group = c.benchmark_group("chunk_index_cost");
+    group.sample_size(20);
+
+    for (label, hub, with_index) in [
+        ("empty/with_index", 0usize, true),
+        ("empty/no_index", 0, false),
+        ("hub2000/with_index", 2_000, true),
+        ("hub2000/no_index", 2_000, false),
+    ] {
+        group.bench_function(label, |b| {
+            b.iter_batched(
+                || {
+                    rt.block_on(async {
+                        let fx = fixture().await;
+                        seed_concepts(&fx.db, hub + chunk_rows::EDGES + 1).await;
+                        if hub > 0 {
+                            // A real hub: every edge out of one source, which is
+                            // what makes the single-open probe's out-degree scan
+                            // expensive when it happens.
+                            let batch: Vec<EdgeAssertion> = (1..=hub)
+                                .map(|i| {
+                                    EdgeAssertion::new(
+                                        "c0000000",
+                                        format!("c{i:07}"),
+                                        "LINKS",
+                                    )
+                                    .valid_from(TS)
+                                    .valid_to(OPEN)
+                                })
+                                .collect();
+                            for chunk in batch.chunks(2_000) {
+                                fx.db.bulk_import(chunk.to_vec()).await.unwrap();
+                            }
+                        }
+                        if !with_index {
+                            // Dropping it leaves the schema stamped v6 without
+                            // the object the rung created — legitimate only
+                            // inside a benchmark, and the reason this arm exists
+                            // is that it is the only way to attribute the cost.
+                            fx.db
+                                .raw()
+                                .connect()
+                                .unwrap()
+                                .execute("DROP INDEX IF EXISTS idx_lc_open_interval", ())
+                                .await
+                                .unwrap();
+                        }
+                        fx
+                    })
+                },
+                |fx| {
+                    let base = hub + 1;
+                    let edges: Vec<EdgeAssertion> = (0..chunk_rows::EDGES)
+                        .map(|k| {
+                            EdgeAssertion::new(
+                                "c0000000",
+                                format!("c{:07}", base + k),
+                                "CHUNK",
+                            )
+                            .valid_from(TS)
+                            .valid_to(OPEN)
+                        })
+                        .collect();
+                    rt.block_on(fx.db.write_bulk_atomic(edges)).unwrap()
+                },
+                BatchSize::PerIteration,
+            )
+        });
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     budgets,
     write_path,
@@ -921,6 +1294,13 @@ criterion_group!(
     replay,
     integrity,
     search,
-    snapshot
+    snapshot,
+    // Wave 3.
+    graph_analytics,
+    hydrate_scaling,
+    overlap_guard,
+    archive_cost,
+    filtered_vector,
+    chunk_index_cost
 );
 criterion_main!(budgets);

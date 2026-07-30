@@ -77,16 +77,16 @@ impl TraversalBuilder {
         format!(
             r#"
 WITH RECURSIVE walk(node_id, depth, path) AS (
-    SELECT ?1, 0, CAST(?1 AS BLOB)
+    SELECT ?1, 0, '/' || CAST(?1 AS BLOB) || '/'
     UNION ALL
-    SELECT l.target_id, w.depth + 1, w.path || '/' || CAST(l.target_id AS BLOB)
+    SELECT l.target_id, w.depth + 1, w.path || CAST(l.target_id AS BLOB) || '/'
     FROM walk w
     JOIN links_current l ON l.source_id = w.node_id
     WHERE w.depth < ?2
       AND l.valid_from <= ?3 AND ?3 < l.valid_to
       AND l.weight >= ?4
       {edge_filter}
-      AND INSTR(w.path, CAST(l.target_id AS BLOB)) = 0
+      AND INSTR(w.path, '/' || CAST(l.target_id AS BLOB) || '/') = 0
 )
 SELECT DISTINCT w.node_id
 FROM walk w JOIN concepts c ON c.id = w.node_id

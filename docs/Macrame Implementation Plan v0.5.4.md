@@ -2,41 +2,51 @@
 
 | | |
 |---|---|
-| Plan version | 1.20 |
-| Against document | Macrame v0.5.4 — [docs/architecture/](architecture/README.md) |
-| Date | 2026-07-28 |
-| Test baseline | **190 passing, 0 failing** (`--features property-tests`, `--no-fail-fast`) — green for the first time in several cycles. The last red, `a_high_priority_write_completes_while_the_backlog_is_still_queued`, turned out to be asserting something §5.1.5 does not promise rather than catching a defect; see §8.1c. **`--no-fail-fast` is not optional for reading this number**: without it cargo stops at the first failing binary and everything alphabetically behind it never runs, which is how the archive defect below sat unnoticed. Separately, `doctrine_property_tests` faults under R15 on roughly 15% of runs and takes the suite with it when it does. |
-| Status | Phases 0–3 and the native-graph work delivered, and Phase 3 is now reachable from the public API (D-048). Phase 4 is complete: §5.2–§5.9, §6 and Appendix A restored, and the rest of the architecture document de-corrupted. Snapshot composition landed (D-049). **Phase 5 is complete** — Doctrine VIII divergence, archive crash safety, the Doctrine VII property suite, and empirical cost estimates, the last arriving with D-050. **Filtered vector search is implemented** and `TwoPhaseTempTable` is removed as unimplementable on libSQL 0.9.30. **Hybrid search is implemented** (D-051), closing the last capability gap Appendix A.2 recorded. **The archive read path is sound** (D-052) — it had been dropping entities from pre-cutoff reconstructions, and closing it also closed D-049's composition carve-out. **The snapshot cadence is implemented** (D-053), closing D-049's second carve-out and with it both. **Retention gains its daily tier** (D-054), which the cadence had just made load-bearing. **§9 is measured for the first time** (D-055): a criterion harness over twelve rows, eleven inside budget and one — the chunk-commit calibration §5.1.5's whole latency argument rests on — **missing by 20×**. **That fix landed** (D-056): the per-row statement preparation was real and worth 41% (≈62 → ≈37 ms), and isolating the rest showed the two ledger triggers are ~92% of what remains — the same commit without them takes **2.96 ms, which is the ≤ 3 ms budget itself**, so the budget was set without the amplification its own preamble claims. The consequence lands on §5.1.5's golden rule (chunks of ~40 rows, not 500, for a 3 ms bound) and is left open with the numbers rather than settled by editing a constant. **The other three bulk paths now have the same hoist** (D-057), measured rather than assumed: concepts 34.1 → 11.9 ms, annotations 4.60 → 2.13 ms, embeddings 73.4 → 67.4 ms at 500 rows. The spread contradicts D-056's explanation of its own 41% — the untriggered table saved the most-but-one and the DiskANN tables the least, so preparation is a near-constant per row rather than a function of trigger weight. It also produces the control this project lacked (2.13 ms for 500 untriggered upserts, corroborating D-056's 2.96 ms) and identifies the embedding chunk at ≈135 µs per vector as the worst bulk path in the system, which makes the §5.1.5 question sharper there than for edges. **§5.1.5's golden rule is re-derived** (D-058), which was the last thing D-056 left open: it is a bound on *duration*, so `CHUNK_ROWS = 1000` becomes `CHUNK_BUDGET` = 3 ms plus four measured row counts (edges 90, concepts 70, annotations 600, embeddings 30, measuring 2.39/2.35/2.36/2.06 ms against the old constant's 89/24/3.5/143 ms). Three of §5.1.5's numbers were wrong: one constant cannot express one duration across paths whose per-row costs span 60×; per-transaction overhead is ~0.8 ms rather than "noise"; and two of the four paths are superlinear in chunk size, so their old chunks were the worst latency *and* the worst throughput simultaneously — cutting the edge chunk is 3.3× faster in total, not a trade. That also corrects D-056's own "~40 rows" and its "unreachable by construction". **The superlinearity is now diagnosed (D-059), and it corrects D-058 twice.** The sweep measured every chunk size into a fresh database, so chunk size and table size were one variable; separated, a fixed 90-row chunk into a hub of 0/2,000/8,000 edges costs 4.4/18.4/47.7 ms. So D-058's "3.3× faster as eleven chunks" is wrong — end to end it is 85.5 ms as one transaction against 94.7 ms as eleven, ~11% *slower* — and smaller chunks are a genuine latency-for-throughput trade on every path after all. The bound and the four constants stand. The edge path's growth is a **defect**: `trg_links_single_open`'s `EXISTS` is served by `idx_lc_traversal_cover` with only `source_id` bound (it wins as a covering index over the PK autoindex, which lacks `valid_to`), so every insert scans its source's out-degree — 90 rows into a 90,000-edge hub take 1.06 s, and this slows interactive `assert_edge` too, not just chunks. A proven fix exists (`idx_lc_open_interval`, 47.7 → 8.0 ms and flat) and is **not shipped**: it is a D-036 schema change wanting its own migration rung. The embedding path is the same shape and inherent to DiskANN. Open: that migration rung; the chunk constants are empty-database figures and need a realistic fixture, which requires deciding what "realistic" means; the residual `links_current` upsert growth (not the commit, cache, index count, or table size); the `Subgraph` integer-index rewrite; the `write_annotations` rename; and the R15 upstream report. |
+| Plan version | 1.24 |
+| Against document | Macrame v0.5.5 — [docs/architecture/](architecture/README.md) |
+| Date | 2026-07-30 |
+| Crate version | **0.5.5** — `Cargo.toml` had said 0.5.2 for three releases (§8.7); nothing reads `CARGO_PKG_VERSION`, which is why nothing noticed |
+| Schema version | **6** — the v5 → v6 rung ships D-059's index (Wave 2.1) |
+| Test baseline | **202 passing, 0 failing** on plain `cargo test`; **221 with `--features property-tests`**. Thirty-one new tests across Waves 1 and 2. **`--no-fail-fast` is not optional**: without it cargo stops at the first failing binary and everything alphabetically behind it never runs, which is how the archive defect sat unnoticed. R15 remains — an intermittent `STATUS_ACCESS_VIOLATION` that took a *different* binary on each of two consecutive full runs during Wave 1, passed in isolation both times, and did not fire at all during Wave 2; it is a libSQL fault under concurrent local opens, not a test failure, and the only honest way to read a red is to re-run the named binary alone. **§8.5 is still the right lens on this green**, but nine of its ten defects are now closed by tests inside it rather than sitting behind it. |
+| Status | Phases 0–3 and the native-graph work delivered, and Phase 3 is now reachable from the public API (D-048). Phase 4 is complete: §5.2–§5.9, §6 and Appendix A restored, and the rest of the architecture document de-corrupted. Snapshot composition landed (D-049). **Phase 5 is complete** — Doctrine VIII divergence, archive crash safety, the Doctrine VII property suite, and empirical cost estimates, the last arriving with D-050. **Filtered vector search is implemented** and `TwoPhaseTempTable` is removed as unimplementable on libSQL 0.9.30. **Hybrid search is implemented** (D-051), closing the last capability gap Appendix A.2 recorded. **The archive read path is sound** (D-052) — it had been dropping entities from pre-cutoff reconstructions, and closing it also closed D-049's composition carve-out. **The snapshot cadence is implemented** (D-053), closing D-049's second carve-out and with it both. **Retention gains its daily tier** (D-054), which the cadence had just made load-bearing. **§9 is measured for the first time** (D-055): a criterion harness over twelve rows, eleven inside budget and one — the chunk-commit calibration §5.1.5's whole latency argument rests on — **missing by 20×**. **That fix landed** (D-056): the per-row statement preparation was real and worth 41% (≈62 → ≈37 ms), and isolating the rest showed the two ledger triggers are ~92% of what remains — the same commit without them takes **2.96 ms, which is the ≤ 3 ms budget itself**, so the budget was set without the amplification its own preamble claims. The consequence lands on §5.1.5's golden rule (chunks of ~40 rows, not 500, for a 3 ms bound) and is left open with the numbers rather than settled by editing a constant. **The other three bulk paths now have the same hoist** (D-057), measured rather than assumed: concepts 34.1 → 11.9 ms, annotations 4.60 → 2.13 ms, embeddings 73.4 → 67.4 ms at 500 rows. The spread contradicts D-056's explanation of its own 41% — the untriggered table saved the most-but-one and the DiskANN tables the least, so preparation is a near-constant per row rather than a function of trigger weight. It also produces the control this project lacked (2.13 ms for 500 untriggered upserts, corroborating D-056's 2.96 ms) and identifies the embedding chunk at ≈135 µs per vector as the worst bulk path in the system, which makes the §5.1.5 question sharper there than for edges. **§5.1.5's golden rule is re-derived** (D-058), which was the last thing D-056 left open: it is a bound on *duration*, so `CHUNK_ROWS = 1000` becomes `CHUNK_BUDGET` = 3 ms plus four measured row counts (edges 90, concepts 70, annotations 600, embeddings 30, measuring 2.39/2.35/2.36/2.06 ms against the old constant's 89/24/3.5/143 ms). Three of §5.1.5's numbers were wrong: one constant cannot express one duration across paths whose per-row costs span 60×; per-transaction overhead is ~0.8 ms rather than "noise"; and two of the four paths are superlinear in chunk size, so their old chunks were the worst latency *and* the worst throughput simultaneously — cutting the edge chunk is 3.3× faster in total, not a trade. That also corrects D-056's own "~40 rows" and its "unreachable by construction". **The superlinearity is now diagnosed (D-059), and it corrects D-058 twice.** The sweep measured every chunk size into a fresh database, so chunk size and table size were one variable; separated, a fixed 90-row chunk into a hub of 0/2,000/8,000 edges costs 4.4/18.4/47.7 ms. So D-058's "3.3× faster as eleven chunks" is wrong — end to end it is 85.5 ms as one transaction against 94.7 ms as eleven, ~11% *slower* — and smaller chunks are a genuine latency-for-throughput trade on every path after all. The bound and the four constants stand. The edge path's growth is a **defect**: `trg_links_single_open`'s `EXISTS` is served by `idx_lc_traversal_cover` with only `source_id` bound (it wins as a covering index over the PK autoindex, which lacks `valid_to`), so every insert scans its source's out-degree — 90 rows into a 90,000-edge hub take 1.06 s, and this slows interactive `assert_edge` too, not just chunks. A proven fix exists (`idx_lc_open_interval`, 47.7 → 8.0 ms and flat) and is **not shipped**: it is a D-036 schema change wanting its own migration rung. The embedding path is the same shape and inherent to DiskANN. Open: that migration rung; the chunk constants are empty-database figures and need a realistic fixture, which requires deciding what "realistic" means; the residual `links_current` upsert growth (not the commit, cache, index count, or table size); the `Subgraph` integer-index rewrite; the `write_annotations` rename; and the R15 upstream report. **A full read of the crate against the document on 2026-07-30 (§8.5) changes what comes next.** It found ten defects the suite does not see, six of which return a wrong answer rather than an error: the concept log payload omits `embedding_model` so every temporal read loses it; the fold partitions on `entity_id` alone so a concept can be conflated with an edge and vanish; overlapping *closed* valid-time intervals are unguarded; `AttributeMode::AtTime` disagrees with the other two readers about retirement; and `Subgraph` lets its adjacency reference nodes absent from `nodes`, which makes `louvain` **panic**, `scc` emit phantom components, and `k_core` inflate degrees — four handlings of one violated invariant, none of them chosen. It also found that defect H was marked **Fixed** and is not: `classify_archive_violation` is still called from nowhere, so `DbError::ArchiveViolation` remains unconstructible. §9 is re-sequenced into four waves accordingly, and correctness now precedes the D-059 migration rung rather than following it. **Wave 1 is delivered (2026-07-30):** all six wrong-answer defects that needed no schema change are fixed and closed by thirteen new tests — 184 passing, up from 171. Three decisions were taken along the way rather than deferred: `Subgraph` drops adjacency to invisible nodes rather than admitting flagged tombstones (which left all five algorithms untouched); retirement means *not returned as of the instant asked about*, uniformly; and `classify_archive_violation` was **deleted** rather than wired up, because `error::classify` already did the same job and D-033 requires one classifier, not two. Doctrine VII's static guard had to be narrowed to permit `embedding_model` — it banned the substring `embedding`, which is coarser than the doctrine, since what Doctrine VII excludes is the *vector* (**AH**). The register's own duplicate lettering was found and corrected. **Wave 2 is also delivered (2026-07-30).** All four deferred decisions taken, three of them recorded as **D-060**, **D-061** and **D-062**; `SCHEMA_VERSION` moves to 6 with D-059's index on its own rung, `Cargo.toml` is corrected to 0.5.5, and the suite stands at 202. Two of the plan's own recommendations did not survive contact with the code and are corrected in place rather than quietly re-decided: the overlap guard cannot live in `EdgeAssertion::normalized`, which is a pure function with no connection, and *both* offered identity options were wrong — requiring ULIDs would invalidate every id the crate has ever been used with, and declaring ids fully opaque leaves `transaction_log.entity_id` ambiguous between different links. **Wave 3 is delivered (2026-07-30)** — six new bench groups and three more decisions (**D-063**, **D-064**, **D-065**). It found a defect rather than only confirming numbers, and the defect was introduced by Wave 2: the overlap guard's narrowing predicate made a covering index win over the selective one, so the guard scanned the source's out-degree — **D-059's defect, reproduced by D-060's fix, one wave later, worth +9.8 ms per chunk with every correctness test passing throughout** (**AI**, D-064). It also *retired* two proposed optimisations rather than performing them: D-047's `Subgraph` rewrite, whose deferral condition had gone unanswered for two releases (the load dominates any single analysis at every size measured), and **AF**'s planner cache, whose stated justification — "neither input can change without DDL" — is false of `corpus_size`, which changes on every embedding write, and which measures at under 1% of a filtered search either way. The four `chunk_rows` constants were re-derived against the v6 index and **stand unchanged**. **Open next: Wave 4** — hardening, plus one thing Wave 3 surfaced and did not explain: `load_subgraph` is superlinear, 12.5× for 10× the nodes. |
 
 ---
 
 ## 0. Where the code actually is
 
-| Area | State | Notes |
-|---|---|---|
-| Schema, triggers, guards | **Done** | §4 fully realised, incl. D-008/D-029 |
-| `util::timestamp` | **Done** | canonical form, parser, formatter |
-| `audit_current` / `rebuild_current` | **Done** | symmetric difference (D-030) |
-| `archive()` | **Done, ratified** | predicates ratified §1.1 and now lifted into §5.7 |
-| `reconstruct()` | **Done (Phase 2)** | ATTACH bracketed and released on all paths, self-healing on the way in (D-044) |
-| Migration ladder | **Done (Phase 0)** | legacy-free baseline at v2 (D-032); rungs v2 → v3 (D-041) and v3 → v4 (D-042) |
-| External review round | **Done** | 3 accepted (D-042 index, D-043 snapshot header, D-044 self-healing ATTACH), 2 declined with reasons (D-045) |
-| Write Actor | **Done (Phase 1)** | exhaustive match, no wildcard |
-| Public write API | **Done (Phase 1)** | assert / retire / upsert / bulk-atomic / bulk-import / annotations / rebuild / archive |
-| Snapshots (write side) | **Done (Phase 2)** | atomic temp+fsync+rename; retention by parsed `seq_id`; versioned container (D-043) |
-| Embedding tables | **Done (Phase 3)** | `register_model()` creates table + DiskANN index in one tx (D-037) |
-| Vector search | **Done (Phase 3)** | `vector_top_k` + `vector_distance_cos`; `vector_distance` never existed |
-| Graph analytics | **Done (D-039)** | native `Subgraph`; petgraph dropped; five algorithms with brute-force oracles |
-| Traversal builder | **Done (D-039)** | edge types bound, not interpolated; `attribute_mode` now read |
-| Vector write path on `Database` | **Done (D-048)** | `register_model` + `upsert_embeddings` through the actor; Phase 3 reachable from the public API for the first time |
-| **`VectorFilterStrategy` implementations** | **Done (D-050)** | `FilteredVectorSearch`; two strategies with bodies, `TwoPhaseTempTable` removed as unimplementable on this engine; `byte_budget` read; estimates returned |
-| §5.2–§5.8, §6, Appendix A | **Restored** | recovered from a v0.5.1 copy and forward-ported; Appendix A rewritten against the crate (D-040) |
-| Architecture document | **De-corrupted** | headings, fences, identifiers and eaten `<…>` spans repaired throughout; §4.3 trigger DDL recovered from `schema::ddl` |
-| **Hybrid search** | **Done (D-051)** | `concepts_fts` FTS5 external-content index on a v4 → v5 rung; `HybridSearch` builder; `rebuild_fts()` for D-036 |
-| Snapshot composition | **Done (D-049, D-052)** | anchored fold + tombstone merge; composes by default, **and now across the archive boundary**. Cadence still open — §5.4 |
-| Archive read path | **Done (D-052)** | `hot_log_covers` replaced by a real completeness test; it had been losing entities from pre-cutoff reconstructions |
-| Subgraph loader | **Done, now linear** | per-row byte check made loading O(E²); fixed with incremental accounting (D-047) |
-| `Subgraph` internals | **Deferred** | integer-index rewrite waits on a benchmark — §5.5 below (D-047) |
+Read with §8.5. A row saying **Done** below means the mechanism exists and its tests pass; several such rows still carry a defect that those tests do not reach, and the **Defect** column names it. "Done" has never meant "audited", and the 2026-07-30 review is the first time most of this surface was read end to end against the document.
+
+**Wave 1 closed six of the ten (V, W, Z, AB, AE, AC).** Rows below carry the letter with its state, so a closed defect stays visible where it happened rather than disappearing from the row it was found in.
+
+| Area | State | Notes | Defect |
+|---|---|---|---|
+| Schema, triggers, guards | **Done** | §4 fully realised, incl. D-008/D-029; concept log payload at v2; `idx_lc_open_interval` on a v6 rung (D-059) | ~~V~~, ~~AA~~ fixed — AA in the write actor, not the trigger (D-060), so raw SQL can still write an overlap and §4.2 says so |
+| `util::timestamp` | **Done** | canonical form, parser, formatter | — |
+| `util::ids` | **Live** | `validate_id` enforces the two reserved delimiters at both write boundaries (D-061); `generate_id` is offered, not required | ~~AD~~, ~~J~~ fixed |
+| `temporal::Interval` | **Live** | `overlaps()` is the overlap guard's decision procedure (D-060) | ~~AG~~ fixed |
+| `audit_current` / `rebuild_current` | **Done** | symmetric difference (D-030) | — |
+| `archive()` | **Done, ratified** | predicates ratified §1.1 and now lifted into §5.7; its two deletes now classified | ~~AC~~ fixed — duplicate classifier deleted |
+| `reconstruct()` | **Done** | ATTACH bracketed and released on all paths, self-healing on the way in (D-044); folds partition on `(table_name, entity_id)` | ~~V~~, ~~W~~ fixed |
+| Migration ladder | **Done (Phase 0)** | legacy-free baseline at v2 (D-032); rungs v2 → v3 (D-041), v3 → v4 (D-042), v4 → v5 (D-051), v5 → v6 (D-059) | — |
+| External review round | **Done** | 3 accepted (D-042 index, D-043 snapshot header, D-044 self-healing ATTACH), 2 declined with reasons (D-045) | — |
+| Write Actor | **Done (Phase 1)** | exhaustive match, no wildcard | — |
+| Public write API | **Done (Phase 1)** | assert / retire / upsert / bulk-atomic / bulk-import / annotations / rebuild / archive | see §8.6 — three paths sit outside `CHUNK_BUDGET` |
+| Snapshots (write side) | **Done (Phase 2)** | atomic temp+fsync+rename; retention by parsed `seq_id`; versioned container (D-043) | — |
+| Embedding tables | **Done (Phase 3)** | `register_model()` creates table + DiskANN index in one tx (D-037) | — |
+| Vector search | **Done (Phase 3)** | `vector_top_k` + `vector_distance_cos`; `vector_distance` never existed | — |
+| Graph analytics | **Done** | native `Subgraph`; petgraph dropped; five algorithms with brute-force oracles. `Subgraph` now carries a stated closure invariant the algorithms may rely on | ~~Z~~ fixed — none of the five needed changing once the invariant holds |
+| Traversal builder | **Done (D-039)** | edge types bound, not interpolated; `attribute_mode` now read | filters `retired` only on the final projection, so paths route *through* retired concepts |
+| Attribute hydration | **Done, one semantic** | `Current` / `AtTime` / `Omit` all reachable (D-039); one retirement rule across all three readers; batched | ~~V~~, ~~AB~~, ~~AE~~ fixed |
+| Vector write path on `Database` | **Done (D-048)** | `register_model` + `upsert_embeddings` through the actor; Phase 3 reachable from the public API for the first time | — |
+| **`VectorFilterStrategy` implementations** | **Done (D-050)** | `FilteredVectorSearch`; two strategies with bodies, `TwoPhaseTempTable` removed as unimplementable on this engine; `byte_budget` read; estimates returned | **AF** — the planner's own input is O(corpus) |
+| §5.2–§5.8, §6, Appendix A | **Restored** | recovered from a v0.5.1 copy and forward-ported; Appendix A rewritten against the crate (D-040) | — |
+| Architecture document | **De-corrupted** | headings, fences, identifiers and eaten `<…>` spans repaired throughout; §4.3 trigger DDL recovered from `schema::ddl` | — |
+| **Hybrid search** | **Done (D-051)** | `concepts_fts` FTS5 external-content index on a v4 → v5 rung; `HybridSearch` builder; `rebuild_fts()` for D-036 | no graph filter; cannot be combined with `FilteredVectorSearch` |
+| Snapshot composition | **Done (D-049, D-052, D-053, D-054)** | anchored fold + tombstone merge; composes across the archive boundary; cadence and daily retention landed | — |
+| Archive read path | **Done (D-052)** | `hot_log_covers` replaced by a real completeness test; it had been losing entities from pre-cutoff reconstructions | — |
+| Subgraph loader | **Done, batched, measured** | per-row byte check made loading O(E²); fixed with incremental accounting (D-047). `hydrate` issues one query per 400 ids: 400 nodes in 0.82 ms. Still linear — a constant-factor win. `load_subgraph` itself is mildly superlinear (12.5× for 10× nodes) and **unexplained** | ~~AE~~ fixed |
+| `Subgraph` internals | **Retired (D-063)** | the integer-index rewrite optimises the algorithms, and the load dominates any single analysis at every size measured — 62.2 ms against Louvain's 28.3 ms at 10K nodes. Available with a stated trigger, not an open item | — |
+| §9 benchmarks | **Done (D-055, Wave 3)** | twenty rows, plus six groups covering `load_subgraph`, the five algorithms, `archive()`, `FilteredVectorSearch`, the batched hydrate, the overlap guard and the index's write cost | — |
 
 ---
 
@@ -190,6 +200,8 @@ A second external review proposed carrying five `petgraph` design choices into `
 
 **Deferred, with a condition.** Nobody has benchmarked the algorithms. Until this cycle the load path dominated everything (see below), and §9's budgets are not implemented as gates. The trigger for revisiting is a measurement of Louvain and Dijkstra on a budget-sized loaded graph — not the plausibility of the argument.
 
+> **Update (2026-07-30, §8.6).** The condition has never been met because the benchmark does not exist: `benches/budgets.rs` measures twenty rows and none of them is an algorithm or a subgraph load. It is scheduled as **Wave 3.1**, and defect **AE** suggests what it will find — `hydrate` issues one query per node, 400 nodes measured at 400 round trips, so the dominant cost of getting a graph into memory is round trips rather than the in-memory representation this rewrite would change. Expect Wave 3.1 to retire the rewrite rather than schedule it. Fixing **AE** first (Wave 1.5) is also what makes the measurement meaningful, since otherwise the loader's N+1 buries whatever the algorithms cost.
+
 **The cost the proposal does not price.** Determinism is structural today (`BTreeMap` in, `BTreeMap`/`BTreeSet` out, explicit tie-breaks). Integer indices in insertion order make it procedural — dependent on the loader's `ORDER BY` and `ids.sort()`. Both are correct now, but that substitution is the project's recurring defect, and here it fails silently: a reordered `ORDER BY` gives a different Louvain partition, and §8's oracle is an *upper bound*, so a different-but-valid answer passes. Any implementation must ship with a test loading one graph under two SQL orderings and asserting identical index assignment.
 
 **Blueprint defects to not inherit:** it drops `embedding_model` from `NodeData`; `ulid_to_idx` stores every id twice, partly cancelling the memory win; and `Vec<Vec<EdgeId>>` → `Vec<EdgeData>` does not deliver its own cache argument, since reading a `weight` still pulls three `String`s in. The separation that pays puts weight beside topology.
@@ -275,6 +287,8 @@ It ran `CREATE TABLE` + `CREATE INDEX` in one `BEGIN IMMEDIATE` on a caller-supp
 
 > **Recommendation:** B, moving to C if a real caller trips it. A alone is the worst of the three: it looks like cleanup and isn't.
 
+> **Update (2026-07-30).** Still open, now scheduled as **Wave 4.2**, and the review adds two facts to decide it with. `close()` discards the writer's `Result` *and* the shutdown response, so a panicked actor closes "successfully" — whatever is decided about `Drop`, that is a separate one-line fix. And `Shutdown` arrives on the **high-priority** channel, so `close()` preempts every queued low-priority command and their callers see `WriterDroppedResponder`. That is defensible — D-028 already says a queued command is not cancellable — but it is undocumented, and it means `close()` is not "drain then stop" as this entry assumes.
+
 ### 7.4 Louvain phase two *(D-039)*
 
 The implementation is the local-moving phase only; it does not aggregate communities into super-nodes and recurse. Documented as such on the function.
@@ -292,6 +306,8 @@ The implementation is the local-moving phase only; it does not aggregate communi
 - But `Current` is also the sensible default for present-time traversal, which is the common case, and it is the builder's default.
 
 > **Recommendation:** keep the default, but consider splitting the *call* — `execute()` (present) versus `execute_as_of(ts)` (historical, rejecting `Current`) — so the mode cannot be wrong for the call being made. Not urgent; the warning is at least present.
+
+> **Update (2026-07-30).** This entry assumed `AtTime` is the faithful mode and `Current` the fast-but-wrong one. Defects **V** and **AB** say otherwise as things stand: `AtTime` loses `embedding_model` entirely, because the log payload never carried it, and it ignores `retired` while both other readers honour it. So today the "historical" mode is the *less* faithful of the two, and the split recommended above would route callers toward it. Waves 1.1 and 1.4 have to land before this recommendation is safe to act on.
 
 ---
 
@@ -321,7 +337,7 @@ Restated as ordering and renamed `a_lone_high_priority_write_is_still_serviced_b
 ### 8.2 Coverage gaps where green means nothing
 
 - ~~**`tests/concurrency_tests.rs` is one `assert!(true)`.**~~ **Closed** — the binary now holds six real tests, the last of which is fixed in §8.1c above. The `write_annotations` rename it was blocking is therefore unblocked. Original note: The binary reports `ok` in every run while testing nothing; clippy flags the assertion as always true. §5.1's priority guarantee, §9's WAL-reader claim, and the per-chunk atomicity of `bulk_import` are all uncovered. *(Spun off as a separate task.)*
-- **`FakeClock` is constructed in `harness.rs` and never injected.** §5 claims "every test uses `FakeClock`"; no test does. The compiler warns about the dead field on every build, which is how long this has been true.
+- **`FakeClock` is constructed in `harness.rs` and never injected.** §5 claims "every test uses `FakeClock`"; no test does. The compiler warns about the dead field on every build, which is how long this has been true. *(Defect K. Scheduled as **Wave 2.4**, with the reason it has stalled written down: `Database::open` hardcodes `SystemClock`, and a fake starting at the epoch trips `trg_concepts_monotonic_ra`, so the fake needs the same `MAX(recorded_at)` floor the real clock already has.)*
 - **`RecordedAtRegression` is mapped by the classifier but unreachable through the public API.** `SystemClock` is strictly increasing by contract, so no test can provoke the trigger without raw SQL. Good news about the clock, real gap in coverage.
 - **`seq_id` gap tolerance (D-024)** — §8 names this test and it does not exist. **And it currently cannot exist**, which is worse than it being unwritten: no fold in the crate carries a `seq_id > :anchor` term, so there is nothing for gap tolerance to be a property *of*. D-024's guarantee is vacuous rather than satisfied. This test becomes writable when §5.4 lands, and it should land with it — the first anchored fold is precisely the code the rule binds, and writing the rule's test afterwards is how the `audit_current` defect happened.
 
@@ -343,32 +359,264 @@ Restated as ordering and renamed `a_lone_high_priority_write_is_still_serviced_b
 - `validate_id` returns `NotFound` for a malformed ULID — wrong semantics (defect J, still open).
 - `reconstruct` handles `operation == "D"`, but no trigger writes a `'D'` row (Doctrine V). Document as forward-compatible or remove; an unreachable branch in replay logic is a claim about the ledger that is not true.
 - Three pre-existing clippy warnings: an empty line after a doc comment in `ddl.rs`, an unnecessary deref in `archive.rs`, a manual `is_multiple_of` in `embedding.rs`.
+- ~~`Cargo.toml` still declares `version = "0.5.2"` while the code, this plan and the register are all at 0.5.5.~~ **Fixed 2026-07-30 — bumped to 0.5.5.** Nothing in the crate reads `CARGO_PKG_VERSION`, which is exactly why it drifted three releases without anything noticing; the snapshot container carries its own format version (D-043) and the schema its own `user_version`, so the package version is documentation and was wrong.
+
+---
+
+## 8.5 The 2026-07-30 review — defects the suite reports green on
+
+The crate was read end to end against the document for the first time. The suite was green before the review and is green after it: **171 passing on plain `cargo test`, 190 with the property features**. Every defect below is inside that green.
+
+> **Wave 1 has since closed six of these — V, W, Z, AB, AE and AC.** The findings are kept as written rather than edited into the past tense, because what they describe is what the code did and because §8.7's point is that a register entry moved to *Fixed* should stay legible enough to check. Each carries a resolution line; §9's Wave 1 table names the closing test for each. The baseline is now **184 passing** on plain `cargo test`.
+
+Findings were verified rather than inferred wherever a probe could settle them. Four of five throwaway probes reproduced; the fifth is recorded as unproven below rather than promoted. Severity follows this document's standing rule — **a wrong answer outranks a crash** — which is why the panic is fifth on this list and not first.
+
+### The six that answer wrongly
+
+**V — every temporal read loses `embedding_model`.** `trg_concepts_log_insert` and `trg_concepts_log_update` build their payload from `title, content, valid_from, valid_to, retired`. `embedding_model` is not among them. Both `replay::fold_delta` and `as_of::hydrate_attributes` read `payload["embedding_model"]` anyway, so both always see `null`. Measured on a concept written with `.embedding_model("nomic_v1")`:
+
+```text
+live column          = Some("nomic_v1")
+reconstruct(now)     = None
+AttributeMode::AtTime = None
+```
+
+The consequence is worse than a dropped field. `AtTime` is the mode Doctrine VIII exists to offer, and it returns a *less* faithful record than `Current`, the mode §5.2 documents as wrong for historical text. This is defect O one layer down — a field written by nobody and read by two.
+
+> **Fixed, Wave 1.1.** Payload v2. The interesting part was not the fix but that Doctrine VII's static guard refused it — see the note under Wave 1 and defect **AH**. Databases created before the change keep their v1 triggers, because `CREATE TRIGGER IF NOT EXISTS` does not replace a body and `verify` checks presence by name; they lose nothing they were not already losing, and gain the field on the next rung that moves `user_version`. That is recorded on `CREATE_TRIGGERS` rather than here, where the code is.
+
+**W — the fold partitions on `entity_id` alone.** Every fold in `replay.rs` uses `ROW_NUMBER() OVER (PARTITION BY entity_id …)`, not `PARTITION BY table_name, entity_id`. Link keys are `source|target|type|valid_from`; concept keys are whatever the caller passed, and **nothing validates them** (see **AD**). A concept whose id equals a link's entity key is conflated with that link, and the higher `seq_id` wins. Measured: the concept was **silently absent** from the reconstruction while present in `concepts` and in `transaction_log`. The one-line fix is the partition; the durable fix is **AD**.
+
+> **Fixed, Wave 1.2** — the one-line fix, in all four folds. **AD stays open**, and the distinction matters: the collision is now *harmless*, not *unreachable*. Identifiers are still unvalidated and the CTE cycle check still assumes a fixed width. The `AtTime` query in `as_of.rs` turned out not to need the change at all — it already filtered `table_name = 'concepts'`.
+
+**AA — overlapping closed valid-time intervals are unguarded.** `trg_links_single_open` fires `WHEN NEW.valid_to = '9999-…'`. Two *closed* intervals for one `(source, target, edge_type)` that overlap in valid time are accepted without complaint, and `query_as_of_edges` at an instant inside both returns the relationship twice:
+
+```text
+assert [2026-01-01, 2026-06-01)  -> Ok
+assert [2026-03-01, 2026-09-01)  -> Ok
+query_as_of_edges(2026-04-01)    -> 2 rows, one relationship
+```
+
+Every weighted algorithm then double-counts that edge. The property suite's invariant is stated over *open* intervals only, so nothing tests the stronger claim — and `Interval::overlaps`, which is exactly the arithmetic that decides it, is dead code (**AG**).
+
+> **Fixed, Wave 2.2 (D-060), in the write actor rather than in `EdgeAssertion::normalized`** as recommended — `normalized` is pure and has no connection, and doing the read at the API boundary would leave a check-then-write race against the actor's insert. **AG** closes with it: `Interval::overlaps` is the decision procedure, which is why the SQL narrows to a provable superset instead of restating the comparison.
+>
+> The case the recommendation missed: **two open intervals overlap**, so the general check shadowed `SingleOpenViolation` and three existing tests failed. Left in, that would have made a typed error constructible by nothing — defect Q's shape, reintroduced by a fix. The two guards now partition the space on exactly `trg_links_single_open`'s `WHEN` clause.
+
+**AB — three readers, three retirement semantics.** `hydrate_attributes(Current)` filters `retired = 0`; `fold_delta` treats a retired concept as a tombstone and removes it; `hydrate_attributes(AtTime)` reads the payload and never looks at `retired` at all, so it returns concepts retired long before `ts`. One of the three is right and the document does not say which.
+
+> **Fixed, Wave 1.4.** Two of the three were already right and agreed; `AtTime` was the outlier. The rule is now stated on `hydrate_attributes`: *a concept retired as of the instant asked about is not returned*. Note the clause that keeps this from collapsing into "filter the live column" — `Current` asks whether it is retired **now**, `AtTime` whether it was retired **then**. Those differ, and the difference is Doctrine II rather than a leftover of this defect, which is why there is a second test asserting `AtTime` before a retirement still sees the concept.
+
+**Z — `Subgraph` breaks its own invariant and five algorithms disagree about it.** `hydrate` filters `retired = 0`, but the adjacency lists were built from `links_current`, which still carries edges to retired concepts. So `out_adj` references nodes absent from `nodes`. On a three-node graph with one retired neighbour:
+
+| | behaviour |
+|---|---|
+| `louvain` | **panics** — `comm[&edge.node]`, "no entry found for key" |
+| `scc` | returns the retired node as its own phantom component |
+| `k_core` | counts the surviving node's degree as 2 when one edge is in the graph |
+| `dijkstra` | returns a distance to a node the caller cannot look up |
+
+Four handlings of one violated invariant, none of them chosen. The panic is the *least* damaging of the four; `k_core`'s inflated degree is the one that will be believed. Retirement is the supported path — concepts are never deleted (D-022) — so this is reachable in ordinary use, not a corner.
+
+> **Fixed, Wave 1.3, by choosing to drop dangling entries** rather than admit retired nodes behind a flag. The deciding argument was the shape of the change, not taste: dropping made the invariant true and **none of the five algorithms needed touching**, while the flag would have required a correct three-state handling in all five and in every algorithm added later. The invariant is stated on the `Subgraph` type rather than in the loader's doc comment, because "the loader happens to produce this" and "callers may rely on this" are different claims and the algorithms rely on the second.
+
+**AC — defect H was marked Fixed and is not.** `classify_archive_violation` and `WriteOp::Delete` are defined and called from nowhere in `src/` or `tests/`, so `DbError::ArchiveViolation` cannot be produced by any code path. The Phase 1 fix made the function *delegate* to `abort_kind` instead of making it *called*, so the defect as stated — "never called" — survived its own repair. Structurally identical to defect Q, which was fixed properly. **H is reopened as AC**, and the lesson is about the register rather than about the archive: a defect line should be closed by the test that would have caught it, not by a commit that touched the file.
+
+> **Fixed, Wave 1.6, by deleting the function.** `error::classify` with `WriteOp::Delete` already produced exactly the same `ArchiveViolation` from exactly the same `abort_kind`, so this was never one classifier missing a caller — it was two classifiers where D-033 requires one, and the redundant one was the one nobody called. `archive()`'s two `DELETE`s now go through the survivor, which makes the typed error reachable and gives it the only site where a guard firing is genuinely diagnostic: the marker table missing means the session's own invariant broke from inside.
+>
+> Note what the closing test can and cannot do. "This function is called from nowhere" is a property of the call graph, and a test that calls the function cannot see it — which is precisely how the Phase 1 commit closed H without changing anything. The test therefore pins the *behaviour*, and the deletion is what makes the defect unrepeatable.
+
+### Four that are slow or dead rather than wrong
+
+**AD — nothing validates an identifier.** `generate_id` and `validate_id` are exported from `util` and called nowhere. Three modules nevertheless assume ULIDs: **W** above, the `entity_id` concatenation whose safety argument in `edge.rs` rests on `|` never occurring in a component, and the traversal CTE's cycle check, which is `INSTR(w.path, CAST(l.target_id AS BLOB)) = 0` and is only correct because every id is the same fixed width. With variable-length ids a short id that is a substring of the path prunes a live branch. Assumed by three, enforced by none.
+
+> **Fixed, Wave 2.3 (D-061) — and neither of the two options §9 offered was the answer.** Requiring ULIDs is a *different* contract, not a tighter one: every id the suite uses (`a`, `SRC`, `n000`) would become invalid, which is the evidence that the assumption was simply wrong. Declaring ids fully opaque understates its own cost — the width-independent cycle check is the smaller half, and the larger is that `|` inside a component makes `transaction_log.entity_id` ambiguous between *different links*, which W's partition cannot help with because both rows are links. Shipped: ids are opaque except that `|` and `/` are reserved. Every existing id stays valid, the cycle check becomes `INSTR(path, '/' || id || '/')` over a doubly-delimited path, and **W's collision becomes unreachable** rather than merely harmless. **J** closes in the same change — `validate_id` returned `NotFound`, which tells a caller the thing is missing and invites them to create it again with the same id.
+
+**AE — two N+1 loops on the read path.** `subgraph::hydrate` and `as_of::hydrate_attributes` both issue **one query per node**. Measured: `load_subgraph` over 400 nodes and 399 edges takes 13.2 ms, of which 400 are round trips. Linear in node count, so roughly 330 ms at 10 000 nodes, essentially all of it round-trip overhead. Both collapse to one `WHERE id IN (…)` or a join against the walk. Neither is benched (§8.6).
+
+> **Fixed, Wave 1.5 — and deliberately not claimed as a speedup.** Both are batched at 400 ids per statement, which is a bind-variable ceiling rather than a latency budget: `CHUNK_BUDGET` bounds how long the *writer* holds the lock and these are reads. The round-trip count is now `ceil(n/400)` instead of `n`, but **the improvement is unmeasured**, because the benchmark that would measure it is Wave 3.1 and still does not exist. That is the same gap §8.6 records against D-047's deferral, and it is left stated rather than closed by assertion.
+>
+> One incidental find: batching changed the result order, because the per-node loop had been supplying `node_ids` order for free. Restored explicitly and tested — a read that permuted its own output between runs would have failed the property suite for a reason unrelated to any property under test.
+>
+> **Measured in Wave 3.1b**, which is what the paragraph above was owed: 100 / 400 / 1,000 nodes hydrate in **0.18 / 0.82 / 2.03 ms**, against 13.2 ms for the whole pre-fix 400-node load. Still linear in node count — the round-trip count fell from *n* to *ceil(n/400)*, but within a chunk the per-row cost is unchanged, so this was a constant-factor win and not an asymptotic one. Worth stating plainly because "N+1" invites the assumption that removing it changes the growth rate, and here it does not.
+
+**AF — the planner's input costs more than the plan.** `FilteredVectorSearch::corpus_size` runs `SELECT COUNT(*)` over the whole model table on **every query** to feed `CostEstimator`. D-007's argument is that strategy choice should be arithmetic rather than a rule of thumb; the arithmetic is currently O(corpus) per query and the thing it selects is not.
+
+**AG — `Interval` is decorative.** `overlaps()` is used by one unit test and no production path. It is the missing half of **AA**.
+
+> **Fixed, Wave 2.2 (D-060)** — see AA above. It is now the guard's decision procedure, and the SQL beside it is deliberately only a narrowing filter so that the definition of "overlap" lives in one place.
+
+### One hazard, recorded as unproven
+
+`run_cadence` is given `read_conn.clone()`, so the cadence and a caller's `reconstruct` can both enter the unsynchronised `ATTACH cold … DETACH cold` region on one connection, and `detach_stale_cold` would tear down a handle another in-flight fold is using. **This did not reproduce**: 200 concurrent reconstructions against a 1 ms / 1-entry cadence with an archive present produced zero errors, because the cadence anchors at `MAX(recorded_at)` and therefore almost always takes the hot path. The window is real — a write landing between `log_head` and the fold — and narrow. Recorded as a hazard to close cheaply in Wave 4, not as a defect.
+
+### Three more, by inspection only
+
+- **FTS5 external content is keyed on `concepts.rowid`**, which is implicit and not stable across `VACUUM`. Nothing in-crate vacuums; nothing stops an operator, and the index would then match text no concept contains, silently.
+- **Snapshot chains compound.** `write_final` composes onto the previous snapshot, so an error propagates forward indefinitely with no periodic full-fold cross-check.
+- **A `SCHEMA_VERSION` bump invalidates every snapshot on disk** — correct per D-043, but nothing re-anchors after a migration, so the first reconstruct after an upgrade folds from genesis.
+
+---
+
+## 8.6 Bounds that are stated and not bounded
+
+Three things carry a number in the document and nothing in the code holds them to it.
+
+> **All three items in this section are resolved by Wave 3.** Kept as written; each carries its outcome. Two of the three predictions made here were right, and the third was right about the direction and wrong about the margin.
+
+**`CHUNK_BUDGET` has three exemptions and none is declared as one.** D-058 derives a 3 ms bound with care and four measured constants, and then three operations hold the actor for unbounded time: `write_bulk_atomic` takes an uncapped `Vec` on the **high-priority** channel, so a large batch stalls the tier that exists for interactive work; `archive()` is one transaction that also runs a full `rebuild_within` inside itself; and `rebuild_current` is high-priority and documented at ~50 s per 10M edges. Each is individually justified — D-012 for the archive, D-023 for the rebuild, D-014 for the atomic batch — and the exemption is recorded in three separate rustdoc notes rather than in §5.1.5, which is where a reader looks for the bound's scope.
+
+> **Resolved, Wave 3.3.** All three are atomic *by contract*, so neither of the two active options worked: capping the batch breaks the guarantee `write_bulk_atomic` exists to provide, and a third priority tier changes which caller waits without changing how long the lock is held. The exemption is now stated in §5.1.5 with `archive()` measured at **26.8 ms** for 2,000 archivable edges, and `CHUNK_BUDGET`'s rustdoc carries the same table. The finding was that the exemptions were correct and their *location* was the defect.
+
+**The `Subgraph` rewrite is deferred on a benchmark nobody has written.** D-047 defers the integer-index rewrite until Louvain and Dijkstra are measured on a budget-sized graph. `benches/budgets.rs` measures twenty rows and none of them is an algorithm, a subgraph load, an archive, or a filtered vector search. So the deferral condition cannot be met, and **AE** suggests the measurement would retire the rewrite rather than schedule it: the dominant cost of getting a graph in memory is per-node round trips, which an integer-index representation does not touch.
+
+> **Resolved, Wave 3.1 — the prediction held, with one qualification it missed** (D-063). The load does dominate: 62.2 ms against Louvain's 28.3 ms at 10K nodes, and the margin does not close with size. But the reasoning above credits the round trips, and those were already batched in Wave 1.5 — the load is still 2.2× the most expensive algorithm *after* that fix, so the cause is the walk and row decoding rather than the round trips the prediction named. Right answer, partly wrong reason.
+>
+> The qualification: the *sum* of all five algorithms approaches the load (≈58 ms against 62 ms at 10K), so a caller who loads once and runs the whole battery is a case where the rewrite would pay. Retired with that stated as its trigger, rather than closed as though no such case existed.
+
+**~~D-059's fix is proven and unshipped.~~ Shipped, Wave 2.1.** `idx_lc_open_interval (source_id, target_id, edge_type, valid_to, valid_from)` on a v5 → v6 rung. It takes a 90-row chunk into an 8 000-edge hub from 47.7 ms to 8.0 ms and flat, and fixes interactive `assert_edge` on a high-degree node at the same time.
+
+The acceptance test asserts the **plan**, not a duration, and that is the more useful assertion here: D-059's diagnosis was causal — the `EXISTS` was served by `idx_lc_traversal_cover` with only `source_id` bound — so what has to be pinned is which index is chosen and how much of it is bound. Verified by dropping the index and re-running: `SEARCH links_current USING COVERING INDEX idx_lc_traversal_cover (source_id=?)` before, all three equality columns bound after. A duration assertion would need a hub large enough to clear the noise and would fail for machine reasons.
+
+**Still not re-measured:** the four `chunk_rows` constants were derived against the pre-index cost, and the edge chunk in particular was sized around a scan this index removes. That belongs to Wave 3 with the rest of the measurement, and is called out here rather than assumed away.
+
+---
+
+## 8.7 Documentation drift found by the review
+
+Recorded here rather than silently corrected, because the pattern matters more than any one line: the docs have drifted in **both** directions, claiming fixes that did not land and defects that did.
+
+| Location | Claim | Reality | Status |
+|---|---|---|---|
+| README, "Known test gaps" | `tests/concurrency_tests.rs` is `assert!(true)` | six real tests, all passing since §8.1c | **corrected** |
+| README, defect **S** | `CostEstimator` selects among strategies "with no implementations" | both strategies have bodies (D-050) | **corrected**; absorbed into this register as S |
+| README, defect **T** | hybrid search: "no FTS5 table, no keyword retrieval, nothing fuses them" | delivered (D-051) — and contradicted 38 lines lower in the same file | **corrected**; absorbed as T |
+| This plan, defect **H** | `classify_archive_violation` never called — **Fixed** | still never called | **reopened as AC**; closed for real in Wave 1.6 by deleting the function |
+| This plan, the register itself | absorbing the README's letters reused **V**, **W**, **T** and **U**, giving four letters two meanings each | found while closing Wave 1 | **corrected** — see the note at the end of the Appendix. Letters are not reused; the highest assigned is **AH** |
+| `subgraph.rs`, `node_bytes` doc | names a test, `load_subgraph_totals_agree_with_the_derivation` | the test did not exist | **corrected** — written in Wave 1.5, since batching moved the accounting it describes |
+| `Cargo.toml` | `version = "0.5.2"` | code, plan and register are at 0.5.5 | **corrected** — bumped to 0.5.5 |
+
+The README carried its own informal defect letters, S and T, independent of this register. Both are now recorded here as fixed and the README defers to this table, so there is one numbering rather than two.
+
+**The mechanism, since this is the second time.** §8.1b already recorded a mutation surviving in the tree because nothing distinguished it from a commit. Defect H is the same shape at the register level: a line was closed by a commit that touched the file rather than by a test that would have caught the defect. Every Wave 1 item below therefore names its closing test in the table, and a defect line should not move to **Fixed** without one.
 
 ---
 
 ## 9. Sequencing
 
-```
-Phase 4 restoration      — DONE (§5.2–§5.9, §6, Appendix A)
-        │
-        └── unblocks ──> §5.1 vector write path ──> 7.2 register_model
+Everything the previous plan sequenced is delivered:
 
-5.1 vector write path      — DONE (D-048)
-5.2b annotations (D-041)  — DONE
-5.4 snapshot composition  — DONE (D-049)
-                           carries one decision (cadence) and unblocks the
-                           seq_id gap-tolerance test Phase 5 wants
-Phase 4b de-corruption   — DONE
-Phase 5 (test matrix)    — mostly independent; §5.4 owes it one test
-8.2 coverage gaps        — independent; concurrency_tests spun off
-5.2 vector_filter        — DONE (D-050)
-5.3 hybrid search        — DONE (D-051)
-8.1c concurrency test    — DONE; suite green, and the rename it blocked is free
+```
+Phase 4 restoration       — DONE (§5.2–§5.9, §6, Appendix A)
+Phase 4b de-corruption    — DONE
+Phase 5 (test matrix)     — DONE (all four cells)
+5.1 vector write path     — DONE (D-048)
+5.2 vector_filter         — DONE (D-050)
+5.2b annotations          — DONE (D-041)
+5.3 hybrid search         — DONE (D-051)
+5.4 snapshot composition  — DONE (D-049, D-052), cadence D-053, retention D-054
+7.2 register_model        — DONE (D-048)
+8.1c concurrency test     — DONE; the write_annotations rename it blocked is free
+§9 measurement            — DONE (D-055 … D-059)
 ```
 
-**Recommended order:** §5.1, 7.2, §5.4 and the de-corruption pass are done. Next is **Phase 5** — the test matrix §8 specifies, now that §8 itself is legible and its 0.5.4 additions are recorded. The two carve-outs §5.4 leaves — composing across the archive boundary, and the snapshot cadence — are both decisions rather than transcription, and belong with whoever settles the maintenance-task lifecycle. §5.2's strategy work waits on the two premises above; §5.3 waits on a go/defer call now that its design is no longer missing.
+**So the old sequence is exhausted, and §8.5 supplies the new one.** Note what changed in priority: before the review the obvious next move was D-059's migration rung, because it is the largest measured win. It is now second. Ten defects that the suite reports green on outrank a performance fix, and four of the six wrong-answer defects are single-file changes that need no schema movement at all — they can land while the migration rung is still being decided.
 
-The R15 upstream report is independent of everything and has been outstanding longest.
+The four waves below are ordered by that rule. Within a wave the items are independent unless stated.
+
+### Wave 1 — the six silent defects · no schema change · days — **DELIVERED 2026-07-30**
+
+Everything here was a code fix inside one or two files, and every item ends in a test that would have caught it, all twelve in `tests/wave1_regression_tests.rs`. **Nothing in this wave touches `user_version`.**
+
+| # | Defect | Work | Test that closes it | |
+|---|---|---|---|---|
+| 1.1 | **V** | Added `embedding_model` to both concept log triggers; payload bumped to `'v', 2`; `fold_delta` and `hydrate_attributes` accept v1 (field absent) and v2 against a shared `PAYLOAD_VERSION`. First real use of `DbError::PayloadVersion`, unexercised since 0.5.2. | `embedding_model_survives_every_temporal_read`, `a_v1_concept_payload_still_folds`, `the_trigger_payload_version_matches_the_reader_ceiling` | ✅ |
+| 1.2 | **W** | Partitioned all four folds in `replay.rs` on `(table_name, entity_id)`. **The `AtTime` query in `as_of.rs` did not need it** — it already carries `table_name = 'concepts'` in its `WHERE`, so the discriminator was applied by the filter rather than the partition. Noted in the code so the asymmetry does not read as an oversight. | `a_concept_whose_id_looks_like_an_edge_key_survives_reconstruction` | ✅ |
+| 1.3 | **Z** | **Chose: drop adjacency entries whose endpoint is not a hydrated node.** Stated as a *closure invariant* on `Subgraph` itself rather than as a step in the loader, with `is_closed()` to check it. The five algorithms needed no changes once it holds — which is the argument for this option over admitting flagged tombstone nodes, since that one would have changed all five. | `a_retired_neighbour_leaves_no_dangling_adjacency`, `retiring_the_start_node_yields_an_empty_graph` | ✅ |
+| 1.4 | **AB** | **Chose: a concept retired as of the instant asked about is not returned.** That is what `Current` and `reconstruct` already did; `AtTime` now does too. The rule is per-clock, not per-mode — `Current` asks "retired now", `AtTime` asks "retired then" — which is the two clocks, not a residual disagreement. | `all_three_readers_agree_a_retired_concept_is_not_visible`, `at_time_before_the_retirement_still_sees_the_concept` | ✅ |
+| 1.5 | **AE** | Both loops batched to one query per 400 ids. `hydrate_attributes` reorders results to `node_ids` order, because the per-node loop was incidentally providing that and the property suite compares results for equality. | `hydrate_spans_more_than_one_chunk`, `load_subgraph_totals_agree_with_the_derivation` | ✅ |
+| 1.6 | **AC** | **Deleted, not wired up.** `classify_archive_violation` duplicated `error::classify` with `WriteOp::Delete`; the defect was one classifier too many. `archive()`'s two deletes now go through the surviving one. | `deleting_a_link_outside_an_archive_session_is_a_typed_violation`, plus `a_legal_archive_is_unaffected_by_the_classified_deletes` as the control | ✅ |
+| 1.7 | doc drift | This section, §8.5, §8.7 and the register; README reconciled. The register's own duplicate-lettering drift was found and corrected in the Appendix. | — | ✅ |
+
+**One thing Wave 1 did not anticipate.** `no_payload_carries_a_vector` — the Doctrine VII static guard — refused item 1.1, because its needle was the substring `embedding` and `embedding_model` contains it. The guard was right to fire and wrong in scope: Doctrine VII excludes the *vector*, a derived and reconstructible artifact, and `embedding_model` is a short scalar column of a ledger table naming which model produced one. It is narrowed to permit that identifier **by name**, so `'embedding'` or `'embedding_vector'` in a payload still fails, and a second test pins that the permitted identifier is still a `TEXT` column — because if it ever stops being one, the carve-out silently stops being sound. Recorded as **AH**.
+
+**Verified by reverting.** Nine of the twelve new tests were confirmed to fail against the pre-Wave-1 tree by putting the defects back and re-running. The three that pass either way are named in the test file's header rather than left to look like coverage they are not — the AC test in particular exercises a classifier that was always correct, since "nothing calls it" is a property of the call graph and not observable from a test that calls it.
+
+### Wave 2 — the decisions that have been deferred a full cycle · a week — **DELIVERED 2026-07-30**
+
+Each of these was a fork the previous cycles declined to take unilaterally. All four are taken; three produced decision-register entries (**D-060**, **D-061**, **D-062**). `SCHEMA_VERSION` is now **6**.
+
+**Two of the four recommendations did not survive contact with the code, and the plan was wrong in an instructive way both times.** Recorded here rather than quietly re-decided, because the pattern is the same in both: a recommendation reasoned about the code's *shape* without checking what the shape rests on.
+
+| # | Defect | What was recommended | What shipped |
+|---|---|---|---|
+| 2.1 | D-059 | Ship the index as v5 → v6 | **As recommended.** `idx_lc_open_interval`, one rung, nothing dropped |
+| 2.2 | **AA**, **AG** | Refuse in `EdgeAssertion::normalized` | **Same decision, wrong location** — moved to the write actor (D-060) |
+| 2.3 | **AD**, **J** | Require ULIDs, *or* declare ids fully opaque | **Neither** — opaque with two reserved characters (D-061) |
+| 2.4 | **K** | `open_with_clock`, floored like `SystemClock::new` | **As recommended**, with the floor lifted into the `Clock` trait (D-062) |
+
+**2.1 — the index.** `idx_lc_open_interval (source_id, target_id, edge_type, valid_to, valid_from)` on a v5 → v6 rung. The acceptance test asserts the *plan* rather than a duration: `EXPLAIN QUERY PLAN` on the probe gave `SEARCH links_current USING COVERING INDEX idx_lc_traversal_cover (source_id=?)` before — one column bound, which is the whole defect — and binds all three equality columns after. A timing assertion would need a hub large enough for the difference to clear the noise and would fail for machine reasons. A second test pins that the trigger still contains the predicate the plan test models, since a trigger body cannot be handed to `EXPLAIN` and the copy could otherwise outlive its original.
+
+**2.2 — `normalized` cannot do it.** It is a pure function with no connection. Doing the read at the API boundary instead would leave a check-then-write race against the actor's insert, so the guard runs *in* the actor — one writer by construction, and inside the batch transaction for the batch paths, so the window does not exist rather than being narrow. The recommendation's cost argument was also wrong: "one read per assertion rather than one per insert on the hot index" treats those as different, and on this path an assertion *is* an insert. What actually differs is the race and the reach.
+
+One thing the plan did not anticipate: **two open intervals overlap**, so the general check reported them and shadowed `SingleOpenViolation` — three existing tests caught it. Left unfixed, that would have made a typed error constructible by nothing, which is defect Q's shape reintroduced by a fix. The two guards now partition the space on exactly the trigger's `WHEN` clause.
+
+**2.3 — both options were wrong, and their being wrong is the finding.** Requiring ULIDs is not a tightening of the contract but a different contract: every id in the suite (`a`, `SRC`, `n000`) would become invalid, so three modules *assumed* ULIDs while nothing ever *required* them. And "fully opaque" understates its own cost — a width-independent cycle check is the smaller half; the larger is that `|` inside a component makes `transaction_log.entity_id` ambiguous between different links, which W's partition fix cannot help because both rows are links. The shipped constraint is the two delimiters and nothing else, which leaves every existing id valid and makes W's collision **unreachable** rather than merely harmless.
+
+**2.4 — the floor belongs to the trait.** `Clock::raise_floor` is required, not defaulted: the trait's contract (strictly increasing across restarts) is not a property a clock can hold alone, since it depends on what the database contains and the clock cannot see that. A defaulted no-op would make silently declining to be floored the easy path, and that is the exact failure this closes. The `field is never read` warning that has been on every test build since 0.5.2 is gone.
+
+### Wave 3 — measure what the bounds claim · a week — **DELIVERED 2026-07-30**
+
+Five new bench groups (`graph_analytics`, `hydrate_scaling`, `overlap_guard`, `archive`, `filtered_vector`, `chunk_index_cost`). Three decisions recorded: **D-063**, **D-064**, **D-065**.
+
+**This wave found a defect rather than only confirming numbers, and it was one of mine.** It also *retired* two proposed optimisations instead of performing them, which is what a measurement wave is for and is easy to forget to count as output.
+
+| # | What it owed a number for | Result |
+|---|---|---|
+| 3.1 | D-047's deferral condition, unanswered for two releases | **Rewrite retired** (D-063) — the load dominates any single analysis at every size measured |
+| 3.1b | The batched hydrate (**AE**) | 400 nodes: **0.82 ms**, against 13.2 ms for the whole pre-fix load. Still linear — the win was constant-factor, not asymptotic |
+| 3.1c | The four `chunk_rows` constants against the v6 index | **All four stand.** And the index is a win on an *empty* table too, which D-059 did not claim |
+| 3.1d | The overlap guard (**D-060**) | **Found a defect** — the guard reproduced D-059's own trap (D-064) |
+| 3.2 | **AF**, the planner's O(corpus) input | **Not fixed, and the plan's justification for fixing it was wrong** (D-065) |
+| 3.3 | The three unbounded write paths | Exemption recorded in §5.1.5, where the bound is stated |
+
+**3.1 — D-047 is answered and the rewrite is retired.** Three sizes, load separated from algorithms:
+
+| | 1,001 nodes | 5,001 nodes | 10,001 nodes |
+|---|---|---|---|
+| `load_subgraph` (3 hops) | 4.97 ms | 27.7 ms | 62.2 ms |
+| `louvain` | 1.99 ms | 13.9 ms | 28.3 ms |
+| `scc` | 0.90 ms | 7.7 ms | 12.9 ms |
+| `k_core` / `dijkstra` / `astar` | 0.71 / 0.41 / 0.11 ms | 6.7 / 2.5 / 0.84 ms | — |
+
+At 10K the most expensive algorithm is 45% of the load, and an integer-index representation does not touch the load. §8.6 predicted this outcome; the qualification it did not anticipate is that the *sum* of all five approaches the load (≈58 ms against 62 ms at 10K), so a caller who loads once and runs the whole battery has a workload where the rewrite would matter. Recorded with that trigger rather than closed outright. The measurement also surfaced something larger than what it retired: `load_subgraph` is mildly superlinear, 12.5× for 10× the nodes, and unexplained.
+
+**3.1d — the guard reproduced D-059's defect, one wave after D-059 was fixed.** `OVERLAP_CANDIDATES` carried `AND valid_from < :new_valid_to`, a provably safe narrowing added for efficiency. It is what let `idx_lc_traversal_cover` win as a covering index while binding **one** equality column, so the guard scanned the source's out-degree:
+
+```text
+with the range:     idx_lc_traversal_cover (source_id=? AND valid_from<?)
+without it:         idx_lc_open_interval   (source_id=? AND target_id=? AND edge_type=?)
+```
+
+**+9.8 ms on a 90-edge chunk into a 2,000-edge hub — and identical with and without `idx_lc_open_interval`**, which is what identified it: an index that makes no difference is one that is not being used. Dropping the range brings the guard's cost to within noise of not running it (18.4 → 8.58 ms, against 8.65 ms with the guard disabled). A second, smaller instance of D-056 — the guard preparing per row inside the batch — was found in the same investigation and was worth ~0.2 ms, an order of magnitude less, which is why it was not the answer.
+
+Note what this says about the suite: **no correctness test could have caught it.** The guard returned the right answer, in the right transaction, with the right error type, throughout. `the_overlap_guard_seeks_on_all_three_equality_columns` now pins the plan.
+
+**3.2 — AF is real in mechanism and under 1% in consequence, and the plan's reason for fixing it was false.** Measured: `corpus_size` costs 5.2 µs at 2,000 vectors and 8.5 µs at 20,000 — 10× the corpus for 1.6× the time, because ~4.9 µs is round trip and preparation rather than counting. Extrapolated to §9's 100K corpus, ~22 µs against a 2.5 ms search. The instruction was to cache both "since neither can change without DDL"; that is true of `declared_dimension` and **false of `corpus_size`**, which changes on every `upsert_embeddings`. The proposed fix would have bought <1% at the price of a staleness bug.
+
+**3.3 — the exemption is recorded, because all three paths are atomic by contract.** `write_bulk_atomic` (D-014), `archive()` (D-012, measured at 26.8 ms for 2,000 archivable edges) and `rebuild_current` (D-023) cannot be chunked without breaking the guarantee each exists to provide. Capping and a third tier were both considered: capping breaks the contract, and a third tier changes which caller waits without changing how long the lock is held. The defect was never the exemption — it was stating the bound as though it had none. §5.1.5 now carries the scope, and `CHUNK_BUDGET`'s rustdoc points at it.
+
+### Wave 4 — hardening
+
+- **4.1** — Serialise the `ATTACH cold` region, or give the cadence its own connection. Cheaper than continuing to reason about the window.
+- **4.2** — `Drop` with a `debug_assert`, and propagate `close()`'s writer error rather than discarding it. This is §7.3 option B, recommended two cycles ago and still open. Note also that `Shutdown` arrives on the *high-priority* channel, so `close()` discards queued background work and its callers see `WriterDroppedResponder` — defensible, undocumented.
+- **4.3** — Decide whether `Database::raw()` and the free-function `upsert_embedding` / `register_model` stay public. If they do, §5.1 should say that actor containment is a convention above the actor rather than a guarantee: `query_only` protects `read_conn()`, and nothing protects `raw()`.
+- **4.4** — Re-anchor snapshots after a migration, and add a periodic full-fold cross-check against the composed result.
+- **4.5** — `AttributeMode::Omit` makes `execute()` return `Ok(vec![])`, indistinguishable from no results; `timestamp::normalize` returns `ReplayCorrupt { seq: 0 }` for bad *caller* input; `Database::schema_version()` returns the crate constant rather than the file's; `archive_horizon.archived_at` is written with the cutoff instead of the archive time; `load_subgraph` supports neither `edge_types` nor `min_weight` while `TraversalBuilder` supports both. Small, real, and none of them urgent.
+
+### Independent of all four
+
+The **R15 upstream report** against libSQL 0.9.30 is unblocked by nothing and has been outstanding longest. The `write_annotations` rename has been free since §8.1c and is still not done.
 
 ---
 
@@ -385,10 +633,10 @@ Severity is about silence: a defect that returns a wrong answer without erroring
 | E | `snapshot.rs` | `{:08}` + lexicographic retention breaks past 1e8 | **Fixed** (Phase 2) |
 | F | `search.rs` | dimension check compared a length to itself | **Fixed** (D-037) |
 | G | `replay.rs` | path interpolated into SQL rather than bound | **Fixed** (Phase 2) |
-| H | `archive.rs` | `classify_archive_violation` never called | **Fixed** (Phase 1) |
+| H | `archive.rs` | `classify_archive_violation` never called | **Reopened as AC** — the Phase 1 commit made it *delegate*, not *called* |
 | I | `snapshot.rs`, `seed.rs` | no-op stubs presenting as implementations | **Fixed** (Phase 2) |
-| J | `util/ids.rs` | `validate_id` returns `NotFound` for a malformed ULID | **Open** |
-| K | `tests/harness.rs` | `FakeClock` constructed but never injected | **Open** |
+| J | `util/ids.rs` | `validate_id` returns `NotFound` for a malformed ULID — a caller matching on it is told to create the thing again, with the same id, forever | **Fixed** (Wave 2.3, D-061) — `DbError::InvalidId { id, reason }` |
+| K | `tests/harness.rs` | `FakeClock` constructed but never injected | **Fixed** (Wave 2.4, D-062) — `Database::open_with_clock`; the standing build warning is gone |
 | L | `search.rs` | called `vector_distance`, which does not exist in libSQL | **Fixed** (D-037) |
 | M | `schema/migrations.rs` | `verify()` counted `sqlite_master`; any registered model broke reopen | **Fixed** (D-038) |
 | N | `graph/builder.rs` | edge types interpolated as SQL literals on an unvalidated read path | **Fixed** (D-039) |
@@ -397,9 +645,46 @@ Severity is about silence: a defect that returns a wrong answer without erroring
 | Q | `error.rs` | `SubgraphTooLarge` constructed nowhere; D-007's byte budget unenforced | **Fixed** (D-039) |
 | R | `tests/concurrency_tests.rs` | entire binary is `assert!(true)`; reports green, tests nothing | **Fixed** (rewritten; last red resolved §8.1c) |
 | X | `vector/search.rs` | `reciprocal_rank_fusion` sorted on score alone, leaving ties to `HashMap` order — the same query could answer in a different order twice | **Fixed** (D-051) |
+| S | `graph/vector_filter.rs` | `CostEstimator` chose between strategies that had no implementations; a candidate-count heuristic named after a byte-budget cost model | **Fixed** (D-050) — absorbed from the README's own lettering |
+| T | `vector/search.rs` | `reciprocal_rank_fusion` was a pure function with no FTS5 table, no keyword arm, and nothing feeding it | **Fixed** (D-051) — absorbed from the README's own lettering |
+| U | `temporal/archive.rs` | archive-session marker created before `BEGIN` as committed state; every archive died on "table already exists" | **Fixed** (§8.1b) |
 | Y | `temporal/replay.rs` | `hot_log_covers` tested reach, not completeness; after an archive, a pre-cutoff `reconstruct` could **drop an entity entirely**, silently | **Fixed** (D-052) |
-| S | `vector/vector_filter.rs` | `CostEstimator` selects among strategies with no implementations | **Fixed** (D-050) |
-| V | `vector/vector_filter.rs` | `CostEstimator` carried `byte_budget` unread; `select_strategy` was a candidate-count heuristic wearing a cost model's name | **Fixed** (D-050) |
-| W | `graph/vector_filter.rs` | `PostFilter` under-returns silently when the filter is tight — a wrong answer shaped like a small result | **Fixed** (D-050, escalation) |
-| T | `vector/search.rs` | no path from `Database` to an embedding; feature unreachable from the public API | **Open** |
-| U | `temporal/archive.rs` | an un-reverted mutation left in the tree: the archive-session marker created *before* `BEGIN`, as committed state, and then created again inside the transaction | **Fixed** (Phase 5) |
+
+Found by the 2026-07-30 review (§8.5). All ten were inside a green suite. **Six are closed by Wave 1**, each by the named test in `tests/wave1_regression_tests.rs` rather than by a commit — see §8.7 for why that distinction is now enforced.
+
+| # | Location | Defect | Status |
+|---|---|---|---|
+| V | `schema/ddl.rs`, `temporal/replay.rs`, `temporal/as_of.rs` | concept log payload omits `embedding_model`; two readers read it, so **every temporal read returns `None`** and `AtTime` is less faithful than `Current` | **Fixed** (Wave 1.1) — payload v2; `embedding_model_survives_every_temporal_read`, `a_v1_concept_payload_still_folds` |
+| W | `temporal/replay.rs` | folds partition on `entity_id` alone, not `(table_name, entity_id)`; a concept whose id collides with a link key **vanishes from the reconstruction** | **Fixed** (Wave 1.2) — `a_concept_whose_id_looks_like_an_edge_key_survives_reconstruction` |
+| Z | `graph/subgraph.rs`, `graph/algorithms.rs` | adjacency may reference nodes absent from `nodes`; `louvain` **panics**, `scc` emits phantom components, `k_core` inflates degree, `dijkstra` returns unlookupable nodes | **Fixed** (Wave 1.3) — closure invariant on `Subgraph`; `a_retired_neighbour_leaves_no_dangling_adjacency` |
+| AA | `schema/ddl.rs`, `connection.rs` | `trg_links_single_open` guards only the open sentinel; **overlapping closed valid-time intervals are accepted** and read back as two edges for one relationship | **Fixed** (Wave 2.2, D-060) — refused in the write actor; `overlapping_closed_intervals_are_refused` |
+| AB | `temporal/as_of.rs` | `AttributeMode::AtTime` ignores `retired` while the other two readers do not — three readers, three semantics | **Fixed** (Wave 1.4) — `all_three_readers_agree_a_retired_concept_is_not_visible` |
+| AC | `temporal/archive.rs`, `error.rs` | `classify_archive_violation` and `WriteOp::Delete` called from nowhere; `DbError::ArchiveViolation` unconstructible (reopens **H**) | **Fixed** (Wave 1.6) — duplicate classifier deleted, `archive()`'s deletes routed through `classify` |
+| AD | `util/ids.rs` | `generate_id` / `validate_id` called nowhere; nothing validates an identifier, while three modules assume ULIDs (root cause of **W**, and of the CTE cycle check's width assumption) | **Fixed** (Wave 2.3, D-061) — ids opaque with `\|` and `/` reserved; W's collision now unreachable, and the CTE cycle check is width-independent |
+| AE | `graph/subgraph.rs`, `temporal/as_of.rs` | `hydrate` and `hydrate_attributes` issue one query per node — 400 nodes measured at 400 round trips | **Fixed** (Wave 1.5) — batched to one query per 400 ids; **unmeasured**, see Wave 3.1 |
+| AF | `graph/vector_filter.rs` | `corpus_size` runs `COUNT(*)` over the corpus on every filtered query; the planner's input is O(corpus) | **Closed, not fixed** (Wave 3.2, D-065) — measured at <1% of a filtered search, and the proposed cache was unsound for `corpus_size` |
+| AI | `connection.rs` | The overlap guard's narrowing predicate made `idx_lc_traversal_cover` win as a covering index, so the guard scanned the source's out-degree — **D-059's defect, reproduced by D-060's fix**. +9.8 ms per 90-edge chunk into a 2,000-edge hub, with every correctness test passing throughout | **Fixed** (Wave 3.1d, D-064) — `the_overlap_guard_seeks_on_all_three_equality_columns` |
+| AG | `temporal/interval.rs` | `Interval::overlaps` is dead code — the crate's only overlap arithmetic, and the missing half of **AA** | **Fixed** (Wave 2.2, D-060) — it is the overlap guard's decision procedure, which is why the SQL narrows to a superset rather than restating the comparison |
+| AH | `tests/doctrine_static_tests.rs` | `no_payload_carries_a_vector` banned the substring `embedding` in any trigger, which is coarser than Doctrine VII — it excludes the *vector*, not the scalar naming the model. The guard refused Wave 1.1 | **Fixed** (Wave 1.1) — narrowed to permit `embedding_model` by name, with `the_permitted_exception_is_still_a_scalar_column` pinning the shape the carve-out rests on |
+### A correction to this register, found while closing Wave 1
+
+The absorption of the README's informal letters (§8.7) left five rows below the
+table above that **reused letters this register had already assigned** — a second
+`V`, `W`, `T` and `U` — so the register briefly had two meanings for four letters
+and told the reader nothing about which one a cross-reference meant. That is the
+same class of failure as defect H, one level up: the register is supposed to be
+the thing that does not drift.
+
+The duplicate block is removed. Its content is preserved where it was not already
+present, and one row of it was stale on arrival:
+
+- The two extra `D-050` findings — `CostEstimator` carrying `byte_budget` unread,
+  and `PostFilter` under-returning silently on a tight filter — are part of **S**,
+  which is where D-050's work is recorded. They are not separate defects.
+- The old `T` ("no path from `Database` to an embedding") was marked **Open** and
+  has been closed since **D-048**; `T` above is the hybrid-search row.
+- The old `U` duplicated **U** above verbatim.
+
+**Letters are not reused and not recycled.** A defect that returns keeps its
+original letter with a pointer (as **H → AC**), and the next new defect takes the
+next unused letter. The highest letter assigned is **AG**.

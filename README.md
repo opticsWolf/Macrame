@@ -19,7 +19,7 @@ Delivered as a single Rust crate that an application links directly. The entire 
 | Graph storage & traversal | Recursive CTEs over relational edge tables, compiled from a typed builder |
 | Bitemporal semantics | Two independent clocks per row — valid time and transaction time — enforced by engine triggers |
 | Native vector search | Per-model `F32_BLOB` tables with auto-maintained DiskANN indexes; `vector_top_k` + `vector_distance_cos` |
-| In-memory graph analytics | Dijkstra, A\*, SCC, k-core, Louvain (phase-one) — native adjacency-list `Subgraph`, no external graph dependency |
+| In-memory graph analytics | Dijkstra, A\*, SCC, k-core, Louvain (phase-one) — native adjacency-list `Subgraph`, no external graph dependency. Runs on a `Subgraph` whose adjacency is closed over its node set, so a retired concept removes its edges rather than leaving the algorithms to disagree about a dangling one |
 | Point-in-time reconstruction | Append-only `transaction_log` folded with window functions; snapshot composition for fast replay (carve-outs: off across archive boundary, no cadence yet) |
 
 ## Two Semantic Operations
@@ -131,39 +131,87 @@ src/
 
 ```bash
 # Full test suite (unit, integration, scenario)
-cargo test
+cargo test --no-fail-fast
 
 # Property tests (generated-history binaries, run serially)
-cargo test --features property-tests
+cargo test --features property-tests --no-fail-fast
 ```
+
+`--no-fail-fast` is not optional for reading the totals: without it cargo stops at the first failing binary and everything alphabetically behind it never runs. That is how the archive defect U sat unnoticed behind a known-red `concurrency_tests`.
 
 ### Test Layers
 
 | Layer | What it proves |
 |---|---|
-| Unit tests | CTE builder output, interval arithmetic, RRF fusion, embedding codec roundtrips |
+| Unit tests | CTE builder output, interval arithmetic, RRF fusion, embedding codec roundtrips. Note that the interval-arithmetic test is the only caller of `Interval::overlaps` — defect **AG** |
 | Integration tests | Full API against real database files; WAL crash recovery |
-| Property tests | Random assertion/retirement streams never produce overlapping open intervals; `links_current` == latest-belief projection |
+| Property tests | Random assertion/retirement streams never produce overlapping **open** intervals; `links_current` == latest-belief projection. The open-interval restriction is load-bearing, not incidental — nothing tests the closed case, which is defect **AA** |
 | Scenario tests | Attribute fidelity across `AttributeMode` values; corrupt-then-rebuild roundtrip |
+| Regression tests | `tests/wave1_regression_tests.rs` — one per Wave 1 defect, each verified to fail against the pre-fix tree. Its header names the three that pass either way and says why, rather than letting them look like coverage they are not |
+
+**Current baseline: 203 passing, 0 failing** on plain `cargo test`; 222 with `--features property-tests --no-fail-fast`.
+
+Benchmarks are separate and are **measurements, not gates** — §9's numbers are stated for named hardware, so an absolute threshold in CI would gate on whichever runner picked up the job:
+
+```bash
+cargo bench --bench budgets
+```
+
+Two things to know before reading a red or a green here. **A green means "no test disagrees with the code"** — the 2026-07-30 review found ten defects living inside a green suite, and while nine are now closed by tests, one still is not. And **a red may not be yours**: R15 crashes an arbitrary test binary with `STATUS_ACCESS_VIOLATION` on roughly one full run in three, taking a different binary each time and passing when that binary is re-run alone. Re-run the named binary on its own before believing it.
 
 ### Known test gaps
 
 | Gap | Detail |
 |---|---|
-| Concurrency tests | `tests/concurrency_tests.rs` is `assert!(true)` — reports green, tests nothing. Priority interleaving, prefix visibility, writer containment, and shutdown coordination are all uncovered. |
-| `FakeClock` injection | Constructed in `harness.rs` but never injected into any test. The compiler warns about the dead field on every build. |
-| Benchmark gates | §9 performance budgets are not yet implemented as CI gates. |
+| Raw-SQL overlap | The valid-time overlap guard lives in the write actor, so it binds callers of this API and not raw SQL against the same file. A trigger would bind both and would tax every insert on the path the v6 index was just added to make fast. |
+| Unbenched read paths | `benches/budgets.rs` measures twenty rows and none of them is `load_subgraph`, one of the five algorithms, `archive()`, or `FilteredVectorSearch`. The deferred `Subgraph` rewrite is blocked on a benchmark in that gap. |
+| Benchmark gates | §9 performance budgets are measured, not enforced as CI gates — deliberately (D-047, D-055). |
 | `RecordedAtRegression` | Mapped by the error classifier but unreachable through the public API — `SystemClock` is strictly increasing by contract. |
-| `seq_id` gap tolerance (D-024) | No fold in the crate carries a `seq_id > :anchor` term, so the guarantee is vacuous rather than satisfied. Becomes writable when snapshot cadence lands. |
+| Plan-shape coverage | Three tests now pin a query *plan* rather than a result (**D-042**, **D-059**, **D-064**), because that class of defect returns the right answer and no correctness test can see it. Every index-sensitive query should have one; not all of them do. |
 
 ### Known defects
 
-| # | Location | Defect |
+Severity rule: **a wrong answer outranks a crash.** Full evidence, reproductions and remediation order are in the [implementation plan §8.5](docs/Macrame%20Implementation%20Plan%20v0.5.4.md); the letters are that document's register.
+
+**Open:**
+
+| # | Location | Defect | Wave |
+|---|---|---|---|
+| `load_subgraph` growth | `graph/subgraph.rs` | Superlinear — 12.5× for 10× the nodes (4.97 → 62.2 ms, 1K → 10K). Surfaced by Wave 3 and **not explained**; larger than anything the retired `Subgraph` rewrite would have recovered | 4 |
+| R15 | libSQL 0.9.30 | Intermittent `STATUS_ACCESS_VIOLATION` when local databases are opened concurrently in one process; mitigated by `RUST_TEST_THREADS = "1"` and the `property-tests` feature gate | — |
+
+**Closed by Wave 3 (2026-07-30)** — the measurement wave, recorded as D-063, D-064 and D-065:
+
+| # | Was | Resolution |
 |---|---|---|
-| J | `util/ids.rs` | `validate_id` returns `NotFound` for a malformed ULID — wrong semantics |
-| S | `vector_filter.rs` | `CostEstimator` selects among strategies with no implementations; the selector is a candidate-count heuristic carrying the name of a byte-budget cost model |
-| T | Hybrid search | `reciprocal_rank_fusion` exists as a pure function; no FTS5 table, no keyword retrieval, nothing fuses them |
-| R15 | libSQL 0.9.30 | Intermittent `STATUS_ACCESS_VIOLATION` when local databases are opened concurrently in one process; mitigated by `RUST_TEST_THREADS = "1"` and the `property-tests` feature gate |
+| AI | The overlap guard's narrowing predicate made `idx_lc_traversal_cover` win as a *covering* index, so the guard bound one column and scanned the source's out-degree — **D-059's defect, reproduced by D-060's fix one wave later.** +9.8 ms per 90-edge chunk into a 2,000-edge hub | Predicate dropped; the query is now a three-column point lookup. **No correctness test could have caught this** — the guard answered correctly throughout — so the plan is pinned by a test |
+| AF | `corpus_size` runs `COUNT(*)` per filtered query; the planner's input is O(corpus) | **Closed without a fix.** Measured at <1% of a search, and caching it would be unsound: it changes on every embedding write |
+| D-047 | The `Subgraph` integer-index rewrite, deferred on a benchmark nobody had written | **Retired.** The load dominates any single analysis at every size measured |
+
+**Closed by Wave 2 (2026-07-30)**, with three decisions recorded as D-060, D-061 and D-062:
+
+| # | Was | Resolution |
+|---|---|---|
+| AA | `trg_links_single_open` guards only the open sentinel, so **overlapping closed intervals were accepted** and read back as two edges for one relationship | Refused in the write actor (D-060). Not in a trigger — so raw SQL can still write one, and §4.2 says so |
+| AG | `Interval::overlaps` was dead code, the missing half of AA | It is the guard's decision procedure; the SQL beside it only narrows |
+| AD | Nothing validated an identifier while three modules assumed ULIDs | Ids are opaque with `\|` and `/` reserved (D-061). Every existing id stays valid, and W's collision becomes unreachable rather than merely harmless |
+| J | `validate_id` returned `NotFound` for a malformed id | `DbError::InvalidId { id, reason }` — a refusal is not an absence |
+| K | `FakeClock` was constructed in the harness and injected nowhere | `Database::open_with_clock` (D-062), with the floor lifted into the `Clock` trait |
+| D-059 | The single-open probe scanned its source's out-degree on every insert | `idx_lc_open_interval` on a v5 → v6 rung. **`SCHEMA_VERSION` is now 6** |
+
+**Closed by Wave 1 (2026-07-30)**, each by a named test rather than by a commit — the distinction is deliberate, because defect **H** spent a full cycle marked fixed on the strength of a commit that changed nothing observable:
+
+| # | Was | Resolution |
+|---|---|---|
+| V | Concept log payload omitted `embedding_model`, so **every temporal read returned `None`** | Payload v2, readers accept v1 and v2 |
+| W | Folds partitioned on `entity_id` alone; a concept colliding with a link key **vanished from the reconstruction** | Partition on `(table_name, entity_id)` |
+| Z | Adjacency could reference absent nodes: `louvain` **panicked**, `scc` emitted phantoms, `k_core` inflated degree | `Subgraph` carries a stated closure invariant; dangling entries dropped. No algorithm needed changing |
+| AB | Three attribute readers, three retirement semantics | One rule: not returned if retired as of the instant asked about |
+| AE | `hydrate` and `hydrate_attributes` issued one query per node | Batched at 400 ids per statement. **Not yet benchmarked** — Wave 3 |
+| AC | `classify_archive_violation` called from nowhere, so `DbError::ArchiveViolation` was unconstructible (reopened **H**) | Deleted — `error::classify` already did the same job. `archive()`'s deletes routed through it |
+| AH | Doctrine VII's static guard banned the substring `embedding`, refusing the V fix | Narrowed to permit `embedding_model` by name, with a test pinning that it is still a scalar column |
+
+Two defects this table used to carry, **S** (`CostEstimator` with no strategy implementations) and **T** (RRF with no keyword arm), are **fixed** — D-050 and D-051 respectively. They were listed as open here while the delivery table below recorded them as delivered.
 
 ## Dependencies
 
@@ -201,12 +249,43 @@ No GPL-licensed components. No `chrono` or `time` dependency.
 | Phase 5 — Test matrix | **Delivered** — Doctrine VIII divergence (both directions), archive crash safety (D-012), Doctrine VII property suite, and empirical cost estimates via D-050 |
 | Filtered vector search | **Delivered (D-050)** — `FilteredVectorSearch`; two strategies, both with bodies, held together by a test requiring them to agree; `TwoPhaseTempTable` removed, its two mechanisms being absent from libSQL 0.9.30 |
 | Hybrid search | **Delivered (D-051)** — `concepts_fts` FTS5 external-content index on a `v4 → v5` rung; `HybridSearch` fuses vector and keyword arms by RRF; `rebuild_fts()` satisfies D-036 |
-| `Subgraph` integer-index rewrite | **Deferred** — pending Louvain/Dijkstra benchmark on budget-sized graph |
+| `Subgraph` integer-index rewrite | **Deferred** — pending a Louvain/Dijkstra benchmark on a budget-sized graph, which does not exist; see Wave 3 |
+
+Every item the previous plan sequenced is delivered. What comes next is set by the 2026-07-30 review rather than by that sequence.
+
+## Roadmap
+
+Four waves, ordered by the project's own severity rule — a wrong answer outranks a crash, and both outrank a slow one. Full detail, evidence and per-item acceptance tests are in the [implementation plan §9](docs/Macrame%20Implementation%20Plan%20v0.5.4.md).
+
+| Wave | Theme | Scope | Size |
+|---|---|---|---|
+| **1** ✅ | The six silent defects | V, W, Z, AB, AC, AE, plus documentation drift. **No schema change.** Delivered 2026-07-30; thirteen new tests, 171 → 184 passing | done |
+| **2** ✅ | Decisions deferred a full cycle | D-059's index shipped as the v5 → v6 rung; valid-time overlap (**AA**/**AG**), identity (**AD**/**J**) and the injectable clock (**K**) all decided. Delivered 2026-07-30; 184 → 202 passing | done |
+| **3** ✅ | Measure what the bounds claim | Six bench groups covering every previously unmeasured path. Found one defect (**AI**), retired two proposed optimisations, confirmed the four chunk constants. Delivered 2026-07-30; 202 → 203 passing | done |
+| **4** ⬅ | Hardening | Serialise the `ATTACH cold` region; `Drop` + propagate `close()`'s error; settle whether `raw()` stays public; re-anchor snapshots after a migration; explain `load_subgraph`'s superlinearity | — |
+
+Why correctness preceded the performance work: D-059's index is the largest measured win in the tree and it moves `user_version`, so it wants a stable base and its own migration test. Wave 1's defects needed no schema movement, so they landed while that rung was still being decided — **Wave 2 is now what's next.**
+
+### Contracts settled by Waves 1 and 2
+
+Recorded here because they constrain future work rather than merely describing past work.
+
+- **`Subgraph` is closed.** Every adjacency endpoint is a hydrated node, stated on the type. Algorithms may rely on it and none re-checks. A future loader that admits retired nodes has to revisit all five.
+- **Retirement is uniform.** A concept retired as of the instant asked about is not returned, by any of the three readers. `Current` asks "retired now" and `AtTime` asks "retired then" — that difference is the two clocks and is meant to stay.
+- **One error classifier, not two.** `error::classify` is the only path to a typed guard error; the archive's private duplicate is gone.
+- **Identifiers are opaque, except that `|` and `/` are reserved.** Not ULIDs — the crate never required them and three modules only assumed them. The two characters delimit the transaction log's entity key and the traversal path, so an id carrying one is ambiguous rather than merely unusual. `generate_id()` is offered, not required.
+- **Valid-time intervals for one relationship never overlap — through this API.** Two open intervals are `SingleOpenViolation` (the trigger), anything else overlapping is `OverlappingInterval` (the write actor). The two guards partition the space; they do not layer. Raw SQL against the same file can still write an overlap.
+- **A `Clock` can be told its floor.** `raise_floor` is a required trait method, not a defaulted one, because "strictly increasing across restarts" depends on what the database already holds and no clock can see that by itself.
+- **`CHUNK_BUDGET`'s 3 ms has exactly three exemptions**, and they are stated with the bound rather than scattered across rustdoc: `write_bulk_atomic`, `archive()` and `rebuild_current` are atomic by contract and cannot be chunked without breaking the guarantee each exists to provide. Callers who need the latency bound instead of the atomicity have `bulk_import`.
+- **A narrowing predicate is not free if it changes the plan.** A covering index is chosen for containing the columns, not for discriminating between rows, so the more columns one carries the more queries it silently captures. This has now bitten the same codebase three times; index-sensitive queries get a test that asserts their `EXPLAIN QUERY PLAN`.
+
+Independent of all four: the **R15 upstream report** against libSQL 0.9.30, outstanding longest and blocked by nothing.
 
 ## Documentation
 
 - [Architecture specification](docs/architecture/README.md) — normative surfaces: §4 (schema) and Appendix A (API). One file per section.
-- [Implementation plan](docs/Macrame%20Implementation%20Plan%20v0.5.4.md) — delivery status, open items, defect register
+- [Implementation plan](docs/Macrame%20Implementation%20Plan%20v0.5.4.md) — delivery status, open items, defect register. Start at **§8.5** (the 2026-07-30 review, with reproductions), **§8.6** (bounds that are stated and not bounded) and **§9** (the four waves).
+- [Decision register](docs/architecture/s13-decision-register.md) — D-001 … D-059, each with its rationale and the disqualifying flaw of the alternative
 
 ## License
 

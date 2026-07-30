@@ -72,6 +72,39 @@ pub enum DbError {
     #[error("physical delete blocked outside archive session ({table})")]
     ArchiveViolation { table: String },
 
+    /// An identifier the crate's own encodings cannot represent (D-061).
+    ///
+    /// Distinct from [`Self::NotFound`], and the distinction is defect J: this
+    /// id was refused, not looked up. `validate_id` used to return `NotFound`
+    /// here, which tells a caller the thing is missing and invites them to
+    /// create it — with the same id, which will be refused again.
+    #[error("invalid identifier {id:?}: {reason}")]
+    InvalidId { id: String, reason: String },
+
+    /// Two valid-time intervals for one relationship claim the same instant.
+    ///
+    /// Distinct from [`Self::SingleOpenViolation`], which is the storage layer's
+    /// guard and covers only the *open* sentinel. This is the general case, and
+    /// it is refused at the API rather than by a trigger (D-060): raw SQL against
+    /// the same file can still write an overlap, and §4.2 says so.
+    ///
+    /// The consequence of allowing one is not an error later but a wrong answer:
+    /// `query_as_of_edges` at an instant inside both returns the relationship
+    /// twice, and every weighted algorithm downstream double-counts that edge.
+    #[error(
+        "edge {source_id} -> {target_id} ({edge_type}) already holds [{existing_from}, {existing_to}), \
+         which overlaps the asserted [{valid_from}, {valid_to})"
+    )]
+    OverlappingInterval {
+        source_id: String,
+        target_id: String,
+        edge_type: String,
+        valid_from: String,
+        valid_to: String,
+        existing_from: String,
+        existing_to: String,
+    },
+
     #[error("links_current drift detected: {n} intervals diverge")]
     CurrentDrift { n: usize },
 

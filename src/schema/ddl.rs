@@ -283,10 +283,57 @@ pub const CREATE_INDICES: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS idx_lc_traversal_cover ON links_current \
      (source_id, valid_from, valid_to, weight, edge_type, target_id);",
     "CREATE INDEX IF NOT EXISTS idx_lc_tgt_active ON links_current (target_id, valid_to);",
+    // The single-open-interval probe's own index (D-059, shipped v5 -> v6).
+    //
+    // `trg_links_single_open` runs an `EXISTS` on every edge insert, keyed on
+    // (source_id, target_id, edge_type, valid_to) with valid_from as an
+    // inequality. Before this index the planner served that probe from
+    // `idx_lc_traversal_cover` with only `source_id` bound — it wins as a
+    // covering index over the primary-key autoindex, which lacks `valid_to` —
+    // so **every insert scanned its source's entire out-degree**. Measured on a
+    // fixed 90-row chunk: 4.4 ms into an empty table, 18.4 ms into a
+    // 2,000-edge hub, 47.7 ms into an 8,000-edge one, and 1.06 s into 90,000.
+    // Growth in the table, not in the chunk.
+    //
+    // With this index the same 90 rows into the 8,000-edge hub take 8.0 ms and
+    // stay flat. It matters beyond bulk import: the probe is on the insert path,
+    // so an interactive `assert_edge` against a high-degree node paid the same
+    // scan, and that is the path CHUNK_BUDGET's 3 ms exists to protect.
+    //
+    // Column order follows the trigger's WHERE exactly — the three equalities
+    // first, then `valid_to` which is compared to the sentinel, then
+    // `valid_from` which is the `<>` and cannot be a seek column. This does not
+    // subsume `idx_lc_traversal_cover` and is not subsumed by it: that one leads
+    // on `source_id` alone for the recursive walk, this one needs all three
+    // equality columns bound. Both are kept, which is a fourth index write per
+    // assertion buying a scan's removal from the same operation.
+    "CREATE INDEX IF NOT EXISTS idx_lc_open_interval ON links_current \
+     (source_id, target_id, edge_type, valid_to, valid_from);",
     "CREATE INDEX IF NOT EXISTS idx_txlog_time ON transaction_log (recorded_at);",
     "CREATE INDEX IF NOT EXISTS idx_txlog_entity ON transaction_log (entity_id);",
 ];
 
+/// Every trigger the schema declares.
+///
+/// **`IF NOT EXISTS` means a changed body does not reach an existing file.**
+/// `migrations::verify` checks trigger *presence by name*, which is deliberate
+/// (a count refuses healthy databases) but does not and cannot notice that a
+/// trigger present under the right name carries an older body. A database
+/// stamped v5 by an earlier build therefore keeps whatever trigger text it was
+/// created with until a rung drops and recreates it.
+///
+/// This is why the payload carries a version. Changing a log trigger's payload
+/// splits the database population in two — files created after the change write
+/// the new shape, files created before keep writing the old one — and the only
+/// thing that makes that survivable is that every reader accepts both. A
+/// payload change that did *not* bump `v` would be indistinguishable at read
+/// time from corruption, which is the case `DbError::PayloadVersion` exists for.
+///
+/// The v1 → v2 concept payload (defect V) is deliberately left to ride along on
+/// the next rung that has to move `user_version` anyway rather than claiming one
+/// of its own: an old file loses `embedding_model` from its temporal reads, which
+/// is exactly the behaviour it had before, and gains it the moment it is
+/// migrated. Nothing regresses in the meantime.
 pub const CREATE_TRIGGERS: &[&str] = &[
     r#"
     CREATE TRIGGER IF NOT EXISTS trg_links_current_sync
@@ -338,15 +385,27 @@ pub const CREATE_TRIGGERS: &[&str] = &[
     END;
     "#
     ),
+    // Payload v2 adds `embedding_model` (defect V). Before it, the field was
+    // written by nobody and read by two — `replay::fold_delta` and
+    // `as_of::hydrate_attributes` both asked the payload for it and both always
+    // saw null, so `AttributeMode::AtTime`, the faithful mode Doctrine VIII
+    // exists to offer, returned a *less* complete record than `Current`.
+    //
+    // The version number moves because the shape is a compat surface: readers
+    // must be able to tell "this build wrote no model" from "this payload
+    // predates the field". v1 is still accepted and folds with the field absent,
+    // which is what makes this safe without a migration rung — see the note on
+    // [`CREATE_TRIGGERS`].
     r#"
     CREATE TRIGGER IF NOT EXISTS trg_concepts_log_insert
     AFTER INSERT ON concepts
     BEGIN
         INSERT INTO transaction_log (table_name, entity_id, operation, payload, recorded_at)
         VALUES ('concepts', NEW.id, 'I',
-                json_object('v', 1, 'title', NEW.title, 'content', NEW.content,
+                json_object('v', 2, 'title', NEW.title, 'content', NEW.content,
                             'valid_from', NEW.valid_from, 'valid_to', NEW.valid_to,
-                            'retired', NEW.retired),
+                            'retired', NEW.retired,
+                            'embedding_model', NEW.embedding_model),
                 NEW.recorded_at);
     END;
     "#,
@@ -356,9 +415,10 @@ pub const CREATE_TRIGGERS: &[&str] = &[
     BEGIN
         INSERT INTO transaction_log (table_name, entity_id, operation, payload, recorded_at)
         VALUES ('concepts', NEW.id, 'U',
-                json_object('v', 1, 'title', NEW.title, 'content', NEW.content,
+                json_object('v', 2, 'title', NEW.title, 'content', NEW.content,
                             'valid_from', NEW.valid_from, 'valid_to', NEW.valid_to,
-                            'retired', NEW.retired),
+                            'retired', NEW.retired,
+                            'embedding_model', NEW.embedding_model),
                 NEW.recorded_at);
     END;
     "#,
