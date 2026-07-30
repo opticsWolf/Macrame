@@ -492,3 +492,192 @@ proptest! {
         })?;
     }
 }
+
+// ---------------------------------------------------------------------------
+// T0.1 — the two traversal CTE forms must agree
+// ---------------------------------------------------------------------------
+
+/// The form shipped through 0.5.6: `UNION ALL`, a `path` column of visited ids,
+/// and an `INSTR` cycle check restricting the walk to **simple paths**.
+///
+/// Kept here as the oracle, and nowhere else in the tree. It is the definition
+/// T0.1's rewrite claims to preserve, so preserving it has to be checkable after
+/// the implementation stops containing it.
+const OLD_WALK: &str = r#"
+WITH RECURSIVE walk(node_id, depth, path) AS (
+    SELECT ?1, 0, '/' || CAST(?1 AS BLOB) || '/'
+    UNION ALL
+    SELECT l.target_id, w.depth + 1, w.path || CAST(l.target_id AS BLOB) || '/'
+    FROM walk w
+    JOIN links_current l ON l.source_id = w.node_id
+    WHERE w.depth < ?2
+      AND l.valid_from <= ?3 AND ?3 < l.valid_to
+      AND l.weight >= ?4
+      AND INSTR(w.path, '/' || CAST(l.target_id AS BLOB) || '/') = 0
+)"#;
+
+/// The 0.6.0 form: `UNION` dedupes `(node_id, depth)` on entry; no path column.
+const NEW_WALK: &str = r#"
+WITH RECURSIVE walk(node_id, depth) AS (
+    SELECT ?1, 0
+    UNION
+    SELECT l.target_id, w.depth + 1
+    FROM walk w
+    JOIN links_current l ON l.source_id = w.node_id
+    WHERE w.depth < ?2
+      AND l.valid_from <= ?3 AND ?3 < l.valid_to
+      AND l.weight >= ?4
+)"#;
+
+const IDS_PROJECTION: &str = r#"
+SELECT DISTINCT w.node_id
+FROM walk w JOIN concepts c ON c.id = w.node_id
+WHERE c.retired = 0
+ORDER BY w.node_id;"#;
+
+const EDGES_PROJECTION: &str = r#"
+SELECT DISTINCT l.source_id, l.target_id, l.edge_type
+FROM walk w
+JOIN links_current l ON l.source_id = w.node_id
+WHERE l.valid_from <= ?3 AND ?3 < l.valid_to
+  AND l.weight >= ?4
+ORDER BY l.source_id, l.target_id, l.edge_type;"#;
+
+/// Five nodes, because the shapes that separate the two forms — a diamond, a
+/// cycle, two routes of different length to one node — do not exist in two.
+const TNODES: [&str; 5] = ["t0", "t1", "t2", "t3", "t4"];
+
+/// An edge as generated: endpoints, type, and whether it is still live at the
+/// instant queried. Expired edges are generated because the temporal predicate
+/// sits inside the recursion, so a rewrite could preserve reachability and quietly
+/// change *when* an edge counts.
+#[derive(Debug, Clone)]
+struct TEdge {
+    src: usize,
+    tgt: usize,
+    etype: usize,
+    expired: bool,
+}
+
+fn tedge_strategy() -> impl Strategy<Value = TEdge> {
+    (
+        0..TNODES.len(),
+        0..TNODES.len(),
+        0..TYPES.len(),
+        prop::bool::weighted(0.2),
+    )
+        .prop_map(|(src, tgt, etype, expired)| TEdge {
+            src,
+            tgt,
+            etype,
+            expired,
+        })
+}
+
+async fn fresh_traversal(harness: &TestHarness) -> (libsql::Database, libsql::Connection) {
+    let db = libsql::Builder::new_local(&harness.db_path)
+        .build()
+        .await
+        .unwrap();
+    let conn = db.connect().unwrap();
+    migrations::run(&conn).await.unwrap();
+    for id in TNODES {
+        conn.execute(
+            "INSERT INTO concepts (id, title, valid_from, recorded_at) VALUES (?1, 'N', ?2, ?2)",
+            libsql::params![id, TS[0]],
+        )
+        .await
+        .unwrap();
+    }
+    (db, conn)
+}
+
+async fn apply_edges(conn: &libsql::Connection, edges: &[TEdge]) {
+    for e in edges {
+        // Errors are ignored the way `apply` ignores them: a generated duplicate
+        // trips `trg_links_single_open`, which is the schema working.
+        let _ = conn
+            .execute(
+                "INSERT INTO links (source_id, target_id, edge_type, valid_from, valid_to, \
+                 weight, properties, recorded_at) VALUES (?1, ?2, ?3, ?4, ?5, 1.0, '{}', ?4)",
+                libsql::params![
+                    TNODES[e.src],
+                    TNODES[e.tgt],
+                    TYPES[e.etype],
+                    TS[0],
+                    if e.expired { TS[2] } else { SENTINEL },
+                ],
+            )
+            .await;
+    }
+}
+
+async fn rows_of(conn: &libsql::Connection, sql: &str, depth: usize) -> Vec<Vec<String>> {
+    let mut rows = conn
+        .query(
+            sql,
+            libsql::params![TNODES[0], depth as i64, TS[3], f64::NEG_INFINITY],
+        )
+        .await
+        .unwrap();
+    let mut out = Vec::new();
+    while let Some(r) = rows.next().await.unwrap() {
+        let mut cols = Vec::new();
+        for i in 0.. {
+            match r.get::<String>(i) {
+                Ok(v) => cols.push(v),
+                Err(_) => break,
+            }
+        }
+        out.push(cols);
+    }
+    out
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 32, ..ProptestConfig::default() })]
+
+    /// **T0.1: the rewrite preserves the answer.** Node sets and projected edge
+    /// sets are identical between the simple-path form and the walk form, at
+    /// every depth, over generated graphs.
+    ///
+    /// The equivalence is provable — if a walk of length `k ≤ D` reaches `X`,
+    /// excising its cycles gives a simple path of length `≤ k` that also reaches
+    /// `X`, so the two reachability relations coincide — and an argument is
+    /// exactly what this project does not accept on its own for a query. The
+    /// generator produces cycles, self-loops, diamonds and expired edges,
+    /// which are the four shapes the proof steps over.
+    ///
+    /// The shipped `TraversalBuilder::build_sql()` is compared too, so this is a
+    /// test of the query that runs rather than of a copy of it kept in step by
+    /// hand.
+    #[test]
+    fn the_traversal_rewrite_returns_what_the_simple_path_form_returned(
+        edges in prop::collection::vec(tedge_strategy(), 0..10),
+        depth in 1usize..5,
+    ) {
+        block_on(async {
+            let harness = TestHarness::new();
+            let (_db, conn) = fresh_traversal(&harness).await;
+            apply_edges(&conn, &edges).await;
+
+            let old_ids = rows_of(&conn, &format!("{OLD_WALK}{IDS_PROJECTION}"), depth).await;
+            let new_ids = rows_of(&conn, &format!("{NEW_WALK}{IDS_PROJECTION}"), depth).await;
+            prop_assert_eq!(&old_ids, &new_ids, "node sets diverged at depth {}", depth);
+
+            let old_edges = rows_of(&conn, &format!("{OLD_WALK}{EDGES_PROJECTION}"), depth).await;
+            let new_edges = rows_of(&conn, &format!("{NEW_WALK}{EDGES_PROJECTION}"), depth).await;
+            prop_assert_eq!(&old_edges, &new_edges, "edge sets diverged at depth {}", depth);
+
+            // And the query the crate actually issues agrees with both.
+            let shipped = macrame::graph::TraversalBuilder::new(TNODES[0])
+                .max_depth(depth)
+                .min_weight(f64::NEG_INFINITY)
+                .build_sql();
+            let shipped_ids = rows_of(&conn, &shipped, depth).await;
+            prop_assert_eq!(&old_ids, &shipped_ids, "build_sql diverged at depth {}", depth);
+
+            Ok(())
+        })?;
+    }
+}

@@ -184,7 +184,11 @@ async fn archive_session(
     // audit could explain, from a compensation that had quietly stopped being
     // the image of the thing it compensated for. Doctrine II: two clocks, never
     // mixed. Deriving from the definition cannot drift from the definition.
-    crate::integrity::rebuild::rebuild_within(&tx).await?;
+    crate::integrity::rebuild::rebuild_within(
+        &tx,
+        crate::integrity::rebuild::Verify::No,
+    )
+    .await?;
 
     let log_entries_archived = tx
         .execute(

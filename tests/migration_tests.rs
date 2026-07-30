@@ -590,3 +590,49 @@ async fn the_subsumed_source_index_is_gone() {
     assert_eq!(n, 0, "idx_lc_src_active is subsumed and must not survive");
 }
 
+
+/// The **shipped** traversal CTE keeps D-042's covering index, filtered or not.
+///
+/// The test above approximates the recursive step by hand, which is one hazard
+/// away from testing a query nobody runs. This one explains the exact string
+/// `TraversalBuilder::build_sql` emits, so T0.1's rewrite cannot have moved the
+/// planner off `idx_lc_traversal_cover` while every returned row stayed correct
+/// — D-064's failure mode, and the reason plan shape is a test category here.
+#[tokio::test]
+async fn the_shipped_traversal_cte_stays_on_the_covering_index() {
+    use macrame::graph::TraversalBuilder;
+
+    let harness = TestHarness::new();
+    let conn = connect(&harness).await;
+    migrations::run(&conn).await.unwrap();
+
+    for (label, builder) in [
+        ("unfiltered", TraversalBuilder::new("a").max_depth(3)),
+        (
+            "edge-type filtered",
+            TraversalBuilder::new("a")
+                .max_depth(3)
+                .edge_types(vec!["CITES".to_string()]),
+        ),
+    ] {
+        let sql = builder.build_sql();
+        let mut rows = conn
+            .query(&format!("EXPLAIN QUERY PLAN {sql}"), ())
+            .await
+            .unwrap();
+        let mut plan = Vec::new();
+        while let Some(r) = rows.next().await.unwrap() {
+            plan.push(r.get::<String>(3).unwrap());
+        }
+        let plan = plan.join(" | ");
+
+        assert!(
+            plan.contains("idx_lc_traversal_cover"),
+            "{label}: the walk left its index: {plan}"
+        );
+        assert!(
+            plan.contains("COVERING INDEX"),
+            "{label}: the walk is no longer index-only: {plan}"
+        );
+    }
+}

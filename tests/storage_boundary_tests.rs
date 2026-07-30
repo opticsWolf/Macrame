@@ -15,6 +15,13 @@
 //! "the schema permits what the write API refuses", and the third — negative
 //! weights — is permitted by the write API too, with the refusal at the *read*
 //! boundary. Consolidating the statement must not flatten that difference.
+//!
+//! The fourth test runs the other way (T0.3, D-078). §4.7 also listed **NaN**
+//! weights as a gap, and that was wrong: the storage layer refuses NaN outright,
+//! through every door including raw SQL. So it is pinned in the failing
+//! direction — if the engine ever starts accepting NaN, that test breaks and
+//! §4.7 has to be corrected back. A claim that the schema *does* enforce
+//! something needs a tripwire exactly as much as a claim that it does not.
 
 mod harness;
 
@@ -197,6 +204,86 @@ async fn read_conn_refuses_a_write_and_raw_does_not() {
         "§4.7/D-068: raw() is an unprotected connection by design — got \
          {permitted:?}"
     );
+
+    db.close().await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// 4. NaN — the one §4.7 got wrong: the storage layer already refuses it
+// ---------------------------------------------------------------------------
+
+/// Every write door refuses a NaN weight, including raw SQL (T0.3, D-078).
+///
+/// §4.7 listed NaN beside negative weights as something only `load_subgraph`
+/// catches. It is not: SQLite stores a NaN double as NULL, so `weight REAL NOT
+/// NULL` rejects it before any of this crate's code sees it. That makes NaN the
+/// opposite of the other three cases in this file — an invariant the storage
+/// layer enforces, where §4.7 had claimed it was silent.
+///
+/// Pinned in the failing direction on purpose. If a future libSQL begins storing
+/// NaN as a real double, these inserts start succeeding, this test fails, and
+/// §4.7's row 3 has to be corrected *back* — along with the note on
+/// `load_subgraph`'s `is_nan()` arm, which is currently unreachable and says so.
+/// Discovering that by way of a shortest path over NaN would be considerably
+/// worse.
+#[tokio::test]
+async fn a_nan_weight_is_refused_by_the_storage_layer_not_the_loader() {
+    let harness = TestHarness::new();
+    let db = Database::open(&harness.db_path).await.unwrap();
+    two_concepts(&db).await;
+
+    // 1. The public write path.
+    let via_api = db
+        .assert_edge(
+            EdgeAssertion::new("a", "b", "KNOWS")
+                .valid_from(T0)
+                .valid_to(OPEN)
+                .weight(f64::NAN),
+        )
+        .await;
+    assert!(
+        via_api.is_err(),
+        "§4.7/D-078: NaN must not reach links.weight — got {via_api:?}"
+    );
+
+    let raw = db.raw().connect().unwrap();
+
+    // 2. Raw SQL, NaN bound as a parameter — the door §4.7 is about.
+    let bound = raw
+        .execute(
+            "INSERT INTO links (source_id, target_id, edge_type, valid_from, valid_to, \
+             weight, properties, recorded_at) VALUES ('a','b','CITES',?1,?2,?3,'{}',?1)",
+            libsql::params![T0, OPEN, f64::NAN],
+        )
+        .await;
+    assert!(
+        bound.is_err(),
+        "§4.7/D-078: raw SQL binding NaN must still be refused — got {bound:?}"
+    );
+
+    // 3. Raw SQL computing NaN in the engine, which never crosses the binding
+    //    layer at all. Checked separately because it is a different code path
+    //    and could plausibly behave differently.
+    let literal = raw
+        .execute(
+            "INSERT INTO links (source_id, target_id, edge_type, valid_from, valid_to, \
+             weight, properties, recorded_at) \
+             VALUES ('a','b','CITES2',?1,?2, 0.0/0.0, '{}', ?1)",
+            libsql::params![T0, OPEN],
+        )
+        .await;
+    assert!(
+        literal.is_err(),
+        "§4.7/D-078: an engine-computed NaN must be refused too — got {literal:?}"
+    );
+
+    // Nothing landed.
+    let mut rows = raw
+        .query("SELECT COUNT(*) FROM links", ())
+        .await
+        .unwrap();
+    let n: i64 = rows.next().await.unwrap().unwrap().get(0).unwrap();
+    assert_eq!(n, 0, "a NaN weight reached links");
 
     db.close().await.unwrap();
 }

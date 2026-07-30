@@ -47,10 +47,23 @@ use crate::error::{DbError, Result};
 
 /// Bytes an identifier may not contain, and where each is load-bearing.
 ///
-/// `|` joins a link's entity key in `transaction_log`; `/` separates the
-/// traversal CTE's path. Both are structural, not cosmetic — a collision in
-/// either produces a wrong answer with no error.
-pub const RESERVED_ID_CHARS: [char; 2] = ['|', '/'];
+/// `|` joins a link's entity key in `transaction_log`. Structural, not
+/// cosmetic — a collision produces a wrong answer with no error.
+///
+/// **`/` was reserved here through 0.5.6 and is free again as of 0.6.0
+/// (T0.1, D-076).** It existed for exactly one reason: the traversal CTE
+/// carried a `path` column of visited ids, delimited by `/`, and D-061 reserved
+/// the character so the cycle check could match a whole element rather than a
+/// substring once ids became variable-length. T0.1 deleted the path column —
+/// the walk dedupes on entry instead — so nothing in the crate delimits with
+/// `/` any more, and continuing to refuse it would be a constraint kept for a
+/// mechanism that no longer exists.
+///
+/// Relaxing is safe in the direction that matters: ids previously refused are
+/// now accepted, so no stored id becomes invalid and no migration is implied.
+/// Adding a character back later would not be safe, which is why this list is
+/// worth keeping short.
+pub const RESERVED_ID_CHARS: [char; 1] = ['|'];
 
 /// Generate a new Crockford base32 26-character ULID string.
 ///
@@ -90,8 +103,8 @@ pub fn validate_id(id: &str) -> Result<()> {
             id: id.to_string(),
             reason: format!(
                 "identifier contains the reserved character {c:?}; \
-                 {RESERVED_ID_CHARS:?} delimit the transaction-log entity key and \
-                 the traversal path, so an id carrying one is ambiguous"
+                 {RESERVED_ID_CHARS:?} delimits the transaction-log entity key, \
+                 so an id carrying one is ambiguous"
             ),
         });
     }
@@ -110,9 +123,23 @@ mod tests {
         }
     }
 
+    /// `/` is accepted again (T0.1, D-076).
+    ///
+    /// It was reserved solely for the traversal CTE's path delimiter, and the
+    /// path column is gone. Asserted rather than assumed, because a constraint
+    /// that outlives its mechanism is invisible until someone hits it — and
+    /// because the direction matters: this test failing means the crate has
+    /// started refusing ids it accepted, which is a breaking change to callers.
+    #[test]
+    fn a_slash_is_no_longer_reserved() {
+        for id in ["a/b", "urn:x/y/z", "2026/01/01"] {
+            validate_id(id).unwrap_or_else(|e| panic!("{id:?} must be accepted now: {e}"));
+        }
+    }
+
     #[test]
     fn a_reserved_character_is_refused_by_name() {
-        for id in ["a|b", "a/b", "a|b|KNOWS|2026-01-01T00:00:00.000000Z"] {
+        for id in ["a|b", "a|b|KNOWS|2026-01-01T00:00:00.000000Z"] {
             let err = validate_id(id).unwrap_err();
             assert!(
                 matches!(err, DbError::InvalidId { .. }),

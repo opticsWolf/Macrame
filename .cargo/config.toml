@@ -15,13 +15,29 @@
 # One binary in isolation showed the same split: 2/40 parallel, 0/40 serial.
 # So the trigger is concurrency, not volume, and serialising libtest removes it.
 #
+# RE-MEASURED 2026-07-30 on 0.5.6, same dependency version, WITH this setting
+# in force. Serialising does NOT remove it — it reduces a rate:
+#
+#     cargo test --no-fail-fast    5/10 bad runs
+#
+# Each faulting binary is clean alone (storage_boundary, vector_filter,
+# replay_snapshot, write_path: 0/15 each, 60 isolated runs, no fault), so the
+# trigger is neither the binary nor threads within one. The correlate looks
+# like database open/drop churn: the property binaries open one per generated
+# case and fault 3/4 alone. If you see a red build, re-run the named binary
+# alone before assuming a real failure -- and note the fault kills the process,
+# so tests after it are never reported and a pass-count sum comes back SMALLER
+# rather than red. See R15 in docs/ and T5.2 of the v0.6.0 hardening plan.
+#
 # `[env]` does not override a value already in the environment, so setting
 # RUST_TEST_THREADS yourself still works — which is how you reproduce the fault
 # if you are chasing it or checking whether an upstream release has fixed it.
 #
-# The residual case is `doctrine_property_tests`, which still faults ~3/25 even
-# serialised because generated histories open a database per case. That binary
-# is behind the `property-tests` feature for exactly this reason, and is run as
-# its own step rather than as part of `cargo test`.
+# The worst case is `doctrine_property_tests` -- 3/4 serialised as of 2026-07-30,
+# where 0.5.4 recorded ~3/25 -- because generated histories open a database per
+# case. `integrity_property_tests` faulted 1/4 in the same session, so it is not
+# one binary. All three generated-history targets are behind the `property-tests`
+# feature for this reason, and are run as their own step rather than as part of
+# `cargo test`.
 [env]
 RUST_TEST_THREADS = "1"

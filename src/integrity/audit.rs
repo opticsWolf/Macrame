@@ -23,32 +23,23 @@ pub async fn audit_current(conn: &libsql::Connection) -> Result<usize> {
     // `projection` is the latest-belief view of `links`: one row per interval
     // key, the one with the greatest recorded_at. `materialized` is what
     // links_current actually holds. Doctrine VI says they must be equal.
-    let query = r#"
+    let query = format!(
+        r#"
         WITH materialized AS (
             SELECT source_id, target_id, edge_type, valid_from,
                    valid_to, weight, properties, recorded_at
             FROM links_current
         ),
-        projection AS (
-            SELECT source_id, target_id, edge_type, valid_from,
-                   valid_to, weight, properties, recorded_at
-            FROM (
-                SELECT source_id, target_id, edge_type, valid_from,
-                       valid_to, weight, properties, recorded_at,
-                       ROW_NUMBER() OVER (
-                           PARTITION BY source_id, target_id, edge_type, valid_from
-                           ORDER BY recorded_at DESC
-                       ) AS rn
-                FROM links
-            ) WHERE rn = 1
-        )
+        projection AS ({projection})
         SELECT
             (SELECT COUNT(*) FROM (
                 SELECT * FROM materialized EXCEPT SELECT * FROM projection))
           + (SELECT COUNT(*) FROM (
                 SELECT * FROM projection EXCEPT SELECT * FROM materialized))
-    "#;
-    let mut rows = conn.query(query, ()).await?;
+    "#,
+        projection = super::LATEST_BELIEF_PROJECTION
+    );
+    let mut rows = conn.query(&query, ()).await?;
     let count: i64 = if let Some(row) = rows.next().await? {
         row.get(0).unwrap_or(0)
     } else {

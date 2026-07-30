@@ -375,27 +375,19 @@ impl Database {
         // `?1..?4` are start, depth, ts and min_weight; edge types take `?5`
         // onwards. Bound, never spliced — an edge type is a value, and the only
         // validation in the crate runs on the *write* path (D-039), so a
-        // traversal never passes through it. Same numbering as
-        // `TraversalBuilder::build_sql`, deliberately, so the two are legible
-        // side by side.
-        let edge_filter = if traversal.edge_types.is_empty() {
-            String::new()
-        } else {
-            let placeholders: Vec<String> = (0..traversal.edge_types.len())
-                .map(|i| format!("?{}", i + 5))
-                .collect();
-            format!(" AND l.edge_type IN ({})", placeholders.join(", "))
-        };
+        // traversal never passes through it.
+        let edge_filter = traversal.edge_filter_sql();
 
-        // Topology first: the walk is over links_current, bounded by hop count
-        // and by the path check that stops it revisiting a node.
+        // Topology first. The recursion itself is `TraversalBuilder::walk_cte`
+        // and is **not** duplicated here (T0.1): this file and `builder.rs` held
+        // byte-identical copies, and they had already drifted once — D-073 found
+        // this loader taking neither `edge_types` nor `min_weight` while the
+        // builder took both.
         let sql = format!(
-            r#"
--- The path is `/a/b/c/` — leading and trailing delimiter, so the cycle check
--- can ask for a *delimited* id and match a whole element rather than a
--- substring. `INSTR(path, id)` was correct only while every id was the same
--- fixed width (D-061): with variable-length ids, visiting `abc` would prune a
--- live branch to `b`. Ids may not contain `/`, which is what makes this exact.
+            "{}{}",
+            traversal.walk_cte(),
+            format_args!(
+                r#"
 -- **The `DISTINCT` is why this query is superlinear, and it is not removable.**
 --
 -- Wave 3 measured `load_subgraph` at 12.5x for 10x the nodes and could not say
@@ -403,45 +395,26 @@ impl Database {
 -- `USE TEMP B-TREE FOR DISTINCT`: an O(E log E) sort over the output, and
 -- n log n predicts ~13.3x for 10x, against the 12.5x measured. That is the term.
 --
--- It is load-bearing. The cycle check stops a path revisiting a node; it does
--- not stop two branches reaching the same node, so `walk` holds a node once per
--- path that reaches it and the join multiplies that node's edges accordingly.
--- Without `DISTINCT` a caller gets an edge once per path to its source.
+-- It is load-bearing: two branches can reach the same node, so a node appears in
+-- `walk` at more than one depth and the join would otherwise emit its edges once
+-- per depth. Without `DISTINCT` a caller gets duplicate edges.
 --
--- Two fixes were tried and neither is here:
+-- **Corrected in 0.6.0 (T0.1), and the correction is not that the analysis was
+-- wrong.** Everything above holds, and D-070's two rejected fixes were measured
+-- honestly. What was wrong was the fixture: `benches/` seeds a chain of stars,
+-- which is a *tree*, and in a tree there is exactly one path to each node — so
+-- the term that actually dominated was identically 1 and invisible. D-070
+-- concluded the growth was "inherent to producing a deduplicated result", which
+-- is true of trees and false of graphs. The real cost was the walk enumerating
+-- **paths** rather than nodes; see `walk_cte`. On a 328-edge layered graph at
+-- depth 6 that was 299,593 walk rows and 428 ms, against 49 rows and 0.1 ms now.
+-- The `DISTINCT` stays, and it is no longer the leading term.
 --
---   * Deduplicating the walk first (`SELECT DISTINCT node_id FROM walk`, then
---     joining) moves the sort to nodes rather than edges — and is **36% slower**,
---     because on a hub-shaped graph `walk` has far more rows than the join emits.
---   * Aligning `ORDER BY` with the full `DISTINCT` key elides the *second*
---     temp b-tree (`USE TEMP B-TREE FOR ORDER BY` disappears from the plan,
---     verified). Measured back-to-back: **85.95 ms against 86.76 ms** — no
---     effect. The `DISTINCT` b-tree dominates and the second pass is over rows
---     already nearly in order. Reverted, because it widens the ordering contract
---     to `weight` and the timestamps in exchange for nothing measurable.
---
--- So the growth is explained, inherent to producing a deduplicated result, and
--- left alone. Note that both A/B arms above sit near 86 ms where Wave 3 recorded
--- 62.2 ms for the same code — identical builds varied ~29% across runs in that
--- session, which is a caution about the absolute figures in §8.8 rather than
--- about this query.
 -- The filters appear **twice**, and that is the contract (D-073). The walk uses
 -- them to bound which nodes are reached; the projection uses them to decide
 -- which adjacency lands in the result. Filtering only the walk would hand a
 -- caller who asked for `CITES` a graph reached via `CITES` and populated with
 -- every other edge type those nodes happen to have.
-WITH RECURSIVE walk(node_id, depth, path) AS (
-    SELECT ?1, 0, '/' || CAST(?1 AS BLOB) || '/'
-    UNION ALL
-    SELECT l.target_id, w.depth + 1, w.path || CAST(l.target_id AS BLOB) || '/'
-    FROM walk w
-    JOIN links_current l ON l.source_id = w.node_id
-    WHERE w.depth < ?2
-      AND l.valid_from <= ?3 AND ?3 < l.valid_to
-      AND l.weight >= ?4
-      {edge_filter}
-      AND INSTR(w.path, '/' || CAST(l.target_id AS BLOB) || '/') = 0
-)
 SELECT DISTINCT l.source_id, l.target_id, l.edge_type, l.weight, l.valid_from, l.valid_to
 FROM walk w
 JOIN links_current l ON l.source_id = w.node_id
@@ -450,6 +423,7 @@ WHERE l.valid_from <= ?3 AND ?3 < l.valid_to
   {edge_filter}
 ORDER BY l.source_id, l.target_id, l.edge_type
 "#
+            )
         );
 
         let mut params: Vec<libsql::Value> = vec![
@@ -471,6 +445,21 @@ ORDER BY l.source_id, l.target_id, l.edge_type
             // schema does not constrain the column. Refusing here keeps the
             // wrongness at the boundary: the alternative is a shortest path that
             // is merely a path, returned with no indication of it.
+            //
+            // **The `is_nan()` arm is unreachable on a file this schema created
+            // (T0.3, D-078).** SQLite stores a NaN double as NULL, so
+            // `weight REAL NOT NULL` refuses it — measured on libSQL 0.9.30
+            // through `assert_edge`, through a raw `INSERT` binding NaN, and
+            // through a raw `INSERT` computing `0.0/0.0` in the engine; all three
+            // fail with `NOT NULL constraint failed`. §4.7 used to list NaN as a
+            // gap this loader covered, which had it backwards.
+            //
+            // Kept anyway, as defence rather than decoration: a future engine
+            // that stores NaN as a real double would make it live again, and the
+            // cost of a comparison per edge against reading a shortest path
+            // computed over NaN is not a close call. `storage_boundary_tests`
+            // pins the engine's current behaviour, so that change would arrive
+            // as a failing test rather than as a silent answer.
             if weight < 0.0 || weight.is_nan() {
                 return Err(DbError::NegativeEdgeWeight {
                     source_id: source,

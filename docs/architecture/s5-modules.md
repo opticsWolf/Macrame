@@ -385,20 +385,23 @@ That last paragraph is the substance of [D-028](s13-decision-register.md#d-028) 
 
 ### 5.2 graph/builder.rs — traversal, valid time, and attribute fidelity
 
-The builder compiles every traversal into a recursive CTE over `links_current`, with every parameter bound and none interpolated — edge types included, as of 0.5.4. Cycle detection uses a path of concatenated fixed-width ID bytes rather than the classic comma-delimited string path: every ULID occupies exactly 26 bytes and the crate additionally separates them with `/`, so the `INSTR(path, id) = 0` test cannot produce the delimiter-confusion false positives of text paths. A spurious match would require one ULID to appear inside the concatenation of others — a ~2⁻¹³⁰ event per hop, which the design documents and disregards.
+The builder compiles every traversal into a recursive CTE over `links_current`, with every parameter bound and none interpolated — edge types included, as of 0.5.4.
+
+**Rewritten in 0.6.0 ([D-076](s13-decision-register.md#d-076)), and the previous form is described below because the change is a correction rather than a tuning.** Through 0.5.6 the recursion used `UNION ALL` and carried a `path` column of visited ids, refusing a target already present in it. That restricts the walk to *simple paths* — so `walk` held one row per distinct path to each node rather than one row per node, and the trailing `SELECT DISTINCT` collapsed the duplication only after the work had been done. The row count is multiplicative in branching factor per hop: a **328-edge** graph at depth 6 produced **299,593** walk rows and took **403 ms** on libSQL 0.9.30. It survived five releases because every fixture measuring it was a *tree*, where there is exactly one path to each node and the pathological term is identically 1.
+
+The current form dedupes on entry. `UNION` — not `UNION ALL` — bounds `walk` by `V × (depth+1)`, and termination comes from the depth bound rather than from inspecting a path, so the path column and its `INSTR` check are gone entirely. The same traversal now emits 49 rows in 0.2 ms. The projections keep their `DISTINCT`, because a node still legitimately appears at more than one depth. The two are equivalent: excising the cycles from any walk of length `k ≤ D` gives a simple path of length `≤ k` to the same node, so the reachable sets coincide.
 
 ```sql
-WITH RECURSIVE walk(node_id, depth, path) AS (
-    SELECT ?1, 0, CAST(?1 AS BLOB)
-    UNION ALL
-    SELECT l.target_id, w.depth + 1, w.path || '/' || CAST(l.target_id AS BLOB)
+WITH RECURSIVE walk(node_id, depth) AS (
+    SELECT ?1, 0
+    UNION                                             -- dedupes the queue
+    SELECT l.target_id, w.depth + 1
     FROM walk w
     JOIN links_current l ON l.source_id = w.node_id
     WHERE w.depth < ?2
       AND l.valid_from <= ?3 AND ?3 < l.valid_to      -- the valid-time window
       AND l.weight >= ?4
       AND l.edge_type IN (?5, ?6, ...)                -- bound, never spliced
-      AND INSTR(w.path, CAST(l.target_id AS BLOB)) = 0
 )
 SELECT DISTINCT w.node_id
 FROM walk w JOIN concepts c ON c.id = w.node_id
@@ -428,7 +431,7 @@ Separating hydration from the walk is what fixed the second defect [D-039](s13-d
 
 **The recursive step is index-only (0.5.4, [D-042](s13-decision-register.md#d-042)).** `idx_lc_traversal_cover` carries every column the walk reads, so the hop join never fetches a base-table row: `EXPLAIN QUERY PLAN` reports `SEARCH l USING COVERING INDEX idx_lc_traversal_cover (source_id=? AND valid_from<?)`, and `links_current` itself is not touched until the terminal join to `concepts`. That plan shape is asserted by test rather than assumed, including the seek constraint and not merely the word `COVERING` — the column order is what makes the difference, and an index in the wrong order still exists, still reports as covering, and still walks more of itself than it needs to. [D-042](s13-decision-register.md#d-042) records the ordering argument and the measurement that corrected it.
 
-**Cycle-detection performance note (0.5.1).** `INSTR(w.path, CAST(l.target_id AS BLOB))` is O(path length) per hop. At the default `max_depth = 3` with 27-byte path elements the path is ~81 bytes — trivial. At depth 10 it is ~270 bytes — still fast. At depth ≥ 50 it exceeds 1,300 bytes and `INSTR` becomes CPU-bound. The practical maximum depth for knowledge-graph traversals is 5–10 hops, and the [§9](s6-s10-flows-to-dependencies.md#9-performance-budgets) gates measure depth 3. If a use case ever requires depth ≥ 20, benchmark this against a visited-set CTE (`json_each` over a JSON array of visited ids) and document the crossover. The current design is correct and fast for the target workload; this note exists so a future maintainer does not assume O(1) cycle detection.
+~~**Cycle-detection performance note (0.5.1).** `INSTR(w.path, CAST(l.target_id AS BLOB))` is O(path length) per hop… If a use case ever requires depth ≥ 20, benchmark this against a visited-set CTE (`json_each` over a JSON array of visited ids) and document the crossover.~~ **Obsolete as of 0.6.0 ([D-076](s13-decision-register.md#d-076)): there is no path column and no cycle check.** The note is struck rather than deleted because it is a good example of the trap it fell into — it costed the cycle check carefully, per hop, and concluded the design was "correct and fast for the target workload". It was correct. The cost it was measuring was not the one that mattered, and depth was not the variable: at depth 6 on a 328-edge *graph* the query took 403 ms, while the `INSTR` it warns about at depth 50 would still have been ~1,300 bytes of memchr. Depth bounded the path length; branching factor multiplied the number of paths, and nothing here was watching that.
 
 ### 5.3 graph/vector_filter.rs — strategies and the byte-budget cost model
 
@@ -581,6 +584,10 @@ The honest cost of [§4.4](s4-schema.md#44-asymmetric-versioning-deliberately)'s
 ### 5.7 temporal/archive.rs — cold storage
 
 Archive moves closed intervals and superseded log rows into a separate database file via `ATTACH`. The session is one atomic transaction ([D-012](s13-decision-register.md#d-012)): create the session marker, copy rows to the cold file, verify counts, re-derive the affected materialization, record the horizon, drop the marker, commit. A crash anywhere rolls the whole thing back, leaving hot and cold mutually consistent.
+
+**What "re-derive the affected materialization" costs, and which variable it scales with (0.6.0, [D-077](s13-decision-register.md#d-077)).** That step is `rebuild_within`, and it is not a touch-up of the archived rows — it is `DELETE FROM links_current` followed by a full window-function reprojection over **everything still in `links`**. Two consequences the sentence above hides. First, the archive's repair term grows with the *surviving* table, not with the batch being archived, so [§9](s6-s10-flows-to-dependencies.md#9-performance-budgets)'s "Archive, 100K closed intervals ≤ 30 s" is parameterised on the wrong quantity: archiving a fixed 100K intervals costs steadily more as the ledger grows. Second, until 0.6.0 that rebuild also ran `audit_current` on itself — two `EXCEPT` passes over the whole projection, O(E log E) each, inside the archive's write transaction. Measured at 4K/16K/40K rows in `links`, the audit alone costs **≈15 / 61 / 190 ms** — **roughly half the whole repair**. The audit's own figure is the stable one across runs (179–212 ms at 40K over five runs); the rebuild total is not (318–428 ms for identical work), so the *share* reads anywhere from 42% to 61% depending on the run and is quoted as "about half" rather than to a precision the harness does not have. That is [D-070](s13-decision-register.md#d-070)'s session-noise caution applied to this cycle's own numbers. It is now skipped on this path ([D-077](s13-decision-register.md#d-077)); `rebuild_current`, the operator-facing repair, still verifies.
+
+None of this was hidden by the published figures so much as unattributed by them: the `archive` cost in [§5.1](s5-modules.md#51-connectionrs--the-handle-the-pragmas-and-the-write-actor)'s exemption table is measured end-to-end through `Database::archive`, so the re-derivation was always inside it. Nobody had asked what fraction it was.
 
 **The session marker is committed state at no point ([D-008](s13-decision-register.md#d-008), revised 0.5.3).** `CREATE TABLE macrame_archive_session (x)` is the first statement *inside* the transaction and `DROP TABLE` is the last, so commit drops it and rollback discards it. There is no crash path that leaves the delete guards disarmed.
 

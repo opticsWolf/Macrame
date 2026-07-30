@@ -128,7 +128,17 @@ pub mod chunk_rows {
 /// |---|---|---|
 /// | [`Database::write_bulk_atomic`] | none — caller-sized `Vec` | D-014: the batch is *one act* under one stamp. Splitting it is the thing the method exists not to do |
 /// | [`Database::archive`] | measured **26.8 ms** for 2,000 archivable edges | D-012: copy-then-delete must be atomic, or a crash between the phases duplicates or loses rows |
-/// | `rebuild_current` | ~50 s per 10M edges | D-023: the window between `DELETE` and `INSERT` is the whole of current belief; a reader landing in it sees a graph with no edges and no error |
+/// | `rebuild_current` | measured **24.6 / 104 / 318 ms** at 4K / 16K / 40K rows in `links` (was "~50 s per 10M edges", which nothing had measured) | D-023: the window between `DELETE` and `INSERT` is the whole of current belief; a reader landing in it sees a graph with no edges and no error |
+///
+/// The `archive` figure is end-to-end through this method, so it **includes**
+/// the re-derivation `archive()` runs inside its transaction — but it does not
+/// attribute it, and until D-077 more than half of that re-derivation was an
+/// audit comparing `links_current` against the query that had just filled it.
+/// Note also which variable that cost scales with: `rebuild_within` reprojects
+/// **all of `links`**, so the archive's repair term grows with the *surviving*
+/// table and not with the batch being archived. A budget stated per "100K closed
+/// intervals" ([§9](../docs/architecture/s6-s10-flows-to-dependencies.md)) is
+/// therefore parameterised on the wrong quantity.
 ///
 /// All three are atomic **by contract**, which is why "cap the batch" and "add a
 /// third tier" were both considered and neither was taken: capping breaks the

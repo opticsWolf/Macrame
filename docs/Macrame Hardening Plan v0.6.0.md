@@ -34,9 +34,40 @@ D-071 with a test).
 
 ---
 
-## Tier 0 — Measured defects
+## Tier 0 — Measured defects · ✅ **COMPLETE (D-076, D-077, D-078)**
 
-### T0.1 — The traversal enumerates paths, not nodes *(the headline item)*
+All three delivered 2026-07-30, each reproduced on libSQL 0.9.30 first. Worth recording what
+that cost: **every one of the three contained a claim that did not survive being checked** —
+T0.1's "within noise" on trees (it is 8–10% slower), T0.2's prescribed ordering (which would
+have deleted a check that was doing real work) and its "the published cost does not include
+this" (it does), and T0.3's scope (NaN is the opposite of a §4.7 gap, not a weaker one). The
+diagnoses were right in all three cases and the *justifications* were where the errors were.
+That is an argument for T4.1 rather than against this plan.
+
+
+### T0.1 — The traversal enumerates paths, not nodes *(the headline item)* — ✅ **DELIVERED, D-076**
+
+> **Delivered 2026-07-30.** Reproduced on libSQL 0.9.30 before anything was changed
+> (`examples/traversal_diag.rs`): the `walk` row counts came out **identical** to the table
+> below — 1,555 / 9,331 / 37,449 / 299,593 — on a different engine, which is the strongest
+> available evidence that the fixture here was reconstructed correctly. Shipped timings on the
+> layered fixture: 1.8 → 0.1, 11.1 → 0.1, 51.5 → 0.1, **402.9 → 0.2 ms**.
+>
+> **Two things in this item were wrong and are corrected in D-076.**
+>
+> 1. **"No regression on the existing fixture … within noise" is not what libSQL measures.**
+>    At best-of-15, stable to a tenth of a millisecond across runs: 1,011 nodes 1.6 ms either
+>    way, 5,051 nodes 8.9 → 9.5, 10,101 nodes 17.8 → 19.6 — **8–10% slower on trees at scale**.
+>    `UNION` maintains a dedupe b-tree over every queued row and on a tree it never removes
+>    anything. The trade (~2,000× on graphs against ~9% on trees) is overwhelming and it is
+>    still a trade, so it is recorded as one. A first attempt measured 18% and that was harness
+>    error — the baseline arm discarded rows while the shipped arm allocated 10,101 `String`s.
+> 2. **The bonus is real and was taken.** `/` is free again; only `|` remains reserved.
+>
+> Everything else in this item held: the equivalence argument, the plan shape (verified against
+> the *shipped* string, not a hand copy), and the extraction of the two duplicate CTEs into one
+> `TraversalBuilder::walk_cte`. The property test asked for is in `integrity_property_tests`
+> and passes at 512 cases. D-070 is corrected, not deleted.
 
 **Where.** [`TraversalBuilder::build_sql`](../src/graph/builder.rs) and the duplicate CTE in
 [`load_subgraph_with`](../src/graph/subgraph.rs).
@@ -128,7 +159,37 @@ Deleting the path column **frees `/`** — only `|` remains reserved, for
 
 ---
 
-### T0.2 — Repair costs more than the damage
+### T0.2 — Repair costs more than the damage — ✅ **DELIVERED, D-077**
+
+> **Delivered 2026-07-30.** The audit is **roughly half the whole repair**, measured at
+> 4K/16K/40K rows in `links` (`examples/repair_diag.rs`): ≈15/61/190 ms of the rebuild.
+> Removed from the archive path; `rebuild_current` still verifies. Quoted as "about half"
+> deliberately — the audit's own cost is stable across runs (179–212 ms at 40K over five) but
+> the rebuild total is not (318–428 ms for identical work), so the *ratio* reads 42–61%
+> depending on the run. First draft of this entry said "56–61%" from a single run.
+>
+> **The prescribed order was wrong and is inverted in D-077.** This item justifies dropping the
+> audit because "the archive already knows the projection is correct because it just derived it
+> from the definition". There was no *the* definition — the projection existed **twice**,
+> byte-identical, in `rebuild.rs` and `audit.rs` — so the post-rebuild audit was not tautological
+> at all: it was a live check that the two copies still agreed. Dropping it first would have
+> removed the only thing keeping them honest. The projection is extracted to one
+> `LATEST_BELIEF_PROJECTION` **first**, and only then is skipping the audit a saving rather than
+> a silent loss of coverage.
+>
+> **"The published archive cost estimate does not include this" is not correct.** Both figures —
+> the 26.8 ms in §5.1's exemption table and §9's ≤ 30 s — are stated over `archive()` end to end,
+> and `benches/budgets.rs` measures the public handle method. The re-derivation was always inside
+> them. The real defect is that it was **unattributed**, which is what §5.7 now fixes.
+>
+> **A finding worth more than the optimisation.** `rebuild_within` reprojects *all* of `links`,
+> so the archive's repair term scales with the **surviving** table, not the batch archived —
+> §9's "per 100K closed intervals" is the wrong variable, and archiving a fixed volume costs
+> more as the ledger grows. That is T1.1's problem and is recorded, not fixed, here.
+>
+> Coverage moved rather than shrank: an ungated test archives and then audits from outside,
+> mutation-verified (removing the rebuild makes it fail). The equivalent property test existed
+> but sits behind `property-tests`, so plain `cargo test` had been proving nothing here.
 
 `rebuild_within` ([rebuild.rs](../src/integrity/rebuild.rs)) is not one O(E) pass. It is:
 
@@ -152,7 +213,29 @@ estimate does not include this.
 
 ---
 
-### T0.3 — §4.7 invariant 3 is misstated
+### T0.3 — §4.7 invariant 3 is misstated — ✅ **DELIVERED, D-078**
+
+> **Delivered 2026-07-30.** Confirmed on libSQL 0.9.30 rather than carried over from the
+> SQLite 3.50.4 probe, and through **three** doors rather than one: `assert_edge(f64::NAN)`,
+> a raw `INSERT` binding NaN, and a raw `INSERT` computing `0.0/0.0` in the engine — which
+> never crosses the binding layer and so could have behaved differently. All three:
+> `NOT NULL constraint failed: links.weight`. Nothing lands.
+>
+> Row 3 now reads "non-negative", with the correction stated beside it rather than quietly
+> dropped — a reader who trusted the old row would have written a NaN guard they did not need.
+> The loader's `is_nan()` arm stays, commented as unreachable.
+>
+> **One refinement to the framing.** This is not a weaker instance of §4.7's property, it is the
+> opposite of it: §4.7 exists to record where the schema is *silent*, and here the schema is
+> strict, so the section claimed a hole in its own subject. The new test therefore runs in the
+> **failing direction** — the other three assert the storage layer accepts what the API refuses
+> and break if a gap closes; this one asserts refusal and breaks if a gap ever *opens*. Which is
+> the direction that matters: the alternative failure mode is a shortest path over NaN, where
+> every comparison is false and the answer is silently arbitrary.
+
+---
+
+### T0.3 — original text
 
 §4.7 lists *"edge weights are non-negative **and not NaN**"* as refused only by
 `load_subgraph`. **NaN is already refused by the storage layer.** SQLite stores NaN as NULL,
@@ -415,6 +498,109 @@ open item). Add a soak test: one long-lived `Database`, heavy concurrent read lo
 Tokio tasks plus a saturated write actor, run for minutes rather than milliseconds. If that is
 clean, the claim is defended and can be cited. If it is not, R15 is severe and the plan
 changes.
+
+#### Measured during the v0.5.6 Wave 5 session (2026-07-30, libSQL 0.9.30)
+
+R15 fired often enough while finishing Wave 5 to be worth measuring rather than logging. All
+runs below are on the shipped mitigation — `RUST_TEST_THREADS = "1"` from `.cargo/config.toml`,
+applied to every `cargo test` in the project directory. No run passed `--test-threads` itself,
+so these are the numbers a maintainer gets by typing `cargo test`.
+
+| Run | Faults | Documented figure |
+|---|---|---|
+| Full plain suite, `cargo test --no-fail-fast`, 10 consecutive runs | **5 / 10** | 0 / 30 (0.5.4) |
+| `vector_filter_tests` alone, 15 runs | 0 / 15 | 0 / 40 (one binary, 0.5.4) |
+| `replay_snapshot_tests` alone, 15 runs | 0 / 15 | — |
+| `write_path_tests` alone, 15 runs | 0 / 15 | — |
+| `storage_boundary_tests` alone, 15 runs | 0 / 15 | — |
+| `doctrine_property_tests` alone, serialised, 4 runs | 3 / 4 | ~3 / 25 (0.5.4) |
+| `integrity_property_tests` alone, serialised, 4 runs | 1 / 4 | — |
+
+Faulting targets across the ten suite runs: `storage_boundary_tests` ×2, `vector_filter_tests`,
+`replay_snapshot_tests`, `write_path_tests`. Ad-hoc full runs earlier in the same session were
+3 / 7, consistent with the measured 5 / 10.
+
+**Three corrections to R15 as written, and the first one matters most.**
+
+1. **"Plain `cargo test` measures 0/30" does not reproduce.** It is 5 / 10 today, on the
+   mitigation, on the same dependency version. Either the rate rose with the suite
+   (171 → 221 tests since that figure was taken) or the original 0/30 was a lucky streak.
+   Either way, R15 currently reads as though serialising libtest *removed* the fault for
+   ordinary use, and it did not — it reduced a rate. The risk row and the `.cargo/config.toml`
+   comment both need rewording, because a maintainer who reads them and then sees a red build
+   will spend the time distinguishing R15 from a real failure that the row was written to save
+   them.
+
+2. **Every faulting binary is clean in isolation.** Four binaries that died during suite runs
+   are 0 / 15 each when run alone, at 60 total isolated runs with no fault. So the trigger is
+   not the binary, not any test in it, and not thread concurrency *within* a binary — that is
+   already serialised in both cases. Something accumulates across a `cargo test` invocation
+   that per-binary isolation does not reproduce. R15's current framing ("several local
+   databases opened and dropped concurrently in one process") does not cover this, since the
+   isolated runs open and drop databases the same way.
+
+3. **The residue is not one binary.** R15 names "the two generated-history binaries" and
+   `doctrine_property_tests` as the residual case; there are **three** gated targets
+   (`doctrine`, `integrity`, `graph`) and `integrity_property_tests` faulted 1 / 4 today.
+   `doctrine_property_tests` at 3 / 4 is also an order worse than the recorded ~3 / 25.
+
+**A churn hypothesis was drawn from the table above and then refuted; both are kept, because
+the refutation is the useful part.** The suite data — property binaries at 3 / 4, ordinary
+binaries at 0 / 15 — reads as though the fault tracked how many databases a process opens and
+drops. It does not. A standalone reproducer (below) separates the two variables directly:
+**500 sequential opens in one process is 0 / 10, and 32 concurrent opens is 2 / 12.** Churn is
+not sufficient and concurrency is, which is what R15 said originally. The suite table cannot
+distinguish them, so no inference of that kind should have been drawn from it.
+
+**What the standalone reproduction establishes** (libsql 0.9.30, Windows, release, tokio
+multi-thread, one file per task, no Macrame types in the loop — so R15's long-standing claim
+that this reproduces outside the crate is now verified rather than inherited):
+
+| Shape | Faults |
+|---|---|
+| 500 opens, sequential, one process | 0 / 10 |
+| 4 / 8 / 16 concurrent opens | 0 / 10 each |
+| 32 concurrent opens | 2 / 12 |
+| 128 concurrent opens | 5 / 12 |
+| 500 concurrent opens | 5 / 10 |
+| 128 concurrent opens, **nothing dropped until all have finished** | 3 / 12 |
+
+Every fault is `0xC0000005`; no panics and no SQLite errors accompany any of them. The last
+row is the sharp one: holding every handle alive until the end still faults, so this is
+concurrent **open**, not an open/drop race, and not teardown. The threshold sits between 16
+and 32 concurrent opens on this machine.
+
+**Consequence for the soak.** The proposed soak tests a *load* hypothesis: one open `Database`,
+many concurrent readers, a saturated actor. That is now the right shape to test the claim, but
+it is testing the *claim*, not the fault — the fault needs concurrent opens, and a single
+long-lived `Database` performs its opens once, at construction. So the soak's clean result
+would be evidence for the claim rather than a test of the bug, which is what it should be.
+**Add a control arm** that does the thing known to fault — a long-lived `Database` exercised
+under load *while* a second task opens 32+ databases concurrently in the same process — so the
+soak can distinguish "the claim holds" from "the harness never provoked anything".
+
+**One thing this does not explain, and it should not be papered over.** Every Macrame binary is
+0 / 15 alone while the suite that runs those same binaries *serially* is 5 / 10, all under
+`RUST_TEST_THREADS = "1"`. If concurrent opens are required, the suite-level runs are finding
+concurrency somewhere per-binary runs do not, and this data does not say where. `Database::open`
+opening three connections (four with the cadence) is the obvious suspect and is not evidence.
+Unresolved, and flagged rather than guessed at.
+
+**And the claim itself should be sharpened before it is defended.** *"An application opens one
+`Database` and holds it for its lifetime"* is not what the crate does: `open_inner` opens
+three connections, four since Wave 4.1 gave the cadence its own. What the soak can actually
+test — and therefore what production exposure should be stated as — is **one process, one
+file, a bounded set of connections opened once and never churned**. That is a defensible
+claim. The current wording is a claim about `Database` handles, and `Database` handles are not
+what the fault appears to count.
+
+**One reporting hazard worth writing down while it is fresh.** The fault is a process-level
+access violation, so the harness dies mid-binary: the tests that already printed `ok` are
+reported, the ones after it are silent, and the binary's `test result:` line never appears.
+A script that sums `N passed` across the run therefore returns a *smaller number with no
+failures* rather than a red. Anything that gates on this suite must key on the absence of a
+per-target result line, not on a pass count — and `--no-fail-fast` is not optional, or
+everything alphabetically behind the fault is skipped as well.
 
 ### T5.3 — Snapshot chain cross-check
 

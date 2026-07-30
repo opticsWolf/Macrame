@@ -515,3 +515,83 @@ async fn test_valid_time_predicate_matches_edge_at_same_instant() {
     let edges = macrame::temporal::query_as_of_edges(&conn, ts).await.unwrap();
     assert_eq!(edges.len(), 1, "edge must be live at its own valid_from");
 }
+
+// ---------------------------------------------------------------------------
+// T0.2 / D-077 — the archive no longer audits its own rebuild
+// ---------------------------------------------------------------------------
+
+/// `archive()` leaves `links_current` equal to the projection, **audited from
+/// outside**.
+///
+/// D-077 stopped `archive()`'s internal `rebuild_within` from auditing itself:
+/// with one definition of the projection (`LATEST_BELIEF_PROJECTION`) that check
+/// compares a table against the query that just filled it, in the same
+/// transaction, and it was two `EXCEPT` passes over the whole table under the
+/// archive's write lock — measured at roughly **half** the entire repair.
+///
+/// The guarantee it used to provide has to come from somewhere, and this is the
+/// somewhere: audit *after* the archive commits, from outside, which is a
+/// stronger check than the tautological one it replaces. There is a property
+/// test that does this over generated histories, but it lives behind the
+/// `property-tests` feature — so plain `cargo test` would otherwise no longer
+/// prove that an archive leaves a clean projection at all.
+#[tokio::test]
+async fn an_archive_leaves_no_drift_although_it_no_longer_checks_itself() {
+    let harness = TestHarness::new();
+    let conn = libsql::Builder::new_local(&harness.db_path)
+        .build()
+        .await
+        .unwrap()
+        .connect()
+        .unwrap();
+    migrations::run(&conn).await.unwrap();
+
+    let t0 = "2026-01-01T00:00:00.000000Z";
+    let t1 = "2026-02-01T00:00:00.000000Z";
+    let t2 = "2026-03-01T00:00:00.000000Z";
+    let open = "9999-12-31T23:59:59.999999Z";
+
+    for id in ["a", "b", "c"] {
+        conn.execute(
+            "INSERT INTO concepts (id, title, valid_from, recorded_at) VALUES (?1, 'n', ?2, ?2)",
+            libsql::params![id, t0],
+        )
+        .await
+        .unwrap();
+    }
+
+    // Three shapes that must survive an archive differently: a superseded
+    // assertion (archivable), the belief that superseded it (not), and a closed
+    // interval old enough to go (archivable).
+    let rows: [(&str, &str, &str, &str, &str); 3] = [
+        ("a", "b", t0, open, t0),
+        ("a", "b", t0, open, t1),
+        ("b", "c", t0, t1, t0),
+    ];
+    for (src, tgt, vf, vt, rec) in rows {
+        conn.execute(
+            "INSERT INTO links (source_id, target_id, edge_type, valid_from, valid_to, \
+             weight, properties, recorded_at) VALUES (?1, ?2, 'KNOWS', ?3, ?4, 1.0, '{}', ?5)",
+            libsql::params![src, tgt, vf, vt, rec],
+        )
+        .await
+        .unwrap();
+    }
+
+    assert_eq!(audit_current(&conn).await.unwrap(), 0, "clean before archive");
+
+    let cold = harness.temp_dir.path().join("cold.db");
+    let report = macrame::temporal::archive(&conn, t2, t2, &cold).await.unwrap();
+    assert!(
+        report.links_archived > 0,
+        "the fixture must actually archive something, or this proves nothing"
+    );
+
+    // The real assertion: the projection is intact, checked by the auditor the
+    // rebuild is no longer allowed to call on itself.
+    assert_eq!(
+        audit_current(&conn).await.unwrap(),
+        0,
+        "archive left links_current drifted from the projection"
+    );
+}

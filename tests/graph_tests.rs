@@ -50,16 +50,27 @@ fn test_cte_sql_compilation() {
         .attribute_mode(AttributeMode::Current);
 
     let sql = builder.build_sql();
-    assert!(sql.contains("WITH RECURSIVE walk"));
-    // Delimited on both sides, so the check matches a whole path element rather
-    // than a substring — ids are variable-length (D-061), and `INSTR(path, id)`
-    // was only correct while they were not.
-    assert!(sql.contains("INSTR(w.path, '/' || CAST(l.target_id AS BLOB) || '/') = 0"));
-    assert!(
-        sql.contains("SELECT ?1, 0, '/' || CAST(?1 AS BLOB) || '/'"),
-        "the seed must carry both delimiters or the first hop cannot match"
-    );
+    assert!(sql.contains("WITH RECURSIVE walk(node_id, depth)"));
     assert!(sql.contains("w.depth < ?2"));
+
+    // T0.1: `UNION`, not `UNION ALL`. This is the whole optimisation — `UNION`
+    // dedupes on `(node_id, depth)` as rows enter the queue, so `walk` is bounded
+    // by V × (depth+1). With `UNION ALL` it holds one row per distinct *path*,
+    // which is multiplicative in branching factor per hop: 328 edges at depth 6
+    // measured 299,593 rows and 428 ms before this changed.
+    assert!(
+        sql.contains("UNION\n") && !sql.contains("UNION ALL"),
+        "the walk must dedupe on entry, or it enumerates paths: {sql}"
+    );
+
+    // The path column and its cycle check are gone, and must stay gone. They were
+    // what restricted the walk to simple paths; termination is the depth bound
+    // now. Asserted as absence because that is the regression that would be
+    // invisible — reinstating them returns correct answers, slowly.
+    assert!(
+        !sql.contains("path") && !sql.contains("INSTR"),
+        "the path column and INSTR cycle check must not come back: {sql}"
+    );
 }
 
 /// Edge types reach the CTE as bind parameters, never as SQL text.
