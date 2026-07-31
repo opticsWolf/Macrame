@@ -27,7 +27,12 @@ async fn try_weight(conn: &libsql::Connection, label: &str, sql: &str) {
         Ok(_) => println!("  {label:<28} ACCEPTED"),
         Err(e) => {
             let msg = e.to_string();
-            let short = msg.split(':').next_back().unwrap_or(&msg).trim().to_string();
+            let short = msg
+                .split(':')
+                .next_back()
+                .unwrap_or(&msg)
+                .trim()
+                .to_string();
             println!("  {label:<28} refused ({short})");
         }
     }
@@ -37,7 +42,10 @@ async fn try_weight(conn: &libsql::Connection, label: &str, sql: &str) {
 async fn main() {
     // ---- 1. what the CHECK admits ----
     println!("\n1. CHECK (weight >= 0.0), values offered directly:");
-    let db = libsql::Builder::new_local(":memory:").build().await.unwrap();
+    let db = libsql::Builder::new_local(":memory:")
+        .build()
+        .await
+        .unwrap();
     let conn = db.connect().unwrap();
     conn.execute(
         "CREATE TABLE w (id INTEGER PRIMARY KEY, weight REAL NOT NULL CHECK (weight >= 0.0))",
@@ -113,7 +121,10 @@ async fn main() {
              edge_type, valid_from, recorded_at, valid_to, weight, properties FROM links"
                 .to_string(),
         ),
-        ("drop links (takes its triggers)", "DROP TABLE links".to_string()),
+        (
+            "drop links (takes its triggers)",
+            "DROP TABLE links".to_string(),
+        ),
         (
             "rename",
             "ALTER TABLE links_rebuild RENAME TO links".to_string(),
@@ -232,7 +243,10 @@ async fn main() {
     // Would `typeof(weight) = 'real'` close it, and does it disturb the values
     // that must keep working?
     println!("\n5. CHECK (weight >= 0.0 AND typeof(weight) = 'real'):");
-    let db3 = libsql::Builder::new_local(":memory:").build().await.unwrap();
+    let db3 = libsql::Builder::new_local(":memory:")
+        .build()
+        .await
+        .unwrap();
     let conn3 = db3.connect().unwrap();
     conn3
         .execute(

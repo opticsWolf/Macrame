@@ -1,6 +1,6 @@
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use serde::{Deserialize, Serialize};
 
 use crate::error::{DbError, Result};
 use crate::temporal::as_of::NodeAttributes;
@@ -206,8 +206,7 @@ pub async fn reconstruct(
     if hot_log_is_complete(conn, ts, archive_path).await? {
         if let Some(base) = snapshot_anchor(snapshots_dir, ts) {
             let anchor = base.seq_anchor;
-            let delta =
-                fold_delta(conn, ANCHORED_HOT_FOLD, libsql::params![ts, anchor]).await?;
+            let delta = fold_delta(conn, ANCHORED_HOT_FOLD, libsql::params![ts, anchor]).await?;
             return Ok(delta.apply_to(base, ts));
         }
         return fold(conn, ts, HOT_FOLD).await;
@@ -599,10 +598,11 @@ async fn fold_delta(
             });
         }
 
-        let payload: serde_json::Value = serde_json::from_str(&payload_str).map_err(|e| DbError::ReplayCorrupt {
-            seq: seq_id,
-            reason: format!("Failed to parse payload JSON: {e}"),
-        })?;
+        let payload: serde_json::Value =
+            serde_json::from_str(&payload_str).map_err(|e| DbError::ReplayCorrupt {
+                seq: seq_id,
+                reason: format!("Failed to parse payload JSON: {e}"),
+            })?;
 
         // v1 and v2 differ by one added field, so v1 folds by reading it as
         // absent — which is what `Option` already means here. A future shape
@@ -610,17 +610,39 @@ async fn fold_delta(
         // path, and would want a match on `v` rather than a ceiling.
         let v = payload.get("v").and_then(|v| v.as_u64()).unwrap_or(1);
         if v > PAYLOAD_VERSION as u64 {
-            return Err(DbError::PayloadVersion { got: v as u8, max: PAYLOAD_VERSION });
+            return Err(DbError::PayloadVersion {
+                got: v as u8,
+                max: PAYLOAD_VERSION,
+            });
         }
 
         if table_name == "concepts" {
             let id = _entity_id;
             let retired = payload.get("retired").and_then(|r| r.as_i64()).unwrap_or(0);
             if retired == 0 {
-                let title = payload.get("title").and_then(|s| s.as_str()).unwrap_or("").to_string();
-                let content = payload.get("content").and_then(|s| s.as_str()).unwrap_or("").to_string();
-                let embedding_model = payload.get("embedding_model").and_then(|s| s.as_str()).map(|s| s.to_string());
-                concepts.insert(id.clone(), NodeAttributes { id, title, content, embedding_model });
+                let title = payload
+                    .get("title")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let content = payload
+                    .get("content")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let embedding_model = payload
+                    .get("embedding_model")
+                    .and_then(|s| s.as_str())
+                    .map(|s| s.to_string());
+                concepts.insert(
+                    id.clone(),
+                    NodeAttributes {
+                        id,
+                        title,
+                        content,
+                        embedding_model,
+                    },
+                );
             } else {
                 // Retirement is the application axis (§4.1), and a reconstruction
                 // shows what was visible. Onto a snapshot that means removing
@@ -628,11 +650,31 @@ async fn fold_delta(
                 d.concepts_gone.insert(id);
             }
         } else if table_name == "links" {
-            let src = payload.get("source_id").and_then(|s| s.as_str()).unwrap_or("").to_string();
-            let tgt = payload.get("target_id").and_then(|s| s.as_str()).unwrap_or("").to_string();
-            let edge_type = payload.get("edge_type").and_then(|s| s.as_str()).unwrap_or("").to_string();
-            let vf = payload.get("valid_from").and_then(|s| s.as_str()).unwrap_or("").to_string();
-            let vt = payload.get("valid_to").and_then(|s| s.as_str()).unwrap_or("").to_string();
+            let src = payload
+                .get("source_id")
+                .and_then(|s| s.as_str())
+                .unwrap_or("")
+                .to_string();
+            let tgt = payload
+                .get("target_id")
+                .and_then(|s| s.as_str())
+                .unwrap_or("")
+                .to_string();
+            let edge_type = payload
+                .get("edge_type")
+                .and_then(|s| s.as_str())
+                .unwrap_or("")
+                .to_string();
+            let vf = payload
+                .get("valid_from")
+                .and_then(|s| s.as_str())
+                .unwrap_or("")
+                .to_string();
+            let vt = payload
+                .get("valid_to")
+                .and_then(|s| s.as_str())
+                .unwrap_or("")
+                .to_string();
             edges.insert(_entity_id, (src, tgt, edge_type, vf, vt));
         }
     }

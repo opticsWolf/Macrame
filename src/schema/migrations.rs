@@ -633,7 +633,10 @@ mod tests {
     fn every_trigger_and_index_yields_a_name() {
         let triggers = super::trigger_names();
         assert_eq!(triggers.len(), CREATE_TRIGGERS.len());
-        assert!(triggers.iter().all(|n| n.starts_with("trg_")), "{triggers:?}");
+        assert!(
+            triggers.iter().all(|n| n.starts_with("trg_")),
+            "{triggers:?}"
+        );
 
         let indices = super::index_names();
         assert_eq!(indices.len(), CREATE_INDICES.len());

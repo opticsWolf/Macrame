@@ -250,7 +250,11 @@ WITH RECURSIVE walk(node_id, depth) AS (
     /// involved, so this never returns [`DbError::AttributeModeUnstated`]:
     /// topology at an instant is unambiguous, and it is only the *pairing* with
     /// live attributes that needed a decision.
-    pub async fn execute_ids(&self, conn: &libsql::Connection, now_ts: &str) -> Result<Vec<String>> {
+    pub async fn execute_ids(
+        &self,
+        conn: &libsql::Connection,
+        now_ts: &str,
+    ) -> Result<Vec<String>> {
         let sql = self.build_sql();
 
         let mut params: Vec<libsql::Value> = vec![
@@ -356,7 +360,10 @@ mod tests {
             as_of: TUE.to_string(),
         }
         .to_string();
-        assert!(text.contains("AtTime") && text.contains("Current"), "{text}");
+        assert!(
+            text.contains("AtTime") && text.contains("Current"),
+            "{text}"
+        );
     }
 
     /// Stating `Current` on a historical traversal is legitimate and stays so.
@@ -367,7 +374,11 @@ mod tests {
     /// without asking, never to asking for it.
     #[test]
     fn a_stated_mode_is_honoured_on_a_historical_traversal() {
-        for mode in [AttributeMode::Current, AttributeMode::AtTime, AttributeMode::Omit] {
+        for mode in [
+            AttributeMode::Current,
+            AttributeMode::AtTime,
+            AttributeMode::Omit,
+        ] {
             let got = TraversalBuilder::new("a")
                 .as_of(TUE)
                 .attribute_mode(mode)

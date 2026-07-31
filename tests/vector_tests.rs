@@ -140,21 +140,39 @@ async fn a_wrong_dimension_is_refused_with_the_declared_dimension() {
     let m = model();
     register_model(&conn, &m, 4).await.unwrap();
 
-    let err = upsert_embedding(&conn, &m, "c0", &[1.0, 2.0]).await.unwrap_err();
+    let err = upsert_embedding(&conn, &m, "c0", &[1.0, 2.0])
+        .await
+        .unwrap_err();
     match err {
-        DbError::DimMismatch { got, expected, model } => {
+        DbError::DimMismatch {
+            got,
+            expected,
+            model,
+        } => {
             assert_eq!((got, expected, model.as_str()), (2, 4, "probe_v1"));
         }
         other => panic!("expected DimMismatch, got {other:?}"),
     }
 
-    let err = search_vector(&conn, &[1.0, 2.0, 3.0], &m, 5).await.unwrap_err();
+    let err = search_vector(&conn, &[1.0, 2.0, 3.0], &m, 5)
+        .await
+        .unwrap_err();
     assert!(
-        matches!(err, DbError::DimMismatch { got: 3, expected: 4, .. }),
+        matches!(
+            err,
+            DbError::DimMismatch {
+                got: 3,
+                expected: 4,
+                ..
+            }
+        ),
         "search must check the query vector too, got {err:?}"
     );
 
-    assert_eq!(count(&conn, &format!("SELECT COUNT(*) FROM {}", m.table())).await, 0);
+    assert_eq!(
+        count(&conn, &format!("SELECT COUNT(*) FROM {}", m.table())).await,
+        0
+    );
 }
 
 /// **The storage layer enforces the dimension only because the index exists.**
@@ -176,11 +194,17 @@ async fn the_engine_enforces_dimension_only_where_the_index_exists() {
     // Bypass the crate check entirely: hand the engine a raw two-float blob.
     let rejected = conn
         .execute(
-            &format!("INSERT INTO {} (concept_id, embedding) VALUES ('c0', ?1)", m.table()),
+            &format!(
+                "INSERT INTO {} (concept_id, embedding) VALUES ('c0', ?1)",
+                m.table()
+            ),
             libsql::params![le(&[1.0, 2.0])],
         )
         .await;
-    assert!(rejected.is_err(), "the indexed table must reject a short vector");
+    assert!(
+        rejected.is_err(),
+        "the indexed table must reject a short vector"
+    );
     assert_eq!(
         count(&conn, &format!("SELECT COUNT(*) FROM {}", m.table())).await,
         0,
@@ -216,22 +240,35 @@ async fn search_returns_neighbours_nearest_first() {
     let m = model();
     register_model(&conn, &m, 4).await.unwrap();
 
-    upsert_embedding(&conn, &m, "c0", &[1.0, 0.0, 0.0, 0.0]).await.unwrap();
-    upsert_embedding(&conn, &m, "c1", &[0.9, 0.1, 0.0, 0.0]).await.unwrap();
-    upsert_embedding(&conn, &m, "c2", &[0.0, 0.0, 0.0, 1.0]).await.unwrap();
+    upsert_embedding(&conn, &m, "c0", &[1.0, 0.0, 0.0, 0.0])
+        .await
+        .unwrap();
+    upsert_embedding(&conn, &m, "c1", &[0.9, 0.1, 0.0, 0.0])
+        .await
+        .unwrap();
+    upsert_embedding(&conn, &m, "c2", &[0.0, 0.0, 0.0, 1.0])
+        .await
+        .unwrap();
 
-    let hits = search_vector(&conn, &[1.0, 0.0, 0.0, 0.0], &m, 3).await.unwrap();
+    let hits = search_vector(&conn, &[1.0, 0.0, 0.0, 0.0], &m, 3)
+        .await
+        .unwrap();
     assert_eq!(hits.len(), 3);
     assert_eq!(hits[0].concept_id, "c0");
     assert_eq!(hits[1].concept_id, "c1");
     assert_eq!(hits[2].concept_id, "c2");
     assert!(hits[0].score <= hits[1].score && hits[1].score <= hits[2].score);
 
-    let top1 = search_vector(&conn, &[0.0, 0.0, 0.0, 1.0], &m, 1).await.unwrap();
+    let top1 = search_vector(&conn, &[0.0, 0.0, 0.0, 1.0], &m, 1)
+        .await
+        .unwrap();
     assert_eq!(top1.len(), 1);
     assert_eq!(top1[0].concept_id, "c2");
 
-    assert!(search_vector(&conn, &[1.0, 0.0, 0.0, 0.0], &m, 0).await.unwrap().is_empty());
+    assert!(search_vector(&conn, &[1.0, 0.0, 0.0, 0.0], &m, 0)
+        .await
+        .unwrap()
+        .is_empty());
 }
 
 /// Re-embedding replaces the vector: one row per concept per model, because an
@@ -243,13 +280,25 @@ async fn re_embedding_replaces_rather_than_accumulates() {
     let m = model();
     register_model(&conn, &m, 4).await.unwrap();
 
-    upsert_embedding(&conn, &m, "c0", &[1.0, 0.0, 0.0, 0.0]).await.unwrap();
-    upsert_embedding(&conn, &m, "c0", &[0.0, 0.0, 0.0, 1.0]).await.unwrap();
+    upsert_embedding(&conn, &m, "c0", &[1.0, 0.0, 0.0, 0.0])
+        .await
+        .unwrap();
+    upsert_embedding(&conn, &m, "c0", &[0.0, 0.0, 0.0, 1.0])
+        .await
+        .unwrap();
 
-    assert_eq!(count(&conn, &format!("SELECT COUNT(*) FROM {}", m.table())).await, 1);
-    let hits = search_vector(&conn, &[0.0, 0.0, 0.0, 1.0], &m, 1).await.unwrap();
+    assert_eq!(
+        count(&conn, &format!("SELECT COUNT(*) FROM {}", m.table())).await,
+        1
+    );
+    let hits = search_vector(&conn, &[0.0, 0.0, 0.0, 1.0], &m, 1)
+        .await
+        .unwrap();
     assert_eq!(hits[0].concept_id, "c0");
-    assert!(hits[0].score < 0.001, "the newest vector must be the one stored");
+    assert!(
+        hits[0].score < 0.001,
+        "the newest vector must be the one stored"
+    );
 }
 
 /// **Doctrine VII, the half that needed Phase 3 to become testable.**
@@ -399,7 +448,12 @@ fn test_dim_mismatch_rejection() {
     let vec = vec![1.0f32, 2.0f32, 3.0f32];
     let res = EmbeddingCodec::encode(&vec, 768, "nomic-v1");
     assert!(res.is_err());
-    if let Err(DbError::DimMismatch { got, expected, model }) = res {
+    if let Err(DbError::DimMismatch {
+        got,
+        expected,
+        model,
+    }) = res
+    {
         assert_eq!(got, 3);
         assert_eq!(expected, 768);
         assert_eq!(model, "nomic-v1");
@@ -410,8 +464,16 @@ fn test_dim_mismatch_rejection() {
 
 #[test]
 fn test_reciprocal_rank_fusion_scoring() {
-    let vector_ranks = vec!["doc_a".to_string(), "doc_b".to_string(), "doc_c".to_string()];
-    let keyword_ranks = vec!["doc_b".to_string(), "doc_a".to_string(), "doc_d".to_string()];
+    let vector_ranks = vec![
+        "doc_a".to_string(),
+        "doc_b".to_string(),
+        "doc_c".to_string(),
+    ];
+    let keyword_ranks = vec![
+        "doc_b".to_string(),
+        "doc_a".to_string(),
+        "doc_d".to_string(),
+    ];
 
     let fused = reciprocal_rank_fusion(&vector_ranks, &keyword_ranks, 60);
     assert!(!fused.is_empty());
@@ -434,7 +496,9 @@ fn test_vector_filter_cost_estimator() {
     // 100K vectors of 768 dimensions.
     let estimator = CostEstimator::new(10_000_000, 100_000, 768 * 4);
 
-    let loose = estimator.estimate(10, CandidateCount::Exact(90_000)).unwrap();
+    let loose = estimator
+        .estimate(10, CandidateCount::Exact(90_000))
+        .unwrap();
     assert_eq!(loose.strategy, VectorFilterStrategy::PostFilter);
 
     let tight = estimator.estimate(10, CandidateCount::Exact(50)).unwrap();
@@ -442,7 +506,10 @@ fn test_vector_filter_cost_estimator() {
 
     // The budget is a ceiling on the candidate set, not decoration.
     let over = estimator.estimate(10, CandidateCount::Exact(10_000_000));
-    assert!(matches!(over, Err(DbError::SubgraphTooLarge { .. })), "got {over:?}");
+    assert!(
+        matches!(over, Err(DbError::SubgraphTooLarge { .. })),
+        "got {over:?}"
+    );
 }
 
 // -- D-048: the vector write path reaches the actor -------------------------
@@ -491,7 +558,10 @@ async fn an_application_can_register_and_embed_through_the_handle_alone() {
     let hits = search_vector(db.read_conn(), &[1.0, 0.0, 0.0, 0.0], &m, 2)
         .await
         .unwrap();
-    assert_eq!(hits[0].concept_id, "c0", "nearest neighbour is the identical vector");
+    assert_eq!(
+        hits[0].concept_id, "c0",
+        "nearest neighbour is the identical vector"
+    );
 
     db.close().await.unwrap();
 }
@@ -528,15 +598,16 @@ async fn re_embedding_replaces_and_never_touches_the_ledger() {
 
     let mut rows = db
         .read_conn()
-        .query(
-            &format!("SELECT COUNT(*) FROM {}", m.table()),
-            (),
-        )
+        .query(&format!("SELECT COUNT(*) FROM {}", m.table()), ())
         .await
         .unwrap();
     let n: i64 = rows.next().await.unwrap().unwrap().get(0).unwrap();
     assert_eq!(n, 1, "a second embedding must replace the first");
-    assert_eq!(log_len(&db).await, before, "an embedding reached the ledger");
+    assert_eq!(
+        log_len(&db).await,
+        before,
+        "an embedding reached the ledger"
+    );
 }
 
 /// A chunk is one transaction, so a bad vector in the middle takes the whole
@@ -590,7 +661,10 @@ async fn embedding_an_unregistered_model_is_refused_by_name() {
         .upsert_embeddings(&m, vec![("c0".to_string(), vec![1.0])])
         .await
         .unwrap_err();
-    assert!(matches!(err, DbError::ModelNotRegistered { .. }), "got {err:?}");
+    assert!(
+        matches!(err, DbError::ModelNotRegistered { .. }),
+        "got {err:?}"
+    );
 }
 
 /// More rows than `chunk_rows::EMBEDDINGS`, so the chunking loop runs more than

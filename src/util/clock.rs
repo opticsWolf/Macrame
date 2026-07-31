@@ -1,7 +1,7 @@
-use std::sync::Mutex;
-use std::time::SystemTime;
 use crate::error::Result;
 use crate::util::timestamp;
+use std::sync::Mutex;
+use std::time::SystemTime;
 
 /// Trait defining the clock interface for timestamp generation.
 /// CONTRACT: successive calls return strictly increasing values,
@@ -74,7 +74,9 @@ impl SystemClock {
         // Wall clock when the database is empty or its stamp will not parse:
         // there is nothing to be behind, and a corrupt stored timestamp must not
         // become this process's floor (D-027).
-        let floor = recorded_at_floor(conn).await?.unwrap_or_else(SystemTime::now);
+        let floor = recorded_at_floor(conn)
+            .await?
+            .unwrap_or_else(SystemTime::now);
         Ok(Self {
             last_issued: Mutex::new(floor),
         })

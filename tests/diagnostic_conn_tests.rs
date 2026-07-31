@@ -50,7 +50,10 @@ async fn a_diagnostic_connection_reads_and_explains() {
         .await
         .unwrap();
     let n: i64 = rows.next().await.unwrap().unwrap().get(0).unwrap();
-    assert_eq!(n, 1, "the diagnostic connection sees the actor's committed write");
+    assert_eq!(
+        n, 1,
+        "the diagnostic connection sees the actor's committed write"
+    );
 
     // The use T5.1 names first, and the one `raw()`'s old doc listed first.
     conn.query("EXPLAIN QUERY PLAN SELECT * FROM links_current", ())
@@ -100,11 +103,10 @@ async fn turning_the_pragma_off_rescues_the_reader_and_not_the_diagnostic() {
         .execute("PRAGMA query_only = OFF", ())
         .await
         .unwrap();
-    db.read_conn()
-        .execute(INSERT, ())
-        .await
-        .expect("query_only is a guardrail: turning it off must restore writes, \
-                 and §4.7 invariant 2 depends on that being true");
+    db.read_conn().execute(INSERT, ()).await.expect(
+        "query_only is a guardrail: turning it off must restore writes, \
+                 and §4.7 invariant 2 depends on that being true",
+    );
     // Re-arm, so `close()` does not run against a reader this test disarmed.
     db.read_conn()
         .execute("PRAGMA query_only = ON", ())
@@ -154,7 +156,10 @@ async fn each_diagnostic_connection_is_the_callers_own() {
     a.execute("PRAGMA query_only = ON", ()).await.unwrap();
     let mut rows = b.query("PRAGMA query_only", ()).await.unwrap();
     let v: i64 = rows.next().await.unwrap().unwrap().get(0).unwrap();
-    assert_eq!(v, 0, "the two diagnostic connections share per-connection state");
+    assert_eq!(
+        v, 0,
+        "the two diagnostic connections share per-connection state"
+    );
 
     db.close().await.unwrap();
 }

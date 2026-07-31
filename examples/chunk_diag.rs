@@ -57,7 +57,9 @@ async fn raw_conn(dir: &tempfile::TempDir, name: &str) -> (libsql::Database, lib
         .unwrap();
     let conn = raw.connect().unwrap();
     conn.execute("PRAGMA journal_mode = WAL", ()).await.ok();
-    conn.execute("PRAGMA synchronous = NORMAL", ()).await.unwrap();
+    conn.execute("PRAGMA synchronous = NORMAL", ())
+        .await
+        .unwrap();
     conn.execute("PRAGMA foreign_keys = ON", ()).await.unwrap();
     (raw, conn)
 }
@@ -134,7 +136,9 @@ async fn main() {
             let db = fresh(&dir, "a.db").await;
             seed(&db, 1_001).await;
             let t = Instant::now();
-            db.write_bulk_atomic(hub_edges(1, 1_000, "CHUNK")).await.unwrap();
+            db.write_bulk_atomic(hub_edges(1, 1_000, "CHUNK"))
+                .await
+                .unwrap();
             println!("  one 1000-row transaction : {:>8.2} ms", ms(t.elapsed()));
             db.close().await.unwrap();
 
@@ -153,7 +157,10 @@ async fn main() {
         // Chunk size held constant, table size varied, per trigger config.
         "table" => {
             println!("== fixed 90-row chunk vs table size ==");
-            println!("  {:>7}  {:>10}  {:>10}  {:>10}", "preload", "all three", "no guard", "log only");
+            println!(
+                "  {:>7}  {:>10}  {:>10}  {:>10}",
+                "preload", "all three", "no guard", "log only"
+            );
             for preload in [0usize, 2_000, 8_000] {
                 let mut cells = Vec::new();
                 for drops in [
@@ -194,7 +201,10 @@ async fn main() {
                 for (drops, big_cache) in [
                     (vec![], false),
                     (vec!["trg_links_single_open"], false),
-                    (vec!["trg_links_single_open", "trg_links_current_sync"], false),
+                    (
+                        vec!["trg_links_single_open", "trg_links_current_sync"],
+                        false,
+                    ),
                     (vec!["trg_links_single_open"], true),
                 ] {
                     let name = format!("c{n}_{}_{}.db", drops.len(), big_cache);
@@ -203,7 +213,9 @@ async fn main() {
                     db.close().await.unwrap();
                     let (_raw, conn) = raw_conn(&dir, &name).await;
                     if big_cache {
-                        conn.execute("PRAGMA cache_size = -524288", ()).await.unwrap();
+                        conn.execute("PRAGMA cache_size = -524288", ())
+                            .await
+                            .unwrap();
                     }
                     drop_triggers(&conn, &drops).await;
                     let (loop_t, commit_t) = insert_raw(&conn, n, "CHUNK").await;
@@ -238,7 +250,12 @@ async fn main() {
                 let t = Instant::now();
                 db.write_bulk_atomic(batch).await.unwrap();
                 let e = t.elapsed();
-                println!("  n = {:>5} : {:>8.2} ms  ({:>6.1} us/row)", n, ms(e), ms(e) * 1e3 / n as f64);
+                println!(
+                    "  n = {:>5} : {:>8.2} ms  ({:>6.1} us/row)",
+                    n,
+                    ms(e),
+                    ms(e) * 1e3 / n as f64
+                );
                 db.close().await.unwrap();
             }
         }
@@ -310,7 +327,10 @@ async fn main() {
                     drop(stmt);
                     tx.commit().await.unwrap();
                     if measure {
-                        println!("  links_current has {preload:>6} rows -> 90 upserts : {:>8.2} ms", ms(e));
+                        println!(
+                            "  links_current has {preload:>6} rows -> 90 upserts : {:>8.2} ms",
+                            ms(e)
+                        );
                     }
                 }
             }
@@ -319,7 +339,10 @@ async fn main() {
         // Proof by fix: an index matching the guard's predicate.
         "fix" => {
             println!("== guard cost vs table size, with a matching index ==");
-            println!("  {:>7}  {:>12}  {:>13}", "preload", "as shipped", "+guard index");
+            println!(
+                "  {:>7}  {:>12}  {:>13}",
+                "preload", "as shipped", "+guard index"
+            );
             for preload in [0usize, 2_000, 8_000] {
                 let mut cells = Vec::new();
                 for add_index in [false, true] {
@@ -336,7 +359,9 @@ async fn main() {
                             .unwrap();
                     }
                     let t = Instant::now();
-                    db.write_bulk_atomic(hub_edges(1, 90, "MEASURED")).await.unwrap();
+                    db.write_bulk_atomic(hub_edges(1, 90, "MEASURED"))
+                        .await
+                        .unwrap();
                     cells.push(ms(t.elapsed()));
                     db.close().await.unwrap();
                 }
@@ -456,12 +481,19 @@ async fn main() {
                 for (id, v) in &rows {
                     let blob = EmbeddingCodec::encode(v, 8, m.as_str()).unwrap();
                     stmt.reset();
-                    stmt.execute(libsql::params![id.as_str(), blob]).await.unwrap();
+                    stmt.execute(libsql::params![id.as_str(), blob])
+                        .await
+                        .unwrap();
                 }
                 drop(stmt);
                 tx.commit().await.unwrap();
                 let e = t.elapsed();
-                println!("  n = {:>5} : {:>8.2} ms  ({:>6.1} us/row)", n, ms(e), ms(e) * 1e3 / n as f64);
+                println!(
+                    "  n = {:>5} : {:>8.2} ms  ({:>6.1} us/row)",
+                    n,
+                    ms(e),
+                    ms(e) * 1e3 / n as f64
+                );
                 drop(conn);
                 db.close().await.unwrap();
             }

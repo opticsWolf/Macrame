@@ -130,10 +130,10 @@ async fn the_strategy_never_changes_the_answer() {
     // reachable at CORPUS = 60 — noted rather than silently omitted; the chunk
     // merge gets its own test below.
     for reachable in [
-        vec![55, 56, 57, 58, 59],                 // tight, and far from the query
-        vec![0, 1, 2, 30, 31, 59],                // spans the whole distance range
+        vec![55, 56, 57, 58, 59],                   // tight, and far from the query
+        vec![0, 1, 2, 30, 31, 59],                  // spans the whole distance range
         (0..CORPUS).step_by(2).collect::<Vec<_>>(), // loose: half the corpus
-        (0..CORPUS).collect::<Vec<_>>(),          // everything
+        (0..CORPUS).collect::<Vec<_>>(),            // everything
     ] {
         let harness = TestHarness::new();
         let db = fixture(&harness, &reachable).await;
@@ -156,13 +156,15 @@ async fn the_strategy_never_changes_the_answer() {
             let planned = base.execute(db.read_conn(), TS).await.unwrap();
 
             assert_eq!(
-                ids(&post), ids(&pre),
+                ids(&post),
+                ids(&pre),
                 "strategies disagree at k={k} over {} reachable nodes; \
                  the planner is choosing between different answers",
                 reachable.len()
             );
             assert_eq!(
-                ids(&planned), ids(&pre),
+                ids(&planned),
+                ids(&pre),
                 "the planned strategy disagreed with the exact one at k={k}"
             );
 
@@ -248,11 +250,15 @@ async fn the_planner_follows_the_arithmetic_not_a_threshold() {
             .unwrap();
 
         assert_eq!(
-            plan.strategy, expected,
+            plan.strategy,
+            expected,
             "with {} of {CORPUS} reachable the planner chose {:?} \
              (post={}, pre={}, k'={})",
-            reachable.len(), plan.strategy, plan.post_filter_bytes,
-            plan.pre_filter_bytes, plan.k_prime
+            reachable.len(),
+            plan.strategy,
+            plan.post_filter_bytes,
+            plan.pre_filter_bytes,
+            plan.k_prime
         );
         db.close().await.unwrap();
     }
@@ -266,12 +272,21 @@ fn k_prime_inflates_by_selectivity_and_stays_clamped() {
     let est = CostEstimator::new(usize::MAX, 1000, 8);
 
     assert_eq!(est.k_prime(10, 1000), 10, "no filter, no inflation");
-    assert_eq!(est.k_prime(10, 100), 100, "a tenth reachable, ten times the k");
     assert_eq!(
-        est.k_prime(10, 1), 1000,
+        est.k_prime(10, 100),
+        100,
+        "a tenth reachable, ten times the k"
+    );
+    assert_eq!(
+        est.k_prime(10, 1),
+        1000,
         "one candidate would want k'=10000; the corpus is the ceiling"
     );
-    assert_eq!(est.k_prime(10, 0), 10, "an empty candidate set must not divide by zero");
+    assert_eq!(
+        est.k_prime(10, 0),
+        10,
+        "an empty candidate set must not divide by zero"
+    );
 }
 
 /// **`byte_budget` is read.** The candidate set is checked against the ceiling
@@ -310,7 +325,11 @@ async fn a_capped_probe_reports_a_lower_bound() {
         .await
         .unwrap();
 
-    assert!(plan.candidates.is_capped(), "the cap was not reported: {:?}", plan.candidates);
+    assert!(
+        plan.candidates.is_capped(),
+        "the cap was not reported: {:?}",
+        plan.candidates
+    );
     assert_eq!(plan.candidates.lower_bound(), 10);
     assert_eq!(results.len(), 3, "a capped probe must still answer");
     db.close().await.unwrap();
@@ -346,13 +365,17 @@ async fn the_chunked_exact_scan_returns_a_global_top_k() {
 
     let expected: Vec<String> = (1..=5).map(|n| node_id(corpus - n)).collect();
     assert_eq!(
-        ids(&got), expected,
+        ids(&got),
+        expected,
         "the global nearest five were not returned — the per-statement LIMIT \
          was merged without re-sorting"
     );
     // Scores ascend: the merge sorted, rather than trusting per-chunk order.
     for w in got.windows(2) {
-        assert!(w[0].score <= w[1].score, "results are not ordered by distance");
+        assert!(
+            w[0].score <= w[1].score,
+            "results are not ordered by distance"
+        );
     }
     db.close().await.unwrap();
 }
@@ -364,7 +387,11 @@ async fn an_unreachable_filter_returns_nothing_rather_than_everything() {
     let harness = TestHarness::new();
     let db = fixture(&harness, &[]).await;
 
-    let got = search(query()).top_k(5).execute(db.read_conn(), TS).await.unwrap();
+    let got = search(query())
+        .top_k(5)
+        .execute(db.read_conn(), TS)
+        .await
+        .unwrap();
     assert!(got.is_empty(), "a filter matching nothing returned {got:?}");
     db.close().await.unwrap();
 }

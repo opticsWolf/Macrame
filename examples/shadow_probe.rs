@@ -132,7 +132,11 @@ async fn main() {
         "CREATE INDEX idx_lc_open_interval ON links_current \
          (source_id, target_id, edge_type, valid_to, valid_from)",
     ] {
-        report(&stmt.chars().take(52).collect::<String>(), conn.execute(stmt, ()).await).await;
+        report(
+            &stmt.chars().take(52).collect::<String>(),
+            conn.execute(stmt, ()).await,
+        )
+        .await;
     }
 
     // The triggers come back from the crate's own DDL, so the recreated bodies
@@ -186,8 +190,10 @@ async fn main() {
         .unwrap()
         .get(0)
         .unwrap();
-    println!("  after one assert_edge: {n2} rows (trigger is {})",
-        if n2 == n + 1 { "live" } else { "DEAD" });
+    println!(
+        "  after one assert_edge: {n2} rows (trigger is {})",
+        if n2 == n + 1 { "live" } else { "DEAD" }
+    );
 
     println!(
         "  audit_current drift: {}",

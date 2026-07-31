@@ -57,8 +57,18 @@ fn every_edge_endpoint_is_a_seeded_concept() {
         let ids: HashSet<String> = (0..NODES).map(node_id).collect();
         for e in shape.edges(NODES) {
             assert_ne!(e.source, e.target, "{}: self-loop", shape.name());
-            assert!(ids.contains(&e.source), "{}: dangling {}", shape.name(), e.source);
-            assert!(ids.contains(&e.target), "{}: dangling {}", shape.name(), e.target);
+            assert!(
+                ids.contains(&e.source),
+                "{}: dangling {}",
+                shape.name(),
+                e.source
+            );
+            assert!(
+                ids.contains(&e.target),
+                "{}: dangling {}",
+                shape.name(),
+                e.target
+            );
         }
     }
 }
@@ -329,9 +339,7 @@ fn the_register_names_no_fixture_the_matrix_lacks() {
     for token in REGISTER.split('`').skip(1).step_by(2) {
         let looks_like_a_fixture = token.contains('_')
             && token.len() > 4
-            && token
-                .chars()
-                .all(|c| c.is_ascii_lowercase() || c == '_')
+            && token.chars().all(|c| c.is_ascii_lowercase() || c == '_')
             && token.starts_with(|c: char| c.is_ascii_lowercase());
         if !looks_like_a_fixture {
             continue;

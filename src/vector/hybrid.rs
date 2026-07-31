@@ -99,7 +99,9 @@ pub async fn keyword_search(
                 ORDER BY rank ASC, c.id ASC
                 LIMIT ?2";
 
-    let mut rows = conn.query(sql, libsql::params![query, top_k as i64]).await?;
+    let mut rows = conn
+        .query(sql, libsql::params![query, top_k as i64])
+        .await?;
     let mut out = Vec::new();
     while let Some(row) = rows.next().await? {
         out.push((row.get(0)?, row.get::<f64>(1)?));
@@ -202,9 +204,7 @@ impl HybridSearch {
 
         let fused = reciprocal_rank_fusion(&vector_ids, &keyword_ids, self.rrf_k);
 
-        let rank_of = |list: &[String], id: &str| {
-            list.iter().position(|x| x == id).map(|i| i + 1)
-        };
+        let rank_of = |list: &[String], id: &str| list.iter().position(|x| x == id).map(|i| i + 1);
 
         Ok(fused
             .into_iter()
@@ -225,7 +225,10 @@ mod tests {
 
     #[test]
     fn escaping_turns_a_search_box_into_terms() {
-        assert_eq!(escape_fts5_query("bitemporal ledger"), r#""bitemporal" "ledger""#);
+        assert_eq!(
+            escape_fts5_query("bitemporal ledger"),
+            r#""bitemporal" "ledger""#
+        );
         // The operators that would otherwise change the meaning of the query.
         assert_eq!(escape_fts5_query("cats NOT dogs"), r#""cats" "NOT" "dogs""#);
         // The syntax errors: an unbalanced quote, a trailing operator, a column

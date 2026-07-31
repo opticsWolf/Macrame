@@ -101,12 +101,9 @@ async fn refuses_a_database_from_a_newer_build() {
     let harness = TestHarness::new();
     let conn = connect(&harness).await;
     migrations::run(&conn).await.unwrap();
-    conn.execute(
-        &format!("PRAGMA user_version = {}", SCHEMA_VERSION + 7),
-        (),
-    )
-    .await
-    .unwrap();
+    conn.execute(&format!("PRAGMA user_version = {}", SCHEMA_VERSION + 7), ())
+        .await
+        .unwrap();
 
     let reason = refusal_reason(migrations::run(&conn).await.unwrap_err());
     assert!(
@@ -282,9 +279,12 @@ async fn a_v2_database_climbs_to_v3_and_gains_the_annotations_table() {
         .unwrap();
     assert_eq!(version, SCHEMA_VERSION);
 
-    conn.query("SELECT concept_id, label, value, computed_at FROM analytics_annotations", ())
-        .await
-        .expect("the rung must create analytics_annotations");
+    conn.query(
+        "SELECT concept_id, label, value, computed_at FROM analytics_annotations",
+        (),
+    )
+    .await
+    .expect("the rung must create analytics_annotations");
 }
 
 /// The v5 → v6 rung reaches v6 from a database that stopped at v5, and the
@@ -742,7 +742,10 @@ async fn the_traversal_walks_inside_the_index_with_and_without_an_edge_type_filt
     };
 
     for (label, sql) in [
-        ("unfiltered", TraversalBuilder::new("A").max_depth(3).build_sql()),
+        (
+            "unfiltered",
+            TraversalBuilder::new("A").max_depth(3).build_sql(),
+        ),
         (
             "edge-type filtered",
             TraversalBuilder::new("A")
@@ -793,7 +796,6 @@ async fn the_subsumed_source_index_is_gone() {
         .unwrap();
     assert_eq!(n, 0, "idx_lc_src_active is subsumed and must not survive");
 }
-
 
 /// The **shipped** traversal CTE keeps D-042's covering index, filtered or not.
 ///

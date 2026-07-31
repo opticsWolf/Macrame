@@ -39,7 +39,11 @@ async fn seeded(harness: &TestHarness) -> (libsql::Database, libsql::Connection)
     for (etype, vt, ra) in [
         ("A", SENTINEL, TS),
         ("B", "2026-03-01T00:00:00.000000Z", TS),
-        ("B", "2026-04-01T00:00:00.000000Z", "2026-02-01T00:00:00.000000Z"),
+        (
+            "B",
+            "2026-04-01T00:00:00.000000Z",
+            "2026-02-01T00:00:00.000000Z",
+        ),
     ] {
         conn.execute(
             "INSERT INTO links (source_id, target_id, edge_type, valid_from, valid_to, \
@@ -63,7 +67,12 @@ async fn shape(conn: &libsql::Connection, table: &str) -> Vec<(String, String, i
         .unwrap();
     let mut out = Vec::new();
     while let Some(r) = rows.next().await.unwrap() {
-        out.push((r.get(1).unwrap(), r.get(2).unwrap(), r.get(3).unwrap(), r.get(5).unwrap()));
+        out.push((
+            r.get(1).unwrap(),
+            r.get(2).unwrap(),
+            r.get(3).unwrap(),
+            r.get(5).unwrap(),
+        ));
     }
     out
 }
@@ -163,8 +172,18 @@ async fn an_added_temporal_column_can_still_carry_its_canonical_check() {
     .expect("ADD COLUMN must accept a column-level CHECK");
 
     let triggers: i64 = conn
-        .query("SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger'", ())
-        .await.unwrap().next().await.unwrap().unwrap().get(0).unwrap();
+        .query(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger'",
+            (),
+        )
+        .await
+        .unwrap()
+        .next()
+        .await
+        .unwrap()
+        .unwrap()
+        .get(0)
+        .unwrap();
     assert_eq!(
         triggers as usize,
         ddl::CREATE_TRIGGERS.len(),
@@ -220,12 +239,17 @@ async fn dropping_and_rebuilding_the_materialization_loses_nothing() {
     };
 
     let before = capture(&conn).await;
-    assert!(!before.is_empty(), "the fixture must have something to lose");
+    assert!(
+        !before.is_empty(),
+        "the fixture must have something to lose"
+    );
     assert_eq!(audit_current(&conn).await.unwrap(), 0);
 
     // A migration's-eye view: the derivative table ceases to exist.
     conn.execute("DROP TABLE links_current", ()).await.unwrap();
-    conn.execute(ddl::CREATE_LINKS_CURRENT_TABLE, ()).await.unwrap();
+    conn.execute(ddl::CREATE_LINKS_CURRENT_TABLE, ())
+        .await
+        .unwrap();
     assert!(capture(&conn).await.is_empty());
 
     let report = rebuild_current(&conn).await.unwrap();

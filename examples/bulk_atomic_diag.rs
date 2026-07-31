@@ -116,9 +116,8 @@ async fn main() {
             for _ in 0..3 {
                 best = best.min(hold_ms(shape, n).await);
             }
-            let predicted = macrame::connection::estimated_bulk_hold(&batch(shape, n))
-                .as_secs_f64()
-                * 1000.0;
+            let predicted =
+                macrame::connection::estimated_bulk_hold(&batch(shape, n)).as_secs_f64() * 1000.0;
             println!(
                 "{:>8} {:>10} {:>11.1} {:>11.1} {:>11.1} {:>10.2}x",
                 n,

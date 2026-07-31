@@ -220,7 +220,7 @@ fn assert_strategy() -> impl Strategy<Value = Assert> {
         0..NODES.len(),
         0..NODES.len(),
         0..TYPES.len(),
-        0..3usize,             // valid_from  ∈ TS[0..3]
+        0..3usize,                   // valid_from  ∈ TS[0..3]
         prop::option::of(2..5usize), // valid_to ∈ TS[2..5] or open
         0..WEIGHTS.len(),
         0..TS.len(),

@@ -27,12 +27,12 @@
 mod harness;
 
 use harness::TestHarness;
-use macrame::graph::{dijkstra, k_core, louvain, scc};
 use macrame::graph::AttributeMode;
+use macrame::graph::EdgeAssertion;
+use macrame::graph::{dijkstra, k_core, louvain, scc};
 use macrame::schema::migrations;
 use macrame::temporal::hydrate_attributes;
 use macrame::{ConceptUpsert, Database};
-use macrame::graph::EdgeAssertion;
 
 const T0: &str = "2026-01-01T00:00:00.000000Z";
 const T1: &str = "2026-02-01T00:00:00.000000Z";
@@ -67,10 +67,7 @@ async fn embedding_model_survives_every_temporal_read() {
 
     let live: Option<String> = db
         .read_conn()
-        .query(
-            "SELECT embedding_model FROM concepts WHERE id = 'c1'",
-            (),
-        )
+        .query("SELECT embedding_model FROM concepts WHERE id = 'c1'", ())
         .await
         .unwrap()
         .next()
@@ -135,7 +132,10 @@ async fn a_v1_concept_payload_still_folds() {
     let state = macrame::temporal::reconstruct(&conn, NOW, None, None)
         .await
         .unwrap();
-    let c = state.concepts.get("old").expect("v1 payload must still fold");
+    let c = state
+        .concepts
+        .get("old")
+        .expect("v1 payload must still fold");
     assert_eq!(c.title, "Old");
     assert_eq!(c.embedding_model, None, "absent, not an error");
 }
@@ -322,7 +322,10 @@ async fn all_three_readers_agree_a_retired_concept_is_not_visible() {
     let current = hydrate_attributes(db.read_conn(), &ids, NOW, AttributeMode::Current)
         .await
         .unwrap();
-    assert!(current.is_empty(), "Current: retired concept is not visible");
+    assert!(
+        current.is_empty(),
+        "Current: retired concept is not visible"
+    );
 
     let at_time = hydrate_attributes(db.read_conn(), &ids, NOW, AttributeMode::AtTime)
         .await
@@ -393,7 +396,9 @@ async fn at_time_before_the_retirement_still_sees_the_concept() {
 // ---------------------------------------------------------------------------
 
 /// Build the exact graph the review reproduced on: three nodes, one retired.
-async fn graph_with_a_retired_neighbour(harness: &TestHarness) -> (Database, macrame::graph::Subgraph) {
+async fn graph_with_a_retired_neighbour(
+    harness: &TestHarness,
+) -> (Database, macrame::graph::Subgraph) {
     let db = Database::open(&harness.db_path).await.unwrap();
 
     for id in ["a", "b", "c"] {
@@ -401,12 +406,22 @@ async fn graph_with_a_retired_neighbour(harness: &TestHarness) -> (Database, mac
             .await
             .unwrap();
     }
-    db.assert_edge(EdgeAssertion::new("a", "b", "KNOWS").valid_from(T0).valid_to(OPEN).weight(1.0))
-        .await
-        .unwrap();
-    db.assert_edge(EdgeAssertion::new("a", "c", "KNOWS").valid_from(T0).valid_to(OPEN).weight(1.0))
-        .await
-        .unwrap();
+    db.assert_edge(
+        EdgeAssertion::new("a", "b", "KNOWS")
+            .valid_from(T0)
+            .valid_to(OPEN)
+            .weight(1.0),
+    )
+    .await
+    .unwrap();
+    db.assert_edge(
+        EdgeAssertion::new("a", "c", "KNOWS")
+            .valid_from(T0)
+            .valid_to(OPEN)
+            .weight(1.0),
+    )
+    .await
+    .unwrap();
 
     // `c` retires. links_current still carries a -> c: retirement is the
     // application axis and does not touch the topology table.
@@ -486,9 +501,14 @@ async fn retiring_the_start_node_yields_an_empty_graph() {
             .await
             .unwrap();
     }
-    db.assert_edge(EdgeAssertion::new("a", "b", "KNOWS").valid_from(T0).valid_to(OPEN).weight(1.0))
-        .await
-        .unwrap();
+    db.assert_edge(
+        EdgeAssertion::new("a", "b", "KNOWS")
+            .valid_from(T0)
+            .valid_to(OPEN)
+            .weight(1.0),
+    )
+    .await
+    .unwrap();
     db.upsert_concept(ConceptUpsert::new("a", "a").valid_from(T0).retired(true))
         .await
         .unwrap();
@@ -618,9 +638,14 @@ async fn deleting_a_link_outside_an_archive_session_is_a_typed_violation() {
             .await
             .unwrap();
     }
-    db.assert_edge(EdgeAssertion::new("a", "b", "KNOWS").valid_from(T0).valid_to(OPEN).weight(1.0))
-        .await
-        .unwrap();
+    db.assert_edge(
+        EdgeAssertion::new("a", "b", "KNOWS")
+            .valid_from(T0)
+            .valid_to(OPEN)
+            .weight(1.0),
+    )
+    .await
+    .unwrap();
 
     // The guard is on `links` and fires whenever the archive-session marker is
     // absent, which is every moment outside `archive()`.
@@ -874,7 +899,10 @@ fn the_overlap_arithmetic_has_a_production_caller() {
     let c = Interval::new("2026-06-01T00:00:00.000000Z", "2026-09-01T00:00:00.000000Z");
 
     assert!(a.overlaps(&b));
-    assert!(!a.overlaps(&c), "half-open intervals that abut do not overlap");
+    assert!(
+        !a.overlaps(&c),
+        "half-open intervals that abut do not overlap"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -973,7 +1001,9 @@ async fn an_injected_clock_is_floored_against_an_existing_database() {
     let harness = TestHarness::new();
 
     // First session: ordinary wall-clock stamps, well ahead of the epoch.
-    let db = Database::open_with_cadence(&harness.db_path, None).await.unwrap();
+    let db = Database::open_with_cadence(&harness.db_path, None)
+        .await
+        .unwrap();
     db.upsert_concept(ConceptUpsert::new("c1", "Existing").valid_from(T0))
         .await
         .unwrap();
@@ -1066,7 +1096,11 @@ async fn load_subgraph_with_filters_the_returned_edges_not_only_the_walk() {
         .iter()
         .map(|e| e.edge_type.as_str())
         .collect();
-    assert_eq!(types, ["CITES", "CITES"], "only the asked-for type: {types:?}");
+    assert_eq!(
+        types,
+        ["CITES", "CITES"],
+        "only the asked-for type: {types:?}"
+    );
     assert!(graph.is_closed());
     assert!(
         !graph.nodes.contains_key("c") && !graph.nodes.contains_key("d"),
@@ -1175,7 +1209,11 @@ async fn the_unfiltered_loader_still_returns_everything() {
     mixed_graph(&db).await;
 
     let graph = db.load_subgraph("hub", 3, NOW, 1 << 20).await.unwrap();
-    assert_eq!(graph.edge_count(), 4, "all four edges, both types, both weights");
+    assert_eq!(
+        graph.edge_count(),
+        4,
+        "all four edges, both types, both weights"
+    );
     assert_eq!(graph.nodes.len(), 5);
 
     db.close().await.unwrap();
@@ -1242,10 +1280,17 @@ async fn vacuum_does_not_disturb_the_fts_index() {
 
     let before = rowids(&db).await;
     assert!(
-        before.iter().enumerate().all(|(i, (r, _))| *r == i as i64 + 1),
+        before
+            .iter()
+            .enumerate()
+            .all(|(i, (r, _))| *r == i as i64 + 1),
         "rowids must be dense for the argument to hold: {before:?}"
     );
-    assert_eq!(hits(&db).await, 20, "every concept is indexed to begin with");
+    assert_eq!(
+        hits(&db).await,
+        20,
+        "every concept is indexed to begin with"
+    );
 
     // Through `raw()`: VACUUM is an operator action, not something the API does.
     db.raw()
@@ -1324,7 +1369,11 @@ async fn an_emptied_fts_index_still_passes_integrity_check() {
     .await
     .unwrap();
 
-    assert_eq!(hits(&db).await, 0, "the index is now empty — genuinely stale");
+    assert_eq!(
+        hits(&db).await,
+        0,
+        "the index is now empty — genuinely stale"
+    );
 
     let checked = raw
         .execute(macrame::schema::ddl::VERIFY_CONCEPTS_FTS, ())
@@ -1378,7 +1427,10 @@ async fn a_delete_row_in_the_log_is_refused_as_corruption() {
 
     match err {
         macrame::DbError::ReplayCorrupt { seq, reason } => {
-            assert!(seq > 0, "the error must name the offending row, got seq {seq}");
+            assert!(
+                seq > 0,
+                "the error must name the offending row, got seq {seq}"
+            );
             assert!(
                 reason.contains("Doctrine V"),
                 "the refusal should say which rule it enforces: {reason}"
@@ -1434,9 +1486,13 @@ async fn retirement_still_removes_a_concept_from_a_composed_fold() {
     db.upsert_concept(ConceptUpsert::new("gone", "Gone").valid_from(T0))
         .await
         .unwrap();
-    db.upsert_concept(ConceptUpsert::new("gone", "Gone").valid_from(T0).retired(true))
-        .await
-        .unwrap();
+    db.upsert_concept(
+        ConceptUpsert::new("gone", "Gone")
+            .valid_from(T0)
+            .retired(true),
+    )
+    .await
+    .unwrap();
 
     let state = db.reconstruct(NOW).await.unwrap();
     assert!(state.concepts.contains_key("keep"));
@@ -1511,7 +1567,9 @@ async fn an_upgraded_database_is_re_anchored_at_open() {
     db.close().await.unwrap();
 
     let count = |dir: &std::path::Path| {
-        std::fs::read_dir(dir).map(|d| d.flatten().count()).unwrap_or(0)
+        std::fs::read_dir(dir)
+            .map(|d| d.flatten().count())
+            .unwrap_or(0)
     };
     assert!(count(&snaps_dir) > 0, "close() must leave an anchor");
 
@@ -1600,12 +1658,22 @@ async fn a_legal_archive_is_unaffected_by_the_classified_deletes() {
             .unwrap();
     }
     // A closed interval, superseded, and therefore archivable.
-    db.assert_edge(EdgeAssertion::new("a", "b", "KNOWS").valid_from(T0).valid_to(T1).weight(1.0))
-        .await
-        .unwrap();
-    db.assert_edge(EdgeAssertion::new("a", "b", "KNOWS").valid_from(T1).valid_to(OPEN).weight(2.0))
-        .await
-        .unwrap();
+    db.assert_edge(
+        EdgeAssertion::new("a", "b", "KNOWS")
+            .valid_from(T0)
+            .valid_to(T1)
+            .weight(1.0),
+    )
+    .await
+    .unwrap();
+    db.assert_edge(
+        EdgeAssertion::new("a", "b", "KNOWS")
+            .valid_from(T1)
+            .valid_to(OPEN)
+            .weight(2.0),
+    )
+    .await
+    .unwrap();
 
     // The cutoff must be after `recorded_at`, which `SystemClock` sets to now —
     // LINKS_ARCHIVABLE requires `recorded_at < :cutoff` as well as a closed valid

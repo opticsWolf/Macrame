@@ -80,7 +80,10 @@ fn control_conn() -> &'static (tokio::runtime::Runtime, libsql::Connection) {
     CONTROL.get_or_init(|| {
         let rt = runtime();
         let conn = rt.block_on(async {
-            let db = libsql::Builder::new_local(":memory:").build().await.unwrap();
+            let db = libsql::Builder::new_local(":memory:")
+                .build()
+                .await
+                .unwrap();
             db.connect().unwrap()
         });
         (rt, conn)
@@ -210,14 +213,13 @@ fn write_path(c: &mut Criterion) {
                 // Distinct interval per iteration: re-asserting the same open
                 // interval is what trg_links_single_open exists to refuse, and
                 // benchmarking a rejection measures the guard, not the write.
-                db
-                    .assert_edge(
-                        EdgeAssertion::new("c0000000", "c0000001", format!("B{i}"))
-                            .valid_from(TS)
-                            .valid_to(OPEN),
-                    )
-                    .await
-                    .unwrap()
+                db.assert_edge(
+                    EdgeAssertion::new("c0000000", "c0000001", format!("B{i}"))
+                        .valid_from(TS)
+                        .valid_to(OPEN),
+                )
+                .await
+                .unwrap()
             }
         })
     });
@@ -228,12 +230,11 @@ fn write_path(c: &mut Criterion) {
             let i = ucount.get();
             ucount.set(i + 1);
             async move {
-                db
-                    .upsert_concept(
-                        ConceptUpsert::new("c0000000", format!("Rename {i}")).valid_from(TS),
-                    )
-                    .await
-                    .unwrap()
+                db.upsert_concept(
+                    ConceptUpsert::new("c0000000", format!("Rename {i}")).valid_from(TS),
+                )
+                .await
+                .unwrap()
             }
         })
     });
@@ -305,10 +306,7 @@ fn write_path(c: &mut Criterion) {
                     // A second connection: the actor owns the write one. Dropping
                     // the triggers is legal — the delete guards protect rows, not
                     // schema — and this database is thrown away immediately.
-                    let raw = libsql::Builder::new_local(&fx.path)
-                        .build()
-                        .await
-                        .unwrap();
+                    let raw = libsql::Builder::new_local(&fx.path).build().await.unwrap();
                     let conn = raw.connect().unwrap();
                     for t in ["trg_links_log_insert", "trg_links_current_sync"] {
                         conn.execute(&format!("DROP TRIGGER IF EXISTS {t}"), ())
@@ -445,7 +443,8 @@ fn chunk_budget(c: &mut Criterion) {
                             value: format!("{}", i % 7),
                         })
                         .collect();
-                    rt.block_on(fx.db.write_analytics_annotations(rows)).unwrap()
+                    rt.block_on(fx.db.write_analytics_annotations(rows))
+                        .unwrap()
                 },
                 BatchSize::PerIteration,
             )
@@ -578,7 +577,8 @@ fn chunk_scaling(c: &mut Criterion) {
                             value: format!("{}", i % 7),
                         })
                         .collect();
-                    rt.block_on(fx.db.write_analytics_annotations(rows)).unwrap()
+                    rt.block_on(fx.db.write_analytics_annotations(rows))
+                        .unwrap()
                 },
                 BatchSize::PerIteration,
             )
@@ -687,7 +687,8 @@ fn bulk_chunks(c: &mut Criterion) {
                         value: format!("{}", i % 7),
                     })
                     .collect();
-                rt.block_on(fx.db.write_analytics_annotations(rows)).unwrap()
+                rt.block_on(fx.db.write_analytics_annotations(rows))
+                    .unwrap()
             },
             BatchSize::PerIteration,
         )
@@ -792,7 +793,9 @@ fn replay(c: &mut Criterion) {
         // An anchor taken most of the way through, so the composed path folds a
         // small delta and the difference between the two rows is the whole log.
         let snaps = fx.path.parent().unwrap().join("bench_snaps");
-        let base = reconstruct(fx.db.read_conn(), &now, None, None).await.unwrap();
+        let base = reconstruct(fx.db.read_conn(), &now, None, None)
+            .await
+            .unwrap();
         save_snapshot(&snaps, &base).unwrap();
         for i in n..n + 50 {
             fx.db.upsert_concept(concept(i)).await.unwrap();
@@ -816,8 +819,11 @@ fn replay(c: &mut Criterion) {
     group.sample_size(20);
 
     group.bench_function("reconstruct_full_fold (§9 ≤ 100 ms @ 10K)", |b| {
-        b.to_async(&rt)
-            .iter(|| async { reconstruct(fx.db.read_conn(), &now, None, None).await.unwrap() })
+        b.to_async(&rt).iter(|| async {
+            reconstruct(fx.db.read_conn(), &now, None, None)
+                .await
+                .unwrap()
+        })
     });
 
     group.bench_function("reconstruct_composed (§9 ≤ 200 ms @ 1M)", |b| {
@@ -945,7 +951,9 @@ fn snapshot(c: &mut Criterion) {
             .unwrap()
             .get(0)
             .unwrap();
-        let state = reconstruct(fx.db.read_conn(), &now, None, None).await.unwrap();
+        let state = reconstruct(fx.db.read_conn(), &now, None, None)
+            .await
+            .unwrap();
         (fx, state)
     });
 
@@ -996,7 +1004,12 @@ fn graph_analytics(c: &mut Criterion) {
     // Large enough not to refuse the fixture; the budget is not what is being
     // measured here.
     let budget = 64 << 20;
-    let graph = rt.block_on(async { fx.db.load_subgraph("c0000000", 3, TS, budget).await.unwrap() });
+    let graph = rt.block_on(async {
+        fx.db
+            .load_subgraph("c0000000", 3, TS, budget)
+            .await
+            .unwrap()
+    });
     eprintln!(
         "graph fixture: {} nodes, {} edges",
         graph.nodes.len(),
@@ -1008,8 +1021,12 @@ fn graph_analytics(c: &mut Criterion) {
 
     // The load, which is where §8.6 expects the time to be.
     group.bench_function("load_subgraph_3hop", |b| {
-        b.to_async(&rt)
-            .iter(|| async { fx.db.load_subgraph("c0000000", 3, TS, budget).await.unwrap() })
+        b.to_async(&rt).iter(|| async {
+            fx.db
+                .load_subgraph("c0000000", 3, TS, budget)
+                .await
+                .unwrap()
+        })
     });
 
     // The five algorithms, over an already-loaded graph. Synchronous and pure,
@@ -1107,11 +1124,13 @@ fn overlap_guard(c: &mut Criterion) {
                         // A closed interval on a fresh edge type: the guard
                         // runs, finds nothing, and the insert proceeds. That is
                         // the common case and the one on the latency path.
-                        rt.block_on(fx.db.assert_edge(
-                            EdgeAssertion::new("c0000000", "c0000001", "PROBED")
-                                .valid_from(TS)
-                                .valid_to("2027-01-01T00:00:00.000000Z"),
-                        ))
+                        rt.block_on(
+                            fx.db.assert_edge(
+                                EdgeAssertion::new("c0000000", "c0000001", "PROBED")
+                                    .valid_from(TS)
+                                    .valid_to("2027-01-01T00:00:00.000000Z"),
+                            ),
+                        )
                         .unwrap()
                     },
                     BatchSize::PerIteration,
@@ -1286,13 +1305,9 @@ fn chunk_index_cost(c: &mut Criterion) {
                             // expensive when it happens.
                             let batch: Vec<EdgeAssertion> = (1..=hub)
                                 .map(|i| {
-                                    EdgeAssertion::new(
-                                        "c0000000",
-                                        format!("c{i:07}"),
-                                        "LINKS",
-                                    )
-                                    .valid_from(TS)
-                                    .valid_to(OPEN)
+                                    EdgeAssertion::new("c0000000", format!("c{i:07}"), "LINKS")
+                                        .valid_from(TS)
+                                        .valid_to(OPEN)
                                 })
                                 .collect();
                             for chunk in batch.chunks(2_000) {
@@ -1319,13 +1334,9 @@ fn chunk_index_cost(c: &mut Criterion) {
                     let base = hub + 1;
                     let edges: Vec<EdgeAssertion> = (0..chunk_rows::EDGES)
                         .map(|k| {
-                            EdgeAssertion::new(
-                                "c0000000",
-                                format!("c{:07}", base + k),
-                                "CHUNK",
-                            )
-                            .valid_from(TS)
-                            .valid_to(OPEN)
+                            EdgeAssertion::new("c0000000", format!("c{:07}", base + k), "CHUNK")
+                                .valid_from(TS)
+                                .valid_to(OPEN)
                         })
                         .collect();
                     rt.block_on(fx.db.write_bulk_atomic(edges)).unwrap()

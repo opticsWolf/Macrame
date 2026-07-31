@@ -332,11 +332,11 @@ impl FilteredVectorSearch {
         }
 
         let results = match estimate.strategy {
-            VectorFilterStrategy::PreFilterCTE => {
-                self.run_pre_filter(conn, &candidates).await?
-            }
+            VectorFilterStrategy::PreFilterCTE => self.run_pre_filter(conn, &candidates).await?,
             VectorFilterStrategy::PostFilter => {
-                let (rows, saturated) = self.run_post_filter(conn, &candidates, estimate.k_prime).await?;
+                let (rows, saturated) = self
+                    .run_post_filter(conn, &candidates, estimate.k_prime)
+                    .await?;
                 // Short *and* saturated means the index scan ran out before the
                 // filter did, so the missing rows may exist and may be nearer
                 // than what came back. Escalate rather than under-return.

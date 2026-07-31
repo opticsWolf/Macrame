@@ -156,13 +156,25 @@ async fn open_db(harness: &TestHarness) -> Database {
 /// working — the properties are about the state that results either way.
 async fn step(db: &Database, op: Op) {
     match op {
-        Op::Assert { src, tgt, etype, valid_from, valid_to } => {
-            let mut e = EdgeAssertion::new(NODES[src], NODES[tgt], TYPES[etype])
-                .valid_from(TS[valid_from]);
+        Op::Assert {
+            src,
+            tgt,
+            etype,
+            valid_from,
+            valid_to,
+        } => {
+            let mut e =
+                EdgeAssertion::new(NODES[src], NODES[tgt], TYPES[etype]).valid_from(TS[valid_from]);
             e = e.valid_to(valid_to.map_or(SENTINEL, |i| TS[i]));
             let _ = db.assert_edge(e).await;
         }
-        Op::Retire { src, tgt, etype, valid_from, valid_to } => {
+        Op::Retire {
+            src,
+            tgt,
+            etype,
+            valid_from,
+            valid_to,
+        } => {
             let _ = db
                 .retire_edge(
                     NODES[src],
@@ -182,11 +194,18 @@ async fn step(db: &Database, op: Op) {
         Op::RetireConcept { id } => {
             let _ = db
                 .upsert_concept(
-                    ConceptUpsert::new(NODES[id], "N").valid_from(TS[0]).retired(true),
+                    ConceptUpsert::new(NODES[id], "N")
+                        .valid_from(TS[0])
+                        .retired(true),
                 )
                 .await;
         }
-        Op::Bulk { src, tgt, etype, valid_from } => {
+        Op::Bulk {
+            src,
+            tgt,
+            etype,
+            valid_from,
+        } => {
             let _ = db
                 .write_bulk_atomic(vec![EdgeAssertion::new(
                     NODES[src],

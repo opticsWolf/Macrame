@@ -409,10 +409,7 @@ async fn a_nan_weight_is_refused_by_the_storage_layer_not_the_loader() {
     );
 
     // Nothing landed.
-    let mut rows = raw
-        .query("SELECT COUNT(*) FROM links", ())
-        .await
-        .unwrap();
+    let mut rows = raw.query("SELECT COUNT(*) FROM links", ()).await.unwrap();
     let n: i64 = rows.next().await.unwrap().unwrap().get(0).unwrap();
     assert_eq!(n, 0, "a NaN weight reached links");
 

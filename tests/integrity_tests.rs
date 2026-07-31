@@ -84,7 +84,10 @@ async fn test_trg_links_current_sync() {
 
     // Verify transaction_log entry
     let log_count: i64 = conn
-        .query("SELECT COUNT(*) FROM transaction_log WHERE table_name = 'links'", ())
+        .query(
+            "SELECT COUNT(*) FROM transaction_log WHERE table_name = 'links'",
+            (),
+        )
         .await
         .unwrap()
         .next()
@@ -132,7 +135,10 @@ async fn test_trg_links_single_open_violation() {
 
     assert!(res.is_err());
     let err_str = res.err().unwrap().to_string();
-    assert!(err_str.contains("open interval"), "Expected single open interval error, got: {err_str}");
+    assert!(
+        err_str.contains("open interval"),
+        "Expected single open interval error, got: {err_str}"
+    );
 }
 
 #[tokio::test]
@@ -158,7 +164,10 @@ async fn test_trg_concepts_monotonic_ra_violation() {
 
     assert!(res.is_err());
     let err_str = res.err().unwrap().to_string();
-    assert!(err_str.contains("strictly increasing"), "Expected monotonic recorded_at error, got: {err_str}");
+    assert!(
+        err_str.contains("strictly increasing"),
+        "Expected monotonic recorded_at error, got: {err_str}"
+    );
 }
 
 #[tokio::test]
@@ -177,7 +186,9 @@ async fn test_delete_guard_triggers() {
     ).await.unwrap();
 
     // Concepts are never physically archived (D-022): the guard is unconditional.
-    let res = conn.execute("DELETE FROM concepts WHERE id = 'c1'", ()).await;
+    let res = conn
+        .execute("DELETE FROM concepts WHERE id = 'c1'", ())
+        .await;
     assert!(res.is_err());
     let err_str = res.err().unwrap().to_string();
     assert!(
@@ -245,23 +256,40 @@ async fn test_archive_session_marker_lifecycle() {
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .await
         .unwrap();
-    tx.execute("CREATE TABLE macrame_archive_session (x)", ()).await.unwrap();
+    tx.execute("CREATE TABLE macrame_archive_session (x)", ())
+        .await
+        .unwrap();
 
     // Permitted inside the session.
     tx.execute("DELETE FROM links", ()).await.unwrap();
 
     // Invisible to a second connection while uncommitted.
-    let db2 = libsql::Builder::new_local(&harness.db_path).build().await.unwrap();
+    let db2 = libsql::Builder::new_local(&harness.db_path)
+        .build()
+        .await
+        .unwrap();
     let conn2 = db2.connect().unwrap();
     let seen: i64 = conn2
         .query(
             "SELECT COUNT(*) FROM sqlite_master WHERE name = 'macrame_archive_session'",
             (),
         )
-        .await.unwrap().next().await.unwrap().unwrap().get(0).unwrap();
-    assert_eq!(seen, 0, "uncommitted marker must not be visible to other connections");
+        .await
+        .unwrap()
+        .next()
+        .await
+        .unwrap()
+        .unwrap()
+        .get(0)
+        .unwrap();
+    assert_eq!(
+        seen, 0,
+        "uncommitted marker must not be visible to other connections"
+    );
 
-    tx.execute("DROP TABLE macrame_archive_session", ()).await.unwrap();
+    tx.execute("DROP TABLE macrame_archive_session", ())
+        .await
+        .unwrap();
     tx.commit().await.unwrap();
 
     // Re-armed after commit, and the marker is not committed state.
@@ -270,7 +298,14 @@ async fn test_archive_session_marker_lifecycle() {
             "SELECT COUNT(*) FROM sqlite_master WHERE name = 'macrame_archive_session'",
             (),
         )
-        .await.unwrap().next().await.unwrap().unwrap().get(0).unwrap();
+        .await
+        .unwrap()
+        .next()
+        .await
+        .unwrap()
+        .unwrap()
+        .get(0)
+        .unwrap();
     assert_eq!(after, 0);
 
     // Re-populate: BEFORE DELETE cannot fire on an empty table.
@@ -305,7 +340,9 @@ async fn test_archive_session_marker_rollback_rearms_guard() {
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .await
         .unwrap();
-    tx.execute("CREATE TABLE macrame_archive_session (x)", ()).await.unwrap();
+    tx.execute("CREATE TABLE macrame_archive_session (x)", ())
+        .await
+        .unwrap();
     tx.rollback().await.unwrap();
 
     let after: i64 = conn
@@ -313,9 +350,19 @@ async fn test_archive_session_marker_rollback_rearms_guard() {
             "SELECT COUNT(*) FROM sqlite_master WHERE name = 'macrame_archive_session'",
             (),
         )
-        .await.unwrap().next().await.unwrap().unwrap().get(0).unwrap();
+        .await
+        .unwrap()
+        .next()
+        .await
+        .unwrap()
+        .unwrap()
+        .get(0)
+        .unwrap();
     assert_eq!(after, 0, "rollback must discard the marker");
-    assert!(conn.execute("DELETE FROM transaction_log", ()).await.is_err());
+    assert!(conn
+        .execute("DELETE FROM transaction_log", ())
+        .await
+        .is_err());
 }
 
 #[tokio::test]
@@ -393,7 +440,10 @@ async fn test_audit_detects_drift_in_both_directions() {
             (),
         ).await.unwrap();
     }
-    for (etype, ra) in [("A", "2026-01-01T00:00:00.000000Z"), ("B", "2026-01-02T00:00:00.000000Z")] {
+    for (etype, ra) in [
+        ("A", "2026-01-01T00:00:00.000000Z"),
+        ("B", "2026-01-02T00:00:00.000000Z"),
+    ] {
         conn.execute(
             &format!("INSERT INTO links (source_id, target_id, edge_type, valid_from, valid_to, weight, properties, recorded_at) \
                       VALUES ('c1', 'c2', '{etype}', '2026-01-01T00:00:00.000000Z', '9999-12-31T23:59:59.999999Z', 1.0, '{{}}', '{ra}')"),
@@ -412,7 +462,11 @@ async fn test_audit_detects_drift_in_both_directions() {
     conn.execute("DELETE FROM links_current WHERE edge_type = 'A'", ())
         .await
         .unwrap();
-    assert_eq!(drift_count(audit_current(&conn).await), 1, "missed materialisation must be drift");
+    assert_eq!(
+        drift_count(audit_current(&conn).await),
+        1,
+        "missed materialisation must be drift"
+    );
 
     // Direction 2: links_current ALSO has a row the projection does not.
     // Both halves are now non-empty, so the count must be their sum -- catching
@@ -422,16 +476,31 @@ async fn test_audit_detects_drift_in_both_directions() {
          VALUES ('c1', 'c2', 'GHOST', '2026-01-01T00:00:00.000000Z', '9999-12-31T23:59:59.999999Z', 1.0, '{}', '2026-01-01T00:00:00.000000Z')",
         (),
     ).await.unwrap();
-    assert_eq!(drift_count(audit_current(&conn).await), 2, "both directions must be summed");
+    assert_eq!(
+        drift_count(audit_current(&conn).await),
+        2,
+        "both directions must be summed"
+    );
 
     // A stale row -- right key, wrong payload -- counts once in each direction,
     // because it is simultaneously a row the projection lacks and one it wants.
-    conn.execute("DELETE FROM links_current WHERE edge_type = 'GHOST'", ()).await.unwrap();
-    conn.execute("UPDATE links_current SET weight = 99.0 WHERE edge_type = 'B'", ()).await.unwrap();
+    conn.execute("DELETE FROM links_current WHERE edge_type = 'GHOST'", ())
+        .await
+        .unwrap();
+    conn.execute(
+        "UPDATE links_current SET weight = 99.0 WHERE edge_type = 'B'",
+        (),
+    )
+    .await
+    .unwrap();
     assert_eq!(drift_count(audit_current(&conn).await), 3);
 
     rebuild_current(&conn).await.unwrap();
-    assert_eq!(audit_current(&conn).await.unwrap(), 0, "rebuild must clear both directions");
+    assert_eq!(
+        audit_current(&conn).await.unwrap(),
+        0,
+        "rebuild must clear both directions"
+    );
 }
 
 /// §4.1: every temporal column is exactly `YYYY-MM-DDTHH:MM:SS.ffffffZ`.
@@ -452,11 +521,11 @@ async fn test_non_canonical_timestamps_are_rejected_at_write_time() {
     // The exact literal that used to be written freely, and that silently
     // mis-ordered against every microsecond-precision stamp it was compared to.
     for bad in [
-        "2026-01-01T00:00:00Z",            // second precision
-        "2026-01-01T00:00:00.000Z",        // milliseconds
-        "2026-01-01T00:00:00.000000",      // no zone
+        "2026-01-01T00:00:00Z",             // second precision
+        "2026-01-01T00:00:00.000Z",         // milliseconds
+        "2026-01-01T00:00:00.000000",       // no zone
         "2026-01-01T00:00:00.000000+01:00", // offset
-        "2026-01-01 00:00:00.000000Z",     // space separator
+        "2026-01-01 00:00:00.000000Z",      // space separator
         "not-a-timestamp",
     ] {
         let res = conn
@@ -513,7 +582,9 @@ async fn test_valid_time_predicate_matches_edge_at_same_instant() {
     ).await.unwrap();
 
     // Half-open [valid_from, valid_to): the edge is live exactly at valid_from.
-    let edges = macrame::temporal::query_as_of_edges(&conn, ts).await.unwrap();
+    let edges = macrame::temporal::query_as_of_edges(&conn, ts)
+        .await
+        .unwrap();
     assert_eq!(edges.len(), 1, "edge must be live at its own valid_from");
 }
 
@@ -579,10 +650,16 @@ async fn an_archive_leaves_no_drift_although_it_no_longer_checks_itself() {
         .unwrap();
     }
 
-    assert_eq!(audit_current(&conn).await.unwrap(), 0, "clean before archive");
+    assert_eq!(
+        audit_current(&conn).await.unwrap(),
+        0,
+        "clean before archive"
+    );
 
     let cold = harness.temp_dir.path().join("cold.db");
-    let report = macrame::temporal::archive(&conn, t2, t2, &cold).await.unwrap();
+    let report = macrame::temporal::archive(&conn, t2, t2, &cold)
+        .await
+        .unwrap();
     assert!(
         report.links_archived > 0,
         "the fixture must actually archive something, or this proves nothing"

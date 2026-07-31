@@ -53,7 +53,12 @@ async fn main() {
             .query("PRAGMA journal_mode", ())
             .await
             .unwrap();
-        rows.next().await.unwrap().unwrap().get::<String>(0).unwrap()
+        rows.next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<String>(0)
+            .unwrap()
     });
 
     // ---- 1. does a read-only open succeed against the live WAL file? ----
@@ -100,7 +105,10 @@ async fn main() {
         .map(|_| ());
     report("INSERT", ins).await;
 
-    let ddl = conn.execute("CREATE TABLE t (x INTEGER)", ()).await.map(|_| ());
+    let ddl = conn
+        .execute("CREATE TABLE t (x INTEGER)", ())
+        .await
+        .map(|_| ());
     report("CREATE TABLE", ddl).await;
 
     let tmp = conn

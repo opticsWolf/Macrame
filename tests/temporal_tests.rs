@@ -5,16 +5,16 @@ mod harness;
 /// canonical stamp does; the point is that it is not the cutoff (Wave 4.5).
 const ARCHIVED_AT: &str = "2026-07-30T12:00:00.000000Z";
 
-use std::path::Path;
 use harness::TestHarness;
 use macrame::error::DbError;
 use macrame::graph::AttributeMode;
-use macrame::schema::migrations;
 use macrame::integrity::audit_current;
+use macrame::schema::migrations;
 use macrame::temporal::{
     archive, hydrate_attributes, load_snapshot, reconstruct, save_snapshot, Interval,
     MaterializedState,
 };
+use std::path::Path;
 
 #[test]
 fn test_interval_containment_and_overlap() {
@@ -22,13 +22,15 @@ fn test_interval_containment_and_overlap() {
     assert!(open_interval.is_open());
     assert!(open_interval.contains("2026-06-01T00:00:00.000000Z"));
 
-    let closed_interval = Interval::new("2026-01-01T00:00:00.000000Z", "2026-06-01T00:00:00.000000Z");
+    let closed_interval =
+        Interval::new("2026-01-01T00:00:00.000000Z", "2026-06-01T00:00:00.000000Z");
     assert!(!closed_interval.is_open());
     assert!(closed_interval.contains("2026-03-01T00:00:00.000000Z"));
     assert!(!closed_interval.contains("2026-07-01T00:00:00.000000Z"));
 
     let overlapping = Interval::new("2026-05-01T00:00:00.000000Z", "2026-08-01T00:00:00.000000Z");
-    let non_overlapping = Interval::new("2026-07-01T00:00:00.000000Z", "2026-09-01T00:00:00.000000Z");
+    let non_overlapping =
+        Interval::new("2026-07-01T00:00:00.000000Z", "2026-09-01T00:00:00.000000Z");
 
     assert!(closed_interval.overlaps(&overlapping));
     assert!(!closed_interval.overlaps(&non_overlapping));
@@ -186,33 +188,70 @@ async fn test_archive_moves_closed_intervals_and_leaves_no_drift() {
     ).await.unwrap();
 
     let archive_path = harness.temp_dir.path().join("test_macrame_archive.db");
-    let report = archive(&conn, "2026-06-01T00:00:00.000000Z", ARCHIVED_AT, &archive_path)
-        .await
-        .expect("archive session should succeed");
+    let report = archive(
+        &conn,
+        "2026-06-01T00:00:00.000000Z",
+        ARCHIVED_AT,
+        &archive_path,
+    )
+    .await
+    .expect("archive session should succeed");
 
-    assert!(archive_path.exists(), "cold database file should be created");
-    assert_eq!(report.links_archived, 1, "only the closed interval is archivable");
+    assert!(
+        archive_path.exists(),
+        "cold database file should be created"
+    );
+    assert_eq!(
+        report.links_archived, 1,
+        "only the closed interval is archivable"
+    );
 
     let remaining: i64 = conn
         .query("SELECT COUNT(*) FROM links", ())
-        .await.unwrap().next().await.unwrap().unwrap().get(0).unwrap();
+        .await
+        .unwrap()
+        .next()
+        .await
+        .unwrap()
+        .unwrap()
+        .get(0)
+        .unwrap();
     assert_eq!(remaining, 1, "the open interval must stay hot");
 
     let live: i64 = conn
-        .query("SELECT COUNT(*) FROM links_current WHERE edge_type = 'LIVE'", ())
-        .await.unwrap().next().await.unwrap().unwrap().get(0).unwrap();
+        .query(
+            "SELECT COUNT(*) FROM links_current WHERE edge_type = 'LIVE'",
+            (),
+        )
+        .await
+        .unwrap()
+        .next()
+        .await
+        .unwrap()
+        .unwrap()
+        .get(0)
+        .unwrap();
     assert_eq!(live, 1);
 
     // Doctrine VI: the materialization still matches what remains in links.
-    assert_eq!(audit_current(&conn).await.unwrap(), 0, "archive must not induce drift");
+    assert_eq!(
+        audit_current(&conn).await.unwrap(),
+        0,
+        "archive must not induce drift"
+    );
 
     // The guards re-armed when the session committed.
     assert!(conn.execute("DELETE FROM links", ()).await.is_err());
 
     // DETACH ran, so a second session can still attach.
-    archive(&conn, "2026-06-01T00:00:00.000000Z", ARCHIVED_AT, &archive_path)
-        .await
-        .expect("second archive session should succeed (cold DB detached)");
+    archive(
+        &conn,
+        "2026-06-01T00:00:00.000000Z",
+        ARCHIVED_AT,
+        &archive_path,
+    )
+    .await
+    .expect("second archive session should succeed (cold DB detached)");
 }
 
 #[tokio::test]
@@ -235,7 +274,13 @@ async fn test_cold_db_reconstruct_missing_archive_error() {
 
     // Target a ts older than recorded_at (pre-horizon) with a missing archive file
     let missing_path = Path::new("non_existent_archive.db");
-    let res = reconstruct(&conn, "2020-01-01T00:00:00.000000Z", Some(missing_path), None).await;
+    let res = reconstruct(
+        &conn,
+        "2020-01-01T00:00:00.000000Z",
+        Some(missing_path),
+        None,
+    )
+    .await;
 
     assert!(res.is_err());
     if let Err(DbError::ReplayCorrupt { reason, .. }) = res {
@@ -272,7 +317,14 @@ const VIII_OPEN: &str = "9999-12-31T23:59:59.999999Z";
 /// Newest transaction-time stamp in the ledger, i.e. "now" in belief terms.
 async fn newest_stamp(conn: &libsql::Connection) -> String {
     conn.query("SELECT MAX(recorded_at) FROM transaction_log", ())
-        .await.unwrap().next().await.unwrap().unwrap().get(0).unwrap()
+        .await
+        .unwrap()
+        .next()
+        .await
+        .unwrap()
+        .unwrap()
+        .get(0)
+        .unwrap()
 }
 
 /// The edges a materialized state holds at valid time `t`, as a set.
@@ -310,21 +362,28 @@ async fn as_of_set(
 #[tokio::test]
 async fn a_retroactive_retirement_makes_as_of_and_reconstruct_diverge() {
     let harness = TestHarness::new();
-    let db = macrame::prelude::Database::open(&harness.db_path).await.unwrap();
+    let db = macrame::prelude::Database::open(&harness.db_path)
+        .await
+        .unwrap();
     for id in ["c1", "c2"] {
         db.upsert_concept(macrame::prelude::ConceptUpsert::new(id, "N").valid_from(VIII_JAN))
-            .await.unwrap();
+            .await
+            .unwrap();
     }
 
     db.assert_edge(
         macrame::prelude::EdgeAssertion::new("c1", "c2", "REL")
             .valid_from(VIII_JAN)
             .valid_to(VIII_OPEN),
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
     let believed_open = newest_stamp(db.read_conn()).await;
 
     // The correction: recorded now, but it changes what was true in February.
-    db.retire_edge("c1", "c2", "REL", VIII_JAN, VIII_FEB).await.unwrap();
+    db.retire_edge("c1", "c2", "REL", VIII_JAN, VIII_FEB)
+        .await
+        .unwrap();
     let believed_closed = newest_stamp(db.read_conn()).await;
     assert!(
         believed_open < believed_closed,
@@ -340,7 +399,8 @@ async fn a_retroactive_retirement_makes_as_of_and_reconstruct_diverge() {
         "current belief has the interval closed in February, so March is outside it: {live:?}"
     );
     assert_eq!(
-        then.len(), 1,
+        then.len(),
+        1,
         "belief at the first stamp had the interval open, so March is inside it: {then:?}"
     );
     assert_ne!(
@@ -366,24 +426,31 @@ async fn a_retroactive_retirement_makes_as_of_and_reconstruct_diverge() {
 #[tokio::test]
 async fn a_retroactive_assertion_is_invisible_to_the_earlier_belief() {
     let harness = TestHarness::new();
-    let db = macrame::prelude::Database::open(&harness.db_path).await.unwrap();
+    let db = macrame::prelude::Database::open(&harness.db_path)
+        .await
+        .unwrap();
     for id in ["c1", "c2"] {
         db.upsert_concept(macrame::prelude::ConceptUpsert::new(id, "N").valid_from(VIII_JAN))
-            .await.unwrap();
+            .await
+            .unwrap();
     }
 
     db.assert_edge(
         macrame::prelude::EdgeAssertion::new("c1", "c2", "EARLY")
             .valid_from(VIII_JAN)
             .valid_to(VIII_OPEN),
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
     let before_the_late_news = newest_stamp(db.read_conn()).await;
 
     db.assert_edge(
         macrame::prelude::EdgeAssertion::new("c1", "c2", "LATE")
             .valid_from(VIII_JAN)
             .valid_to(VIII_OPEN),
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
 
     let live = as_of_set(db.read_conn(), VIII_MAR).await;
     let then = at_valid_time(
@@ -392,7 +459,9 @@ async fn a_retroactive_assertion_is_invisible_to_the_earlier_belief() {
     );
 
     let types = |s: &std::collections::BTreeSet<(String, String, String, String, String)>| {
-        s.iter().map(|e| e.2.clone()).collect::<std::collections::BTreeSet<_>>()
+        s.iter()
+            .map(|e| e.2.clone())
+            .collect::<std::collections::BTreeSet<_>>()
     };
     assert!(
         types(&live).contains("LATE"),
@@ -456,7 +525,9 @@ async fn archivable_fixture(path: &Path) -> (libsql::Database, libsql::Connectio
                  VALUES ('{id}', 'N', '2026-01-01T00:00:00.000000Z', '2026-01-01T00:00:00.000000Z')"
             ),
             (),
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
     }
     for (etype, valid_to) in [
         ("OLD", "2026-02-01T00:00:00.000000Z"),
@@ -470,7 +541,9 @@ async fn archivable_fixture(path: &Path) -> (libsql::Database, libsql::Connectio
                   1.0, '{{}}', '2026-01-01T00:00:00.000000Z')"
             ),
             (),
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
     }
     (db, conn)
 }
@@ -512,7 +585,11 @@ async fn a_failed_archive_session_leaves_the_hot_database_untouched_and_the_guar
     // making the second case a duplicate of the first. It must therefore carry
     // every column the indexes name and be missing only one the copy needs.
     let cases: [(&str, &str, &str); 2] = [
-        ("links", "CREATE TABLE links (not_the_right_column TEXT)", "source_id"),
+        (
+            "links",
+            "CREATE TABLE links (not_the_right_column TEXT)",
+            "source_id",
+        ),
         (
             "transaction_log",
             "CREATE TABLE transaction_log (seq_id INTEGER PRIMARY KEY, table_name TEXT, \
@@ -538,7 +615,10 @@ async fn a_failed_archive_session_leaves_the_hot_database_untouched_and_the_guar
         let before_links = row_set(&conn, HOT_LINK_ROW, "links").await;
         let before_log = row_set(&conn, HOT_LOG_ROW, "transaction_log").await;
         let before_current = row_set(&conn, HOT_CURRENT_ROW, "links_current").await;
-        assert!(!before_links.is_empty(), "the fixture must have rows to lose");
+        assert!(
+            !before_links.is_empty(),
+            "the fixture must have rows to lose"
+        );
 
         let cutoff = "2026-06-01T00:00:00.000000Z";
         let err = archive(&conn, cutoff, ARCHIVED_AT, &cold)
@@ -560,19 +640,23 @@ async fn a_failed_archive_session_leaves_the_hot_database_untouched_and_the_guar
         );
 
         assert_eq!(
-            row_set(&conn, HOT_LINK_ROW, "links").await, before_links,
+            row_set(&conn, HOT_LINK_ROW, "links").await,
+            before_links,
             "[{broken_table}] a failed archive session moved or dropped rows from links"
         );
         assert_eq!(
-            row_set(&conn, HOT_LOG_ROW, "transaction_log").await, before_log,
+            row_set(&conn, HOT_LOG_ROW, "transaction_log").await,
+            before_log,
             "[{broken_table}] a failed archive session moved or dropped ledger rows"
         );
         assert_eq!(
-            row_set(&conn, HOT_CURRENT_ROW, "links_current").await, before_current,
+            row_set(&conn, HOT_CURRENT_ROW, "links_current").await,
+            before_current,
             "[{broken_table}] a failed archive session left the materialization re-derived"
         );
         assert_eq!(
-            audit_current(&conn).await.unwrap(), 0,
+            audit_current(&conn).await.unwrap(),
+            0,
             "[{broken_table}] a failed archive session left links_current drifted from links"
         );
 
@@ -582,7 +666,14 @@ async fn a_failed_archive_session_leaves_the_hot_database_untouched_and_the_guar
                  WHERE type='table' AND name='macrame_archive_session'",
                 (),
             )
-            .await.unwrap().next().await.unwrap().unwrap().get(0).unwrap();
+            .await
+            .unwrap()
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get(0)
+            .unwrap();
         assert_eq!(
             marker, 0,
             "[{broken_table}] the archive-session marker outlived the session: the \

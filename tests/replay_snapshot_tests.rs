@@ -248,7 +248,10 @@ async fn a_successful_save_leaves_no_temporary_file() {
         .map(|e| e.path())
         .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("tmp"))
         .collect();
-    assert!(leftovers.is_empty(), "temp files left behind: {leftovers:?}");
+    assert!(
+        leftovers.is_empty(),
+        "temp files left behind: {leftovers:?}"
+    );
 }
 
 /// A save interrupted before the rename leaves a `.tmp` nothing will ever read.
@@ -279,7 +282,11 @@ async fn close_writes_the_final_snapshot() {
     let dir = harness.temp_dir.path().join("test_macrame_snapshots");
     assert!(dir.exists(), "close() must write a snapshot");
     let anchors = surviving_anchors(&dir);
-    assert_eq!(anchors.len(), 1, "expected exactly one snapshot, got {anchors:?}");
+    assert_eq!(
+        anchors.len(),
+        1,
+        "expected exactly one snapshot, got {anchors:?}"
+    );
 
     let path = dir.join(format!("{:019}.snap.zst", anchors[0]));
     macrame::temporal::load_snapshot(&path).expect("the final snapshot must load");
@@ -346,7 +353,10 @@ async fn a_snapshot_from_another_schema_version_is_refused_not_parsed() {
 
     match macrame::temporal::load_snapshot(&path).unwrap_err() {
         DbError::SnapshotIncompatible { reason, .. } => {
-            assert!(reason.contains("schema v"), "reason should name it: {reason}");
+            assert!(
+                reason.contains("schema v"),
+                "reason should name it: {reason}"
+            );
         }
         other => panic!("expected SnapshotIncompatible, got {other:?}"),
     }
@@ -389,7 +399,10 @@ async fn a_leaked_cold_attachment_does_not_poison_the_connection() {
     let cold_path = harness.temp_dir.path().join("archive.db");
     make_cold_archive(&cold_path, &[]).await;
 
-    let db = libsql::Builder::new_local(&harness.db_path).build().await.unwrap();
+    let db = libsql::Builder::new_local(&harness.db_path)
+        .build()
+        .await
+        .unwrap();
     let conn = db.connect().unwrap();
     migrations::run(&conn).await.unwrap();
 
@@ -414,9 +427,14 @@ async fn a_leaked_cold_attachment_does_not_poison_the_connection() {
     reconstruct(&conn, "2026-06-01T00:00:00.000000Z", Some(&cold_path), None)
         .await
         .expect("reconstruct must survive a leaked cold handle");
-    macrame::temporal::archive(&conn, "2026-06-01T00:00:00.000000Z", ARCHIVED_AT, &cold_path)
-        .await
-        .expect("archive must survive a leaked cold handle");
+    macrame::temporal::archive(
+        &conn,
+        "2026-06-01T00:00:00.000000Z",
+        ARCHIVED_AT,
+        &cold_path,
+    )
+    .await
+    .expect("archive must survive a leaked cold handle");
 }
 
 // -- D-049: snapshot composition -------------------------------------------
@@ -528,7 +546,10 @@ async fn the_anchored_fold_steps_over_a_seq_id_gap() {
     // The gap is real: the newest seq_id has outrun the number of rows.
     let count: i64 = count_of(&db, "SELECT COUNT(*) FROM transaction_log").await;
     let max_seq: i64 = count_of(&db, "SELECT MAX(seq_id) FROM transaction_log").await;
-    assert!(max_seq > count, "expected a gap; max_seq={max_seq} rows={count}");
+    assert!(
+        max_seq > count,
+        "expected a gap; max_seq={max_seq} rows={count}"
+    );
 
     let now = max_recorded_at(&db).await;
     let composed = reconstruct(db.read_conn(), &now, None, Some(&snaps))
@@ -536,7 +557,10 @@ async fn the_anchored_fold_steps_over_a_seq_id_gap() {
         .unwrap();
     let folded = reconstruct(db.read_conn(), &now, None, None).await.unwrap();
 
-    assert_eq!(composed.edges, folded.edges, "the delta was truncated at the gap");
+    assert_eq!(
+        composed.edges, folded.edges,
+        "the delta was truncated at the gap"
+    );
     assert!(
         composed.edges.iter().any(|(s, t, ..)| s == "A" && t == "C"),
         "the edge written after the gap is missing: {:?}",
@@ -974,9 +998,11 @@ async fn a_cadence_anchor_does_not_change_what_reconstruct_answers() {
 
     let mut stamps = Vec::new();
     for i in 0..6 {
-        db.upsert_concept(ConceptUpsert::new(format!("c{i}"), format!("title {i}")).valid_from(CTS))
-            .await
-            .unwrap();
+        db.upsert_concept(
+            ConceptUpsert::new(format!("c{i}"), format!("title {i}")).valid_from(CTS),
+        )
+        .await
+        .unwrap();
         stamps.push(max_recorded_at(&db).await);
     }
     assert!(
@@ -986,14 +1012,18 @@ async fn a_cadence_anchor_does_not_change_what_reconstruct_answers() {
 
     // More history *after* the anchor, so composition has a real delta to apply.
     for i in 6..10 {
-        db.upsert_concept(ConceptUpsert::new(format!("c{i}"), format!("title {i}")).valid_from(CTS))
-            .await
-            .unwrap();
+        db.upsert_concept(
+            ConceptUpsert::new(format!("c{i}"), format!("title {i}")).valid_from(CTS),
+        )
+        .await
+        .unwrap();
         stamps.push(max_recorded_at(&db).await);
     }
 
     for ts in &stamps {
-        let composed = reconstruct(db.read_conn(), ts, None, Some(&dir)).await.unwrap();
+        let composed = reconstruct(db.read_conn(), ts, None, Some(&dir))
+            .await
+            .unwrap();
         let folded = reconstruct(db.read_conn(), ts, None, None).await.unwrap();
         let titles = |s: &MaterializedState| {
             s.concepts
@@ -1043,7 +1073,10 @@ async fn closing_the_handle_stops_the_cadence() {
             .await
             .unwrap();
     }
-    assert!(eventually(|| snapshot_count(&dir) > 0).await, "cadence never ran");
+    assert!(
+        eventually(|| snapshot_count(&dir) > 0).await,
+        "cadence never ran"
+    );
 
     db.close().await.unwrap();
     let settled = snapshot_count(&dir);
@@ -1095,7 +1128,11 @@ async fn a_disabled_cadence_writes_nothing_until_close() {
     assert_eq!(snapshot_count(&dir), 0, "no cadence was asked for");
 
     db.close().await.unwrap();
-    assert_eq!(snapshot_count(&dir), 1, "close() still writes the final anchor");
+    assert_eq!(
+        snapshot_count(&dir),
+        1,
+        "close() still writes the final anchor"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1199,7 +1236,11 @@ async fn retention_drops_days_past_the_window() {
         !survivors.contains(&1),
         "a snapshot 40 days older than the newest is outside the window: {survivors:?}"
     );
-    assert_eq!(survivors.len(), 6, "the six recent days survive: {survivors:?}");
+    assert_eq!(
+        survivors.len(),
+        6,
+        "the six recent days survive: {survivors:?}"
+    );
 }
 
 /// The newest five survive regardless of date, so a burst inside a single day

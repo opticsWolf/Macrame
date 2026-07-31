@@ -41,8 +41,14 @@ const INTERNED_EDGE_ENTRY_BYTES: usize = 24;
 fn main() {
     println!("Subgraph byte accounting, by the loader's own formula.\n");
     println!("size_of::<EdgeRef>()  = {}", std::mem::size_of::<EdgeRef>());
-    println!("size_of::<NodeData>() = {}", std::mem::size_of::<NodeData>());
-    println!("timestamp width       = {} bytes, two per entry\n", TS.len());
+    println!(
+        "size_of::<NodeData>() = {}",
+        std::mem::size_of::<NodeData>()
+    );
+    println!(
+        "timestamp width       = {} bytes, two per entry\n",
+        TS.len()
+    );
 
     println!(
         "{:>10} {:>12} {:>13} {:>14} {:>12} {:>10}",

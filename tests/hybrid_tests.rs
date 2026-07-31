@@ -41,7 +41,12 @@ async fn fixture(harness: &TestHarness) -> Database {
         // id          title              content                              vector rank
         ("semantic", "Nearest", "a paraphrase with no rare words", 0),
         ("middle", "Middle", "ordinary filler text", 4),
-        ("lexical", "Distant", "contains zygomorphic exactly once", 12),
+        (
+            "lexical",
+            "Distant",
+            "contains zygomorphic exactly once",
+            12,
+        ),
         ("filler1", "Filler One", "ordinary filler text", 6),
         ("filler2", "Filler Two", "ordinary filler text", 8),
         ("both", "Both", "zygomorphic paraphrase", 2),
@@ -50,7 +55,9 @@ async fn fixture(harness: &TestHarness) -> Database {
     let concepts: Vec<ConceptUpsert> = docs
         .iter()
         .map(|(id, title, content, _)| {
-            ConceptUpsert::new(*id, *title).content(*content).valid_from(TS)
+            ConceptUpsert::new(*id, *title)
+                .content(*content)
+                .valid_from(TS)
         })
         .collect();
     db.write_concepts(concepts).await.unwrap();
@@ -251,8 +258,14 @@ async fn the_index_can_be_rebuilt_from_the_ledger() {
         .await
         .unwrap();
     assert_eq!(
-        restored.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>(),
-        expected.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>(),
+        restored
+            .iter()
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>(),
+        expected
+            .iter()
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>(),
         "rebuilding did not restore the index"
     );
 
@@ -359,7 +372,11 @@ async fn a_search_box_cannot_become_a_query_expression() {
         .top_k(3)
         .execute(db.read_conn())
         .await;
-    assert!(raw_ok.is_ok(), "a valid raw expression was refused: {:?}", raw_ok.err());
+    assert!(
+        raw_ok.is_ok(),
+        "a valid raw expression was refused: {:?}",
+        raw_ok.err()
+    );
 
     let raw_bad = HybridSearch::new(model(), r#"unbalanced " quote"#, query_vec())
         .raw_match(true)
@@ -393,7 +410,11 @@ async fn the_same_query_answers_the_same_way_twice() {
             .execute(db.read_conn())
             .await
             .unwrap();
-        assert_eq!(ids(&once), ids(&again), "fused order is not stable across runs");
+        assert_eq!(
+            ids(&once),
+            ids(&again),
+            "fused order is not stable across runs"
+        );
     }
 
     db.close().await.unwrap();

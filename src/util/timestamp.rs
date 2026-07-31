@@ -140,7 +140,9 @@ pub fn parse(s: &str) -> Result<SystemTime> {
     let canon = normalize(s)?;
     let b = canon.as_bytes();
     let num = |lo: usize, hi: usize| -> i64 {
-        canon[lo..hi].parse::<i64>().expect("is_canonical checked digits")
+        canon[lo..hi]
+            .parse::<i64>()
+            .expect("is_canonical checked digits")
     };
     let (year, month, day) = (num(0, 4), num(5, 7), num(8, 10));
     let (hour, min, sec) = (num(11, 13), num(14, 16), num(17, 19));
@@ -245,11 +247,11 @@ mod tests {
         assert_eq!(normalize(OPEN_SENTINEL).unwrap(), OPEN_SENTINEL);
 
         for bad in [
-            "2026-01-01T00:00:00",           // no zone
-            "2026-01-01T00:00:00+01:00",     // offset
-            "2026-01-01T00:00:00.000Z",      // milliseconds
+            "2026-01-01T00:00:00",            // no zone
+            "2026-01-01T00:00:00+01:00",      // offset
+            "2026-01-01T00:00:00.000Z",       // milliseconds
             "2026-01-01T00:00:00.000000000Z", // nanoseconds
-            "2026-01-01 00:00:00.000000Z",   // space separator
+            "2026-01-01 00:00:00.000000Z",    // space separator
             "",
         ] {
             assert!(normalize(bad).is_err(), "should reject {bad:?}");

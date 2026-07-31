@@ -153,7 +153,12 @@ async fn ids(conn: &libsql::Connection, walk: &str, depth: usize) -> (Vec<String
 }
 
 /// Best of `n`, because one timing on a warm cache is a sample and not a figure.
-async fn best_of(conn: &libsql::Connection, walk: &str, depth: usize, n: usize) -> (Vec<String>, f64) {
+async fn best_of(
+    conn: &libsql::Connection,
+    walk: &str,
+    depth: usize,
+    n: usize,
+) -> (Vec<String>, f64) {
     let mut best = f64::MAX;
     let mut set = Vec::new();
     for _ in 0..n {
@@ -229,7 +234,9 @@ async fn main() {
         "libSQL 0.9.30, best of 5. `old` is the simple-path CTE shipped through\n\
          0.5.6, kept here as the baseline; `shipped` is TraversalBuilder::execute_ids.\n"
     );
-    println!("== layered fixture, depth = {depth} — paths to a layer-i node grow as width^(i-1) ==\n");
+    println!(
+        "== layered fixture, depth = {depth} — paths to a layer-i node grow as width^(i-1) ==\n"
+    );
     println!(
         "{:<16} {:>7} {:>14} {:>14} {:>11} {:>11}",
         "fixture", "edges", "walk rows old", "walk rows new", "ms old", "ms shipped"

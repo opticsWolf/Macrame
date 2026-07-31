@@ -15,13 +15,15 @@ fn graph_of(edges: &[(&str, &str, f64)]) -> Subgraph {
     let mut g = Subgraph::default();
     for (s, t, w) in edges {
         for id in [s, t] {
-            g.nodes.entry(id.to_string()).or_insert(macrame::graph::NodeData {
-                title: id.to_string(),
-                content: String::new(),
-                embedding_model: None,
-                valid_from: T0.to_string(),
-                valid_to: OPEN.to_string(),
-            });
+            g.nodes
+                .entry(id.to_string())
+                .or_insert(macrame::graph::NodeData {
+                    title: id.to_string(),
+                    content: String::new(),
+                    embedding_model: None,
+                    valid_from: T0.to_string(),
+                    valid_to: OPEN.to_string(),
+                });
         }
         let fwd = EdgeRef {
             node: t.to_string(),
@@ -414,7 +416,12 @@ fn k_core_degree_accounting_is_exact_under_self_loops_and_parallel_edges() {
         vec![("A", "A", 1.0), ("A", "A", 1.0)],
         vec![("A", "B", 1.0), ("B", "A", 1.0)],
         vec![("A", "B", 1.0), ("A", "B", 1.0), ("B", "A", 1.0)],
-        vec![("A", "A", 1.0), ("A", "B", 1.0), ("B", "B", 1.0), ("B", "A", 1.0)],
+        vec![
+            ("A", "A", 1.0),
+            ("A", "B", 1.0),
+            ("B", "B", 1.0),
+            ("B", "A", 1.0),
+        ],
     ] {
         let g = graph_of(&spec);
         // k above every possible degree, so every node is peeled and every
@@ -453,8 +460,12 @@ fn louvain_beats_the_singleton_partition_it_starts_from() {
     ]);
 
     let comms = louvain(&g);
-    let singletons: std::collections::BTreeMap<String, usize> =
-        g.nodes.keys().enumerate().map(|(i, n)| (n.clone(), i)).collect();
+    let singletons: std::collections::BTreeMap<String, usize> = g
+        .nodes
+        .keys()
+        .enumerate()
+        .map(|(i, n)| (n.clone(), i))
+        .collect();
 
     let q = modularity(&g, &comms);
     let q0 = modularity(&g, &singletons);
@@ -598,15 +609,23 @@ async fn loading_scales_linearly_in_the_number_of_edges() {
     let db_l = star(&large, 2000).await;
 
     // One untimed load each: the first touches cold pages the second does not.
-    db_s.load_subgraph("N0000000", 2, T0, 1 << 30).await.unwrap();
-    db_l.load_subgraph("N0000000", 2, T0, 1 << 30).await.unwrap();
+    db_s.load_subgraph("N0000000", 2, T0, 1 << 30)
+        .await
+        .unwrap();
+    db_l.load_subgraph("N0000000", 2, T0, 1 << 30)
+        .await
+        .unwrap();
 
     let t = std::time::Instant::now();
-    db_s.load_subgraph("N0000000", 2, T0, 1 << 30).await.unwrap();
+    db_s.load_subgraph("N0000000", 2, T0, 1 << 30)
+        .await
+        .unwrap();
     let small_ns = t.elapsed().as_nanos().max(1);
 
     let t = std::time::Instant::now();
-    db_l.load_subgraph("N0000000", 2, T0, 1 << 30).await.unwrap();
+    db_l.load_subgraph("N0000000", 2, T0, 1 << 30)
+        .await
+        .unwrap();
     let large_ns = t.elapsed().as_nanos().max(1);
 
     let ratio = large_ns as f64 / small_ns as f64;
@@ -642,17 +661,14 @@ async fn a_historical_traversal_must_say_which_titles_it_wants() {
     // hydration is **transaction** time (what was believed as of `ts`). One
     // parameter, two clocks — Doctrine II, met in a test fixture.
     let tuesday = "2026-01-06T00:00:00.000000Z";
-    let harness = TestHarness::starting_at(
-        macrame::util::clock::parse_iso8601_utc(tuesday).unwrap(),
-    );
+    let harness =
+        TestHarness::starting_at(macrame::util::clock::parse_iso8601_utc(tuesday).unwrap());
     let db = harness.db_with_fake_clock().await;
 
     for (id, title) in [("a", "Original A"), ("b", "Original B")] {
-        db.upsert_concept(
-            macrame::ConceptUpsert::new(id, title).valid_from(tuesday),
-        )
-        .await
-        .unwrap();
+        db.upsert_concept(macrame::ConceptUpsert::new(id, title).valid_from(tuesday))
+            .await
+            .unwrap();
     }
     db.assert_edge(
         macrame::graph::EdgeAssertion::new("a", "b", "KNOWS")
@@ -671,11 +687,9 @@ async fn a_historical_traversal_must_say_which_titles_it_wants() {
     harness.advance(std::time::Duration::from_secs(86_400 * 7));
     let now = harness.clock.peek();
     for (id, title) in [("a", "Renamed A"), ("b", "Renamed B")] {
-        db.upsert_concept(
-            macrame::ConceptUpsert::new(id, title).valid_from(tuesday),
-        )
-        .await
-        .unwrap();
+        db.upsert_concept(macrame::ConceptUpsert::new(id, title).valid_from(tuesday))
+            .await
+            .unwrap();
     }
 
     let conn = db.read_conn();

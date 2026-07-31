@@ -144,13 +144,20 @@ async fn high_priority_writes_are_serviced_before_a_low_priority_backlog() {
         PROBES as i64
     );
     assert_eq!(
-        count(&db, "SELECT COUNT(*) FROM links WHERE edge_type = 'BACKLOG'").await,
+        count(
+            &db,
+            "SELECT COUNT(*) FROM links WHERE edge_type = 'BACKLOG'"
+        )
+        .await,
         BACKLOG as i64
     );
 
-    let last_probe = scalar(&db, "SELECT MAX(recorded_at) FROM links WHERE edge_type = 'PROBE'")
-        .await
-        .unwrap();
+    let last_probe = scalar(
+        &db,
+        "SELECT MAX(recorded_at) FROM links WHERE edge_type = 'PROBE'",
+    )
+    .await
+    .unwrap();
     let first_backlog = scalar(
         &db,
         "SELECT MIN(recorded_at) FROM links WHERE edge_type = 'BACKLOG'",
@@ -242,7 +249,11 @@ async fn a_lone_high_priority_write_is_still_serviced_before_a_saturated_backlog
         chunk.await.unwrap();
     }
     assert_eq!(
-        count(&db, "SELECT COUNT(*) FROM links WHERE edge_type = 'BACKLOG'").await,
+        count(
+            &db,
+            "SELECT COUNT(*) FROM links WHERE edge_type = 'BACKLOG'"
+        )
+        .await,
         BACKLOG as i64,
         "the backlog must still be serviced, only later"
     );
@@ -250,9 +261,12 @@ async fn a_lone_high_priority_write_is_still_serviced_before_a_saturated_backlog
     // The claim itself, as an ordering over the actor's own stamps: the single
     // probe was serviced before every one of the forty chunks that were already
     // queued when it arrived.
-    let probe_at = scalar(&db, "SELECT MAX(recorded_at) FROM links WHERE edge_type = 'PROBE'")
-        .await
-        .unwrap();
+    let probe_at = scalar(
+        &db,
+        "SELECT MAX(recorded_at) FROM links WHERE edge_type = 'PROBE'",
+    )
+    .await
+    .unwrap();
     let first_backlog = scalar(
         &db,
         "SELECT MIN(recorded_at) FROM links WHERE edge_type = 'BACKLOG'",
@@ -438,7 +452,10 @@ async fn open_readers_do_not_block_the_writer() {
     for _ in 0..4 {
         let mut rows = db
             .read_conn()
-            .query("SELECT source_id, target_id FROM links ORDER BY target_id", ())
+            .query(
+                "SELECT source_id, target_id FROM links ORDER BY target_id",
+                (),
+            )
             .await
             .unwrap();
         rows.next().await.unwrap().expect("seeded rows expected");
@@ -479,7 +496,10 @@ async fn open_readers_do_not_block_the_writer() {
         {
             seen += 1;
         }
-        assert!(seen >= 32, "reader saw {seen} rows, expected its 32-row snapshot at least");
+        assert!(
+            seen >= 32,
+            "reader saw {seen} rows, expected its 32-row snapshot at least"
+        );
     }
 
     // A fresh read sees everything the writer committed.

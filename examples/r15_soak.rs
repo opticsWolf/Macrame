@@ -155,7 +155,8 @@ fn supervise(args: &Args) {
             "  run {run:>3}/{:<3}  {:>6.1}s  exit {:>12}  {verdict}",
             args.runs,
             t.elapsed().as_secs_f64(),
-            code.map(|c| c.to_string()).unwrap_or_else(|| "signal".into())
+            code.map(|c| c.to_string())
+                .unwrap_or_else(|| "signal".into())
         );
     }
 
@@ -211,19 +212,18 @@ async fn soak(secs: u64, with_open_storm: bool) {
     // Cadence on: the cadence connection is the fourth one `open()` takes, and
     // the claim is about the set of connections a real application holds. Turning
     // it off would test a shape no application runs.
-    let db = Arc::new(
-        Database::open(dir.path().join("soak.db"))
-            .await
-            .unwrap(),
-    );
+    let db = Arc::new(Database::open(dir.path().join("soak.db")).await.unwrap());
 
     // A little topology, so reads have something to walk.
-    db.write_concepts((0..500).map(|i| {
-        ConceptUpsert::new(format!("c{i:05}"), format!("C{i}"))
-            .content("body")
-            .valid_from(TS)
-    })
-    .collect())
+    db.write_concepts(
+        (0..500)
+            .map(|i| {
+                ConceptUpsert::new(format!("c{i:05}"), format!("C{i}"))
+                    .content("body")
+                    .valid_from(TS)
+            })
+            .collect(),
+    )
     .await
     .unwrap();
     db.bulk_import(

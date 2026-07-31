@@ -654,7 +654,8 @@ impl Database {
                 .archive_path
                 .exists()
                 .then_some(handle.archive_path.as_path());
-            match snapshot::write_final(&handle.read_conn, &handle.snapshots_dir, &ts, archive).await
+            match snapshot::write_final(&handle.read_conn, &handle.snapshots_dir, &ts, archive)
+                .await
             {
                 Ok(path) => tracing::info!(
                     "schema moved v{} -> v{}; re-anchored snapshots at {:?}",
@@ -743,8 +744,7 @@ impl Database {
         };
         if !self.path.exists() {
             return Err(fail(
-                "the file does not exist, and a read-only open cannot create it"
-                    .to_string(),
+                "the file does not exist, and a read-only open cannot create it".to_string(),
             ));
         }
         let db = libsql::Builder::new_local(&self.path)
@@ -792,10 +792,7 @@ impl Database {
     /// of the period that produced it.
     ///
     /// [Doctrine VI]: ../../docs/architecture/s0-s3-foundations.md#doctrine-vi
-    pub async fn verify_snapshot_chain(
-        &self,
-        ts: &str,
-    ) -> Result<crate::temporal::ChainCheck> {
+    pub async fn verify_snapshot_chain(&self, ts: &str) -> Result<crate::temporal::ChainCheck> {
         let archive = self
             .archive_path
             .exists()
@@ -1152,8 +1149,9 @@ impl Database {
     pub async fn bulk_import(&self, edges: Vec<EdgeAssertion>) -> Result<usize> {
         let edges = normalize_all(edges)?;
         let chunks: Vec<_> = edges.chunks(chunk_rows::EDGES).map(<[_]>::to_vec).collect();
-        self.low_chunked(chunks, |chunk, responder| {
-            LowPriCommand::BulkImportChunk { chunk, responder }
+        self.low_chunked(chunks, |chunk, responder| LowPriCommand::BulkImportChunk {
+            chunk,
+            responder,
         })
         .await
     }
@@ -1320,10 +1318,7 @@ impl Database {
     /// per-chunk fidelity boundary of §5.1.6 — a partially written pass is
     /// recoverable by rerunning, which is the property that makes derived state
     /// safe to write this way and assertions not.
-    pub async fn write_analytics_annotations(
-        &self,
-        annotations: Vec<Annotation>,
-    ) -> Result<usize> {
+    pub async fn write_analytics_annotations(&self, annotations: Vec<Annotation>) -> Result<usize> {
         let chunks: Vec<_> = annotations
             .chunks(chunk_rows::ANNOTATIONS)
             .map(<[_]>::to_vec)
@@ -1978,7 +1973,13 @@ impl HighPriCommand {
             } => {
                 let stamp = clock.now();
                 let res = retire_edge(
-                    conn, &source, &target, &edge_type, &valid_from, &valid_to, &stamp,
+                    conn,
+                    &source,
+                    &target,
+                    &edge_type,
+                    &valid_from,
+                    &valid_to,
+                    &stamp,
                 )
                 .await;
                 turn.answer(responder, res);
@@ -2093,12 +2094,14 @@ impl LowPriCommand {
             LowPriCommand::ShadowRebuild { step, responder } => {
                 use crate::integrity::{shadow, ShadowOutcome, ShadowStep};
                 let res = match step {
-                    ShadowStep::Begin => shadow::begin(conn).await.map(|build_start| {
-                        ShadowOutcome::Started {
-                            build_start,
-                            epoch: turn.epoch(),
-                        }
-                    }),
+                    ShadowStep::Begin => {
+                        shadow::begin(conn)
+                            .await
+                            .map(|build_start| ShadowOutcome::Started {
+                                build_start,
+                                epoch: turn.epoch(),
+                            })
+                    }
                     ShadowStep::Fill { after } => shadow::fill_chunk(conn, after.as_deref())
                         .await
                         .map(|last| ShadowOutcome::Filled { last }),
@@ -2583,10 +2586,7 @@ mod tests {
         let fanout: Vec<_> = (0..N).map(|i| edge(&format!("t{i:07}"), i)).collect();
         let history: Vec<_> = (0..N).map(|i| edge("t0", i)).collect();
 
-        let (a, b) = (
-            estimated_bulk_hold(&fanout),
-            estimated_bulk_hold(&history),
-        );
+        let (a, b) = (estimated_bulk_hold(&fanout), estimated_bulk_hold(&history));
         assert!(
             b > a * 5,
             "the guard's expensive path is 16x dearer per pair and this batch \
@@ -2603,10 +2603,9 @@ mod tests {
         let fanout: Vec<_> = (0..N).map(|i| edge(&format!("t{i:07}"), i)).collect();
         let history: Vec<_> = (0..N).map(|i| edge("t0", i)).collect();
 
-        for (batch, measured_ms, label) in [
-            (fanout, 2_618u128, "fanout"),
-            (history, 18_057, "history"),
-        ] {
+        for (batch, measured_ms, label) in
+            [(fanout, 2_618u128, "fanout"), (history, 18_057, "history")]
+        {
             let predicted = estimated_bulk_hold(&batch).as_millis();
             let ratio = predicted as f64 / measured_ms as f64;
             assert!(

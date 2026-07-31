@@ -301,8 +301,7 @@ pub(crate) async fn swap(
         }
     }
     for trigger in ddl::CREATE_TRIGGERS {
-        if trigger.contains("trg_links_current_sync") || trigger.contains("trg_links_single_open")
-        {
+        if trigger.contains("trg_links_current_sync") || trigger.contains("trg_links_single_open") {
             tx.execute(trigger, ()).await?;
         }
     }

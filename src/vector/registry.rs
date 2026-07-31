@@ -103,15 +103,15 @@ async fn read_declared_dimension(
         let name: String = row.get(1)?;
         if name == "embedding" {
             let declared: String = row.get(2)?;
-            return parse_f32_blob_dim(&declared)
-                .map(Some)
-                .ok_or_else(|| DbError::ModelNotRegistered {
+            return parse_f32_blob_dim(&declared).map(Some).ok_or_else(|| {
+                DbError::ModelNotRegistered {
                     model: model.to_string(),
                     table: format!(
                         "{} (column `embedding` is declared {declared:?}, not F32_BLOB(n))",
                         model.table()
                     ),
-                });
+                }
+            });
         }
     }
     Ok(None)
@@ -175,7 +175,15 @@ mod tests {
     /// acquire whatever dimension the caller happened to pass.
     #[test]
     fn refuses_to_invent_a_dimension() {
-        for bad in ["BLOB", "TEXT", "F32_BLOB", "F32_BLOB()", "F32_BLOB(x)", "F32_BLOB(4", ""] {
+        for bad in [
+            "BLOB",
+            "TEXT",
+            "F32_BLOB",
+            "F32_BLOB()",
+            "F32_BLOB(x)",
+            "F32_BLOB(4",
+            "",
+        ] {
             assert_eq!(parse_f32_blob_dim(bad), None, "{bad:?} yielded a dimension");
         }
     }

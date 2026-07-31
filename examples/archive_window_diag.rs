@@ -79,11 +79,7 @@ struct Run {
     longest_hold_ms: f64,
 }
 
-async fn measure(
-    keys: usize,
-    generations: usize,
-    window: Option<Duration>,
-) -> Run {
+async fn measure(keys: usize, generations: usize, window: Option<Duration>) -> Run {
     let dir = tempfile::TempDir::new().unwrap();
     let path = dir.path().join("w.db");
     let clock = Arc::new(FakeClock::new(parse_iso8601_utc(EPOCH).unwrap()));
@@ -155,8 +151,13 @@ async fn main() {
         let whole = measure(keys, generations, None).await;
         println!(
             "{:>7} {:>6} {:>16} {:>9} {:>10} {:>11.1} {:>10.1}",
-            keys, generations, "-- one session", whole.sessions, whole.archived,
-            whole.total_ms, whole.longest_hold_ms
+            keys,
+            generations,
+            "-- one session",
+            whole.sessions,
+            whole.archived,
+            whole.total_ms,
+            whole.longest_hold_ms
         );
 
         for hours in [4u64, 2, 1] {

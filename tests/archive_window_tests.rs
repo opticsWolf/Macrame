@@ -67,7 +67,11 @@ async fn observable(db: &Database) -> (Vec<(String, String, f64)>, i64, Option<i
         .await
         .unwrap();
     while let Some(row) = rows.next().await.unwrap() {
-        current.push((row.get(0).unwrap(), row.get(1).unwrap(), row.get(2).unwrap()));
+        current.push((
+            row.get(0).unwrap(),
+            row.get(1).unwrap(),
+            row.get(2).unwrap(),
+        ));
     }
 
     let hot_links: i64 = conn
@@ -141,7 +145,10 @@ async fn windowing_leaves_the_same_database_a_single_session_would() {
             "a windowed run induced drift in links_current"
         );
         db.close().await.unwrap();
-        (reports.iter().map(|r| r.links_archived).sum::<usize>(), state)
+        (
+            reports.iter().map(|r| r.links_archived).sum::<usize>(),
+            state,
+        )
     };
 
     assert_eq!(
@@ -149,7 +156,10 @@ async fn windowing_leaves_the_same_database_a_single_session_would() {
         "the two runs archived different numbers of links"
     );
     assert_eq!(one.1, many.1, "the two runs left different databases");
-    assert!(one.0 > 0, "the fixture archived nothing, so it proves nothing");
+    assert!(
+        one.0 > 0,
+        "the fixture archived nothing, so it proves nothing"
+    );
 }
 
 /// A window wider than the whole span is one session, and it is `archive()`.

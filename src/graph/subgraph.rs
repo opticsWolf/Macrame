@@ -158,7 +158,8 @@ impl Subgraph {
             .iter()
             .chain(self.in_adj.iter())
             .all(|(id, edges)| {
-                self.nodes.contains_key(id) && edges.iter().all(|e| self.nodes.contains_key(&e.node))
+                self.nodes.contains_key(id)
+                    && edges.iter().all(|e| self.nodes.contains_key(&e.node))
             })
     }
 

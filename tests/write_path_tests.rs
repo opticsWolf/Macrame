@@ -36,7 +36,9 @@ async fn count(db: &Database, sql: &str) -> i64 {
 }
 
 fn open_edge() -> EdgeAssertion {
-    EdgeAssertion::new("A", "B", "KNOWS").valid_from(T1).weight(0.8)
+    EdgeAssertion::new("A", "B", "KNOWS")
+        .valid_from(T1)
+        .weight(0.8)
 }
 
 /// **The regression test for the responder-drop defect.**
@@ -123,7 +125,10 @@ async fn a_second_open_interval_is_a_typed_violation() {
             target_id,
             edge_type,
         } => {
-            assert_eq!((source_id.as_str(), target_id.as_str(), edge_type.as_str()), ("A", "B", "KNOWS"));
+            assert_eq!(
+                (source_id.as_str(), target_id.as_str(), edge_type.as_str()),
+                ("A", "B", "KNOWS")
+            );
         }
         other => panic!("expected SingleOpenViolation, got {other:?}"),
     }
@@ -178,10 +183,7 @@ async fn retiring_something_that_is_not_there_is_not_found() {
     let harness = TestHarness::new();
     let db = db_with_nodes(&harness).await;
 
-    let err = db
-        .retire_edge("A", "B", "KNOWS", T1, T2)
-        .await
-        .unwrap_err();
+    let err = db.retire_edge("A", "B", "KNOWS", T1, T2).await.unwrap_err();
 
     assert!(matches!(err, DbError::NotFound(_)), "got {err:?}");
 }
@@ -251,7 +253,10 @@ async fn write_bulk_atomic_is_all_or_nothing() {
         .await
         .unwrap_err();
 
-    assert!(matches!(err, DbError::SingleOpenViolation { .. }), "got {err:?}");
+    assert!(
+        matches!(err, DbError::SingleOpenViolation { .. }),
+        "got {err:?}"
+    );
     assert_eq!(
         count(&db, "SELECT COUNT(*) FROM links").await,
         0,
@@ -438,8 +443,11 @@ async fn write_back_annotations_routes_through_the_derivative_table() {
     db.assert_edge(open_edge()).await.unwrap();
 
     let graph = db.load_subgraph("A", 2, T2, 1 << 20).await.unwrap();
-    let values: std::collections::BTreeMap<String, String> =
-        graph.nodes.keys().map(|id| (id.clone(), "0".into())).collect();
+    let values: std::collections::BTreeMap<String, String> = graph
+        .nodes
+        .keys()
+        .map(|id| (id.clone(), "0".into()))
+        .collect();
 
     let before = log_len(&db).await;
     let written = graph

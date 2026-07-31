@@ -34,7 +34,9 @@ pub enum DbError {
     // NOTE: the spec (§7) names these fields `source` / `target`. `source` is a
     // reserved field name for thiserror (it is inferred as the error source and
     // requires `std::error::Error`), so the schema column names are used instead.
-    #[error("{source_id} -> {target_id} ({edge_type}) already has an open interval; retire it first")]
+    #[error(
+        "{source_id} -> {target_id} ({edge_type}) already has an open interval; retire it first"
+    )]
     SingleOpenViolation {
         source_id: String,
         target_id: String,

@@ -37,10 +37,8 @@ async fn import_at_depth(
     edges: Vec<EdgeAssertion>,
     depth: usize,
 ) -> usize {
-    let chunks: Vec<Vec<EdgeAssertion>> = edges
-        .chunks(chunk_rows::EDGES)
-        .map(<[_]>::to_vec)
-        .collect();
+    let chunks: Vec<Vec<EdgeAssertion>> =
+        edges.chunks(chunk_rows::EDGES).map(<[_]>::to_vec).collect();
 
     // The shipped helper is private and fixed at PIPELINE_DEPTH, so the sweep
     // drives the public per-chunk call instead: `bulk_import` on a single chunk
@@ -58,7 +56,9 @@ async fn import_at_depth(
         while inflight.len() < depth {
             let Some(chunk) = iter.next() else { break };
             let db = std::sync::Arc::clone(db);
-            inflight.push_back(tokio::spawn(async move { db.bulk_import(chunk).await.unwrap() }));
+            inflight.push_back(tokio::spawn(
+                async move { db.bulk_import(chunk).await.unwrap() },
+            ));
         }
         let Some(h) = inflight.pop_front() else { break };
         written += h.await.unwrap();
@@ -131,7 +131,11 @@ async fn main() {
                         .as_secs_f64()
                         * 1000.0;
                 }
-                std::sync::Arc::into_inner(db).unwrap().close().await.unwrap();
+                std::sync::Arc::into_inner(db)
+                    .unwrap()
+                    .close()
+                    .await
+                    .unwrap();
             }
 
             if depth == 1 {

@@ -288,7 +288,11 @@ mod imp {
         pub fn record_turn(&self, high_depth: usize, low_depth: usize) {
             self.depth_samples.fetch_add(1, Ordering::Relaxed);
             for (sum, max, depth) in [
-                (&self.high_depth_sum, &self.high_depth_max, high_depth as u64),
+                (
+                    &self.high_depth_sum,
+                    &self.high_depth_max,
+                    high_depth as u64,
+                ),
                 (&self.low_depth_sum, &self.low_depth_max, low_depth as u64),
             ] {
                 sum.fetch_add(depth, Ordering::Relaxed);
@@ -307,8 +311,10 @@ mod imp {
             if !kind.exempt_from_budget() && held > crate::CHUNK_BUDGET {
                 k.over_budget.fetch_add(1, Ordering::Relaxed);
             }
-            self.longest
-                .fetch_max((micros << MICROS_SHIFT) | kind.index() as u64, Ordering::Relaxed);
+            self.longest.fetch_max(
+                (micros << MICROS_SHIFT) | kind.index() as u64,
+                Ordering::Relaxed,
+            );
         }
 
         /// A consistent-enough picture for a dashboard.
@@ -351,9 +357,7 @@ mod imp {
                         mean: total
                             .checked_div(turns)
                             .map_or(Duration::ZERO, Duration::from_micros),
-                        longest: Duration::from_micros(
-                            k.longest_micros.load(Ordering::Relaxed),
-                        ),
+                        longest: Duration::from_micros(k.longest_micros.load(Ordering::Relaxed)),
                         buckets: std::array::from_fn(|i| k.buckets[i].load(Ordering::Relaxed)),
                     }
                 })

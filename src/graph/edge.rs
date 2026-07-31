@@ -103,7 +103,15 @@ mod tests {
         assert!(validate_edge_type("KNOWS").is_ok());
         assert!(validate_edge_type("REL2").is_ok());
 
-        for bad in ["", "knows", "KNOWS_WELL", "KNOWS-WELL", "A|B", "O'BRIEN", "ÉTAT"] {
+        for bad in [
+            "",
+            "knows",
+            "KNOWS_WELL",
+            "KNOWS-WELL",
+            "A|B",
+            "O'BRIEN",
+            "ÉTAT",
+        ] {
             assert!(
                 validate_edge_type(bad).is_err(),
                 "{bad:?} should be rejected"

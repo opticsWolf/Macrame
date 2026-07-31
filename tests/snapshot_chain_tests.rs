@@ -217,7 +217,10 @@ async fn deleting_the_snapshots_restores_agreement() {
     }
 
     let check = db.verify_snapshot_chain(LATER).await.unwrap();
-    assert!(!check.diverged(), "deleting the snapshots did not repair it: {check}");
+    assert!(
+        !check.diverged(),
+        "deleting the snapshots did not repair it: {check}"
+    );
 
     db.close().await.unwrap();
 }

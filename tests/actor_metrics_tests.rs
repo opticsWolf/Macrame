@@ -244,5 +244,9 @@ async fn a_backlog_shows_up_in_the_queue_depth() {
          depth is being sampled after the queue drains, not before the turn"
     );
 
-    std::sync::Arc::into_inner(db).unwrap().close().await.unwrap();
+    std::sync::Arc::into_inner(db)
+        .unwrap()
+        .close()
+        .await
+        .unwrap();
 }

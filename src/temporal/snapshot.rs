@@ -110,7 +110,8 @@ pub fn save_snapshot(snapshots_dir: &Path, state: &MaterializedState) -> Result<
         reason: format!("{what}: {e}"),
     };
 
-    fs::create_dir_all(snapshots_dir).map_err(|e| fail("failed to create snapshot directory", e))?;
+    fs::create_dir_all(snapshots_dir)
+        .map_err(|e| fail("failed to create snapshot directory", e))?;
 
     let path = snapshots_dir.join(snapshot_filename(state.seq_anchor));
     let tmp_path = path.with_extension("tmp");
@@ -120,8 +121,8 @@ pub fn save_snapshot(snapshots_dir: &Path, state: &MaterializedState) -> Result<
         reason: format!("failed to serialize snapshot: {e}"),
     })?;
 
-    let compressed = zstd::encode_all(&serialized[..], 3)
-        .map_err(|e| fail("failed to compress snapshot", e))?;
+    let compressed =
+        zstd::encode_all(&serialized[..], 3).map_err(|e| fail("failed to compress snapshot", e))?;
 
     let mut file =
         fs::File::create(&tmp_path).map_err(|e| fail("failed to create snapshot temp file", e))?;
@@ -166,10 +167,11 @@ pub fn load_snapshot(path: &Path) -> Result<MaterializedState> {
     })?;
 
     let mut raw = Vec::new();
-    file.read_to_end(&mut raw).map_err(|e| DbError::ReplayCorrupt {
-        seq: 0,
-        reason: format!("Failed to read snapshot file {:?}: {e}", path),
-    })?;
+    file.read_to_end(&mut raw)
+        .map_err(|e| DbError::ReplayCorrupt {
+            seq: 0,
+            reason: format!("Failed to read snapshot file {:?}: {e}", path),
+        })?;
 
     if raw.len() < SNAP_HEADER_LEN || raw[0..4] != SNAP_MAGIC {
         return Err(DbError::SnapshotIncompatible {
@@ -199,10 +201,11 @@ pub fn load_snapshot(path: &Path) -> Result<MaterializedState> {
         reason: format!("Failed to decompress snapshot {:?}: {e}", path),
     })?;
 
-    let state: MaterializedState = bincode::deserialize(&decompressed).map_err(|e| DbError::ReplayCorrupt {
-        seq: 0,
-        reason: format!("Failed to deserialize snapshot {:?}: {e}", path),
-    })?;
+    let state: MaterializedState =
+        bincode::deserialize(&decompressed).map_err(|e| DbError::ReplayCorrupt {
+            seq: 0,
+            reason: format!("Failed to deserialize snapshot {:?}: {e}", path),
+        })?;
 
     Ok(state)
 }

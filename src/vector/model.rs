@@ -85,17 +85,17 @@ mod tests {
     fn rejects_anything_that_is_not_a_bare_identifier() {
         for bad in [
             "",
-            "nomic-v1",            // hyphen: the obvious near-miss
-            "Nomic",               // uppercase: would make table names ambiguous
-            "1nomic",              // leading digit
-            "_nomic",              // leading underscore
-            "nomic v1",            // space
+            "nomic-v1", // hyphen: the obvious near-miss
+            "Nomic",    // uppercase: would make table names ambiguous
+            "1nomic",   // leading digit
+            "_nomic",   // leading underscore
+            "nomic v1", // space
             "nomic\"; DROP TABLE links; --",
             "nomic'",
             "nomic;",
             "nomic(1)",
             "concepts\" --",
-            "näh",                 // non-ASCII
+            "näh", // non-ASCII
         ] {
             assert!(
                 matches!(ModelName::new(bad), Err(DbError::InvalidModelName(_))),

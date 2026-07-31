@@ -14,7 +14,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use macrame::graph::{astar, dijkstra, k_core, louvain, modularity, scc, EdgeRef, NodeData, Subgraph};
+use macrame::graph::{
+    astar, dijkstra, k_core, louvain, modularity, scc, EdgeRef, NodeData, Subgraph,
+};
 use proptest::prelude::*;
 
 const T0: &str = "2026-01-01T00:00:00.000000Z";
@@ -63,7 +65,11 @@ fn build(n: usize, edges: &[(usize, usize, f64)]) -> Subgraph {
 /// than a defect. Reordering these is exact.
 fn arb_graph(max_nodes: usize) -> impl Strategy<Value = (usize, Vec<(usize, usize, f64)>)> {
     (2usize..=max_nodes).prop_flat_map(|n| {
-        let edge = (0..n, 0..n, prop::sample::select(vec![0.25f64, 0.5, 1.0, 2.0, 4.0]));
+        let edge = (
+            0..n,
+            0..n,
+            prop::sample::select(vec![0.25f64, 0.5, 1.0, 2.0, 4.0]),
+        );
         (Just(n), prop::collection::vec(edge, 0..(n * 2)))
     })
 }
@@ -206,11 +212,8 @@ fn oracle_best_modularity(g: &Subgraph) -> f64 {
         best: &mut f64,
     ) {
         if i == ids.len() {
-            let part: BTreeMap<String, usize> = ids
-                .iter()
-                .cloned()
-                .zip(assign.iter().copied())
-                .collect();
+            let part: BTreeMap<String, usize> =
+                ids.iter().cloned().zip(assign.iter().copied()).collect();
             let q = modularity(g, &part);
             if q > *best {
                 *best = q;
