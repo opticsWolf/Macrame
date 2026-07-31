@@ -14,14 +14,7 @@ pub struct NodeAttributes {
     pub embedding_model: Option<String>,
 }
 
-/// How many ids go into one `IN (…)` list.
-///
-/// Not a latency budget — these are reads, and [`crate::CHUNK_BUDGET`] bounds
-/// how long the *writer* holds the lock. It is a bind-variable ceiling:
-/// `SQLITE_MAX_VARIABLE_NUMBER` is 999 on a stock build, and a hydrate of a
-/// budget-sized subgraph would otherwise fail at the driver with an error that
-/// says nothing about node count.
-const HYDRATE_CHUNK: usize = 400;
+use crate::util::limits::HYDRATE_CHUNK;
 
 /// Query valid-time graph edges under current belief as of `ts` (§5.2).
 pub async fn query_as_of_edges(
@@ -73,7 +66,11 @@ fn placeholders(first: usize, count: usize) -> String {
 /// Note what "as of `ts`" means for each: `Current` asks whether the concept is
 /// retired *now* and `AtTime` asks whether it was retired *then*. That is not an
 /// inconsistency, it is the two clocks — and it is why `Current` on a historical
-/// query still warrants its warning (§7.5).
+/// query is worth objecting to. **That objection is no longer made here**
+/// (T3.2, D-085): this function receives the mode as a parameter and has no way
+/// to tell a historical query from a live one, so it does what it is told.
+/// [`crate::graph::TraversalBuilder`] is the layer that knows, and it raises
+/// [`DbError::AttributeModeUnstated`].
 ///
 /// Both modes issue **one query per chunk of [`HYDRATE_CHUNK`] ids**, not one
 /// per node (defect AE). Results come back in `node_ids` order regardless of the
@@ -92,13 +89,14 @@ pub async fn hydrate_attributes(
 
     let found: HashMap<String, NodeAttributes> = match mode {
         AttributeMode::Omit => return Ok(Vec::new()),
-        AttributeMode::Current => {
-            tracing::warn!(
-                "AttributeMode::Current requested for as_of({}) query: returning live attributes which may reflect post-{} edits",
-                ts, ts
-            );
-            hydrate_current(conn, node_ids).await?
-        }
+        // No warning here any more (T3.2, D-085). This function takes the mode
+        // as a parameter and cannot tell a historical query from a live one —
+        // `ts` is just an instant — so the warning fired on *every* `Current`
+        // hydrate, which is overwhelmingly the ordinary live case where it is
+        // exactly right. Loud where it did not matter and, being a log line,
+        // silent where it did. The decision now lives in `TraversalBuilder`,
+        // which knows whether `as_of` was set, and is a typed error.
+        AttributeMode::Current => hydrate_current(conn, node_ids).await?,
         AttributeMode::AtTime => hydrate_at_time(conn, node_ids, ts).await?,
     };
 

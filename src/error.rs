@@ -90,6 +90,31 @@ pub enum DbError {
 
     #[error("physical delete blocked outside archive session ({table})")]
     ArchiveViolation { table: String },
+
+    /// A traversal asked about the past without saying which text it wanted
+    /// (T3.2, D-085).
+    ///
+    /// `TraversalBuilder::as_of(ts)` fixes the *topology* at `ts`. Node
+    /// attributes are a second, independent question, and the default answer —
+    /// `AttributeMode::Current` — is live text. That combination returns the
+    /// past's graph wearing the present's titles, which is a legitimate thing to
+    /// want and a terrible thing to get by accident.
+    ///
+    /// It used to be a `tracing::warn!`, which is invisible in any application
+    /// that has not configured a subscriber. This is the same statement as a
+    /// value the caller cannot miss.
+    ///
+    /// Fix by stating the mode: `.attribute_mode(AttributeMode::AtTime)` for the
+    /// past's text, or `.attribute_mode(AttributeMode::Current)` to affirm that
+    /// live text is what was meant.
+    #[error(
+        "traversal as_of({as_of}) did not state an attribute mode: topology at \
+         {as_of} would be returned with attributes as they are *now*. Call \
+         .attribute_mode(AttributeMode::AtTime) for attributes as believed at \
+         {as_of}, or .attribute_mode(AttributeMode::Current) to confirm live \
+         attributes are intended"
+    )]
+    AttributeModeUnstated { as_of: String },
     /// [`crate::Database::archive_windowed`] was given a window it cannot use
     /// (T1.1, D-080).
     ///

@@ -523,8 +523,7 @@ ORDER BY l.source_id, l.target_id, l.edge_type
     }
 }
 
-/// How many ids go into one `IN (…)` list. See `as_of::HYDRATE_CHUNK`.
-const HYDRATE_CHUNK: usize = 400;
+use crate::util::limits::HYDRATE_CHUNK;
 
 /// Fill in `nodes` from `concepts` for the ids the topology touched.
 /// Attach node attributes, continuing the caller's byte accounting.

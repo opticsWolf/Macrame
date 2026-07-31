@@ -75,6 +75,11 @@ required-features = ["metrics"]
 name = "bulk_atomic_diag"
 required-features = ["metrics"]
 
+# T3.4's evidence: the hold must not move while the total does.
+[[example]]
+name = "pipeline_diag"
+required-features = ["metrics"]
+
 # T1.2's evidence. The question is the longest single *turn*, which only the
 # actor's own counters can answer.
 [[example]]

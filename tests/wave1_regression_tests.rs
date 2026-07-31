@@ -571,7 +571,10 @@ async fn hydrate_spans_more_than_one_chunk() {
     let harness = TestHarness::new();
     let db = Database::open(&harness.db_path).await.unwrap();
 
-    let n = 450; // > HYDRATE_CHUNK
+    // Derived, not a literal: the fixture must straddle a chunk boundary, and a
+    // hardcoded 450 stops doing that the moment the constant is tuned upward —
+    // silently, since the test still passes while testing one chunk (T3.1).
+    let n = macrame::util::limits::HYDRATE_CHUNK + 50;
     let ids: Vec<String> = (0..n).map(|i| format!("n{i:04}")).collect();
     for id in &ids {
         db.upsert_concept(ConceptUpsert::new(id.clone(), id.clone()).valid_from(T0))

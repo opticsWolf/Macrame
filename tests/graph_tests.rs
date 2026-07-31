@@ -615,3 +615,134 @@ async fn loading_scales_linearly_in_the_number_of_edges() {
          linear is ~8x and quadratic ~26x — the per-row byte check is back"
     );
 }
+
+// ---------------------------------------------------------------------------
+// T3.2 / D-085 — a historical traversal must state which text it wants
+// ---------------------------------------------------------------------------
+
+/// The wrong answer the boundary exists to prevent, demonstrated and then refused.
+///
+/// This is the test that makes T3.2 more than a signature change. It renames a
+/// concept *after* the instant being asked about, so the two attribute modes
+/// genuinely disagree — without that, every mode returns the same string and the
+/// whole question is invisible, which is precisely how this survived to 0.6.0.
+///
+/// Three assertions, in the order that matters:
+///
+///   1. defaulted mode + `as_of` is an **error**, not a guess;
+///   2. `AtTime` returns the title as it was — the answer most callers meant;
+///   3. `Current` returns today's title — still available, now stated.
+#[tokio::test]
+async fn a_historical_traversal_must_say_which_titles_it_wants() {
+    // The clock starts at the valid-time instant the fixture uses, because the
+    // single `as_of` value has to satisfy two different axes at once and the
+    // default epoch-1970 clock makes that impossible to arrange. The topology
+    // filter is **valid** time (`valid_from <= ts < valid_to`), while `AtTime`
+    // hydration is **transaction** time (what was believed as of `ts`). One
+    // parameter, two clocks — Doctrine II, met in a test fixture.
+    let tuesday = "2026-01-06T00:00:00.000000Z";
+    let harness = TestHarness::starting_at(
+        macrame::util::clock::parse_iso8601_utc(tuesday).unwrap(),
+    );
+    let db = harness.db_with_fake_clock().await;
+
+    for (id, title) in [("a", "Original A"), ("b", "Original B")] {
+        db.upsert_concept(
+            macrame::ConceptUpsert::new(id, title).valid_from(tuesday),
+        )
+        .await
+        .unwrap();
+    }
+    db.assert_edge(
+        macrame::graph::EdgeAssertion::new("a", "b", "KNOWS")
+            .valid_from(tuesday)
+            .valid_to(OPEN),
+    )
+    .await
+    .unwrap();
+
+    // The instant being asked about: after the original writes, before the
+    // renames. Taken from the clock rather than written as a literal, so it is
+    // a `recorded_at` the ledger actually straddles.
+    let as_of = harness.clock.peek();
+
+    // Later: the titles change. The topology does not.
+    harness.advance(std::time::Duration::from_secs(86_400 * 7));
+    let now = harness.clock.peek();
+    for (id, title) in [("a", "Renamed A"), ("b", "Renamed B")] {
+        db.upsert_concept(
+            macrame::ConceptUpsert::new(id, title).valid_from(tuesday),
+        )
+        .await
+        .unwrap();
+    }
+
+    let conn = db.read_conn();
+
+    // 1. The combination that used to be a warn! is now a value.
+    let err = TraversalBuilder::new("a")
+        .max_depth(2)
+        .as_of(&as_of)
+        .execute(conn, &now)
+        .await
+        .expect_err("as_of with a defaulted attribute mode must not guess");
+    assert!(
+        matches!(&err, DbError::AttributeModeUnstated { as_of: got } if *got == as_of),
+        "got {err:?}"
+    );
+
+    // 2. What the caller almost certainly meant.
+    let then = TraversalBuilder::new("a")
+        .max_depth(2)
+        .as_of(&as_of)
+        .attribute_mode(AttributeMode::AtTime)
+        .execute(conn, &now)
+        .await
+        .unwrap();
+    let titles: Vec<&str> = then.iter().map(|n| n.title.as_str()).collect();
+    assert!(
+        titles.contains(&"Original A"),
+        "AtTime must return the title as believed at the instant asked about, \
+         got {titles:?}"
+    );
+
+    // 3. The fast, mixed answer — legitimate, and now impossible to get by
+    //    accident. If this ever returns "Original A", `Current` has stopped
+    //    meaning live and the error above is guarding nothing.
+    let mixed = TraversalBuilder::new("a")
+        .max_depth(2)
+        .as_of(&as_of)
+        .attribute_mode(AttributeMode::Current)
+        .execute(conn, &now)
+        .await
+        .unwrap();
+    let titles: Vec<&str> = mixed.iter().map(|n| n.title.as_str()).collect();
+    assert!(
+        titles.contains(&"Renamed A"),
+        "Current must return live text, got {titles:?}"
+    );
+
+    db.close().await.unwrap();
+}
+
+/// A traversal about the present is unaffected, and that is the compatibility
+/// claim T3.2 rests on.
+///
+/// If this needed a `.attribute_mode()` call, the change would be a breaking one
+/// for every existing caller rather than for the one combination that was wrong.
+#[tokio::test]
+async fn a_live_traversal_needs_no_attribute_mode() {
+    let harness = TestHarness::new();
+    let db = Database::open(&harness.db_path).await.unwrap();
+    db.upsert_concept(macrame::ConceptUpsert::new("a", "A").valid_from(T0))
+        .await
+        .unwrap();
+
+    let found = TraversalBuilder::new("a")
+        .execute(db.read_conn(), T0)
+        .await
+        .expect("a query about now has nothing to disambiguate");
+    assert_eq!(found.len(), 1);
+
+    db.close().await.unwrap();
+}

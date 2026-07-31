@@ -639,16 +639,67 @@ is only that it reads as an open question; close it.
 
 ---
 
-## Tier 3 — Read path beyond the traversal
+## Tier 3 — Read path beyond the traversal · ✅ **COMPLETE (D-085, D-086, D-087)**
 
-### T3.1 — One `HYDRATE_CHUNK`
+> Two of the four items shipped as proposed, one was **refuted by its own measurement and
+> removed**, and one **passed its gate and was deferred anyway** on a cost the item does not
+> price. Details under each.
+
+### T3.1 — One `HYDRATE_CHUNK` — ✅ **DELIVERED, folded into D-085**
+
+> **Delivered 2026-07-31.** Now in `util::limits`, beside the `SQLITE_MAX_VARIABLE_NUMBER` it
+> exists to stay under. The `// See as_of::HYDRATE_CHUNK` comment was itself the evidence: the
+> duplication was known and being managed by convention, and a shared constant is what replaces
+> a convention.
+>
+> Two things beyond the item. The margin check moved from a `#[test]` to a `const` block on
+> clippy's prompting — both sides are constants, and the failure it guards is someone tuning
+> the value upward, plausibly in a release build without running the suite, so it should fail
+> the *build*. And `wave1_regression_tests` now derives its straddling fixture size from the
+> constant instead of hardcoding `450`, which would have silently stopped straddling a chunk
+> boundary the moment the constant moved — still passing, testing nothing.
+
+---
+
+### T3.1 — original text
 
 The constant is defined twice, at [subgraph.rs:538](../src/graph/subgraph.rs) and
 [as_of.rs:24](../src/temporal/as_of.rs), both `400`, with the reasoning written out once.
 Two copies of a tuned constant is how they stop being equal. Move to `util`, keep one
 rationale.
 
-### T3.2 — `AttributeMode::Current` + `as_of` should not be a `warn!`
+### T3.2 — `AttributeMode::Current` + `as_of` should not be a `warn!` — ✅ **DELIVERED, D-085**
+
+> **Delivered 2026-07-31.** The item's first option, taken: `DbError::AttributeModeUnstated`
+> when `as_of` is set and the mode was never stated. Both answers stay reachable and neither is
+> silent.
+>
+> **The item is missing the step that makes it possible.** A typed error could not simply
+> replace the `warn!`, because `hydrate_attributes` receives a mode and a `ts`, and a `ts` is
+> just an instant — nothing in that call distinguishes "as of last Tuesday" from "as of now".
+> The warning therefore fired on **every** `Current` hydrate, which is overwhelmingly the
+> ordinary live case where it is exactly right: loud where it did not matter and, being a log
+> line, silent where it did.
+>
+> So the fix is a representation change first. `TraversalBuilder::as_of(ts)` now exists, making
+> "a query about the past" expressible; and `attribute_mode` became `Option<AttributeMode>`,
+> where `None` means **defaulted** rather than `Current`. Those two carry exactly the
+> information the decision needs, and the error names both resolutions — "you must choose"
+> without saying between what is a worse boundary than a warning.
+>
+> **No existing caller changes.** A traversal with no `as_of` is a query about now, where the
+> two modes agree about which text to return, so the default stands; the whole suite compiled
+> and passed unaltered. That is what keeps this from breaking everyone to fix one combination.
+>
+> The test renames a concept *after* the instant asked about, so the modes genuinely disagree —
+> without that, every mode returns the same string and the question is invisible, which is
+> precisely how this survived to 0.6.0. Writing it surfaced Doctrine II inside the fixture: the
+> topology filter is **valid** time while `AtTime` hydration is **transaction** time, and one
+> `as_of` feeds both, so the first version failed by keying the rename on the wrong axis.
+
+---
+
+### T3.2 — original text
 
 Today, an `as_of(Tuesday)` traversal with the default attribute mode returns Tuesday's
 topology wearing today's titles, and says so via `tracing::warn!`. A log line is not a
@@ -660,7 +711,32 @@ For 1.0 this should be one of: a typed error unless the caller explicitly opts i
 that flips to `AtTime` when `as_of` is present. The first is cheaper and more honest. This is
 the last silent-wrong-answer path the v0.5.6 cycle documented but did not close.
 
-### T3.3 — `Subgraph` interning: the argument D-063 did not consider
+### T3.3 — `Subgraph` interning — ⏸️ **GATE PASSED, DEFERRED TO 0.7.0, D-087**
+
+> **Measured 2026-07-31.** The item's gate — edges per budget, not milliseconds — is **passed**,
+> and comfortably. An edge costs 342 bytes at 8-byte ids (378 at ULID length), because
+> `size_of::<EdgeRef>()` is 104 before any payload and every edge is stored twice. Interned to
+> `{u32, u32, f64, u32, u32}` it is 48 bytes for the pair. That is **3,066 → 21,845 edges per
+> MiB**, a 7.1× reachability gain, rising to 9.5× at 64-byte ids.
+>
+> **Deferred on a cost the item does not price.** `Subgraph`, `EdgeRef` and `NodeData` are
+> public types with public fields, read directly by every algorithm and constructed directly by
+> callers and tests. This is not an internal representation change; it is a breaking change to
+> the crate's main read-side structure, in a hardening release whose other items are
+> deliberately additive or invisible. Scheduled for 0.7.0 with the break named.
+>
+> **The sweep found a cheaper adjacent win, in the opposite regime.** Asking where the budget
+> actually goes: edges are 97% of it at zero content per concept, 76% at 2 KB, and **25% at
+> 20 KB**. Meanwhile `load_subgraph_with` *always* hydrates `content` — its own rustdoc says
+> "`attribute_mode` is ignored" — and **no graph algorithm reads it**. A caller running Louvain
+> over 20 KB documents spends three quarters of the budget on bodies nothing will look at.
+> Smaller than interning, complementary to it, and recorded in D-087 rather than acted on here:
+> `Subgraph` carrying live concept text is a documented property, so the fix is a load option,
+> not a silent change of what the type contains.
+
+---
+
+### T3.3 — original text
 
 D-063 retired the integer-index rewrite on **CPU** grounds and the measurement is sound —
 load dominates every single algorithm at every size tested. The **memory** argument was never
@@ -681,7 +757,43 @@ than a vector.
 **Do this only after T0.1**, and gate it on a measurement of edges-per-budget rather than of
 milliseconds. If the budget is not the binding constraint for real callers, skip it.
 
-### T3.4 — Pipeline the bulk paths
+### T3.4 — Pipeline the bulk paths — ❌ **IMPLEMENTED, MEASURED, REMOVED, D-086**
+
+> **Measured 2026-07-31.** Built it, swept depths 1/2/4/8/16 over 20K and 100K edges, and took
+> it out again.
+>
+> | edges | depth 1 | depth 2 | depth 4 | depth 8 | depth 16 |
+> |---|---|---|---|---|---|
+> | 20,000 | 1,557 ms | 1,573 ms | 1,548 ms | 1,578 ms | 1,578 ms |
+> | 100,000 | 8,030 ms | 8,037 ms | 8,017 ms | 8,007 ms | 8,041 ms |
+>
+> Ten cells, all within 1% of sequential, in both directions. The longest hold held at 13.8 ms
+> and 21.0 ms throughout — the control the sweep exists to check, since pipelining must change
+> *when* chunks are sent and never how big they are.
+>
+> **Every observation in the item is true and the conclusion does not follow.** The ~11,000 idle
+> gaps are real; they are also four orders of magnitude smaller than the work they interrupt. A
+> tokio mpsc hop is sub-microsecond against a 13–21 ms chunk. The item sizes the win as though
+> the round trip were comparable to the chunk cost.
+>
+> **And it was not free to keep.** With chunks in flight, a failure at chunk *i* no longer
+> leaves a **prefix** committed — *i+1 … i+k−1* were already sent and commit anyway. D-011
+> promises "earlier chunks committed"; trading that for nothing measurable is the wrong way
+> round.
+>
+> **What stayed is the part worth doing regardless**: the four bulk paths had four copies of
+> the same loop and now share `low_chunked`, sequential, stopping at the first error.
+> `examples/pipeline_diag.rs` is kept on purpose — the item's reasoning is entirely plausible
+> and will be re-proposed by the next reader of that loop, and the sweep is cheaper to re-run
+> than the argument is to re-have.
+>
+> **One condition under which this flips.** The measurement is against an embedded, *local*
+> libSQL, where channel and storage are both in-process. A network-backed or replicated
+> deployment has a round trip that is not sub-microsecond, and there the item's reasoning holds.
+
+---
+
+### T3.4 — original text
 
 `bulk_import` and friends `await` each chunk before sending the next
 ([connection.rs:673](../src/connection.rs)). A 1M-edge import is ~11,000 sequential

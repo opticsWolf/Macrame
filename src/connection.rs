@@ -985,14 +985,11 @@ impl Database {
     /// larger chunks this used through 0.5.5 (D-058).
     pub async fn bulk_import(&self, edges: Vec<EdgeAssertion>) -> Result<usize> {
         let edges = normalize_all(edges)?;
-        let mut written = 0;
-        for chunk in edges.chunks(chunk_rows::EDGES) {
-            let chunk = chunk.to_vec();
-            written += self
-                .low(|responder| LowPriCommand::BulkImportChunk { chunk, responder })
-                .await?;
-        }
-        Ok(written)
+        let chunks: Vec<_> = edges.chunks(chunk_rows::EDGES).map(<[_]>::to_vec).collect();
+        self.low_chunked(chunks, |chunk, responder| {
+            LowPriCommand::BulkImportChunk { chunk, responder }
+        })
+        .await
     }
 
     /// Upsert many **concepts** on the background channel, chunked (D-011).
@@ -1012,14 +1009,14 @@ impl Database {
             .into_iter()
             .map(ConceptUpsert::normalized)
             .collect::<Result<_>>()?;
-        let mut written = 0;
-        for chunk in concepts.chunks(chunk_rows::CONCEPTS) {
-            let chunk = chunk.to_vec();
-            written += self
-                .low(|responder| LowPriCommand::WriteConceptsChunk { chunk, responder })
-                .await?;
-        }
-        Ok(written)
+        let chunks: Vec<_> = concepts
+            .chunks(chunk_rows::CONCEPTS)
+            .map(<[_]>::to_vec)
+            .collect();
+        self.low_chunked(chunks, |chunk, responder| {
+            LowPriCommand::WriteConceptsChunk { chunk, responder }
+        })
+        .await
     }
 
     /// State as believed at `ts` (§5.5, D-026, D-049).
@@ -1096,19 +1093,18 @@ impl Database {
         model: &ModelName,
         rows: Vec<(String, Vec<f32>)>,
     ) -> Result<usize> {
-        let mut written = 0;
-        for chunk in rows.chunks(chunk_rows::EMBEDDINGS) {
-            let chunk = chunk.to_vec();
-            let model = model.clone();
-            written += self
-                .low(|responder| LowPriCommand::UpsertEmbeddingChunk {
-                    model,
-                    chunk,
-                    responder,
-                })
-                .await?;
-        }
-        Ok(written)
+        let chunks: Vec<_> = rows
+            .chunks(chunk_rows::EMBEDDINGS)
+            .map(<[_]>::to_vec)
+            .collect();
+        self.low_chunked(chunks, |chunk, responder| {
+            LowPriCommand::UpsertEmbeddingChunk {
+                model: model.clone(),
+                chunk,
+                responder,
+            }
+        })
+        .await
     }
 
     /// Reconstruct the concept-text search index from the ledger (§5.9, D-036).
@@ -1162,14 +1158,14 @@ impl Database {
         &self,
         annotations: Vec<Annotation>,
     ) -> Result<usize> {
-        let mut written = 0;
-        for chunk in annotations.chunks(chunk_rows::ANNOTATIONS) {
-            let chunk = chunk.to_vec();
-            written += self
-                .low(|responder| LowPriCommand::WriteAnalyticsChunk { chunk, responder })
-                .await?;
-        }
-        Ok(written)
+        let chunks: Vec<_> = annotations
+            .chunks(chunk_rows::ANNOTATIONS)
+            .map(<[_]>::to_vec)
+            .collect();
+        self.low_chunked(chunks, |chunk, responder| {
+            LowPriCommand::WriteAnalyticsChunk { chunk, responder }
+        })
+        .await
     }
 
     /// Move closed intervals and superseded log rows older than `cutoff` to the
@@ -1361,6 +1357,50 @@ impl Database {
             .await
             .map_err(|_| DbError::WriterUnavailable)?;
         rx.await.map_err(|_| DbError::WriterDroppedResponder)?
+    }
+
+    /// Send each chunk in turn and sum the counts — the shape all four bulk
+    /// paths share (T3.4, D-086).
+    ///
+    /// # This is sequential on purpose, and the purpose is a measurement
+    ///
+    /// T3.4 proposed pipelining: send *k* chunks ahead so the actor never finds
+    /// an empty queue. The reasoning is that awaiting each chunk before building
+    /// the next leaves the actor idle for a channel round trip every time, which
+    /// on a 1M-edge import is ~11,000 idle gaps.
+    ///
+    /// Both halves of that are true and the conclusion does not follow. The gaps
+    /// are real; they are also **four orders of magnitude smaller than the work
+    /// they interrupt**. A tokio mpsc hop is sub-microsecond and a chunk takes
+    /// 13–21 ms. Implemented and swept at depths 1, 2, 4, 8 and 16 over 20K and
+    /// 100K edges: every cell landed within 1% of sequential, in both directions
+    /// — see `examples/pipeline_diag.rs`, which is kept precisely so this is not
+    /// re-proposed from the same reasoning.
+    ///
+    /// So the pipelining was removed and the deduplication kept. It was not free
+    /// to hold: with chunks in flight, a failure at chunk `i` no longer leaves a
+    /// **prefix** committed, because `i+1 ..= i+k-1` were already sent and commit
+    /// anyway. D-011 promises "earlier chunks committed", and paying for that
+    /// with a weaker recovery story in exchange for nothing measurable is the
+    /// wrong trade.
+    ///
+    /// Sending stops at the first error, so what commits is exactly the prefix
+    /// before the failure.
+    async fn low_chunked<C>(
+        &self,
+        chunks: Vec<C>,
+        make: impl Fn(C, oneshot::Sender<Result<usize>>) -> LowPriCommand,
+    ) -> Result<usize> {
+        let mut written = 0usize;
+        for chunk in chunks {
+            let (tx, rx) = oneshot::channel();
+            self.lowpri_tx
+                .send(make(chunk, tx))
+                .await
+                .map_err(|_| DbError::WriterUnavailable)?;
+            written += rx.await.map_err(|_| DbError::WriterDroppedResponder)??;
+        }
+        Ok(written)
     }
 
     async fn low<T>(
