@@ -5,6 +5,8 @@ use macrame::error::DbError;
 use macrame::schema::ddl;
 use macrame::schema::migrations::{self, SCHEMA_VERSION};
 
+const TS: &str = "2026-01-01T00:00:00.000000Z";
+
 /// Open the harness database and hand back a connection.
 async fn connect(harness: &TestHarness) -> libsql::Connection {
     libsql::Builder::new_local(&harness.db_path)
@@ -305,7 +307,6 @@ async fn a_v5_database_climbs_to_v6_and_gains_the_open_interval_index() {
     migrations::run(&conn).await.unwrap();
 
     assert_eq!(user_version(&conn).await, SCHEMA_VERSION);
-    assert_eq!(SCHEMA_VERSION, 6, "the ladder's top moved without this test");
 
     let found: i64 = conn
         .query(
@@ -322,6 +323,208 @@ async fn a_v5_database_climbs_to_v6_and_gains_the_open_interval_index() {
         .get(0)
         .unwrap();
     assert_eq!(found, 1, "the rung must create idx_lc_open_interval");
+}
+
+/// The ladder's top, asserted once rather than inside whichever rung test was
+/// written last.
+///
+/// This used to live in the v5 → v6 test as `assert_eq!(SCHEMA_VERSION, 6)`,
+/// where it did its job — the T2.1 rung tripped it immediately — but it made a
+/// version bump look like a failure of the *v6* rung, which it is not. Hoisted
+/// so the message names the actual obligation.
+#[test]
+fn a_version_bump_must_bring_its_own_rung_test() {
+    assert_eq!(
+        SCHEMA_VERSION, 7,
+        "SCHEMA_VERSION moved. Add a test for the new rung — one that starts \
+         from a database at the previous version and asserts what the rung is \
+         *for*, not merely that `run` reached the top."
+    );
+}
+
+/// The v6 → v7 rung rebuilds `links` with the weight constraint, keeps every
+/// row, and puts the four triggers back (T2.1, D-082).
+///
+/// The only rung on the ladder that rewrites a ledger table, so it is the only
+/// one where "did the data survive" is a real question. Three things have to
+/// hold afterwards and each has failed in some version of this migration
+/// somewhere: the rows are all still there, the triggers that were dropped with
+/// the old table are back, and the constraint actually bites.
+#[tokio::test]
+async fn a_v6_database_climbs_to_v7_and_gains_the_weight_check() {
+    let harness = TestHarness::new();
+    let conn = connect(&harness).await;
+
+    // A v6 database is the current baseline with an unconstrained `links`, so it
+    // is built by laying the baseline and rebuilding that one table without the
+    // CHECK — for the reason the v5 test gives: a hand-written copy of an old
+    // schema is a second description that drifts.
+    migrations::run(&conn).await.unwrap();
+    for stmt in [
+        "ALTER TABLE links RENAME TO links_old",
+        "CREATE TABLE links (
+            source_id   TEXT NOT NULL REFERENCES concepts(id),
+            target_id   TEXT NOT NULL REFERENCES concepts(id),
+            edge_type   TEXT NOT NULL,
+            valid_from  TEXT NOT NULL,
+            recorded_at TEXT NOT NULL,
+            valid_to    TEXT NOT NULL DEFAULT '9999-12-31T23:59:59.999999Z',
+            weight      REAL NOT NULL DEFAULT 1.0,
+            properties  TEXT NOT NULL DEFAULT '{}',
+            PRIMARY KEY (source_id, target_id, edge_type, valid_from, recorded_at)
+        )",
+        "DROP TABLE links_old",
+    ] {
+        conn.execute(stmt, ()).await.unwrap();
+    }
+    for trigger_ddl in ddl::CREATE_TRIGGERS {
+        conn.execute(trigger_ddl, ()).await.unwrap();
+    }
+    conn.execute("PRAGMA user_version = 6", ()).await.unwrap();
+
+    for id in ["c0", "c1"] {
+        conn.execute(
+            "INSERT INTO concepts (id, title, valid_from, recorded_at) \
+             VALUES (?1, 'N', ?2, ?2)",
+            libsql::params![id, TS],
+        )
+        .await
+        .unwrap();
+    }
+    for (etype, weight) in [("A", 1.0), ("B", 0.0), ("C", 2.5)] {
+        conn.execute(
+            "INSERT INTO links (source_id, target_id, edge_type, valid_from, valid_to, \
+             weight, properties, recorded_at) \
+             VALUES ('c0','c1',?1,?2,'9999-12-31T23:59:59.999999Z',?3,'{}',?2)",
+            libsql::params![etype, TS, weight],
+        )
+        .await
+        .unwrap();
+    }
+
+    migrations::run(&conn).await.unwrap();
+    assert_eq!(user_version(&conn).await, SCHEMA_VERSION);
+
+    let rows: i64 = conn
+        .query("SELECT COUNT(*) FROM links", ())
+        .await
+        .unwrap()
+        .next()
+        .await
+        .unwrap()
+        .unwrap()
+        .get(0)
+        .unwrap();
+    assert_eq!(rows, 3, "the rebuild lost rows");
+
+    let triggers: i64 = conn
+        .query(
+            "SELECT COUNT(*) FROM sqlite_master \
+             WHERE type = 'trigger' AND tbl_name = 'links'",
+            (),
+        )
+        .await
+        .unwrap()
+        .next()
+        .await
+        .unwrap()
+        .unwrap()
+        .get(0)
+        .unwrap();
+    assert_eq!(
+        triggers, 4,
+        "DROP TABLE took the triggers with it and the rung did not put them back"
+    );
+
+    for (label, weight) in [("negative", "-1.0"), ("text", "'abc'")] {
+        let refused = conn
+            .execute(
+                &format!(
+                    "INSERT INTO links (source_id, target_id, edge_type, valid_from, \
+                     valid_to, weight, properties, recorded_at) \
+                     VALUES ('c0','c1','Z','{TS}','9999-12-31T23:59:59.999999Z',\
+                     {weight},'{{}}','{TS}')"
+                ),
+                (),
+            )
+            .await;
+        assert!(refused.is_err(), "a {label} weight survived the rung");
+    }
+}
+
+/// A database holding a weight the v7 constraint rejects is refused, and told
+/// why — it is not migrated with the offending rows altered or dropped.
+///
+/// Doctrine III is the whole reason: the rung copies every row verbatim, so a
+/// row that cannot be represented in the new shape has no correct automatic
+/// resolution. Clamping to zero and dropping the row are both edits to an
+/// assertion, which is the one thing this ledger does not do. The migration
+/// stops before touching anything and names a row, so the operator can decide.
+#[tokio::test]
+async fn a_negative_weight_already_stored_blocks_the_v7_rung_with_an_explanation() {
+    let harness = TestHarness::new();
+    let conn = connect(&harness).await;
+
+    migrations::run(&conn).await.unwrap();
+    for stmt in [
+        "ALTER TABLE links RENAME TO links_old",
+        "CREATE TABLE links (
+            source_id   TEXT NOT NULL REFERENCES concepts(id),
+            target_id   TEXT NOT NULL REFERENCES concepts(id),
+            edge_type   TEXT NOT NULL,
+            valid_from  TEXT NOT NULL,
+            recorded_at TEXT NOT NULL,
+            valid_to    TEXT NOT NULL DEFAULT '9999-12-31T23:59:59.999999Z',
+            weight      REAL NOT NULL DEFAULT 1.0,
+            properties  TEXT NOT NULL DEFAULT '{}',
+            PRIMARY KEY (source_id, target_id, edge_type, valid_from, recorded_at)
+        )",
+        "DROP TABLE links_old",
+    ] {
+        conn.execute(stmt, ()).await.unwrap();
+    }
+    conn.execute("PRAGMA user_version = 6", ()).await.unwrap();
+
+    for id in ["c0", "c1"] {
+        conn.execute(
+            "INSERT INTO concepts (id, title, valid_from, recorded_at) \
+             VALUES (?1, 'N', ?2, ?2)",
+            libsql::params![id, TS],
+        )
+        .await
+        .unwrap();
+    }
+    conn.execute(
+        "INSERT INTO links (source_id, target_id, edge_type, valid_from, valid_to, \
+         weight, properties, recorded_at) \
+         VALUES ('c0','c1','NEG',?1,'9999-12-31T23:59:59.999999Z',-1.5,'{}',?1)",
+        libsql::params![TS],
+    )
+    .await
+    .unwrap();
+
+    let err = migrations::run(&conn)
+        .await
+        .expect_err("the rung cannot represent this row and must say so");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("c0 -> c1") && msg.contains("Doctrine III"),
+        "the refusal must name a row and why it will not choose: {msg}"
+    );
+
+    // Refused *before* touching anything: still at v6, row still present.
+    assert_eq!(user_version(&conn).await, 6);
+    let rows: i64 = conn
+        .query("SELECT COUNT(*) FROM links", ())
+        .await
+        .unwrap()
+        .next()
+        .await
+        .unwrap()
+        .unwrap()
+        .get(0)
+        .unwrap();
+    assert_eq!(rows, 1, "the failed rung was not clean");
 }
 
 /// **The point of the D-059 rung: the single-open-interval probe seeks on all

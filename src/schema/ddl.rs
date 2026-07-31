@@ -28,6 +28,69 @@ macro_rules! canonical_ts_check {
     };
 }
 
+/// A macro rather than a `const` for the same reason as [`ts_glob`]: `concat!`
+/// splices it into the table DDL and only accepts literals. [`WEIGHT_CHECK`] is
+/// the same text as a value, and carries the reasoning.
+macro_rules! weight_check {
+    () => {
+        "CHECK (weight >= 0.0 AND weight < 9e999 AND typeof(weight) = 'real')"
+    };
+}
+
+/// Table-level CHECK on `links.weight` (§4.7, T2.1, D-083).
+///
+/// Three clauses. Only the first is the one the item asked for; the other two
+/// were found by probing what the first still admits.
+///
+/// `weight >= 0.0` is the item as written: shortest-path analytics are unsound
+/// over negative weights, so Dijkstra and A\* refuse the graph at load time
+/// (D-039). Until now that refusal was the *only* place the property was
+/// enforced, which made it §4.7's one genuinely open gap — a database this crate
+/// wrote by itself could hold a row this crate would not read back.
+///
+/// `typeof(weight) = 'real'` closes a hole the item does not mention and which
+/// probing found. `REAL` in SQLite is an **affinity**, not a type: values that
+/// can be converted are, and values that cannot are stored as they came. `'abc'`
+/// cannot become a number, so it is stored as TEXT — and in SQLite's type
+/// ordering every text value sorts above every numeric one, so `'abc' >= 0.0`
+/// is *true* and the first clause passes it through.
+///
+/// That is not a wrong answer on the read side. It is a **panic**: reading a
+/// text `weight` as `f64` reaches `unreachable!("invalid value type")` inside
+/// libsql 0.9.30, in whatever unrelated query first touches the row. Measured,
+/// not reasoned about — see `examples/weight_check_probe.rs`.
+///
+/// The clause costs one `typeof` per insert and refuses nothing legitimate:
+/// `3`, `'5'` and `1.0` all arrive as REAL through affinity conversion and pass.
+/// It is taken **now** rather than in a later rung because SQLite has no
+/// `ADD CONSTRAINT` — every clause added later costs another full rebuild of the
+/// largest table in the schema.
+///
+/// `weight < 9e999` refuses `+∞`, and the reason is not the one anybody
+/// predicted. The plan expected the CHECK to admit infinity and argued the
+/// loader guard would catch it; the guard tests `< 0.0` and `is_nan()`, so it
+/// does not. The next guess — mine — was that this is harmless, since IEEE
+/// infinity propagates through addition and stays totally ordered, leaving
+/// Dijkstra terminating with "that edge is unusable": an odd answer, not a wrong
+/// one.
+///
+/// Both were wrong, and a test found it. **An infinite weight makes the
+/// transaction log unreplayable.** The log trigger serialises the row to JSON,
+/// and JSON has no representation for infinity, so the payload round-trips into
+/// `ReplayCorrupt { reason: "number out of range" }` — every later
+/// `reconstruct()` fails, including the one `close()` performs. The ledger is
+/// the source of truth under Doctrine III, so a value that cannot survive the
+/// log is not an eccentric weight, it is a corrupt one.
+///
+/// `9e999` is the idiom because SQLite has no `isinf`: the literal overflows to
+/// `+∞` on parse, and `inf < inf` is false. Finite values, including `1e308`,
+/// pass.
+///
+/// The loader guard still **stays**, for the reason the constraint cannot cover:
+/// `links_current` carries no CHECK, and neither do cold files created before
+/// this rung.
+pub const WEIGHT_CHECK: &str = weight_check!();
+
 /// The `RAISE(ABORT, …)` messages the schema's guards emit (§4.3).
 ///
 /// Spliced into the trigger DDL *and* matched by [`crate::error::abort_kind`],
@@ -96,6 +159,9 @@ CREATE TABLE IF NOT EXISTS links (
     weight      REAL NOT NULL DEFAULT 1.0,
     properties  TEXT NOT NULL DEFAULT '{}',
     PRIMARY KEY (source_id, target_id, edge_type, valid_from, recorded_at),
+    "#,
+    weight_check!(),
+    r#",
     "#,
     canonical_ts_check!("valid_from", "valid_to", "recorded_at"),
     r#"

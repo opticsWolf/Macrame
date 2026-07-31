@@ -20,6 +20,20 @@ pub struct ArchiveReport {
 /// satisfied, and the delete guards must not exist on a file whose whole purpose
 /// is to receive rows.
 const COLD_SCHEMA: &[&str] = &[
+    // `weight` carries the same CHECK as the hot table (T2.1, D-083). Not
+    // symmetry for its own sake: the cold file is read back by `reconstruct`
+    // through the same `f64` decode, so a text weight is the same panic there
+    // as it is here, and a negative one is the same unsound shortest path.
+    //
+    // The hot table's constraint does not protect this one. Rows arrive by
+    // `INSERT … SELECT` across an ATTACH, which re-checks against *this*
+    // table's constraints — and a cold file may predate the hot file's rung, or
+    // have been written by a version that had neither.
+    //
+    // `IF NOT EXISTS` means an existing cold database keeps whatever definition
+    // it was created with; this constrains new cold files, and the loader guard
+    // is what covers the old ones. That is the same division of labour §4.7
+    // describes, and the reason the guard stays.
     r#"CREATE TABLE IF NOT EXISTS cold.links (
         source_id   TEXT NOT NULL,
         target_id   TEXT NOT NULL,
@@ -27,7 +41,7 @@ const COLD_SCHEMA: &[&str] = &[
         valid_from  TEXT NOT NULL,
         recorded_at TEXT NOT NULL,
         valid_to    TEXT NOT NULL,
-        weight      REAL NOT NULL,
+        weight      REAL NOT NULL CHECK (weight >= 0.0 AND weight < 9e999 AND typeof(weight) = 'real'),
         properties  TEXT NOT NULL,
         PRIMARY KEY (source_id, target_id, edge_type, valid_from, recorded_at)
     )"#,

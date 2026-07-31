@@ -13,7 +13,7 @@ use crate::schema::ddl::*;
 /// guarantee D-029 buys would be void on it while `user_version` insisted all
 /// was well. Reserving 1 as a value this build refuses by name is what makes
 /// "no legacy support" an enforced property instead of a README sentence.
-pub const SCHEMA_VERSION: u32 = 6;
+pub const SCHEMA_VERSION: u32 = 7;
 
 type StepFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
 
@@ -62,6 +62,12 @@ const STEPS: &[Step] = &[
         to: 6,
         name: "single-open-interval-index",
         apply: |conn| Box::pin(add_open_interval_index(conn)),
+    },
+    Step {
+        from: 6,
+        to: 7,
+        name: "links-weight-check",
+        apply: |conn| Box::pin(add_weight_check(conn)),
     },
 ];
 
@@ -313,6 +319,132 @@ async fn add_open_interval_index(conn: &libsql::Connection) -> Result<()> {
     for index_ddl in CREATE_INDICES {
         conn.execute(index_ddl, ()).await?;
     }
+    Ok(())
+}
+
+/// The v7 shape of `links`, pinned as text (T2.1, D-083).
+///
+/// **Deliberately not `ddl::CREATE_LINKS_TABLE`.** Every other rung on this
+/// ladder reuses the DDL constants, and for those it is right — they create an
+/// index or a derivative table, and getting today's definition is the point. A
+/// *table rebuild* is different: it produces whatever shape the constant names
+/// at the moment it runs, so the day `links` gains a v8 column, this rung would
+/// silently take a v6 database straight to the v8 shape and stamp it v7. The
+/// ladder would then have two databases both stamped v7 with different columns,
+/// and the v7 → v8 rung would run against a table that already had its change.
+///
+/// A migration rung is a statement about the past. Pinning the text is what
+/// makes it one.
+const LINKS_V7: &str = r#"
+CREATE TABLE links_v7 (
+    source_id   TEXT NOT NULL REFERENCES concepts(id),
+    target_id   TEXT NOT NULL REFERENCES concepts(id),
+    edge_type   TEXT NOT NULL,
+    valid_from  TEXT NOT NULL,
+    recorded_at TEXT NOT NULL,
+    valid_to    TEXT NOT NULL DEFAULT '9999-12-31T23:59:59.999999Z',
+    weight      REAL NOT NULL DEFAULT 1.0,
+    properties  TEXT NOT NULL DEFAULT '{}',
+    PRIMARY KEY (source_id, target_id, edge_type, valid_from, recorded_at),
+    CHECK (weight >= 0.0 AND weight < 9e999 AND typeof(weight) = 'real'),
+    -- (the timestamp CHECK, spelled out for the same pinning reason)
+    CHECK (valid_from GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z' AND valid_to GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z' AND recorded_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z' AND 1)
+)
+"#;
+
+/// v6 → v7: constrain `links.weight` (§4.7, T2.1, D-083).
+///
+/// # The only rung that rewrites a ledger table, and what that costs
+///
+/// SQLite has no `ADD CONSTRAINT`, so this is a full rebuild of `links` — the
+/// largest table in the schema — inside [`apply_step`]'s single transaction:
+/// create, copy, drop, rename, recreate triggers. Cost is O(rows) in time and
+/// roughly 2× `links` in peak disk. Every other rung on this ladder is index
+/// work or an additive table; this one is not, and a caller upgrading a large
+/// database should expect it to take a while and to need the space.
+///
+/// It is taken **pre-1.0 on purpose**. D-032 makes this a baseline re-issue
+/// today, which is cheap; after 1.0 the compat contract (D-036) freezes the
+/// ledger tables and the same change becomes an unmigration.
+///
+/// # Doctrine III is not violated, and the case where it would be is refused
+///
+/// A rebuild that *altered* an assertion would be exactly what Doctrine III
+/// forbids. This one copies every row verbatim — no clamping, no rounding, no
+/// dropping. Which means a database already holding a weight the new constraint
+/// rejects cannot be migrated at all, and this refuses **before** touching
+/// anything, with a count and an example, rather than failing halfway through a
+/// copy with a bare `CHECK constraint failed`.
+///
+/// Such rows are reachable: until this rung, `assert_edge(weight = -1.0)` was
+/// accepted by the write API and refused only at load time (§4.7). That was the
+/// gap. An operator who has them must decide what those assertions meant, and
+/// that is not a decision a migration can take for them.
+///
+/// # Order, and the trap it avoids
+///
+/// `DROP TABLE links` first, then rename. Dropping the table takes its four
+/// triggers with it, so the rename does not reparse a schema containing trigger
+/// bodies that name a table which no longer exists — the failure T1.2 hit from
+/// the other direction. All triggers are `IF NOT EXISTS`, so re-running the
+/// whole array afterwards recreates the four on `links` and no-ops the rest.
+/// No index is defined on `links`, so there is none to rebuild.
+async fn add_weight_check(conn: &libsql::Connection) -> Result<()> {
+    let offending: i64 = conn
+        .query(
+            "SELECT COUNT(*) FROM links WHERE NOT (weight >= 0.0 AND weight < 9e999 AND typeof(weight) = 'real')",
+            (),
+        )
+        .await?
+        .next()
+        .await?
+        .and_then(|r| r.get(0).ok())
+        .unwrap_or(0);
+
+    if offending > 0 {
+        let example: Option<String> = conn
+            .query(
+                "SELECT source_id || ' -> ' || target_id || ' (' || edge_type || \
+                 ') weight=' || CAST(weight AS TEXT) FROM links \
+                 WHERE NOT (weight >= 0.0 AND weight < 9e999 AND typeof(weight) = 'real') LIMIT 1",
+                (),
+            )
+            .await?
+            .next()
+            .await?
+            .and_then(|r| r.get(0).ok());
+
+        return Err(DbError::Migration {
+            to: 7,
+            reason: format!(
+                "{offending} row(s) in `links` hold a weight the v7 constraint \
+                 rejects, e.g. {}. Copying them verbatim is impossible and \
+                 altering them would violate Doctrine III, so this migration \
+                 refuses rather than choosing on your behalf. These rows were \
+                 writable through `assert_edge` before v7 (§4.7) — decide what \
+                 they were meant to assert, archive them, and retry.",
+                example.as_deref().unwrap_or("<unreadable>")
+            ),
+        });
+    }
+
+    conn.execute(LINKS_V7, ()).await?;
+    conn.execute(
+        "INSERT INTO links_v7 (source_id, target_id, edge_type, valid_from, \
+         recorded_at, valid_to, weight, properties) \
+         SELECT source_id, target_id, edge_type, valid_from, recorded_at, \
+                valid_to, weight, properties FROM links",
+        (),
+    )
+    .await?;
+    conn.execute("DROP TABLE links", ()).await?;
+    conn.execute("ALTER TABLE links_v7 RENAME TO links", ())
+        .await?;
+
+    for trigger_ddl in CREATE_TRIGGERS {
+        conn.execute(trigger_ddl, ()).await?;
+    }
+
     Ok(())
 }
 

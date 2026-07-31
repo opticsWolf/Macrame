@@ -201,6 +201,16 @@ async fn attribute_mode_omit_returns_topology_only() {
 }
 
 /// A negative weight is refused at load rather than producing a wrong path.
+///
+/// **Planted in `links_current`, not in `links` (T2.1, D-083).** Since v7 the
+/// hot ledger table carries `CHECK (weight >= 0.0 AND weight < 9e999 AND
+/// typeof(weight) = 'real')`, so this test can no longer write its own fixture
+/// there — which is the change working. `NegativeEdgeWeight` is *not* thereby unreachable, and this is the
+/// shape of the case that keeps it reachable: `links_current` is derivative and
+/// carries no such CHECK, so a projection built from a pre-v7 `links`, or a cold
+/// file written before the rung, still reaches the loader with a negative
+/// weight. That is the division of labour §4.7 describes and the reason the
+/// guard stays.
 #[tokio::test]
 async fn a_negative_edge_weight_is_refused_at_load() {
     let harness = TestHarness::new();
@@ -221,12 +231,16 @@ async fn a_negative_edge_weight_is_refused_at_load() {
             .unwrap();
         }
         w.execute(
-            "INSERT INTO links (source_id, target_id, edge_type, valid_from, valid_to, weight, properties, recorded_at) \
+            "INSERT INTO links_current (source_id, target_id, edge_type, valid_from, valid_to, weight, properties, recorded_at) \
              VALUES ('A', 'B', 'KNOWS', ?1, ?2, -1.5, '{}', ?1)",
             libsql::params![T0, OPEN],
         )
         .await
-        .unwrap();
+        .expect(
+            "links_current carries no weight CHECK by design — if this now \
+             fails, the constraint has been added there too and the guard's \
+             remaining reachable cases are cold files alone",
+        );
     }
 
     let err = db.load_subgraph("A", 2, T0, 1 << 20).await.unwrap_err();

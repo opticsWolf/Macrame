@@ -1535,7 +1535,16 @@ async fn an_upgraded_database_is_re_anchored_at_open() {
     }
 
     let reopened = Database::open(&harness.db_path).await.unwrap();
-    assert_eq!(reopened.schema_version(), 6, "the rung must have run");
+    // Against the constant, not a literal: this test is about *re-anchoring
+    // after an upgrade*, and pinning a version number here made it fail on the
+    // T2.1 rung for a reason that had nothing to do with snapshots.
+    // `migration_tests` owns the "a version bump brings its own rung test"
+    // obligation.
+    assert_eq!(
+        reopened.schema_version(),
+        macrame::schema::migrations::SCHEMA_VERSION,
+        "the rung must have run"
+    );
 
     assert!(
         count(&snaps_dir) > 0,

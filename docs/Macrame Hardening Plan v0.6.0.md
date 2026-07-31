@@ -526,9 +526,47 @@ This is a precondition for the rest of the plan, not a nice-to-have: T1.1 and T1
 
 ---
 
-## Tier 2 — Schema
+## Tier 2 — Schema · ✅ **COMPLETE (D-083, D-084)**
 
-### T2.1 — `CHECK (weight >= 0.0)` on `links` — **take it**
+### T2.1 — `CHECK (weight >= 0.0)` on `links` — ✅ **DELIVERED, D-083**
+
+> **Delivered 2026-07-31.** Schema **v7**. Shipped as
+> `CHECK (weight >= 0.0 AND weight < 9e999 AND typeof(weight) = 'real')` on `links`, and the
+> same on `COLD_SCHEMA`. All three of the item's corrections were taken. Two further clauses
+> were needed that the item does not mention, and both are worse than the negative weight it
+> was written for — found by probing, not by reading.
+>
+> **`typeof(weight) = 'real'`.** `REAL` is an *affinity*, not a type. `'abc'` cannot convert,
+> so it is stored as TEXT — and every text value sorts above every numeric one, so
+> `'abc' >= 0.0` is **true** and the plain CHECK passes it. Reading such a row back as `f64`
+> does not error: it hits `unreachable!("invalid value type")` inside libsql 0.9.30 and
+> **panics**, in whatever unrelated query first touches the row.
+>
+> **`weight < 9e999`, and two wrong predictions preceded it.** The item predicted the CHECK
+> would admit `+∞` — correct — and concluded the loader guard must therefore stay. But the
+> guard is `weight < 0.0 || weight.is_nan()`, so it does not catch `+∞` either; nothing did.
+> My correction to that was that it is harmless, since IEEE infinity stays totally ordered and
+> Dijkstra still terminates. Also wrong, and the suite caught it: **an infinite weight makes
+> the transaction log unreplayable.** The log trigger serialises to JSON, JSON has no infinity,
+> and every later `reconstruct()` — including the one `close()` runs — fails with
+> `ReplayCorrupt`. Under Doctrine III that is corruption, not eccentricity.
+>
+> **The guard stays, for neither of those reasons.** A `CHECK` on `links` does not reach
+> `links_current`, which is derivative and deliberately unconstrained, nor pre-v7 cold files.
+> Those are where `NegativeEdgeWeight` is still reachable; `graph_tests` now plants its fixture
+> in `links_current`, its old `links` fixture having stopped working the moment the constraint
+> landed — the tripwire working.
+>
+> **Migration cost named, and one case refused.** Full rebuild of `links`: O(rows), ~2× peak
+> disk, the only rung on the ladder that rewrites a ledger table. Rows are copied **verbatim**,
+> so a database already holding a rejected weight cannot be migrated — the rung refuses before
+> touching anything, with a count and an example row, because clamping or dropping would be an
+> edit to an assertion. The v7 table shape is pinned as literal text rather than reading
+> `ddl::CREATE_LINKS_TABLE`, so the rung stays a statement about the past.
+
+---
+
+### T2.1 — original text
 
 Closes the one §4.7 gap the register calls genuinely open. Three corrections to the obvious
 form:
@@ -544,7 +582,25 @@ form:
   Pre-1.0 with D-032 this is a baseline re-issue, which is cheap; it will not be cheap later.
   **This is an argument for doing it now rather than after 1.0.**
 
-### T2.2 — `rowid_pk INTEGER PRIMARY KEY` on `concepts` — **bundle with erasure, not before**
+### T2.2 — `rowid_pk INTEGER PRIMARY KEY` on `concepts` — ✅ **DELIVERED as a recorded deferral, D-084**
+
+> **Delivered 2026-07-31.** The item's own decision is to defer, so the deliverable is the
+> decision, not code. Recorded with its **trigger condition** — the first rung of whichever
+> release implements concept archival or erasure, carrying `rowid_pk`, the FTS delete trigger
+> and a `rebuild_fts()` together — because an omission with no trigger is indistinguishable
+> from an oversight.
+>
+> **One tension worth stating, which the item does not.** T2.1 argues a ledger-table change
+> should be taken *now*, pre-1.0, while D-032 makes it a cheap baseline re-issue and before
+> D-036 freezes it. That argument applies here too. The difference is that T2.1's constraint is
+> independently correct — it closes a live panic and a live corruption path whatever ships
+> next — whereas `rowid_pk` is inert until its companions exist, and adding an inert column to
+> beat a deadline is how a schema accumulates fields nobody can explain. If 1.0 approaches with
+> erasure still unscheduled, D-084 says to revisit on the deadline argument alone.
+
+---
+
+### T2.2 — original text
 
 Technically sound: an `INTEGER PRIMARY KEY` *is* the rowid, so `VACUUM` cannot renumber it,
 and `content_rowid='rowid_pk'` makes D-071's dense-rowid argument unnecessary rather than
@@ -560,7 +616,19 @@ non-reuse that only matters once deletion exists.
 erasure, together with the delete trigger and a `rebuild_fts()` call.** Taking it earlier pays
 a hot-path cost for a hazard D-071 has already measured as unreachable.
 
-### T2.3 — The overlap guard stays in the actor
+### T2.3 — The overlap guard stays in the actor — ✅ **CONFIRMED, folded into D-083**
+
+> **Delivered 2026-07-31.** Confirmed, not reopened. §4.7 now reads "settled" where it read
+> "open", and the confirmation is recorded inside D-083 rather than as its own decision,
+> because it is the same question T2.1 answers the other way — and the contrast is the useful
+> part. A `CHECK` was affordable for row 3 precisely because the engine enforces it against the
+> raw connection too, so it does **not** share row 1's "constrains only the people already
+> behaving" problem, and it costs a comparison rather than a second index probe on the path
+> D-059 had just made fast.
+
+---
+
+### T2.3 — original text
 
 Revisit and **confirm** D-060 rather than reopen it. The actor now performs exactly the probe
 a trigger would, on an index built for it, once per row with the statement prepared once

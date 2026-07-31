@@ -118,37 +118,71 @@ async fn raw_sql_writes_the_overlapping_pair_the_actor_refuses() {
 // 2. Negative weights — refused at the read boundary, by nothing before it
 // ---------------------------------------------------------------------------
 
-/// `assert_edge` accepts a negative weight; `load_subgraph` refuses the graph.
+/// A negative weight is now refused by the storage layer (T2.1, D-083).
 ///
-/// The odd one of the three. `links.weight` is a bare `REAL NOT NULL` with no
-/// `CHECK` — adding one is a D-036 schema change not taken unilaterally — and
-/// `EdgeAssertion::normalized` validates ids, edge type and timestamps but not
-/// weight. So the value lands through the supported write path and is refused
-/// only when something tries to run Dijkstra or A\* over it, which are unsound
-/// for negative weights: the result would be a shortest path that is merely a
-/// path (D-039).
+/// **This test used to assert the opposite, and the reversal is the delivery.**
+/// Through 0.5.6 `links.weight` was a bare `REAL NOT NULL`, so `assert_edge`
+/// accepted a negative weight and only `load_subgraph` refused it — the one
+/// §4.7 gap the register called genuinely open, and the asymmetric one: a
+/// database this crate wrote by itself could hold a row it would not read back.
+/// Schema v7 closes it with `CHECK (weight >= 0.0 AND typeof(weight) = 'real')`.
 ///
-/// Worth naming because it makes the §4.7 property asymmetric: a database this
-/// crate wrote by itself *can* hold a row the crate refuses to read back.
+/// So this now runs in the failing direction, like the NaN case below: it breaks
+/// if the constraint is ever removed.
+///
+/// The loader guard is **not** thereby redundant, and this asserts that too:
+/// `links_current` carries no such CHECK, and neither do cold files created
+/// before the rung. `graph_tests` covers that path.
 #[tokio::test]
-async fn the_write_api_accepts_a_negative_weight_that_the_loader_refuses() {
+async fn a_negative_weight_is_refused_by_the_schema_through_every_door() {
     let harness = TestHarness::new();
     let db = Database::open(&harness.db_path).await.unwrap();
     two_concepts(&db).await;
 
-    db.assert_edge(
-        EdgeAssertion::new("a", "b", "KNOWS")
-            .valid_from(T0)
-            .valid_to(OPEN)
-            .weight(-1.5),
-    )
-    .await
-    .expect(
-        "§4.7: neither the schema nor EdgeAssertion::normalized checks weight. \
-         If this now fails, the check has moved to the write boundary and §4.7 \
-         should say so.",
+    let via_api = db
+        .assert_edge(
+            EdgeAssertion::new("a", "b", "KNOWS")
+                .valid_from(T0)
+                .valid_to(OPEN)
+                .weight(-1.5),
+        )
+        .await;
+    assert!(
+        via_api.is_err(),
+        "§4.7/D-083: schema v7 refuses a negative weight — got {via_api:?}"
     );
 
+    // Raw SQL too: this is a CHECK, not an actor-level guard, so the connection
+    // §4.7 is about does not get to skip it.
+    let raw = db.raw().connect().unwrap();
+    let via_raw = raw
+        .execute(
+            "INSERT INTO links (source_id, target_id, edge_type, valid_from, valid_to, \
+             weight, properties, recorded_at) VALUES ('a','b','CITES',?1,?2,-1.5,'{}',?1)",
+            libsql::params![T0, OPEN],
+        )
+        .await;
+    assert!(
+        via_raw.is_err(),
+        "§4.7/D-083: raw SQL must not be able to write a negative weight either \
+         — got {via_raw:?}"
+    );
+
+    // But `links_current` is derivative and deliberately unconstrained, which is
+    // what keeps `NegativeEdgeWeight` reachable and the loader guard earning its
+    // place.
+    let into_current = raw
+        .execute(
+            "INSERT INTO links_current (source_id, target_id, edge_type, valid_from, \
+             valid_to, weight, properties, recorded_at) \
+             VALUES ('a','b','KNOWS',?1,?2,-1.5,'{}',?1)",
+            libsql::params![T0, OPEN],
+        )
+        .await;
+    assert!(
+        into_current.is_ok(),
+        "links_current must stay unconstrained — got {into_current:?}"
+    );
     let err = db.load_subgraph("a", 2, T0, 1 << 20).await.unwrap_err();
     assert!(
         matches!(err, DbError::NegativeEdgeWeight { weight, .. } if weight == -1.5),
@@ -156,6 +190,102 @@ async fn the_write_api_accepts_a_negative_weight_that_the_loader_refuses() {
     );
 
     db.close().await.unwrap();
+}
+
+/// A text weight is refused, and the reason is a panic rather than a bad answer.
+///
+/// `REAL` is an affinity, not a type. `'abc'` cannot be converted, so SQLite
+/// stores it as TEXT — and since every text value sorts above every numeric one,
+/// `'abc' >= 0.0` is **true**. A `CHECK (weight >= 0.0)` alone therefore lets it
+/// through, which is why the shipped constraint also pins `typeof`.
+///
+/// What made this worth the extra clause: reading a text `weight` as `f64`
+/// does not return an error. It reaches `unreachable!("invalid value type")`
+/// inside libsql 0.9.30 and panics — in whatever query first touches the row,
+/// arbitrarily far from the write that planted it.
+#[tokio::test]
+async fn a_text_weight_is_refused_because_reading_one_panics() {
+    let harness = TestHarness::new();
+    let db = Database::open(&harness.db_path).await.unwrap();
+    two_concepts(&db).await;
+
+    let raw = db.raw().connect().unwrap();
+    let planted = raw
+        .execute(
+            "INSERT INTO links (source_id, target_id, edge_type, valid_from, valid_to, \
+             weight, properties, recorded_at) VALUES ('a','b','CITES',?1,?2,'abc','{}',?1)",
+            libsql::params![T0, OPEN],
+        )
+        .await;
+    assert!(
+        planted.is_err(),
+        "§4.7/D-083: `weight >= 0.0` alone admits text, so the constraint pins \
+         typeof too — got {planted:?}"
+    );
+
+    db.close().await.unwrap();
+}
+
+/// `+∞` is refused, and the reason is the transaction log rather than the maths.
+///
+/// Two wrong predictions preceded this test, which is why it is worth its space.
+/// The plan expected `CHECK (weight >= 0.0)` to admit `9e999` — correct — and
+/// argued the loader guard would catch it; the guard tests `< 0.0` and
+/// `is_nan()`, so it does not. The next reading was that this is harmless: IEEE
+/// infinity propagates through addition and stays totally ordered, so Dijkstra
+/// terminates and reports the edge as unusable, an odd answer rather than a
+/// wrong one.
+///
+/// Both were wrong. Writing the edge and then closing the database produced
+/// `ReplayCorrupt { reason: "number out of range" }`. The log trigger serialises
+/// the row to JSON; **JSON has no infinity**; the payload cannot be read back.
+/// Every later `reconstruct()` fails, including the one `close()` runs. Under
+/// Doctrine III the log is the source of truth, so a weight that cannot survive
+/// it is not eccentric, it is corrupt — and the schema now refuses it with
+/// `weight < 9e999`.
+///
+/// The second assertion is the one that would have caught this originally, and
+/// it is here rather than in a replay test on purpose: it belongs beside the
+/// constraint whose absence caused it.
+#[tokio::test]
+async fn an_infinite_weight_is_refused_because_the_log_cannot_carry_it() {
+    let harness = TestHarness::new();
+    let db = Database::open(&harness.db_path).await.unwrap();
+    two_concepts(&db).await;
+
+    let via_api = db
+        .assert_edge(
+            EdgeAssertion::new("a", "b", "KNOWS")
+                .valid_from(T0)
+                .valid_to(OPEN)
+                .weight(f64::INFINITY),
+        )
+        .await;
+    assert!(
+        via_api.is_err(),
+        "§4.7/D-083: +inf must not reach links.weight — got {via_api:?}"
+    );
+
+    let raw = db.raw().connect().unwrap();
+    let via_raw = raw
+        .execute(
+            "INSERT INTO links (source_id, target_id, edge_type, valid_from, valid_to, \
+             weight, properties, recorded_at) VALUES ('a','b','CITES',?1,?2,9e999,'{}',?1)",
+            libsql::params![T0, OPEN],
+        )
+        .await;
+    assert!(
+        via_raw.is_err(),
+        "§4.7/D-083: raw SQL must not write an infinite weight either — got \
+         {via_raw:?}"
+    );
+
+    // Nothing landed, so the log is intact and the fold that `close()` runs
+    // succeeds. That is the actual property under test: a database that accepted
+    // the row above could not be closed.
+    db.close()
+        .await
+        .expect("an infinite weight in the log makes reconstruct() fail");
 }
 
 // ---------------------------------------------------------------------------
