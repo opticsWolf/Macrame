@@ -44,6 +44,27 @@ jobs:
         run: cargo fmt --all -- --check
         continue-on-error: true
 
+  # The README carries an MSRV badge and `Cargo.toml` a `rust-version`, and
+  # both are claims. Nothing else in the build would notice them going stale:
+  # the crate is developed on stable, so a newly used std method raises the real
+  # floor silently and the declared one stays where it was.
+  #
+  # `--all-targets` deliberately: tests and benches use `OnceLock` and other
+  # items the library does not, and a contributor hitting a build failure the
+  # badge said would not happen is the same defect as a wrong badge.
+  msrv:
+    name: MSRV (rust-version in Cargo.toml)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: msrv
+        run: echo "v=$(grep -m1 '^rust-version' Cargo.toml | sed 's/.*= *//; s/\"//g')" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.v }}
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --all-features --all-targets
+
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

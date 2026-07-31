@@ -3,6 +3,7 @@
 [![CI](https://github.com/opticsWolf/Macrame/actions/workflows/ci.yml/badge.svg)](https://github.com/opticsWolf/Macrame/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/macrame-db.svg)](https://crates.io/crates/macrame-db)
 [![docs.rs](https://img.shields.io/docsrs/macrame-db)](https://docs.rs/macrame-db)
+[![MSRV](https://img.shields.io/crates/msrv/macrame-db.svg)](#minimum-supported-rust-version)
 [![License](https://img.shields.io/crates/l/macrame-db.svg)](#license)
 
 **A Bitemporal Graph Ledger on libSQL · Embedded knowledge database**
@@ -240,6 +241,14 @@ Severity rule: **a wrong answer outranks a crash.** Full evidence, reproductions
 | AH | Doctrine VII's static guard banned the substring `embedding`, refusing the V fix | Narrowed to permit `embedding_model` by name, with a test pinning that it is still a scalar column |
 
 Two defects this table used to carry, **S** (`CostEstimator` with no strategy implementations) and **T** (RRF with no keyword arm), are **fixed** — D-050 and D-051 respectively. They were listed as open here while the delivery table below recorded them as delivered.
+
+## Minimum Supported Rust Version
+
+**1.88**, verified rather than declared — `cargo +1.88.0 check --all-features --all-targets` passes and 1.85 does not.
+
+It is worth saying where that floor comes from, because it is not this crate. Macrame's own code needs **1.73** (`div_ceil`; 1.70 for `Option::is_some_and`). The binding constraint is `home@0.5.12` at 1.88, reached through `libsql-ffi`'s **build**-dependency on `bindgen → which → home` — and a build-dependency binds consumers too, since `libsql-ffi` compiles the SQLite amalgamation on every downstream build. Lowering the floor means pinning that chain (`cargo update home --precise …`), not changing anything in this crate.
+
+The MSRV is treated as a compatible change and may rise in a minor release.
 
 ## Dependencies
 

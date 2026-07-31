@@ -6,6 +6,16 @@
 name = "macrame-db"
 version = "0.6.0"
 edition = "2021"
+# Measured, not declared: `cargo +1.88.0 check --all-features --all-targets`
+# passes and 1.85 does not.
+#
+# **This floor is not ours.** Macrame's own code needs 1.73 (`div_ceil`; 1.70
+# for `Option::is_some_and`). The binding constraint is `home@0.5.12` at 1.88,
+# reached through `libsql-ffi`'s *build*-dependency on bindgen -> which -> home
+# — and a build-dependency binds consumers too, because libsql-ffi compiles the
+# amalgamation on every downstream build. Lowering it means pinning that chain
+# (`cargo update home --precise …`), not changing anything here.
+rust-version = "1.88"
 authors = ["opticsWolf"]
 description = "A Bitemporal Graph Ledger on libSQL · Embedded knowledge database"
 # crates.io only *warns* locally when these are missing — `cargo publish
