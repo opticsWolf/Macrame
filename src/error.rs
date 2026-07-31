@@ -115,6 +115,21 @@ pub enum DbError {
          attributes are intended"
     )]
     AttributeModeUnstated { as_of: String },
+    /// [`crate::Database::diagnostic_conn`] could not open the file read-only
+    /// (T5.1, D-091).
+    ///
+    /// Its own variant rather than `NotFound`, which renders "node {0} not
+    /// found" — naming the wrong subject is the defect [D-069] was written to
+    /// correct, and a file is not a node.
+    ///
+    /// The case worth the sentence is a missing file:
+    /// `SQLITE_OPEN_READ_ONLY` drops `SQLITE_OPEN_CREATE` with it, so a path
+    /// that does not exist is `SQLITE_CANTOPEN` rather than a fresh empty
+    /// database. That is the right behaviour and an opaque error to receive.
+    ///
+    /// [D-069]: ../../docs/architecture/s13-decision-register.md#d-069
+    #[error("cannot open {path} read-only for diagnostics: {reason}")]
+    DiagnosticConn { path: String, reason: String },
     /// [`crate::Database::archive_windowed`] was given a window it cannot use
     /// (T1.1, D-080).
     ///

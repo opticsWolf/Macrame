@@ -938,9 +938,101 @@ it converts a caveat that must be remembered into one that is enforced.
 
 ---
 
-## Tier 5 — 1.0 API and operations
+## Tier 5 — 1.0 API and operations · ✅ **COMPLETE (D-091, D-092)** — one item carried: the upstream R15 report
 
-### T5.1 — `diagnostic_conn()`, and `raw()` behind a declaration
+### T5.1 — `diagnostic_conn()`, and `raw()` behind a declaration — ✅ **DELIVERED, D-091**
+
+> **Both of the item's premises measured rather than accepted**
+> ([`examples/readonly_open_probe.rs`](../examples/readonly_open_probe.rs), libSQL 0.9.30, live
+> WAL database with the actor running):
+>
+> | | `read_conn()` | `diagnostic_conn()` |
+> |---|---|---|
+> | `SELECT`, `EXPLAIN QUERY PLAN` | allowed | allowed |
+> | `INSERT` | refused | refused |
+> | `PRAGMA query_only = OFF` | allowed | allowed |
+> | `INSERT` after that | **allowed** | **refused** |
+>
+> The last row is the whole difference and the reason the method exists. Rows two and three
+> would look the same for a second `query_only` connection, so
+> [`tests/diagnostic_conn_tests.rs`](../tests/diagnostic_conn_tests.rs) asserts the pair in
+> **both** directions.
+>
+> **One finding the item does not anticipate, running the other way.** `CREATE TEMP TABLE`
+> **succeeds** on the read-only connection and is refused by `read_conn()` — temp tables live in
+> a separate writable temporary database, whereas `query_only` refuses them outright. That is
+> the exact mechanism D-050 measured when it removed `TwoPhaseTempTable`. So the stronger
+> boundary is not uniformly stronger, and one of D-050's two reasons no longer applies to every
+> connection this crate can offer. Recorded, not acted on — D-050's second reason is untouched.
+>
+> **`raw()` is `#[doc(hidden)]`; the `raw-access` feature was rejected on a specific cost.**
+> Cargo features cannot be *required* by a test target except through `required-features`, which
+> makes a plain `cargo test` **skip** that binary. The binaries that call `raw()` are
+> `storage_boundary_tests` and `wave1_regression_tests` — the §4.7 tripwires. Gating them would
+> stop the ordinary `cargo test` running the tests that enforce the section this item is about,
+> in order to make a declaration about a hatch. The hatch stays reachable and stops being
+> discoverable; its legitimate-use list shrinks from three items to one, *provoking a guard*.
+>
+> **§4.7 invariant 2 is narrowed, not closed** — the free `register_model` / `upsert_embedding`
+> still take a bare connection, and the file is still reachable by any SQLite client.
+
+### T5.2 — R15: defend the load-bearing claim — ✅ **SOAKED AND DEFENDED, D-092 · upstream report still open**
+
+> **The instrument had to be a subprocess runner**, which is the part worth recording. The fault
+> is a process-level access violation — not a panic, not a SQLite error, nothing to catch. A
+> `#[test]` that provoked it would take its binary down and be reported, as this document
+> already documents, as *fewer passing tests and no failures*.
+> [`examples/r15_soak.rs`](../examples/r15_soak.rs) re-executes itself with `--child` and tallies
+> exit codes.
+>
+> | arm | shape | result |
+> |---|---|---|
+> | `claim` | one long-lived `Database`, cadence on, 16 concurrent readers running `load_subgraph` + `reconstruct`, actor saturated | **0 / 10** at 15 s, **0 / 6** at 60 s |
+> | `control` | the same, plus a task opening 48 databases concurrently in the same process | **2 / 10** at 15 s |
+>
+> ~8.7 minutes of continuous load in the claimed-safe shape with no fault, in a session where
+> the control faulted twice — both inside the first three seconds, when the open storm ramps.
+> The control is what makes the claim arm mean anything.
+>
+> **The claim is defended in its sharpened form** — *one process, one file, a bounded set of
+> connections opened once and never churned* — and R15's row is reworded to say so. It is a rate
+> and not a proof, and the trigger is still concurrent *open*.
+>
+> **Still open:** the upstream report against 0.9.30. The raw reproduction is written; filing it
+> needs credentials this project's tooling does not hold.
+
+### T5.3 — Snapshot chain cross-check — ✅ **DELIVERED, D-092**
+
+> `Database::verify_snapshot_chain(ts)` folds from genesis — by withholding the snapshot
+> directory, so `snapshot_anchor` finds nothing and the second computation is genuinely
+> independent — and compares against the composed answer.
+>
+> **It reports and does not repair, and that is a decision.** Under Doctrine VI a snapshot is
+> disposable, so the repair is *delete the snapshot directory*: one line, available to the
+> caller, correct without this function's help, and pinned by a test. What the caller cannot get
+> for themselves is the knowledge that the chain diverged, and rewriting the file would destroy
+> the only evidence that composition has a defect. A divergence is a wrong **cache**, not a
+> corrupt ledger, and the report says so.
+>
+> **Not scheduled by this crate.** A genesis fold is exactly the cost snapshots exist to avoid,
+> on a log large enough for snapshots to matter — the only case where this is worth running. The
+> item calls it a scheduling problem; the schedule is the caller's, and the cadence is left
+> alone.
+>
+> **The load-bearing test is the tampered one.** A checker only ever seen to pass is the shape
+> this project keeps finding defects in — D-030's `audit_current` reduced to a constant zero;
+> D-071's FTS `'integrity-check'` reporting healthy on an emptied index. So the test writes a
+> *plausible* wrong snapshot — correctly serialised, named and anchored, with one title altered,
+> one concept removed, one edge dropped — and requires the report to name all three.
+>
+> Two comparison details that would otherwise be silent bugs: `seq_anchor` is reported and never
+> compared (the composed answer legitimately anchors at its snapshot plus delta), and edges are
+> compared as a **set**, because `MaterializedState::edges` is an unordered `Vec` and a
+> reordering is not a divergence.
+
+---
+
+### T5.1 — original text
 
 A read-only diagnostic connection **already exists**: `read_conn()` carries
 `PRAGMA query_only = ON`. So the real question is only what to do with `raw()`, and
@@ -958,7 +1050,7 @@ does not serve, since it returns a shared `&Connection`. Then put `raw()` behind
 `#[doc(hidden)]` or a `raw-access` feature. The hatch remains (D-068 is right that removing it
 buys the appearance of a guarantee); using it becomes a declaration rather than a default.
 
-### T5.2 — R15: defend the load-bearing claim
+### T5.2 — original text
 
 The mitigation is `RUST_TEST_THREADS = "1"` and the claim carrying it is *"production exposure
 is nil by construction — an application opens one `Database` and holds it for its lifetime."*
@@ -1074,7 +1166,7 @@ failures* rather than a red. Anything that gates on this suite must key on the a
 per-target result line, not on a pass count — and `--no-fail-fast` is not optional, or
 everything alphabetically behind the fault is skipped as well.
 
-### T5.3 — Snapshot chain cross-check
+### T5.3 — original text
 
 The project's own open item: `write_final` composes onto the previous snapshot, so an error
 propagates forward indefinitely with no periodic full fold. The difficulty is real — a full

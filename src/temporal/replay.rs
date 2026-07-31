@@ -256,6 +256,183 @@ pub async fn reconstruct(
     result
 }
 
+/// Fold from genesis and compare against the composed answer (§5.5, T5.3,
+/// D-092).
+///
+/// # The problem this exists for
+///
+/// [`crate::temporal::save_snapshot`] is written by `write_final`, which calls
+/// [`reconstruct`] — and `reconstruct` composes onto the *previous* snapshot
+/// whenever one is usable. So snapshot *n* is derived from snapshot *n−1*, and
+/// there is no periodic full fold anywhere in the chain. An error introduced at
+/// any link is copied forward indefinitely, and every subsequent read agrees
+/// with it, because they are all reading the same descendant.
+///
+/// The project's own open item names the difficulty honestly: a full fold is
+/// exactly the cost snapshots exist to avoid, so this cannot run on every read.
+/// It is a **scheduling** problem, and this function is the thing to schedule.
+///
+/// # It reports; it does not repair
+///
+/// Deliberate, and not merely conservative. Under [Doctrine VI] a snapshot is
+/// derivative and disposable, so the repair is *delete the snapshots* — one
+/// line, available to the caller, and correct without this function's help.
+/// What the caller cannot get for themselves is the knowledge that the chain
+/// diverged, and silently rewriting the file would destroy the only evidence of
+/// a bug in composition. A divergence here is not a corrupt database; it is a
+/// wrong **cache**, and it means composition has a defect worth finding.
+///
+/// # Cost
+///
+/// One fold from genesis over the whole log, plus one composed reconstruction.
+/// That is the expensive path by construction — see [`crate::Database::
+/// verify_snapshot_chain`] for the handle-level entry point and the note on
+/// when to run it.
+///
+/// [Doctrine VI]: ../../../docs/architecture/s0-s3-foundations.md#doctrine-vi
+pub async fn verify_snapshot_chain(
+    conn: &libsql::Connection,
+    ts: &str,
+    archive_path: Option<&Path>,
+    snapshots_dir: &Path,
+) -> Result<ChainCheck> {
+    // The composed answer: what every reader gets today.
+    let composed = reconstruct(conn, ts, archive_path, Some(snapshots_dir)).await?;
+    // The authority: the same instant, with the snapshot directory withheld, so
+    // `snapshot_anchor` finds nothing and the fold runs from genesis. Passing
+    // `None` is what makes this an independent computation rather than a second
+    // call to the thing under test.
+    let folded = reconstruct(conn, ts, archive_path, None).await?;
+    Ok(ChainCheck::compare(ts, &composed, &folded))
+}
+
+/// The result of a [`verify_snapshot_chain`] cross-check.
+///
+/// Carries the disagreements rather than a bool, because "the chain diverged" is
+/// not actionable and "these three concepts differ, and this edge is present in
+/// one and not the other" is. Bounded — see [`ChainCheck::SAMPLE_LIMIT`] — since
+/// a chain that went wrong early can disagree about every row, and a report that
+/// is the size of the database is one nobody reads.
+#[derive(Debug, Clone)]
+pub struct ChainCheck {
+    pub timestamp: String,
+    /// `seq_anchor` of the composed answer and of the genesis fold. These
+    /// **may legitimately differ**: the composed answer anchors at the snapshot
+    /// it started from plus its delta, and the fold anchors at the newest row it
+    /// saw. Reported for diagnosis, never compared.
+    pub composed_anchor: i64,
+    pub folded_anchor: i64,
+    pub composed_concepts: usize,
+    pub folded_concepts: usize,
+    pub composed_edges: usize,
+    pub folded_edges: usize,
+    /// Concept ids present in one and not the other, or whose attributes differ.
+    pub concept_disagreements: Vec<String>,
+    /// Edge keys present in one and not the other.
+    pub edge_disagreements: Vec<String>,
+    /// True when either list was truncated at [`ChainCheck::SAMPLE_LIMIT`].
+    pub truncated: bool,
+}
+
+impl ChainCheck {
+    /// How many disagreements of each kind to carry.
+    pub const SAMPLE_LIMIT: usize = 32;
+
+    pub fn diverged(&self) -> bool {
+        !self.concept_disagreements.is_empty() || !self.edge_disagreements.is_empty()
+    }
+
+    fn compare(ts: &str, composed: &MaterializedState, folded: &MaterializedState) -> Self {
+        let mut concept_disagreements = Vec::new();
+        let mut truncated = false;
+
+        let mut ids: Vec<&String> = composed.concepts.keys().collect();
+        ids.extend(folded.concepts.keys());
+        ids.sort_unstable();
+        ids.dedup();
+        for id in ids {
+            let a = composed.concepts.get(id);
+            let b = folded.concepts.get(id);
+            let same = match (a, b) {
+                (Some(a), Some(b)) => {
+                    a.title == b.title
+                        && a.content == b.content
+                        && a.embedding_model == b.embedding_model
+                }
+                (None, None) => true,
+                _ => false,
+            };
+            if !same {
+                if concept_disagreements.len() < Self::SAMPLE_LIMIT {
+                    concept_disagreements.push(id.clone());
+                } else {
+                    truncated = true;
+                }
+            }
+        }
+
+        // Edges are a `Vec` of tuples with no declared order, so the comparison
+        // is on the set. Comparing the vectors directly would report a
+        // divergence for a reordering, which is not one — and that false
+        // positive is worse than useless here, because the whole point of this
+        // check is that a report means "go and find the bug".
+        let key = |e: &(String, String, String, String, String)| {
+            format!("{}|{}|{}|{}|{}", e.0, e.1, e.2, e.3, e.4)
+        };
+        let ca: HashSet<String> = composed.edges.iter().map(key).collect();
+        let fa: HashSet<String> = folded.edges.iter().map(key).collect();
+        let mut edge_disagreements: Vec<String> = ca.symmetric_difference(&fa).cloned().collect();
+        edge_disagreements.sort_unstable();
+        if edge_disagreements.len() > Self::SAMPLE_LIMIT {
+            edge_disagreements.truncate(Self::SAMPLE_LIMIT);
+            truncated = true;
+        }
+
+        Self {
+            timestamp: ts.to_string(),
+            composed_anchor: composed.seq_anchor,
+            folded_anchor: folded.seq_anchor,
+            composed_concepts: composed.concepts.len(),
+            folded_concepts: folded.concepts.len(),
+            composed_edges: ca.len(),
+            folded_edges: fa.len(),
+            concept_disagreements,
+            edge_disagreements,
+            truncated,
+        }
+    }
+}
+
+impl std::fmt::Display for ChainCheck {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if !self.diverged() {
+            return write!(
+                f,
+                "snapshot chain agrees with a genesis fold at {}: {} concepts, {} edges",
+                self.timestamp, self.folded_concepts, self.folded_edges
+            );
+        }
+        write!(
+            f,
+            "snapshot chain DIVERGED at {}: composed {} concepts / {} edges, \
+             genesis fold {} concepts / {} edges; {} concept and {} edge \
+             disagreements{}. The snapshots are a wrong cache, not a corrupt \
+             ledger — deleting the snapshot directory restores correctness and \
+             loses only speed (Doctrine VI). concepts: {:?} edges: {:?}",
+            self.timestamp,
+            self.composed_concepts,
+            self.composed_edges,
+            self.folded_concepts,
+            self.folded_edges,
+            self.concept_disagreements.len(),
+            self.edge_disagreements.len(),
+            if self.truncated { " (truncated)" } else { "" },
+            self.concept_disagreements,
+            self.edge_disagreements,
+        )
+    }
+}
+
 /// The newest usable snapshot at or before `ts`, or `None` to fold from genesis.
 ///
 /// **Composition used to be disabled once an archive database existed, and as of

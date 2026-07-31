@@ -448,6 +448,11 @@ enum LoopCtl {
 /// Primary database handle for Macrame bitemporal ledger.
 pub struct Database {
     db: libsql::Database,
+    /// The file this handle opened, kept so [`Database::diagnostic_conn`] can
+    /// open it again under different flags (T5.1, D-091). `archive_path` and
+    /// `snapshots_dir` are derived from it and were previously the only trace
+    /// of it on the struct.
+    path: PathBuf,
     read_conn: libsql::Connection,
     highpri_tx: mpsc::Sender<HighPriCommand>,
     lowpri_tx: mpsc::Sender<LowPriCommand>,
@@ -603,6 +608,7 @@ impl Database {
 
         let handle = Self {
             db,
+            path: path.to_path_buf(),
             read_conn,
             highpri_tx,
             lowpri_tx,
@@ -672,6 +678,130 @@ impl Database {
     /// Read connection handle for queries, traversals, and folds.
     pub fn read_conn(&self) -> &libsql::Connection {
         &self.read_conn
+    }
+
+    /// The file this handle opened.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// A **new, independently owned, OS-level read-only** connection to this
+    /// database, for diagnostics (§4.7, T5.1, D-091).
+    ///
+    /// # Why this exists when `read_conn()` already does
+    ///
+    /// Two different things, and the difference is the point:
+    ///
+    /// * `read_conn()` returns a shared `&Connection` carrying
+    ///   `PRAGMA query_only = ON`. That pragma is **per-connection and
+    ///   reversible by its holder in one statement**, so it is a guardrail
+    ///   against accident, not a capability boundary. And because the reference
+    ///   is shared, a caller who runs a long reporting query on it is competing
+    ///   with every traversal and fold in the process.
+    /// * This returns a connection opened with `SQLITE_OPEN_READ_ONLY`, which is
+    ///   enforced by the engine below the pragma layer, and it is the caller's
+    ///   own.
+    ///
+    /// **Measured on libSQL 0.9.30 rather than assumed**
+    /// (`examples/readonly_open_probe.rs`), against a live WAL database with the
+    /// write actor running:
+    ///
+    /// | | `read_conn()` | `diagnostic_conn()` |
+    /// |---|---|---|
+    /// | `SELECT`, `EXPLAIN QUERY PLAN` | allowed | allowed |
+    /// | `INSERT` | refused | refused |
+    /// | `PRAGMA query_only = OFF` | **allowed** | allowed |
+    /// | `INSERT` after that | **allowed** | **refused** |
+    ///
+    /// The third and fourth rows are the whole difference: turning the pragma
+    /// off restores writes on `read_conn()` and does not here. That is what
+    /// "boundary rather than guardrail" means, and it is now a number rather
+    /// than a claim.
+    ///
+    /// # One way this is *more* permissive, which is worth knowing
+    ///
+    /// `CREATE TEMP TABLE` **succeeds** here and is refused by `read_conn()`.
+    /// Temp tables live in a separate temporary database that is writable
+    /// regardless of how the main one was opened, whereas `query_only` refuses
+    /// them outright — which is the mechanism [D-050] measured when it removed
+    /// `TwoPhaseTempTable` for returning `SQLITE_READONLY (8)` on the read
+    /// connection. So the stronger boundary is not uniformly stronger, and a
+    /// strategy that needs a temp table has a connection it could run on. That
+    /// is recorded, not acted on: D-050 removed the strategy for two reasons and
+    /// this addresses one of them.
+    ///
+    /// # Errors
+    ///
+    /// The file must already exist. `SQLITE_OPEN_READ_ONLY` drops
+    /// `SQLITE_OPEN_CREATE` with it, so a missing file is `SQLITE_CANTOPEN`
+    /// rather than a fresh empty database — which is the right failure, and is
+    /// surfaced as a typed error rather than as libSQL's error 14.
+    pub async fn diagnostic_conn(&self) -> Result<libsql::Connection> {
+        let fail = |reason: String| DbError::DiagnosticConn {
+            path: self.path.display().to_string(),
+            reason,
+        };
+        if !self.path.exists() {
+            return Err(fail(
+                "the file does not exist, and a read-only open cannot create it"
+                    .to_string(),
+            ));
+        }
+        let db = libsql::Builder::new_local(&self.path)
+            .flags(libsql::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .build()
+            .await
+            .map_err(|e| fail(e.to_string()))?;
+        db.connect().map_err(|e| fail(e.to_string()))
+    }
+
+    /// Cross-check the snapshot chain against a fold from genesis (§5.5, T5.3,
+    /// D-092).
+    ///
+    /// `write_final` composes onto the previous snapshot, so snapshot *n* is
+    /// derived from snapshot *n−1* and nothing in the chain ever folds the whole
+    /// log. An error at any link propagates forward forever and every read
+    /// agrees with it, because every read descends from it. This is the check
+    /// that would notice.
+    ///
+    /// # When to run it
+    ///
+    /// **Not on a schedule this crate chooses.** A genesis fold is precisely the
+    /// cost snapshots exist to avoid, so running it periodically by default
+    /// would give every application the bill snapshots were bought to remove —
+    /// on a database whose log is large enough for snapshots to matter, which is
+    /// the only kind where this is worth doing. The plan calls it a scheduling
+    /// problem and it is the caller's schedule: an idle period, a nightly job,
+    /// or once per *N* anchors, chosen against a log size this crate cannot see.
+    ///
+    /// The cadence is deliberately left alone for the same reason — it runs on a
+    /// connection shared with nothing and a fold there would compete with
+    /// interactive reads at a moment nobody chose.
+    ///
+    /// # It reports; it does not repair
+    ///
+    /// A divergence means the snapshots are a wrong **cache**, not that the
+    /// ledger is corrupt: [Doctrine VI] makes them disposable, so deleting
+    /// [`Self::snapshots_dir`] restores correctness and costs only speed.
+    /// Rewriting the file here would destroy the evidence that composition has a
+    /// defect, which is the only thing this can tell you that you did not
+    /// already know.
+    ///
+    /// Pair it with the actor counters ([`Self::metrics`], D-079) so a
+    /// divergence found by a scheduled run is visible beside the write latency
+    /// of the period that produced it.
+    ///
+    /// [Doctrine VI]: ../../docs/architecture/s0-s3-foundations.md#doctrine-vi
+    pub async fn verify_snapshot_chain(
+        &self,
+        ts: &str,
+    ) -> Result<crate::temporal::ChainCheck> {
+        let archive = self
+            .archive_path
+            .exists()
+            .then_some(self.archive_path.as_path());
+        crate::temporal::verify_snapshot_chain(&self.read_conn, ts, archive, &self.snapshots_dir)
+            .await
     }
 
     /// The clock every write is stamped with (§5.1.1).
@@ -747,9 +877,45 @@ impl Database {
     /// carry the same caveat; prefer [`Self::register_model`] and
     /// [`Self::upsert_embeddings`], which go through the actor.
     ///
-    /// Legitimate uses: `EXPLAIN QUERY PLAN` and other diagnostics, read-only
-    /// reporting queries that want their own connection rather than sharing the
-    /// reader, and provoking a guard in a test. Writing through it is not one.
+    /// # The legitimate-use list is now one item long (T5.1, D-091)
+    ///
+    /// It used to read: `EXPLAIN QUERY PLAN` and other diagnostics, read-only
+    /// reporting queries wanting their own connection rather than sharing the
+    /// reader, and provoking a guard in a test. The first two are exactly what
+    /// [`Self::diagnostic_conn`] now does, and it does them behind an OS-level
+    /// read-only open rather than on a handle that can write. **Use that.**
+    ///
+    /// What is left is the one use that genuinely requires write access through
+    /// a connection the actor does not own: *provoking a guard* — writing the
+    /// state §4.7 says the storage layer permits and this API refuses, so a test
+    /// can assert the gap is still where the document says it is. That is the
+    /// only thing this crate's own suite uses it for.
+    ///
+    /// # Why `#[doc(hidden)]` and not a `raw-access` feature
+    ///
+    /// T5.1 offers either. The feature is the stronger declaration — it shows up
+    /// in the consumer's `Cargo.toml`, where a reviewer sees it — and it was
+    /// **not** taken, for a reason specific to what uses this:
+    ///
+    /// Cargo features are additive and cannot be *required* by a test target
+    /// except through `required-features`, which makes a plain `cargo test`
+    /// **skip** that binary silently. The binaries that call this are
+    /// `storage_boundary_tests` and `wave1_regression_tests` — the §4.7
+    /// tripwires, whose entire job is to fail when a documented gap moves. Gating
+    /// them behind a feature would mean the ordinary `cargo test` stopped running
+    /// the tests that enforce the section this item is about, to make a
+    /// declaration about a hatch. That trade is the wrong way round, and it is
+    /// the same failure the project already names: a suite that quietly does less
+    /// than it appears to.
+    ///
+    /// So the hatch stays reachable and stops being *discoverable*: it is absent
+    /// from the docs, and the documented path for every non-write use is
+    /// [`Self::diagnostic_conn`]. [D-068] is unchanged — removing it would buy
+    /// the appearance of a guarantee, since the file is reachable by any SQLite
+    /// client on the machine.
+    ///
+    /// [D-068]: ../../docs/architecture/s13-decision-register.md#d-068
+    #[doc(hidden)]
     pub fn raw(&self) -> &libsql::Database {
         &self.db
     }
