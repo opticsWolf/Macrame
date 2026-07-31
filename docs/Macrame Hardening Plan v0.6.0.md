@@ -804,9 +804,103 @@ per-chunk atomicity contract. Measure *k*; 2–4 is likely to capture most of it
 
 ---
 
-## Tier 4 — Measurement discipline *(the systemic fix)*
+## Tier 4 — Measurement discipline *(the systemic fix)* · ✅ **COMPLETE (D-088, D-089, D-090)**
 
-### T4.1 — The fixture matrix
+### T4.1 — The fixture matrix — ✅ **DELIVERED, D-088**
+
+> **Delivered as specified, plus one correction the item does not contain.** Four shapes live
+> in [`tests/fixtures.rs`](../tests/fixtures.rs), each named for the cost it is the worst case
+> for, pinned by [`tests/fixture_matrix_tests.rs`](../tests/fixture_matrix_tests.rs) and run
+> against the database by [`examples/fixture_matrix_diag.rs`](../examples/fixture_matrix_diag.rs)
+> and the new `fixture_matrix` bench group. `benches/budgets.rs` no longer holds its own copy of
+> the star: `seed_edges` delegates to `Shape::StarOfStars`, so the shape every pre-0.6.0 §9
+> figure was taken on is a named member of the matrix rather than an anonymous local function.
+>
+> **The number that makes the case.** `load_subgraph` at comparable coverage — each shape at
+> the depth it needs to reach 90% of itself:
+>
+> | shape | depth | nodes | load |
+> |---|---|---|---|
+> | `star_of_stars` | 2 | 600 | **3.06 ms** |
+> | `chain` | 485 | 541 | 23.2 ms |
+> | `clustered` | 89 | 541 | 235 ms |
+> | `dense_small` | 1 | 300 | 259 ms |
+>
+> §9's `load_subgraph` budget is a measurement of the first row. **77× spread** at comparable
+> size, none of it visible before.
+>
+> **The correction: coverage, not depth.** The obvious table fixes the depth, and the first
+> version did. At a fixed depth of 3 the four shapes reach **600, 25, 6 and 300** nodes — so
+> that table compares a 600-node problem against a 6-node one and reports the difference as a
+> property of the shape. That is D-070's error committed inside the file written to prevent it.
+> `depth_to_cover` exists so a shape-crossing measurement has to state which variable it holds
+> fixed.
+>
+> **A second correction, to my own draft.** `Facts` first called its path count "the CTE's row
+> count". It is not — T0.1's `UNION` bounds the walk at `reached × (depth+1)`. Renamed
+> `simple_paths`, kept because it is what separates a tree from a graph and because it is the
+> cost that returns the moment path semantics are reintroduced. Beside `union_bound`, their
+> ratio is what T0.1 bought: **22,127× on `dense_small`**, **0.25× on `star_of_stars`** — the
+> only fixture that existed when T0.1 was written.
+>
+> **`clustered` had to be rebuilt once.** The first version linked communities `i -> j, i < j`,
+> which reads as dense and is a DAG: measured at 9×, it would have shipped as a weaker
+> `star_of_stars` under a name promising a different question. Both directions make each
+> community strongly connected — what Louvain and `scc` are looking for — and take the same
+> walk to 47×.
+
+### T4.2 — Plan-pinning as a test category — ✅ **DELIVERED, D-089 — and it found two dead indexes**
+
+> **Implemented in the opposite direction from the item, which is why it found something.**
+> [`tests/index_plan_tests.rs`](../tests/index_plan_tests.rs) is keyed by **index**, not by
+> query: every entry in `ddl::CREATE_INDICES` must name the query that justifies it. The
+> query-keyed form the item proposes catches a query that leaves its index — which the three
+> reactive tests already do, and they are kept. It cannot catch an index **no query ever seeks
+> on**, because there is no query to write an assertion against.
+>
+> **Two of the six are exactly that**, and both are pure cost — an index write on every insert
+> into their table, read by nothing:
+>
+> * `idx_annotations_label` — nothing in the crate selects from `analytics_annotations` at all.
+> * `idx_lc_tgt_active (target_id, valid_to)` — no query seeks on `target_id` as a leading
+>   column; `Subgraph::in_adj` is built in Rust from the forward rows the walk already returned.
+>
+> Verified rather than inferred: `examples/index_coverage_probe.rs` confirms both *would* be
+> chosen by a query of the obvious shape, so this is "nothing runs that query", not "the planner
+> declines the index". D-059's own note weighs "a fourth index write per assertion" as a price
+> worth arguing about, and `idx_lc_tgt_active` is one of those four on the hottest write path.
+>
+> **Recorded and scheduled, not dropped** — removing an index is a `DROP INDEX` rung, and this
+> release's other items are additive. `the_unread_indices_are_the_two_already_known` pins the
+> set so a third is a red test.
+
+### T4.3 — A control row in every bench run — ✅ **DELIVERED, D-090**
+
+> **Taken, with one change of form.** The item says "add a control row to every bench group",
+> and a rule of that shape is followed until the next group is added in a hurry. The control
+> lives in the **constructor**: `controlled_group` is the only way to obtain a
+> `BenchmarkGroup` in `budgets.rs`, and it has already added the row before it returns.
+> [`tests/bench_control_tests.rs`](../tests/bench_control_tests.rs) keeps the back door shut.
+>
+> **Measured on the first run that used it** — two back-to-back `traversal` runs:
+>
+> | | run 1 | run 2 | absolute | as a ratio to control |
+> |---|---|---|---|---|
+> | `control/select_1` | 1.639 µs | 1.589 µs | −3.0% | — |
+> | `three_hop_warm` | 1.704 ms | 1.635 ms | −4.0% | **−1.0%** |
+> | `as_of_edges` | 720.3 µs | 700.0 µs | −2.8% | **−0.2%** |
+>
+> The control absorbs most of the drift, which is the claim. A quiet pair of runs rather than
+> the cross-session case D-070 measured at 29%, so this demonstrates the mechanism rather than
+> bounding it.
+>
+> What it does *not* do is normalise automatically — criterion measures each row independently
+> and the division is still the reader's. The value is that the divisor is now present in the
+> same run, which is what makes the ratio computable at all.
+
+---
+
+### T4.1 — original text
 
 **This is the most important item in the plan.** One fixture shape has produced: D-070's wrong
 conclusion, T0.1's invisibility, and D-059's still-open *"the chunk constants are
@@ -825,7 +919,7 @@ Decide what realistic means. Four shapes, each with a stated reason:
 Every performance decision entry should name which fixture(s) it was measured on. D-070's
 would then have read *"inherent on `star_of_stars`"*, and the gap would have been visible.
 
-### T4.2 — Plan-pinning as a test category
+### T4.2 — original text
 
 D-042, D-059 and D-064 are one bug three times: a covering index captures a query because it
 contains the columns, not because it discriminates. There are now three `EXPLAIN`-asserting
@@ -835,7 +929,7 @@ Make it a rule: **every query with an index dependency ships with an `EXPLAIN QU
 assertion.** That is currently 5–6 queries. Then a fourth instance of this defect is a red
 test rather than a wave.
 
-### T4.3 — A control row in every bench run
+### T4.3 — original text
 
 D-070 established that this project's absolute timings carry ~29% session noise, which makes
 cross-run comparison meaningless and is not visible from a results table. Add a fixed trivial
