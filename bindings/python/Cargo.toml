@@ -1,0 +1,84 @@
+[package]
+name = "macrame-py"
+# Tracks the wheel, which tracks `macrame-db`. Kept in step by hand for now;
+# `tests/packaging_tests.rs` asserts the two agree, because a wheel reporting a
+# version the ledger underneath it does not have is the kind of drift nobody
+# notices until a bug report cites the wrong one.
+version = "0.6.0"
+edition = "2021"
+# Not the root's floor restated. pyo3 0.29 declares 1.83, which is *under*
+# `macrame-db`'s 1.88, so the binding adds no MSRV pressure — the floor is
+# still `home@0.5.12`, reached through `libsql-ffi`'s build-dependency on
+# bindgen. Stated here so a future pyo3 bump that raises its own floor above
+# 1.88 shows up as a conflict rather than silently moving the crate's.
+rust-version = "1.88"
+authors = ["opticsWolf"]
+description = "Python bindings for Macrame — a bitemporal graph ledger on libSQL"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/opticsWolf/Macrame"
+# Never goes to crates.io. The artifact is a wheel, and a source crate for this
+# would be a second way to build the same thing, free to drift out of step with
+# pyproject.toml. `cargo publish` at the root therefore still uploads exactly
+# one package.
+publish = false
+
+[lib]
+# The Python extension module's name. `pyproject.toml`'s `module-name` must
+# agree with this (`macrame._macrame`), and nothing checks that for us at build
+# time — a mismatch surfaces as an ImportError at first `import macrame`, which
+# is why `tests/packaging_tests.rs` pins the pair.
+name = "_macrame"
+# The one place a cdylib is declared in this repository. It is here rather than
+# on the root package because `crate-type` is not feature-conditional in Cargo:
+# a root cdylib would relink the statically-bound libsql-ffi amalgamation on
+# every `cargo build --release`, and would advertise a cdylib to every consumer
+# of `macrame-db` forever. See D-098.
+crate-type = ["cdylib"]
+
+[dependencies]
+# `metrics` is on deliberately (D-093). It is off by default in Rust because a
+# Rust consumer can turn it on; a Python consumer cannot — a feature flag does
+# not survive into a binary wheel, so anything omitted here is unavailable
+# downstream permanently. T1.4/D-079's argument was that an unobservable
+# CHUNK_BUDGET is an aspiration, and the wheel is the one binding that could
+# not opt in later.
+macrame-db = { path = "../..", features = ["metrics"] }
+
+# Already in the graph through macrame-db, so this costs nothing to build; it
+# is here to be *nameable*. Today that is `testing.rs`, which needs
+# `libsql::Error` to construct a sample `DbError::Engine` so the error-mapping
+# test can cover all 27 variants with no gap. P4.6's diagnostic query will need
+# `libsql::Value` for the same reason — a row has to cross the boundary as
+# something.
+#
+# Pinned to the same version macrame-db uses. Two different libsql versions in
+# one binary would be two different `Error` types, and the `#[from]` conversion
+# would stop compiling — loudly, which is the good case, but worth not
+# discovering by accident.
+libsql = "0.9.30"
+
+# `abi3-py310`: one wheel per platform instead of one per Python minor version
+# (D-094). libsql-ffi rebuilds the SQLite amalgamation from source for every
+# target, so the wheel matrix cost dominates and abi3 divides it by roughly
+# five. The price is the limited C API, which these bindings do not touch.
+pyo3 = { version = "0.29", features = ["abi3-py310"] }
+
+# `rt-multi-thread`: `Database` spawns the write actor and the snapshot cadence
+# as tasks, so a current-thread runtime would deadlock the moment `block_on`
+# waits on either.
+#
+# `time` is not optional either, and it is the kind of thing feature unification
+# would hide: the cadence loop is a `tokio::time::sleep` inside a `select!`
+# (`src/temporal/snapshot.rs`), and a runtime built without the time driver
+# *panics* when it reaches one. macrame-db depends on tokio with `full`, so
+# unification would supply it today — which is exactly why it is named here
+# rather than relied on. Nothing else in `full` is used.
+tokio = { version = "1", features = ["rt-multi-thread", "time"] }
+
+[features]
+# ON for the wheel, OFF for `cargo test -p macrame-py`. Never a default: with
+# it on, the resulting object links against Python symbols that only the
+# interpreter loading the extension supplies, so a plain `cargo build` of this
+# crate would fail at link time on Linux and macOS. maturin turns it on itself
+# (see `features` in pyproject.toml), so no human has to remember to.
+extension-module = ["pyo3/extension-module"]

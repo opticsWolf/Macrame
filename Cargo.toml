@@ -27,6 +27,42 @@ readme = "README.md"
 keywords = ["bitemporal", "graph", "libsql", "ledger", "database"]
 categories = ["database", "database-implementations", "data-structures"]
 
+# The Python binding's tree, kept out of the `.crate` tarball (P0, D-098).
+#
+# The package root is the repo root — deliberately, because `tests/` reaches
+# `docs/` and `src/` through `include_str!` and moving the crate down a level
+# would put those outside the published tarball. The cost of that choice is
+# this list: everything at the root is packaged unless named here.
+#
+# `bindings/` is **not** listed and does not need to be. Cargo already skips a
+# subdirectory that carries its own `Cargo.toml`, since that is another
+# package; `cargo package --list` is the check, and it is asserted by
+# `tests/packaging_tests.rs` rather than left to memory.
+exclude = [
+    "pyproject.toml",
+    "python/",
+    "tests_py/",
+    "/.venv/",
+    "*.whl",
+]
+
+# The Python bindings (P0, D-098). Additive on purpose: the root stays a
+# *package*, and Cargo's default for a workspace root that is itself a package
+# is that package alone — so `default-members` is deliberately absent and
+# `cargo test`, `cargo clippy --all-targets`, `cargo check --all-features` and
+# `cargo publish` here are the same commands they were before, scoped to
+# `macrame-db`. pyo3 is compiled only when something names it (`-p macrame-py`,
+# or maturin).
+#
+# That is a claim about Cargo's behaviour, so it is checked rather than
+# believed: `tests/packaging_tests.rs` asserts `cargo metadata`'s
+# `workspace_default_members` is this package alone.
+#
+# `bindings/python` is `publish = false`, so `cargo publish` still uploads
+# exactly one package.
+[workspace]
+members = ["bindings/python"]
+
 # The import path stays `macrame`, independent of the registry name above.
 # Without this a dependent would have to write `use macrame_db::…`, and every
 # rustdoc link, doc-test and example in the crate says `macrame`.

@@ -1,0 +1,68 @@
+[build-system]
+requires = ["maturin>=1.9,<2.0"]
+build-backend = "maturin"
+
+[project]
+# `macrame` is taken on PyPI — 0.0.1, released 2021-09-25, "Utility to build
+# Assembly/C/C++ projects" — exactly as it is taken on crates.io. This mirrors
+# the resolution already recorded for the crate: distribution `macrame-db`,
+# import path `macrame`.
+#
+# The analogy is imperfect in one way worth stating rather than discovering:
+# Rust's `[lib] name` is namespaced per build graph, so `macrame-db` providing
+# `macrame` collides with nothing. `site-packages` is flat. If that 2021
+# package also installs a top-level `macrame/`, then installing both produces
+# two distributions contending for one directory. It is a dead package and pip
+# warns on file conflicts, so this is recorded as a known, non-silent risk
+# rather than designed around.
+name = "macrame-db"
+requires-python = ">=3.10"
+description = "A Bitemporal Graph Ledger on libSQL · Embedded knowledge database"
+license = { text = "MIT OR Apache-2.0" }
+authors = [{ name = "opticsWolf" }]
+readme = "README.md"
+keywords = ["bitemporal", "graph", "libsql", "ledger", "database"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Database :: Database Engines/Servers",
+    "Typing :: Typed",
+]
+# Taken from `bindings/python/Cargo.toml` by maturin, so the wheel version and
+# the binding crate version cannot disagree.
+dynamic = ["version"]
+
+[project.urls]
+Repository = "https://github.com/opticsWolf/Macrame"
+Issues = "https://github.com/opticsWolf/Macrame/issues"
+
+[tool.maturin]
+manifest-path = "bindings/python/Cargo.toml"
+# Must agree with `[lib] name = "_macrame"` in that manifest. Nothing checks
+# this at build time — a mismatch is an ImportError on first import — so
+# `tests/packaging_tests.rs` pins the pair.
+module-name = "macrame._macrame"
+# A mixed Rust/Python project: `python/macrame/` holds the package's __init__,
+# the type stubs and the PEP 561 marker, and the compiled extension is dropped
+# into it as `_macrame`.
+python-source = "python"
+# `extension-module` is turned on *here* rather than being a default in the
+# manifest, which is the whole point of the split: `cargo test -p macrame-py`
+# must build without it or the test binary links against Python symbols only
+# the interpreter supplies.
+features = ["extension-module"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests_py"]
+# R15 (see .cargo/config.toml for the measurement and the refuted hypothesis).
+# The fault is CONCURRENT OPEN of local libSQL databases in one process, and a
+# worker-per-test-file layout is exactly the shape that reproduced it. This is
+# the pytest-side counterpart of `RUST_TEST_THREADS = "1"`, which does not
+# reach here.
+#
+# The reporting hazard carries across unchanged and is the opposite of what you
+# expect: the fault kills the process, so a crashed run comes back with a
+# SMALLER pass count and no failures. Anything gating on this suite must key on
+# the summary line being present, not on the exit code alone.
+addopts = "-p no:randomly --strict-markers"

@@ -1,0 +1,178 @@
+//! Test hooks. Underscore-prefixed, absent from `macrame.__all__`, shipped in
+//! the wheel on purpose.
+//!
+//! # Why these are in the released artifact rather than behind a feature
+//!
+//! A `testing` Cargo feature would mean the wheel that is tested is not the
+//! wheel that is published, which is the one property a packaging test exists
+//! to establish. These are a handful of functions that construct values and
+//! raise; they touch no ledger state and hold no resources.
+//!
+//! # What this closes, and what it does not
+//!
+//! P2's completeness is enforced in two places, and neither alone is enough:
+//!
+//! - **The compiler** guarantees every `DbError` variant *has* a mapping —
+//!   `errors::build` is a `match` with no wildcard arm, so a new variant
+//!   upstream fails the build.
+//! - **This module plus `tests_py/test_errors.py`** guarantees the mapping is
+//!   *correct*: that each variant reaches the class it should, under the base
+//!   it should, with its fields actually populated. A compiler cannot check
+//!   that a `setattr` used the right name.
+//!
+//! [`DB_ERROR_VARIANTS`] is the seam between the two, and it is the one thing
+//! here that is not machine-enforced from the Rust side. The Python test
+//! compares it against the variants parsed out of `src/error.rs`, so a variant
+//! added upstream and mapped but not sampled fails there.
+
+use pyo3::exceptions::PyValueError;
+use pyo3::prelude::*;
+
+use macrame::error::Overlap;
+use macrame::DbError;
+
+/// Every `DbError` variant, by name.
+///
+/// Checked against `src/error.rs` by `tests_py/test_errors.py`. Do not curate
+/// this list — if a variant is genuinely untestable, the test should say so and
+/// skip it by name, where the exemption is visible.
+pub(crate) const DB_ERROR_VARIANTS: &[&str] = &[
+    "Engine",
+    "Migration",
+    "InvalidEdgeType",
+    "SingleOpenViolation",
+    "NotFound",
+    "DimMismatch",
+    "InvalidModelName",
+    "ModelNotRegistered",
+    "SubgraphTooLarge",
+    "NegativeEdgeWeight",
+    "ReplayCorrupt",
+    "SnapshotIncompatible",
+    "PayloadVersion",
+    "ArchiveViolation",
+    "AttributeModeUnstated",
+    "DiagnosticConn",
+    "ArchiveWindow",
+    "InvalidTimestamp",
+    "InvalidId",
+    "OverlappingInterval",
+    "CurrentDrift",
+    "RebuildFailed",
+    "RebuildInterrupted",
+    "WriterUnavailable",
+    "WriterDroppedResponder",
+    "WriterStopped",
+    "RecordedAtRegression",
+];
+
+#[pyfunction]
+pub(crate) fn _db_error_variants() -> Vec<&'static str> {
+    DB_ERROR_VARIANTS.to_vec()
+}
+
+/// Raise the Python exception a given `DbError` variant maps to.
+///
+/// The sample values are deliberately distinctive rather than plausible —
+/// `"src-1"`, `4242`, `"2026-02-03T04:05:06.000007Z"` — so an assertion that a
+/// field arrived can distinguish "the right field" from "a field".
+#[pyfunction]
+pub(crate) fn _raise_db_error(name: &str) -> PyResult<()> {
+    let err = sample(name).ok_or_else(|| {
+        PyValueError::new_err(format!(
+            "unknown DbError variant {name:?}; known: {DB_ERROR_VARIANTS:?}"
+        ))
+    })?;
+    Err(crate::errors::to_py(err))
+}
+
+fn sample(name: &str) -> Option<DbError> {
+    Some(match name {
+        "Engine" => DbError::Engine(libsql::Error::ConnectionFailed("sample".into())),
+        "Migration" => DbError::Migration {
+            to: 42,
+            reason: "sample-reason".into(),
+        },
+        "InvalidEdgeType" => DbError::InvalidEdgeType("bad-type".into()),
+        "SingleOpenViolation" => DbError::SingleOpenViolation {
+            source_id: "src-1".into(),
+            target_id: "tgt-1".into(),
+            edge_type: "LINKS".into(),
+        },
+        "NotFound" => DbError::NotFound("missing-1".into()),
+        "DimMismatch" => DbError::DimMismatch {
+            got: 7,
+            expected: 768,
+            model: "nomic_v1".into(),
+        },
+        "InvalidModelName" => DbError::InvalidModelName("Bad-Model".into()),
+        "ModelNotRegistered" => DbError::ModelNotRegistered {
+            model: "nomic_v1".into(),
+            table: "embeddings_nomic_v1".into(),
+        },
+        "SubgraphTooLarge" => DbError::SubgraphTooLarge {
+            n: 4242,
+            budget: 1000,
+        },
+        "NegativeEdgeWeight" => DbError::NegativeEdgeWeight {
+            source_id: "src-1".into(),
+            target_id: "tgt-1".into(),
+            weight: -1.5,
+        },
+        "ReplayCorrupt" => DbError::ReplayCorrupt {
+            seq: 4242,
+            reason: "sample-reason".into(),
+        },
+        "SnapshotIncompatible" => DbError::SnapshotIncompatible {
+            path: "sample.snap".into(),
+            reason: "sample-reason".into(),
+        },
+        "PayloadVersion" => DbError::PayloadVersion { got: 9, max: 2 },
+        "ArchiveViolation" => DbError::ArchiveViolation {
+            table: "links".into(),
+        },
+        "AttributeModeUnstated" => DbError::AttributeModeUnstated {
+            as_of: "2026-02-03T04:05:06.000007Z".into(),
+        },
+        "DiagnosticConn" => DbError::DiagnosticConn {
+            path: "sample.db".into(),
+            reason: "sample-reason".into(),
+        },
+        "ArchiveWindow" => DbError::ArchiveWindow {
+            window: std::time::Duration::from_secs(90),
+            reason: "sample-reason".into(),
+        },
+        "InvalidTimestamp" => DbError::InvalidTimestamp {
+            value: "not-a-time".into(),
+            reason: "sample-reason".into(),
+        },
+        "InvalidId" => DbError::InvalidId {
+            id: "bad|id".into(),
+            reason: "sample-reason".into(),
+        },
+        "OverlappingInterval" => DbError::OverlappingInterval {
+            overlap: Box::new(Overlap {
+                source_id: "src-1".into(),
+                target_id: "tgt-1".into(),
+                edge_type: "LINKS".into(),
+                valid_from: "2026-03-01T00:00:00.000000Z".into(),
+                valid_to: "2026-09-01T00:00:00.000000Z".into(),
+                existing_from: "2026-01-01T00:00:00.000000Z".into(),
+                existing_to: "2026-06-01T00:00:00.000000Z".into(),
+            }),
+        },
+        "CurrentDrift" => DbError::CurrentDrift { n: 4242 },
+        "RebuildFailed" => DbError::RebuildFailed { n: 4242 },
+        "RebuildInterrupted" => DbError::RebuildInterrupted {
+            reason: "sample-reason".into(),
+        },
+        "WriterUnavailable" => DbError::WriterUnavailable,
+        "WriterDroppedResponder" => DbError::WriterDroppedResponder,
+        "WriterStopped" => DbError::WriterStopped("sample-reason".into()),
+        "RecordedAtRegression" => DbError::RecordedAtRegression {
+            got: "2026-01-01T00:00:00.000000Z".into(),
+            had: "2026-06-01T00:00:00.000000Z".into(),
+        },
+        _ => return None,
+    })
+}

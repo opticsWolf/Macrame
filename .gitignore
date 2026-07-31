@@ -19,3 +19,18 @@ target
 #  and can be added to the global gitignore or merged into this file.  For a more nuclear
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
+
+# --- Python bindings (P0) ---
+# maturin drops the compiled extension into the source package so that
+# `maturin develop` gives an importable `macrame` without an install step.
+# It is a build artifact living in a source tree, so it has to be named here.
+python/macrame/_macrame.pyd
+python/macrame/_macrame.so
+python/macrame/_macrame*.so
+
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+dist/
+*.egg-info/
