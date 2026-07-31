@@ -11,6 +11,7 @@
 //! count — it is a correct row count on a table whose primary key, checks or
 //! triggers did not survive, which is silent until the next assertion.
 
+#[path = "common/harness.rs"]
 mod harness;
 
 use harness::TestHarness;

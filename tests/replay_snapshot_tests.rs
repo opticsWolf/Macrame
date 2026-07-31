@@ -1,3 +1,4 @@
+#[path = "common/harness.rs"]
 mod harness;
 
 /// When the archive session ran, as distinct from the cutoff it used. Any

@@ -27,6 +27,7 @@
 //! deterministic suite flaky. Run them with
 //! `cargo test --features property-tests`, which CI does as its own step.
 
+#[path = "common/harness.rs"]
 mod harness;
 
 use std::collections::BTreeSet;

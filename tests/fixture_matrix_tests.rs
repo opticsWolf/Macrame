@@ -12,6 +12,7 @@
 //! importantly — asserts that it **differs from the others** on that property.
 //! Four fixtures that all behave alike are one fixture.
 
+#[path = "common/fixtures.rs"]
 mod fixtures;
 
 use fixtures::{facts, node_id, Shape, ALL_SHAPES, CLUSTER_SIZE, DENSE_SMALL_CAP};
@@ -223,6 +224,125 @@ fn the_matrix_discriminates() {
                 "{name} reaches {} nodes, no more than chain's {}",
                 f.reached,
                 chain.reached
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The rule the matrix exists to enforce (T4.1, D-088)
+// ---------------------------------------------------------------------------
+
+/// The decision register, at compile time.
+const REGISTER: &str = include_str!("../docs/architecture/s13-decision-register.md");
+
+/// Decision entries whose conclusion rests on a measurement over a graph.
+///
+/// A hand-maintained list, and the limitation is worth stating rather than
+/// hiding: nothing here can tell that a *newly added* entry is a performance
+/// one, so adding a decision without adding it to this list is not caught. What
+/// is caught is the failure that actually happened — an annotation that rots,
+/// is deleted in an edit, or names a fixture that no longer exists. That is the
+/// same partial enforcement `no_group_is_opened_without_its_control` provides
+/// for T4.3, and it is stated there for the same reason.
+const PERFORMANCE_DECISIONS: &[&str] = &[
+    "d-047", // byte-budget accounting and the loader's growth-rate test
+    "d-055", // the §9 budget table
+    "d-059", // the single-open probe's index
+    "d-063", // the Subgraph rewrite, retired on CPU
+    "d-064", // the overlap guard's plan-shape regression
+    "d-070", // load_subgraph's superlinearity
+    "d-076", // the correction that produced the rule
+    "d-086", // the bulk-path pipelining sweep
+    "d-087", // Subgraph interning, on bytes rather than milliseconds
+    "d-088", // the matrix itself
+];
+
+/// The body of one register entry: from its anchor to the next entry's.
+fn entry(id: &str) -> &'static str {
+    let anchor = format!("<a id=\"{id}\"></a>");
+    let start = REGISTER
+        .find(&anchor)
+        .unwrap_or_else(|| panic!("{id} is not in the decision register"));
+    let rest = &REGISTER[start + anchor.len()..];
+    match rest.find("\n<a id=\"d-") {
+        Some(end) => &rest[..end],
+        None => rest,
+    }
+}
+
+/// **Every performance decision names the fixture it was measured on.**
+///
+/// T4.1's stated rule, and the reason the matrix is worth its maintenance:
+/// D-070's entry *"would then have read 'inherent on `star_of_stars`'"*, and the
+/// gap D-076 later found would have been a qualifier rather than a wave.
+///
+/// The rule was applied prospectively when the matrix landed and the six older
+/// performance entries were annotated afterwards. This is what keeps that from
+/// happening again — and, more usefully, what makes the annotations break if a
+/// shape is ever renamed, since the accepted names come from `ALL_SHAPES`
+/// rather than from a second list.
+#[test]
+fn every_performance_decision_names_its_fixture() {
+    for id in PERFORMANCE_DECISIONS {
+        let body = entry(id);
+        // Backticked only. Matching the bare word would accept "chain" from
+        // "snapshot chain" and "the chain of stars", which it did on the first
+        // run — a tripwire that fires on prose is one that gets disabled.
+        // `star_of_stars` is hyphenated in entries that predate the matrix.
+        let named = ALL_SHAPES.iter().map(|s| s.name()).any(|n| {
+            body.contains(&format!("`{n}`")) || body.contains(&format!("`{}`", n.replace('_', "-")))
+        });
+        // Not every performance conclusion rests on a *graph*: D-087 was
+        // measured on `Subgraph`'s own byte accounting with no database at all.
+        // The opt-out is explicit and still requires a sentence, because "this
+        // was not measured on a fixture" is itself worth stating.
+        let opted_out = body.contains("**Fixture: none");
+        assert!(
+            named || opted_out,
+            "{id} draws a conclusion from a measurement and does not name the \
+             fixture it was taken on (T4.1, D-088). Add a `**Fixture: …**` line \
+             naming one of {:?} in backticks, or `**Fixture: none — …**` if it \
+             was not measured over a graph, or drop it from \
+             PERFORMANCE_DECISIONS if it is no longer a performance entry.",
+            ALL_SHAPES.iter().map(|s| s.name()).collect::<Vec<_>>()
+        );
+    }
+}
+
+/// No entry names a fixture the matrix does not have.
+///
+/// The other direction, and the one that catches a rename. `Shape::name` is the
+/// single source of these strings, so renaming `dense_small` turns every
+/// register reference to it into a dangling name — which this reports, rather
+/// than leaving the document quietly describing a fixture that is gone.
+#[test]
+fn the_register_names_no_fixture_the_matrix_lacks() {
+    let known: Vec<String> = ALL_SHAPES
+        .iter()
+        .flat_map(|s| [s.name().to_string(), s.name().replace('_', "-")])
+        .collect();
+
+    // Every backticked token in the register that looks like a fixture name:
+    // lowercase words joined by underscores, at least two of them. Deliberately
+    // narrow — this is a tripwire, not a parser.
+    for token in REGISTER.split('`').skip(1).step_by(2) {
+        let looks_like_a_fixture = token.contains('_')
+            && token.len() > 4
+            && token
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c == '_')
+            && token.starts_with(|c: char| c.is_ascii_lowercase());
+        if !looks_like_a_fixture {
+            continue;
+        }
+        // Only tokens that are *claimed* as fixtures, i.e. appear next to the
+        // word. Without this the test would flag every snake_case identifier in
+        // the document, which is most of them.
+        if !known.iter().any(|k| k == token) && REGISTER.contains(&format!("fixture `{token}`")) {
+            panic!(
+                "the register calls `{token}` a fixture and the matrix has no such \
+                 shape (T4.1, D-088). Known: {known:?}"
             );
         }
     }

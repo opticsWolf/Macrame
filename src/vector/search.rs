@@ -23,7 +23,16 @@ pub struct VectorSearchResult {
 /// statement is built, so the caller gets [`DimMismatch`] naming both numbers
 /// rather than the engine's `dimensions are different: 2 != 4`.
 ///
+/// # Prefer [`crate::Database::upsert_embeddings`]
+///
+/// This takes a **bare connection** and is therefore §4.7 invariant 2's third
+/// hole: a write that does not cross the actor's channel. Hidden from the docs
+/// alongside [`crate::Database::raw`] (D-091) so the documented path is the one
+/// that preserves the single-writer property; still public, for the reason
+/// [D-068](../../docs/architecture/s13-decision-register.md#d-068) gives.
+///
 /// [`DimMismatch`]: crate::error::DbError::DimMismatch
+#[doc(hidden)]
 pub async fn upsert_embedding(
     conn: &libsql::Connection,
     model: &ModelName,

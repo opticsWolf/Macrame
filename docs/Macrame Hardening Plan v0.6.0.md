@@ -848,6 +848,16 @@ per-chunk atomicity contract. Measure *k*; 2–4 is likely to capture most of it
 > `star_of_stars` under a name promising a different question. Both directions make each
 > community strongly connected — what Louvain and `scc` are looking for — and take the same
 > walk to 47×.
+>
+> **The rule itself was applied prospectively at first, which was half the item.** Only the
+> *new* entries named their fixture, leaving nine older performance decisions reading as
+> though their figures were general. All nine are annotated now, and doing it produced three
+> things arguing would not have: D-063 **already** named its fixture, which is why its CPU
+> finding has survived where D-070’s did not; **D-055 is the largest instance** — all twelve
+> §9 budget rows, the public statement of what this costs, on one shape; and D-087 needed an
+> *opt-out* rather than a shape, since it was measured on `Subgraph`’s own byte accounting with
+> no database at all. `every_performance_decision_names_its_fixture` now enforces it, and
+> caught D-086 — written in this same cycle — on its first run.
 
 ### T4.2 — Plan-pinning as a test category — ✅ **DELIVERED, D-089 — and it found two dead indexes**
 

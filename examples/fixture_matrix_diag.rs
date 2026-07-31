@@ -19,7 +19,7 @@
 //!
 //! Run with:  cargo run --release --example fixture_matrix_diag
 
-#[path = "../tests/fixtures.rs"]
+#[path = "../tests/common/fixtures.rs"]
 mod fixtures;
 
 use std::time::Instant;

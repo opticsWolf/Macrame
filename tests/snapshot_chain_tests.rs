@@ -13,6 +13,7 @@
 //! an emptied index. So the check is run against a snapshot that is deliberately
 //! and specifically wrong, and it has to say so.
 
+#[path = "common/harness.rs"]
 mod harness;
 
 use harness::TestHarness;

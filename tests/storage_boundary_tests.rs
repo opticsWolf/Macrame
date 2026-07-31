@@ -23,6 +23,7 @@
 //! §4.7 has to be corrected back. A claim that the schema *does* enforce
 //! something needs a tripwire exactly as much as a claim that it does not.
 
+#[path = "common/harness.rs"]
 mod harness;
 
 use harness::TestHarness;

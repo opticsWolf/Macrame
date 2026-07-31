@@ -46,6 +46,7 @@
 //! `cargo test --features property-tests`, as their own step, so a genuine
 //! failure is still a genuine failure.
 
+#[path = "common/harness.rs"]
 mod harness;
 
 /// When the archive session ran, as distinct from the cutoff it used. Any

@@ -11,6 +11,17 @@ use crate::vector::ModelName;
 /// one transaction is what makes "registered" mean "enforcing".
 ///
 /// Idempotent, so an application may call it on every start.
+///
+/// # Prefer [`crate::Database::register_model`]
+///
+/// This takes a **bare connection** and is therefore §4.7 invariant 2's third
+/// hole: a write that does not cross the actor's channel. Hidden from the docs
+/// alongside [`crate::Database::raw`] (D-091) so the documented path is the one
+/// that preserves the single-writer property; still public, because
+/// [D-068](../../docs/architecture/s13-decision-register.md#d-068)'s argument
+/// applies unchanged — the file is reachable by any SQLite client, so removing
+/// the supported way to do this would buy the appearance of a guarantee.
+#[doc(hidden)]
 pub async fn register_model(
     conn: &libsql::Connection,
     model: &ModelName,

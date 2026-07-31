@@ -44,7 +44,7 @@
 //! folding state and writing files mid-measurement is noise that would land in
 //! whichever sample happened to overlap it.
 
-#[path = "../tests/fixtures.rs"]
+#[path = "../tests/common/fixtures.rs"]
 mod fixtures;
 
 use std::path::PathBuf;

@@ -32,6 +32,7 @@
 //! `include_str!`s the module each query came from and looks for a fragment of
 //! it. Compile-time, no API change, and it goes red when the original moves.
 
+#[path = "common/harness.rs"]
 mod harness;
 
 use harness::TestHarness;

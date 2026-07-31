@@ -23,6 +23,7 @@
 //!   since 0.5.4 and never written. Not a Wave 1 defect; written because
 //!   batching the hydrate moved the accounting it describes.
 
+#[path = "common/harness.rs"]
 mod harness;
 
 use harness::TestHarness;

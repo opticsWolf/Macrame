@@ -7,6 +7,7 @@
 //! wanted a database per case would belong behind `property-tests` with the rest
 //! of the quarantine. None of these need one.
 
+#[path = "common/harness.rs"]
 mod harness;
 
 use std::future::Future;

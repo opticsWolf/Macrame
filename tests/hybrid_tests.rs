@@ -6,6 +6,7 @@
 //! arm is doing all the work is a vector search with overhead, and it passes any
 //! test that only checks the fused list is non-empty.
 
+#[path = "common/harness.rs"]
 mod harness;
 
 use harness::TestHarness;

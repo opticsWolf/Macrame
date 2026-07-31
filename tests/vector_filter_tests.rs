@@ -4,6 +4,7 @@
 //! The suite is built around a single claim — **the strategy cannot change the
 //! answer**. Everything else here is about the arithmetic that picks one.
 
+#[path = "common/harness.rs"]
 mod harness;
 
 use harness::TestHarness;

@@ -11,6 +11,7 @@
 //! the two is what happens after `PRAGMA query_only = OFF`, and that is
 //! [`turning_the_pragma_off_rescues_the_reader_and_not_the_diagnostic`].
 
+#[path = "common/harness.rs"]
 mod harness;
 
 use harness::TestHarness;

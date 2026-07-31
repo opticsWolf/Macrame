@@ -11,6 +11,7 @@
 //! for "one window per hour" against stamps that all land in the same
 //! microsecond — it would pass, and it would be testing nothing.
 
+#[path = "common/harness.rs"]
 mod harness;
 
 use std::time::Duration;

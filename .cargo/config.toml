@@ -1,43 +1,105 @@
 # Test-harness settings for R15 (see the risk register in docs/).
 #
-# libSQL faults with STATUS_ACCESS_VIOLATION (0xc0000005) when several local
-# databases are opened and dropped concurrently in one process. It is not a
-# Macrame defect: it reproduces with no Macrame types in the loop, it is not
-# confined to any one test binary — replay_snapshot, write_path, temporal and
-# doctrine binaries have all died mid-run — and upgrading 0.6.0 -> 0.9.30 did
-# not change it.
+# libSQL faults with STATUS_ACCESS_VIOLATION (0xc0000005) when local databases
+# are opened *concurrently* in one process. It is not a Macrame defect: it
+# reproduces with no Macrame types in the loop, it is not confined to any one
+# test binary -- storage_boundary, vector_filter, replay_snapshot, write_path
+# and the property binaries have all died mid-run -- and upgrading the
+# dependency 0.6.0 -> 0.9.30 did not change it.
 #
-# Measured on 0.9.30, full suite, 0.5.4:
+# ---------------------------------------------------------------------------
+# If you are here because the build went red, read this paragraph first.
+# ---------------------------------------------------------------------------
 #
-#     libtest default (parallel)   1/20 bad runs
-#     --test-threads=1             0/30 bad runs
+# Re-run the failing binary on its own. Every binary that has died during a
+# suite run is clean in isolation -- four of them at 0/15 each, 60 isolated runs
+# with no fault. A binary that fails alone is a real failure; one that only
+# fails inside the suite is almost certainly this.
 #
-# One binary in isolation showed the same split: 2/40 parallel, 0/40 serial.
-# So the trigger is concurrency, not volume, and serialising libtest removes it.
+# And note the reporting hazard, because it is the opposite of what you expect:
+# the fault kills the process, so the tests that already printed `ok` are
+# reported, the ones behind it are silent, and that binary's `test result:` line
+# never appears. **A pass-count sum therefore comes back SMALLER with no
+# failures rather than red.** Anything gating on this suite must key on the
+# absence of a per-target result line, and `--no-fail-fast` is not optional or
+# everything alphabetically behind the fault is skipped as well.
 #
-# RE-MEASURED 2026-07-30 on 0.5.6, same dependency version, WITH this setting
-# in force. Serialising does NOT remove it — it reduces a rate:
+# ---------------------------------------------------------------------------
+# What is known, and what was believed here and is not true
+# ---------------------------------------------------------------------------
 #
-#     cargo test --no-fail-fast    5/10 bad runs
+# The trigger is CONCURRENT OPEN. A standalone reproducer separates the two
+# candidate variables directly (libsql 0.9.30, Windows, release, tokio
+# multi-thread, one file per task):
 #
-# Each faulting binary is clean alone (storage_boundary, vector_filter,
-# replay_snapshot, write_path: 0/15 each, 60 isolated runs, no fault), so the
-# trigger is neither the binary nor threads within one. The correlate looks
-# like database open/drop churn: the property binaries open one per generated
-# case and fault 3/4 alone. If you see a red build, re-run the named binary
-# alone before assuming a real failure -- and note the fault kills the process,
-# so tests after it are never reported and a pass-count sum comes back SMALLER
-# rather than red. See R15 in docs/ and T5.2 of the v0.6.0 hardening plan.
+#     500 opens, sequential, one process         0/10
+#     4 / 8 / 16 concurrent opens                0/10 each
+#     32 concurrent opens                        2/12
+#     128 concurrent opens                       5/12
+#     128 concurrent, nothing dropped until end  3/12
+#
+# The threshold sits between 16 and 32 concurrent opens on this machine. The
+# last row is the sharp one: holding every handle alive until the end still
+# faults, so this is concurrent *open*, not an open/drop race and not teardown.
+#
+# REFUTED, and it was written here as the diagnosis until 0.6.0: that the
+# correlate is database open/drop CHURN. The suite data reads that way -- the
+# property binaries open one database per generated case and fault ~3/4 alone,
+# where an ordinary 20-test binary is 0/15 -- but 500 sequential opens in one
+# process is 0/10. Churn is not sufficient; concurrency is. The suite table
+# cannot distinguish the two, and no inference of that kind should be drawn
+# from it.
+#
+# ---------------------------------------------------------------------------
+# What this setting does, and what it does not
+# ---------------------------------------------------------------------------
+#
+# Serialising libtest REDUCES THE RATE. It does not remove the fault, and an
+# earlier version of this file said that it did:
+#
+#     0.5.4, full suite, libtest default (parallel)   1/20 bad runs
+#     0.5.4, full suite, --test-threads=1             0/30 bad runs
+#     0.5.6, full suite, --test-threads=1             5/10 bad runs
+#
+# Same dependency version throughout, and the last row was measured WITH this
+# setting in force. Either the rate rose with the suite (171 -> 221 tests) or
+# the original 0/30 was a lucky streak. Read 0/30 as a data point, not as a
+# guarantee this file provides.
+#
+# One thing this does not explain, flagged rather than guessed at: every binary
+# is 0/15 alone while the suite that runs those same binaries serially is 5/10,
+# all under RUST_TEST_THREADS = "1". If concurrent opens are required, the
+# suite-level runs are finding concurrency that per-binary runs do not, and this
+# data does not say where. `Database::open` taking three connections (four with
+# the cadence) is the obvious suspect and is not evidence.
 #
 # `[env]` does not override a value already in the environment, so setting
-# RUST_TEST_THREADS yourself still works — which is how you reproduce the fault
-# if you are chasing it or checking whether an upstream release has fixed it.
+# RUST_TEST_THREADS yourself still works -- which is how you reproduce the fault
+# if you are chasing it, or check whether an upstream release has fixed it.
 #
-# The worst case is `doctrine_property_tests` -- 3/4 serialised as of 2026-07-30,
-# where 0.5.4 recorded ~3/25 -- because generated histories open a database per
-# case. `integrity_property_tests` faulted 1/4 in the same session, so it is not
-# one binary. All three generated-history targets are behind the `property-tests`
-# feature for this reason, and are run as their own step rather than as part of
-# `cargo test`.
+# The three generated-history targets (doctrine, integrity, graph) are behind
+# the `property-tests` feature and run as their own step, because a property
+# case needs a database of its own and serialising does not save them:
+# doctrine_property_tests faulted 3/4 and integrity_property_tests 1/4 in the
+# same session, against ~3/25 recorded at 0.5.4. Quarantined, not silenced --
+# proptest replays every previously found failure from .proptest-regressions
+# before a single new case is generated.
+#
+# ---------------------------------------------------------------------------
+# Production exposure
+# ---------------------------------------------------------------------------
+#
+# Soaked and defended in 0.6.0 (T5.2, D-092), in the sharpened form -- ONE
+# PROCESS, ONE FILE, A BOUNDED SET OF CONNECTIONS OPENED ONCE AND NEVER CHURNED.
+# That wording matters: the old claim was about one `Database` handle, and a
+# handle is not what the fault counts.
+#
+#     cargo run --release --example r15_soak -- --arm claim   --secs 60 --runs 6
+#     cargo run --release --example r15_soak -- --arm control --secs 15 --runs 10
+#
+# claim is 0/6 at 60s and 0/10 at 15s; control, which adds 48 concurrent opens
+# to the same load, is 2/10. The control is what makes the claim arm mean
+# anything -- a clean claim run on its own is indistinguishable from a harness
+# that provoked nothing. Run both or neither.
 [env]
 RUST_TEST_THREADS = "1"

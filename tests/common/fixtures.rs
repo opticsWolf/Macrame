@@ -34,9 +34,12 @@
 //! Fixture builders are dev-only code and do not belong in the shipped library,
 //! and a `fixtures` feature would have to be listed in `required-features` on
 //! `[[bench]]`, which makes a plain `cargo bench` skip the benchmarks silently.
-//! `tests/harness.rs` already establishes the path-include pattern here;
+//! `tests/common/harness.rs` already establishes the pattern; both live under
+//! `tests/common/` because Cargo auto-targets every top-level `tests/*.rs` as
+//! its own integration-test binary, and a shared module there compiles into an
+//! extra binary with no tests in it.
 //! benches and examples reach this file with
-//! `#[path = "../tests/fixtures.rs"] mod fixtures;`.
+//! `#[path = "../tests/common/fixtures.rs"] mod fixtures;`.
 //!
 //! [D-059]: ../docs/architecture/s13-decision-register.md
 //! [D-070]: ../docs/architecture/s13-decision-register.md

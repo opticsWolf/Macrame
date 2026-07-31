@@ -9,6 +9,7 @@
 //! fact, worth checking. These tests check them. A compatibility contract whose
 //! feasibility has never been executed is a plan, not a contract.
 
+#[path = "common/harness.rs"]
 mod harness;
 
 use std::collections::BTreeSet;

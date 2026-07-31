@@ -1,3 +1,4 @@
+#[path = "common/harness.rs"]
 mod harness;
 
 use harness::TestHarness;
