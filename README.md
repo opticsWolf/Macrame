@@ -1,6 +1,22 @@
 # Macrame
 
+[![CI](https://github.com/opticsWolf/Macrame/actions/workflows/ci.yml/badge.svg)](https://github.com/opticsWolf/Macrame/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/macrame-db.svg)](https://crates.io/crates/macrame-db)
+[![docs.rs](https://img.shields.io/docsrs/macrame-db)](https://docs.rs/macrame-db)
+[![License](https://img.shields.io/crates/l/macrame-db.svg)](#license)
+
 **A Bitemporal Graph Ledger on libSQL · Embedded knowledge database**
+
+> Published as **`macrame-db`** because `macrame` was already taken on crates.io
+> by an unrelated crate. The import path is unchanged:
+>
+> ```toml
+> [dependencies]
+> macrame-db = "0.6"
+> ```
+> ```rust
+> use macrame::prelude::*;
+> ```
 
 Macrame is a domain-specific embedded database layer for a knowledge-ledger application: a system in which concepts are linked by typed, weighted relationships, both concepts and relationships change over time, and the history of those changes is itself a first-class asset.
 

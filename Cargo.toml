@@ -1,9 +1,28 @@
 [package]
-name = "macrame"
+# `macrame` is taken on crates.io — an unrelated wasm-bindgen macro crate at
+# 0.0.1 — so the *package* is published as `macrame-db`. The `[lib]` name below
+# keeps the import path `use macrame::…` unchanged, so this is a registry name
+# and not a rename of the crate anyone writes against.
+name = "macrame-db"
 version = "0.6.0"
 edition = "2021"
-authors = ["Macrame Contributors"]
+authors = ["opticsWolf"]
 description = "A Bitemporal Graph Ledger on libSQL · Embedded knowledge database"
+# crates.io only *warns* locally when these are missing — `cargo publish
+# --dry-run` passes without them — but the registry API rejects an upload with
+# no license, so the first real publish would fail after a full verify build.
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/opticsWolf/Macrame"
+readme = "README.md"
+keywords = ["bitemporal", "graph", "libsql", "ledger", "database"]
+categories = ["database", "database-implementations", "data-structures"]
+
+# The import path stays `macrame`, independent of the registry name above.
+# Without this a dependent would have to write `use macrame_db::…`, and every
+# rustdoc link, doc-test and example in the crate says `macrame`.
+[lib]
+name = "macrame"
+path = "src/lib.rs"
 
 [dependencies]
 libsql = "0.9.30"

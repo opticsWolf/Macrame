@@ -1,0 +1,116 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call: # so release.yml can gate on exactly this
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+
+      # `--all-targets` covers benches and examples, which is where several of
+      # this project's diagnostics live and where clippy has caught real defects
+      # (D-075's oversized DbError came out of a clippy warning). Verified clean
+      # under `-D warnings` at 0.6.0, so this is a gate that currently passes.
+      #
+      # `-D warnings` is scoped to this step rather than set for the workflow:
+      # as a global RUSTFLAGS it also applies to the `cargo publish --dry-run`
+      # verification build, where a warning from a dependency's build would fail
+      # a packaging check that has nothing to do with warnings.
+      - name: clippy
+        run: cargo clippy --all-targets --features metrics
+        env:
+          RUSTFLAGS: -D warnings
+
+      # **Report-only, deliberately.** This repo has never been rustfmt-clean —
+      # 246 diffs at 0.6.0, essentially all in tests and benches — so a blocking
+      # gate would go red on its first run for a pre-existing condition, and the
+      # only way to green it is a repo-wide reformat nobody reviewed. Adopting
+      # rustfmt is a decision worth taking on purpose: run `cargo fmt --all` in
+      # its own commit, then delete `continue-on-error` here.
+      - name: rustfmt (advisory)
+        run: cargo fmt --all -- --check
+        continue-on-error: true
+
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # `.cargo/config.toml` sets RUST_TEST_THREADS = "1" for R15 and applies
+      # here automatically. Read that file before changing anything below.
+      #
+      # R15 is an intermittent libSQL access violation (0xC0000005) triggered by
+      # concurrent database opens. It kills the process, so cargo reports
+      # "error: N targets failed" and the run goes red for a reason that has
+      # nothing to do with the change under test — measured at ~5/10 full-suite
+      # runs on Windows. A gate that fails half the time trains people to ignore
+      # red, which is this project's own stated position, so the run is retried
+      # rather than tolerated or ignored.
+      #
+      # Three attempts, not unlimited: R15 has always passed on re-run, so a
+      # genuine failure still goes red after three, and the attempt count is
+      # visible in the log rather than hidden by a `continue-on-error`.
+      - name: test (with R15 retry)
+        shell: bash
+        run: |
+          for attempt in 1 2 3; do
+            echo "::group::cargo test, attempt $attempt"
+            if cargo test --features metrics --no-fail-fast; then
+              echo "::endgroup::"
+              echo "passed on attempt $attempt"
+              exit 0
+            fi
+            echo "::endgroup::"
+            echo "::warning::attempt $attempt failed; see R15 in .cargo/config.toml"
+          done
+          echo "::error::three consecutive test runs failed — this is not R15"
+          exit 1
+
+      # The generated-history binaries are quarantined behind a feature (see
+      # .cargo/config.toml): a property case opens a database of its own, which
+      # is exactly R15's trigger, so they fault far more often than the rest.
+      # Run as their own step so their noise cannot be mistaken for the suite's.
+      - name: property tests (quarantined, R15-prone)
+        shell: bash
+        run: |
+          for attempt in 1 2 3; do
+            if cargo test --features property-tests --no-fail-fast; then
+              exit 0
+            fi
+            echo "::warning::property attempt $attempt failed"
+          done
+          echo "::error::property tests failed three times"
+          exit 1
+
+  # A `cargo publish` failure after a tag is pushed is expensive: the tag is
+  # already public and the version number is spent. This runs the same
+  # packaging and verification step on every PR, so the release job's only new
+  # variable is the upload itself.
+  package:
+    name: cargo publish --dry-run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo publish --dry-run

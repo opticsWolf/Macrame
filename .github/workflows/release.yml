@@ -1,0 +1,87 @@
+name: Release
+
+# Two ways in, and only one of them can publish.
+#
+#   * push a tag `v0.6.0`  -> verify, then upload to crates.io
+#   * run it by hand       -> verify and dry-run only, unless `publish` is
+#                             explicitly set to `true`
+#
+# The manual dry run exists so the whole path can be exercised without spending
+# a version number. A crates.io version cannot be re-uploaded once taken, even
+# if it is yanked, so a failed publish costs the number permanently.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Actually upload to crates.io (otherwise dry-run only)'
+        type: boolean
+        default: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  # The full CI matrix, reused rather than reimplemented — a release gate that
+  # is a second copy of the test job is a gate that drifts from it.
+  verify:
+    uses: ./.github/workflows/ci.yml
+
+  # Cheap, and it runs *before* anything is uploaded: a tag that disagrees with
+  # the manifest publishes a version nobody can find from the tag, and the only
+  # fix is another version number.
+  check-version:
+    name: tag matches Cargo.toml
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: compare
+        shell: bash
+        run: |
+          manifest=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          tag="${GITHUB_REF_NAME#v}"
+          echo "manifest=$manifest  tag=$tag"
+          if [ "$manifest" != "$tag" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml version $manifest"
+            exit 1
+          fi
+
+  publish:
+    name: publish to crates.io
+    needs: [verify, check-version]
+    runs-on: ubuntu-latest
+    # Tag pushes publish; a manual run publishes only when asked. `always()` is
+    # deliberately absent — if `check-version` is skipped on a manual run, this
+    # still requires `verify` to have succeeded.
+    if: |
+      startsWith(github.ref, 'refs/tags/v') ||
+      inputs.publish == true
+    environment: crates-io # add a required reviewer here to gate uploads
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish
+
+  # Runs on manual invocations that did not ask to publish: the same packaging
+  # and verification `cargo publish` performs, stopping before the upload.
+  dry-run:
+    name: publish --dry-run
+    needs: verify
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && inputs.publish != true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo publish --dry-run
