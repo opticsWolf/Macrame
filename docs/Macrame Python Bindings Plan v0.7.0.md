@@ -560,6 +560,76 @@ This is the difference between a numpy array crossing as a memory view and 768 b
 Python floats being unpacked one at a time. **No numpy build dependency** — `PyBuffer<f32>`
 is in pyo3 itself, so numpy is supported without being required.
 
+### P3 — ✅ **DELIVERED 2026-07-31**
+
+> Shipped: `bindings/python/src/{timestamps,types}.rs`, `__init__.py` exporting the value
+> types, `tests_py/test_types.py` (45 tests). **174 Python tests pass**; Rust suite
+> unchanged; clippy clean under `-D warnings`.
+>
+> **Probe P3-a resolved, and it refutes this section.** The plan proposed `macrame.OPEN`
+> as a module-level `datetime`. Measured on CPython 3.13:
+>
+> ```text
+> aware = datetime(9999,12,31,23,59,59,999999, tzinfo=utc)
+>   aware.astimezone(timezone(timedelta(hours=1)))  -> OverflowError
+>   aware.astimezone()          # local zone        -> OSError
+>   aware + timedelta(microseconds=1)               -> OverflowError
+> ```
+>
+> `astimezone()` raises for every zone east of UTC, and in a bitemporal ledger the open
+> interval is *current belief* — not a rare row, the common one. **An open interval is
+> `None`**, in both directions; `macrame.OPEN` is the stored string, for callers who need
+> to name it. The cost is stated rather than hidden: sorting a `valid_to` column needs
+> `key=lambda r: (r.valid_to is None, r.valid_to)`. The probe survives as a test, so if a
+> future CPython makes those work, the failure is the signal to revisit D-096.
+>
+> **D-094's justification for abi3 was wrong, and compiling found it.** It claimed the
+> price was "the limited C API, which these bindings do not touch". They touch it twice:
+> `PyDateAccess` / `PyTimeAccess` — pyo3's `get_year()` / `get_hour()` — and
+> `pyo3::buffer` are both compiled out under `Py_LIMITED_API`.
+>
+> - Timestamp fields are read with `getattr`: seven Python lookups instead of seven
+>   struct reads, on the coercion path only. `isoformat()` is the tempting one-call
+>   alternative and is a trap — it omits `.000000` when microseconds are zero, producing
+>   a non-canonical string for every timestamp landing exactly on a second. Pinned by a
+>   test.
+> - The buffer protocol is gone, so §5's `PyBuffer<f32>` does not exist. Replaced by an
+>   explicit packed-`bytes` fast path (`arr.astype("<f4").tobytes()`) plus sequence
+>   extraction for everything else.
+>
+> **abi3 stays, and now on evidence rather than assumption.** Coercing a 768-dim vector:
+> packed bytes **60.8 µs**, numpy `float32` as a sequence **94.9 µs**, numpy `float64`
+> 114.3 µs, Python list 73.5 µs. The buffer protocol would have bought ~35 µs per vector
+> — 1.6×, not the order of magnitude the plan implicitly assumed — against a 4–5×
+> wheel matrix on a crate that rebuilds the SQLite amalgamation per target.
+>
+> **Three further changes.**
+>
+> 1. **Validation happens in the constructor, not at the point of use.** §5 said
+>    otherwise. The deciding case is bulk writes: validating in `write_bulk_atomic`
+>    reports "invalid edge type" for a list of ten thousand edges with no indication
+>    which one, from a traceback pointing at the write. In the constructor the traceback
+>    points at the line that built it — and an `EdgeAssertion` that exists is then one the
+>    ledger will accept.
+> 2. **`properties` stays a JSON string**, not a dict. The crate documents the payload as
+>    opaque; accepting a dict would make this binding decide key order and what happens to
+>    a `Decimal` for data it never reads.
+> 3. **No chained setters.** §5 proposed keeping them alongside the keyword constructor.
+>    The constructor is complete, and a second way to build the same value is API surface
+>    with no capability behind it.
+>
+> **A bug caught before it shipped.** The first draft of `coerce_embedding` took the
+> packed path for anything extracting as `Vec<u8>`, so `bytearray` and `memoryview` would
+> be fast too. That also swallows a `tuple` of small ints and reinterprets it as float32
+> — a silent wrong answer giving a valid embedding of a quarter the length, which the
+> dimension check would then blame on the model. Now `bytes` exactly; there is a test.
+>
+> **R15 fired during this phase**, exactly as `.cargo/config.toml` describes: one run of
+> four came back **24 result lines / 294 passed / 0 failed** against 25 / 300. The other
+> three were clean. The Rust crate is untouched since P0, so this is the documented
+> upstream fault and not a regression — recorded because the whole point of that note is
+> that a *smaller* green number is the symptom.
+
 ### `Subgraph` stays opaque (proposed D-097)
 
 `Subgraph` is three `BTreeMap`s and is bounded by an explicit `byte_budget` because it is
@@ -594,6 +664,50 @@ Exposed, in this order (each phase independently shippable and testable):
 `estimate_bulk_hold(edges) -> timedelta` free function, because T1.3's whole delivery was
 making that ceiling predictable *before* the call, and a Python caller who cannot ask is
 back where 0.5.x was.
+
+### P4.1 — ✅ **DELIVERED 2026-07-31**
+
+> Shipped: the seven write methods on `Database`, `estimate_bulk_hold` +
+> `BULK_ATOMIC_WARN_HOLD` at module level, `bindings/python/src/rows.rs`,
+> `tests_py/test_write_path.py` (32 tests). **206 Python tests pass**; Rust suite
+> 25/300; clippy clean; tarball unchanged.
+>
+> **`diagnostic_query` and `explain` are pulled forward from P4.6.** P4.1's acceptance is
+> "writes, and reads back", and without a read path there is no way to tell a write that
+> landed from a method that returned a plausible count and did nothing. Every later
+> phase's tests need the same thing. §7's constraint is kept exactly: they are *methods
+> that run a query and return rows*, never a connection object, so the capability T5.1
+> wanted survives and the object that would let a caller keep it does not.
+>
+> **P2's error mapping is now tested against the ledger rather than against a hook.**
+> A real overlapping assertion raises `OverlappingIntervalError` carrying
+> `valid_from="2026-03-01…"` (what was asserted) and `existing_from=T0` (what it hit);
+> two open intervals raise `SingleOpenViolationError` with `source_id`. That is the loop
+> P2 could only close synthetically.
+>
+> **D-041 has a test that would catch its regression.** `write_analytics_annotations`
+> leaves `transaction_log` at exactly the count it had, while `write_concepts` raises it
+> — measured 6 → 6 against 6 → more. Before D-041 these were one call, and analytics
+> output overwrote concept content and versioned it. A test asserting only that
+> annotations land would pass just as well if they landed in the log too.
+>
+> **Two things this phase got wrong, both mine and both in the tests.**
+>
+> 1. A test comment claimed "the edge tables do not enforce" referential integrity. They
+>    do — `configure()` sets `PRAGMA foreign_keys = ON` on every connection — so two
+>    tests wrote edges to concepts that did not exist and got `EngineError: FOREIGN KEY
+>    constraint failed`. The binding was right and the test was wrong. Fixed, and the
+>    behaviour now has a test of its own, because it is the first thing anyone hits who
+>    writes edges before concepts and the error is the schema talking rather than a
+>    binding defect.
+> 2. `retire_edge(..., valid_to=None)` would have passed the open sentinel down, where
+>    the ledger answers with a single-open violation about a row the caller did not think
+>    they wrote. Now refused at the boundary with a sentence saying why.
+>
+> **Checked against T1.3's table**: `estimate_bulk_hold` for 500 spread edges returns
+> 37 ms against the measured ~34 ms, and the pathological shape — many corrections to one
+> relationship — estimates strictly higher than the same row count spread across distinct
+> relationships, which is the 7× case the model exists for.
 
 `astar` takes a heuristic callback, which means calling **into** Python from Rust while the
 GIL is released. That inverts the P1 arrangement and is the one method that needs its own
@@ -748,8 +862,8 @@ The crates.io job can follow later (it was already noted as optional after 0.6.0
 | **P0** Workspace ✅ | — | root `[workspace]` + `exclude`, `bindings/python`, `pyproject.toml`, packaging tests | ✅ suite 300/300; tarball clean; wheel imports; `engine_linked()` true |
 | **P1** Runtime ✅ | P0 | `runtime.rs`, `errors.rs`, `database.rs`, fork guard | ✅ 34 Python tests; GIL probe 333 vs 25; R15 probe P6-a resolved |
 | **P2** Errors ✅ | P1 | `errors.rs` (35 classes), `testing.rs` sample table | ✅ 129 Python tests; exhaustive-match tripwire verified by injection |
-| **P3** Types | P2 | `types.rs`, timestamp coercion, buffer embeddings | coercion suite; `OPEN` sentinel probe P3-a resolved |
-| **P4.1** Write | P3 | write methods | smoke test writes and reads back |
+| **P3** Types ✅ | P2 | `timestamps.rs`, `types.rs`, packed-bytes embeddings | ✅ 174 Python tests; probe P3-a resolved (refuted the datetime sentinel) |
+| **P4.1** Write ✅ | P3 | 7 write methods, `estimate_bulk_hold`, `rows.rs`, diagnostic reads | ✅ 206 Python tests; D-041 pinned; P2 mapping verified against the ledger |
 | **P4.2** Read | P3 | traversal, `Subgraph` pyclass | smoke; `AttributeModeUnstated` raises |
 | **P4.3** Temporal | P4.1 | reconstruct/archive/chain | smoke; `ChainCheck` surfaces divergence |
 | **P4.4** Vector | P3 | register/upsert/search/hybrid | dim-mismatch raises typed |
@@ -792,9 +906,9 @@ continues from D-092.
 | ID | Decision |
 |---|---|
 | D-093 | The wheel ships with `metrics` on: a feature flag does not survive into a binary artifact, so anything the wheel omits is unavailable to Python users permanently. |
-| D-094 | `abi3-py310`: one wheel per platform, because `libsql-ffi` rebuilds SQLite per target and the matrix cost dominates. |
+| D-094 | `abi3-py310`: one wheel per platform, because `libsql-ffi` rebuilds SQLite per target and the matrix cost dominates. **Amended: it does cost limited-API surface** — the datetime accessors and `PyBuffer` are compiled out. Measured at ~35 µs per 768-dim vector against a 4–5× wheel matrix, so it stands. |
 | D-095 | The binding is synchronous. The Write Actor serialises writes, so `await` on the write path advertises concurrency the architecture does not grant. |
-| D-096 | Timestamps are accepted as `str` or aware `datetime` and always returned as `datetime`; naive datetimes are rejected rather than assumed UTC, per §4.1's rule against silent repair. |
+| D-096 | Timestamps are accepted as `str` or aware `datetime` and always returned as `datetime`; naive datetimes are rejected rather than assumed UTC, per §4.1's rule against silent repair. **Amended by probe P3-a: an open interval crosses as `None`, not as a `datetime` at the sentinel** — `datetime.max` cannot survive `.astimezone()` east of UTC. |
 | D-097 | `Subgraph` crosses as an opaque handle, not a dict. Converting eagerly doubles the peak memory of the one operation that already carries a byte budget. |
 | D-099 | Every `DbError` variant maps to its own Python class with its fields as attributes, and completeness is enforced by an exhaustive `match` rather than a test — a wildcard arm would hide exactly the regression being guarded against. |
 | D-098 | The bindings live in a workspace *leaf*; the root package does not move, because `tests/` `include_str!`s `docs/` and `src/`, and moving the crate would put those outside the published tarball. |

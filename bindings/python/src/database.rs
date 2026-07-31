@@ -48,7 +48,10 @@ use pyo3::types::PyType;
 use macrame::prelude::*;
 
 use crate::errors::{closed_error, to_py};
+use crate::rows;
 use crate::runtime::{check_not_forked, runtime};
+use crate::timestamps::to_canonical;
+use crate::types::{PyAnnotation, PyConceptUpsert, PyEdgeAssertion};
 
 /// A Macrame ledger handle.
 #[pyclass(name = "Database", module = "macrame", frozen)]
@@ -235,6 +238,209 @@ impl PyDatabase {
     #[getter]
     fn schema_version(&self, py: Python<'_>) -> PyResult<u32> {
         self.with_db(py, |db| Ok(db.schema_version()))
+    }
+
+    // -- write surface (P4.1) ------------------------------------------------
+    //
+    // Every one of these crosses the Write Actor's channel, and §5.1.8 / D-028
+    // says what that means: **awaiting a write waits on a Rust channel, not in
+    // SQLite**, so `busy_timeout` does not bound it. During an in-flight
+    // `rebuild_current` or `archive` the caller stalls for that transaction's
+    // duration.
+    //
+    // The Python consequence belongs where a caller will look for it: running
+    // one of these on a thread and giving up on it does **not** cancel it. The
+    // command stays queued and commits when the actor reaches it. There is no
+    // cancellation at this boundary, and implying one would be worse than saying
+    // so.
+    //
+    // Values were validated in their constructors (P3), so nothing here can fail
+    // on a malformed edge type or timestamp — that already happened, at the line
+    // that built the value.
+
+    /// Assert an edge. Doctrine III: a new row, never an update.
+    ///
+    /// Raises `SingleOpenViolationError` if the relationship already has an open
+    /// interval — retire it first — and `OverlappingIntervalError` if the
+    /// asserted interval collides with one already recorded.
+    fn assert_edge(&self, py: Python<'_>, edge: PyEdgeAssertion) -> PyResult<()> {
+        let edge = edge.inner;
+        self.with_db(py, move |db| {
+            runtime().block_on(db.assert_edge(edge)).map_err(to_py)
+        })
+    }
+
+    /// Close an open interval by asserting its replacement (Doctrine III).
+    ///
+    /// `valid_to` is when the relationship stopped being true, and it may not be
+    /// `None`: `None` means *open*, and retiring something to an open end is not
+    /// a retirement. Refused here rather than passed down, because the ledger
+    /// would otherwise answer with a single-open violation about a row the
+    /// caller did not think they were writing.
+    #[pyo3(signature = (source, target, edge_type, valid_from, valid_to))]
+    fn retire_edge(
+        &self,
+        py: Python<'_>,
+        source: String,
+        target: String,
+        edge_type: String,
+        valid_from: &Bound<'_, PyAny>,
+        valid_to: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        if valid_to.is_none() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "retire_edge needs an instant for valid_to; None means an open \
+                 interval, and retiring an edge to an open end is not a \
+                 retirement. Pass the moment the relationship stopped being true.",
+            ));
+        }
+        let from = to_canonical(Some(valid_from))?;
+        let to = to_canonical(Some(valid_to))?;
+        self.with_db(py, move |db| {
+            runtime()
+                .block_on(db.retire_edge(source, target, edge_type, &from, &to))
+                .map_err(to_py)
+        })
+    }
+
+    /// Insert or update a concept.
+    fn upsert_concept(&self, py: Python<'_>, concept: PyConceptUpsert) -> PyResult<()> {
+        let concept = concept.inner;
+        self.with_db(py, move |db| {
+            runtime()
+                .block_on(db.upsert_concept(concept))
+                .map_err(to_py)
+        })
+    }
+
+    /// Assert many edges in **one transaction under one stamp** (D-014).
+    ///
+    /// The batch is one act, so it cannot be chunked — splitting it is the thing
+    /// this method exists not to do. That makes the actor's hold a function of
+    /// `len(edges)`, and **every other writer in the process waits that long**.
+    /// Measured on libSQL 0.9.30 (T1.3, D-081): 500 rows ~34 ms, 2,000 ~155 ms,
+    /// 10,000 ~1.0 s, 20,000 ~2.6 s.
+    ///
+    /// Call `macrame.estimate_bulk_hold(edges)` *before* this to find out which
+    /// of those you are in.
+    ///
+    /// A caller who needs the latency bound and not the atomicity wants
+    /// `bulk_import`, which is the same write chunked and explicitly not atomic
+    /// overall (D-011).
+    fn write_bulk_atomic(&self, py: Python<'_>, edges: Vec<PyEdgeAssertion>) -> PyResult<usize> {
+        let edges: Vec<EdgeAssertion> = edges.into_iter().map(|e| e.inner).collect();
+        self.with_db(py, move |db| {
+            runtime()
+                .block_on(db.write_bulk_atomic(edges))
+                .map_err(to_py)
+        })
+    }
+
+    /// Import edges on the background channel, chunked (D-011).
+    ///
+    /// **Atomic per chunk, not overall**: a failure partway leaves earlier
+    /// chunks committed. That is the trade for a bounded hold — use
+    /// `write_bulk_atomic` when the batch must be all-or-nothing.
+    fn bulk_import(&self, py: Python<'_>, edges: Vec<PyEdgeAssertion>) -> PyResult<usize> {
+        let edges: Vec<EdgeAssertion> = edges.into_iter().map(|e| e.inner).collect();
+        self.with_db(py, move |db| {
+            runtime().block_on(db.bulk_import(edges)).map_err(to_py)
+        })
+    }
+
+    /// Upsert many concepts on the background channel, chunked (D-011).
+    ///
+    /// Every row written here is a **ledger** write: it versions the concept and
+    /// lands in `transaction_log`. Derived analytics output does not belong here
+    /// — see `write_analytics_annotations` and D-041.
+    fn write_concepts(&self, py: Python<'_>, concepts: Vec<PyConceptUpsert>) -> PyResult<usize> {
+        let concepts: Vec<ConceptUpsert> = concepts.into_iter().map(|c| c.inner).collect();
+        self.with_db(py, move |db| {
+            runtime()
+                .block_on(db.write_concepts(concepts))
+                .map_err(to_py)
+        })
+    }
+
+    /// Write derived analytics results, chunked (§5.4, D-041).
+    ///
+    /// Rows go to `analytics_annotations`, which carries **no log trigger**:
+    /// nothing written here reaches `transaction_log` and nothing here versions
+    /// a concept. Rerunning an algorithm replaces the previous pass rather than
+    /// recording that the world changed.
+    ///
+    /// That is the whole of D-041, and it is why `Annotation` is a separate type
+    /// from `ConceptUpsert`. Writing one as the other overwrote concept content
+    /// with labels and recorded every analytics rerun as a fresh version of the
+    /// world.
+    fn write_analytics_annotations(
+        &self,
+        py: Python<'_>,
+        annotations: Vec<PyAnnotation>,
+    ) -> PyResult<usize> {
+        let annotations: Vec<Annotation> = annotations.into_iter().map(|a| a.inner).collect();
+        self.with_db(py, move |db| {
+            runtime()
+                .block_on(db.write_analytics_annotations(annotations))
+                .map_err(to_py)
+        })
+    }
+
+    // -- diagnostic reads (pulled forward from P4.6) --------------------------
+
+    /// Run a read-only query on a connection belonging to this call.
+    ///
+    /// Opens the file `SQLITE_OPEN_READ_ONLY` — an OS-level boundary, not a
+    /// reversible `PRAGMA` — runs `sql`, and drops the connection. Returns a list
+    /// of tuples, with values as they are stored: a timestamp column comes back
+    /// as the canonical string, not a `datetime`, because this is the diagnostic
+    /// path and its job is to show what is actually there.
+    ///
+    /// The typed read surface is P4.2. This is not it.
+    #[pyo3(signature = (sql, params = None))]
+    fn diagnostic_query<'py>(
+        &self,
+        py: Python<'py>,
+        sql: &str,
+        params: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Vec<Bound<'py, pyo3::types::PyTuple>>> {
+        let bound: Vec<libsql::Value> = match params {
+            None => Vec::new(),
+            Some(seq) => seq
+                .try_iter()?
+                .map(|item| rows::py_to_value(&item?))
+                .collect::<PyResult<_>>()?,
+        };
+        let sql = sql.to_string();
+        let raw = self.with_db(py, move |db| {
+            rows::map_err(runtime().block_on(async {
+                let conn = db.diagnostic_conn().await?;
+                rows::collect(&conn, &sql, bound).await
+            }))
+        })?;
+        rows::rows_to_py(py, raw)
+    }
+
+    /// `EXPLAIN QUERY PLAN` for `sql`, as the detail column only.
+    ///
+    /// The use T5.1 named first. Separate from `diagnostic_query` because a
+    /// plan's shape is not a query's shape, and callers want the detail rather
+    /// than three columns of bookkeeping.
+    fn explain(&self, py: Python<'_>, sql: &str) -> PyResult<Vec<String>> {
+        let sql = format!("EXPLAIN QUERY PLAN {sql}");
+        let raw = self.with_db(py, move |db| {
+            rows::map_err(runtime().block_on(async {
+                let conn = db.diagnostic_conn().await?;
+                rows::collect(&conn, &sql, Vec::new()).await
+            }))
+        })?;
+        Ok(raw
+            .into_iter()
+            .filter_map(|cells| match cells.last() {
+                Some(libsql::Value::Text(detail)) => Some(detail.clone()),
+                _ => None,
+            })
+            .collect())
     }
 
     fn __repr__(&self) -> String {

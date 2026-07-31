@@ -6,12 +6,17 @@
 //! - [`runtime`] — the async→sync boundary and the GIL rule (P1, D-095)
 //! - [`errors`] — the exception hierarchy, 27 variants mapped (P2)
 //! - [`database`] — the `Database` handle's lifecycle (P1)
+//! - [`timestamps`] — `str` / aware `datetime` in, `datetime` out (P3)
+//! - [`types`] — the value types callers construct (P3)
 //! - [`testing`] — underscore-prefixed hooks the Python suite drives
 
 mod database;
 mod errors;
+mod rows;
 mod runtime;
 mod testing;
+mod timestamps;
+mod types;
 
 use pyo3::prelude::*;
 
@@ -51,6 +56,32 @@ fn engine_linked() -> bool {
     true
 }
 
+/// How long `write_bulk_atomic` will hold the write actor for this batch.
+///
+/// **T1.3's whole delivery was making that ceiling predictable *before* the
+/// call**, so a Python caller who cannot ask is back where 0.5.x was: the only
+/// statement of the cost was the word "uncapped" in a doc table.
+///
+/// The batch is one act under one stamp and cannot be chunked, so this duration
+/// is time every other writer in the process spends waiting.
+///
+/// **It is a shape, not a promise.** Calibrated on libSQL 0.9.30, one machine,
+/// 100–20,000 rows, within 5% across that range except below ~500 rows where
+/// fixed costs dominate and it over-predicts by 3× — harmless, since nothing
+/// that small approaches the warning threshold. It says nothing about disk. It
+/// exists to distinguish 30 ms from 18 s, and should not be read closer than
+/// that.
+///
+/// The 7× case it is built for: 20,000 edges spread over distinct relationships
+/// against 20,000 corrections to a single relationship's history. A size-only
+/// model under-predicts the second by 7×, which is the direction that hurts.
+#[pyfunction]
+fn estimate_bulk_hold(edges: Vec<types::PyEdgeAssertion>) -> std::time::Duration {
+    let edges: Vec<macrame::prelude::EdgeAssertion> =
+        edges.into_iter().map(|e| e.inner).collect();
+    macrame::prelude::estimated_bulk_hold(&edges)
+}
+
 /// The chunk budget the write actor holds itself to, in milliseconds.
 ///
 /// The crate's one cross-cutting number. The observability that makes it
@@ -66,14 +97,24 @@ fn _macrame(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
 
     errors::register(m)?;
+    types::register(m)?;
 
     m.add_class::<database::PyDatabase>()?;
 
     m.add_function(wrap_pyfunction!(engine_linked, m)?)?;
     m.add_function(wrap_pyfunction!(chunk_budget_ms, m)?)?;
+    m.add_function(wrap_pyfunction!(estimate_bulk_hold, m)?)?;
+    // The threshold `write_bulk_atomic` warns above, as a timedelta. Exposed so
+    // a caller can compare an estimate against it rather than hard-coding 250ms.
+    m.add(
+        "BULK_ATOMIC_WARN_HOLD",
+        macrame::prelude::BULK_ATOMIC_WARN_HOLD,
+    )?;
     m.add_function(wrap_pyfunction!(runtime::_block_for_testing, m)?)?;
     m.add_function(wrap_pyfunction!(runtime::_mark_forked, m)?)?;
     m.add_function(wrap_pyfunction!(testing::_db_error_variants, m)?)?;
     m.add_function(wrap_pyfunction!(testing::_raise_db_error, m)?)?;
+    m.add_function(wrap_pyfunction!(timestamps::_coerce_timestamp, m)?)?;
+    m.add_function(wrap_pyfunction!(timestamps::_render_timestamp, m)?)?;
     Ok(())
 }

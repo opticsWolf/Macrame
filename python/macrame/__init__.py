@@ -14,6 +14,23 @@ Quick start::
 snapshot and the only one that can report the write actor's exit status; a
 handle that is merely garbage-collected loses both, at a time Python chooses.
 
+Timestamps
+----------
+Pass a canonical string or an **aware** ``datetime``; naive datetimes are
+refused rather than assumed to be UTC. Timestamps come back as aware UTC
+``datetime`` objects.
+
+An **open interval is ``None``**, in both directions::
+
+    macrame.EdgeAssertion("a", "b", "LINKS", valid_from=t0)          # open
+    macrame.EdgeAssertion("a", "b", "LINKS", valid_from=t0, valid_to=None)
+
+``datetime`` cannot safely carry the stored sentinel — it is exactly
+``datetime.max``, and ``.astimezone()`` overflows for any zone east of UTC —
+so ``None`` is what an unbounded end looks like here. `OPEN` is the stored
+string, for callers who need to name it. Sorting a mixed column needs
+``key=lambda r: (r.valid_to is None, r.valid_to)``.
+
 Errors
 ------
 Every error is a subclass of `MacrameError`, and every one carries its
@@ -38,16 +55,23 @@ from __future__ import annotations
 import os as _os
 
 from ._macrame import (
+    BULK_ATOMIC_WARN_HOLD,
+    OPEN,
+    Annotation,
     ArchiveViolationError,
     ArchiveWindowError,
+    AttributeMode,
     AttributeModeUnstatedError,
     BudgetError,
+    ConceptUpsert,
     CurrentDriftError,
     Database,
     DiagnosticConnError,
     DimMismatchError,
+    EdgeAssertion,
     EngineError,
     IntegrityError,
+    Interval,
     InvalidEdgeTypeError,
     InvalidIdError,
     InvalidModelNameError,
@@ -77,11 +101,22 @@ from ._macrame import (
     __version__,
     chunk_budget_ms,
     engine_linked,
+    estimate_bulk_hold,
 )
 
 __all__ = [
     # handle
     "Database",
+    # value types
+    "ConceptUpsert",
+    "EdgeAssertion",
+    "Annotation",
+    "Interval",
+    "AttributeMode",
+    "OPEN",
+    # write-path budgeting
+    "estimate_bulk_hold",
+    "BULK_ATOMIC_WARN_HOLD",
     # base and groups
     "MacrameError",
     "MacrameClosedError",
