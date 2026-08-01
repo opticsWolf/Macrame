@@ -212,9 +212,7 @@ All budgets measured on named reference hardware. Regression detection uses crit
 - [Architecture specification](docs/architecture/README.md) — normative surfaces: §4 (schema) and Appendix A (API)
 - [Architecture Quick Reference](docs/quickref.md) — v0.7.0 reference: API, schema, decisions, performance
 - [Python bindings](docs/architecture/s14-python-bindings.md) — §14: async→sync boundary, error tree, stubs
-- [Python bindings plan](docs/Macrame%20Python%20Bindings%20Plan%20v0.7.0.md) — P0…P8 delivery notes
 - [Decision register](docs/architecture/s13-decision-register.md) — D-001…D-109 with rationale
-- [Implementation plan](docs/Macrame%20Implementation%20Plan%20v0.5.6.md) — delivery status, defect register
 
 ---
 
