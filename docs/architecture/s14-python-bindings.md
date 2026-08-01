@@ -360,7 +360,8 @@ record and the corrections each phase made to it.
 | P4.5 | audit and the two rebuilds | ✅ |
 | P4.6 | `metrics()` and the handle's introspection | ✅ |
 | P4.7 | six algorithms on `Subgraph`, `astar` included | ✅ |
-| P5–P8 | wheels, CI, stubs, docs | not started |
+| P5 | wheels, sdist, the naming resolution | ✅ |
+| P6–P8 | CI, stubs, docs | not started |
 
 **Not yet settled**, and each changes what gets built:
 
@@ -434,6 +435,40 @@ On the vector side, a model name is the one string in this crate that cannot be 
 The plan's fallback — a fixed heuristic set instead of a callable — was not needed. What was needed is two guards, because `Fn(&str, &str) -> f64` cannot report failure: a raising heuristic is captured and re-raised after the search, and a `NaN` is refused by name rather than reaching a priority queue whose comparison would then panic inside a callback across an FFI boundary. `0.0` stands in meanwhile, which is admissible on every graph, so the search stays well-defined rather than running on a poisoned ordering.
 
 `modularity` is exposed separately from `louvain` on purpose, and the reason is the same one it exists for in Rust: a detector returning one node per community satisfies "modularity did not decrease from the singleton partition" *by being* that partition, and measuring Q is what tells the two apart.
+
+---
+
+<a id="1413-packaging"></a>
+### 14.13 Packaging and distribution
+
+Four wheels and an sdist, built by `.github/workflows/wheels.yml` ([D-106](s13-decision-register.md#d-106)):
+
+| | | |
+|---|---|---|
+| `manylinux_2_28` x86_64 | built and smoke-tested on the runner | |
+| `manylinux_2_28` aarch64 | cross-built under emulation | **not** smoke-tested — an x86_64 runner cannot import it |
+| macOS `universal2` | built and smoke-tested | |
+| Windows x86_64 | built and smoke-tested | |
+| sdist | built, then installed `--no-binary :all:` | the fallback for everything above's gaps |
+
+**One wheel per platform, not per interpreter**, because [D-094](s13-decision-register.md#d-094) chose abi3. That decision's cost was measured in µs per embedding; this is where it is repaid — the alternative is a 4 × 5 matrix of a crate that rebuilds the SQLite amalgamation on every cell.
+
+**What the smoke test asserts is the failure this file exists to prevent**: not that the wheel imports, but that it has an *engine* in it and the counters are *real*. `engine_linked()` is P0's tautology-resistant link check, kept precisely for this; `metrics().turns > 0` is [D-093](s13-decision-register.md#d-093) — a wheel built without `--features metrics` still imports, still answers `metrics()`, and answers zero forever.
+
+**Measured, probe P5-a** (2026-08-01, Windows x86_64 native, `cargo clean` first):
+
+| | |
+|---|---|
+| cold build | 54–62 s, 197 crates, `libsql-ffi` included |
+| wheel | 4.3 MiB compressed · 11.0 MiB unpacked · 10.7 MiB of that the extension |
+| sdist | 748 KiB, 124 members |
+| `pip install --no-binary :all:` | 183 s, fresh virtualenv |
+
+The build is cheap. **Only the native target is measured**, and the plan's named risk — aarch64 under QEMU, typically 5–15× — is what the first CI run answers.
+
+**Uploads carry no token.** Trusted Publishing mints a short-lived OIDC credential for this repository and this workflow; there is no long-lived secret in the repo and none for anyone to handle. It is configured once on PyPI by the project owner. A packaging test asserts `wheels.yml` names no secret, because pasting a token in is the obvious fix for a failed upload and it reviews as a small change.
+
+**The public surface is now pinned in both directions.** P4 added twelve classes and four constants across five Rust modules, each registered in `lib.rs` and each needing a *second*, hand-written entry in `python/macrame/__init__.py`. A missed one is invisible rather than broken: importable only as `macrame._macrame.Thing`, absent from `dir()`, from `import *`, and from the stubs P8 will generate. `test_packaging.py` compares the extension's exports against `__all__` both ways, and checks every public class claims `module = "macrame"` rather than the private extension. Verified by injection — dropping `Subgraph` from `__all__` fails the test naming it.
 
 <!--nav-->
 ← [previous](s13-decision-register.md) · [index](README.md) · [next](appendices.md) →

@@ -45,6 +45,20 @@ An edge tuple's five slots are identifiers and instants in every context, so `e[
 
 `CandidateCount` is **not** exposed as a type. Its whole content is a number and whether that number is exact, which is two attributes on `CostEstimate` — `candidates` and `candidates_capped`. A class would make a caller unwrap it to reach the number they wanted, which is how the cap ends up ignored, and the cap is the part that matters: SQLite has no histograms, so the count is measured by running the traversal under a probe, and a probe that hit its cap measured only that the set is bigger than the cap.
 
+<a id="d-106"></a>D-106 — one abi3 wheel per platform, an sdist as the universal fallback, and PyPI uploads by Trusted Publishing rather than a token (0.7.0). [D-094](s13-decision-register.md#d-094), [D-098](s13-decision-register.md#d-098), [§14.13](s14-python-bindings.md#1413-packaging-and-distribution).
+
+**The matrix is small because [D-094](s13-decision-register.md#d-094) made it small.** `pyo3` is built `abi3-py310`, so one wheel per platform serves CPython 3.10 and everything after it. Without abi3 this is four platforms times five interpreter versions — twenty builds of a crate that compiles the SQLite amalgamation each time. That is the other half of a trade whose visible cost was ~35 µs per 768-dim embedding, and it is the half that pays for it.
+
+**Probe P5-a is answered for one target and open for the rest.** Cold, `cargo clean` first, on Windows x86_64: **54–62 s, 197 crates compiled including `libsql-ffi`**; the wheel is **4.3 MiB compressed, 11.0 MiB unpacked**, of which the extension is 10.7 MiB. The sdist is 748 KiB, and `pip install --no-binary :all:` on it takes **183 s** in a fresh virtualenv. So the build is not expensive and the plan's instruction not to assume the matrix is cheap is discharged — *for the native case*. The stated risk was aarch64 under emulation, typically 5–15× native, which is affordable but unmeasured; the first run of `wheels.yml` is what measures it, and the fallback if it does not fit is a native arm64 runner rather than dropping the target.
+
+**The sdist is not a formality.** It is the install path for every platform the matrix does not cover, so the CI job proves it *builds from source with no wheel in reach* (`--no-binary :all:`) rather than proving a tarball was produced. This works because `libsql-ffi` compiles the amalgamation anyway and needs only a C compiler — verified locally end to end, including that the `metrics` feature survives the source build, which is what makes `Database.metrics()` honest in a wheel-less install too.
+
+**`musllinux` stays out of scope** until someone asks: it doubles the Linux matrix for a `libsql-ffi` build nobody here has checked against musl, and an untested wheel is worse than an sdist that works.
+
+**No API token exists for this.** PyPI uploads use Trusted Publishing — OIDC, a short-lived credential minted for one repository and one workflow — so there is no long-lived secret to leak, rotate, or hand to anyone, and the project owner configures it once on PyPI itself. `tests_py/test_packaging.py` asserts the workflow references no secret, because the easy fix for a failed upload is to paste a token in and that change looks small in review.
+
+**The naming risk is recorded rather than designed around.** Distribution `macrame-db`, import `macrame`, mirroring the crate — and unlike Rust's per-build-graph `[lib] name`, `site-packages` is flat, so a second distribution installing a top-level `macrame/` would contend for the directory. The incumbent is a dead 2021 build tool and `pip` warns on file conflicts, so the risk is known and non-silent. `macrame_db` is the fallback if it ever materialises, and the README now says all of this next to the crate-name note.
+
 <!--nav-->
 ← [previous](s11-s12-milestones-and-risks.md) · [index](README.md) · [next](s14-python-bindings.md) →
 <!--/nav-->

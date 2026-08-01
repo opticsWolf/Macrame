@@ -143,3 +143,100 @@ def test_abi3_floor_matches_requires_python():
         f"pyo3 is abi3-py3{abi3.group(1)} but requires-python is "
         f">=3.{floor.group(1)}. The wheel's real floor is the abi3 one."
     )
+
+
+# ---------------------------------------------------------------------------
+# P5: the public surface, and the matrix that ships it
+# ---------------------------------------------------------------------------
+
+
+def test_every_name_the_extension_exports_is_re_exported():
+    """``__all__`` is hand-written, and the extension's exports are not.
+
+    P4 added twelve classes and four constants across five Rust modules, each
+    registered in `lib.rs` and each needing a second, manual entry in
+    ``python/macrame/__init__.py``. Forget one and it is invisible: importable
+    only as ``macrame._macrame.Thing``, absent from ``dir(macrame)``, absent
+    from ``from macrame import *``, and absent from the stubs P8 generates from
+    this list. Nothing fails — the wheel builds and every test passes — which is
+    exactly the kind of gap that survives a release.
+    """
+    import macrame._macrame as ext
+
+    exported = {n for n in dir(ext) if not n.startswith("_")}
+    re_exported = set(macrame.__all__)
+
+    missing = sorted(exported - re_exported)
+    assert not missing, (
+        f"{len(missing)} name(s) registered in the extension but not re-exported "
+        f"from `macrame`: {missing}. Add them to the import block and to "
+        f"`__all__` in python/macrame/__init__.py."
+    )
+
+
+def test_everything_in_all_actually_exists():
+    """The other direction, which breaks louder but is worth pinning here too.
+
+    A name in ``__all__`` that was never imported makes ``from macrame import *``
+    raise ``AttributeError`` — and only that form, so an ordinary
+    ``import macrame`` in every test would not notice.
+    """
+    for name in macrame.__all__:
+        assert hasattr(macrame, name), f"__all__ names {name!r}, which does not exist"
+
+
+def test_public_classes_claim_the_package_rather_than_the_extension():
+    """``module = "macrame"`` on every ``#[pyclass]``.
+
+    pyo3 defaults a class's ``__module__`` to the extension module, so a
+    forgotten attribute gives ``macrame._macrame.Subgraph`` in every repr and
+    traceback — naming a private module the caller is told not to import — and
+    sends ``pickle`` looking there too.
+    """
+    wrong = {
+        name: obj.__module__
+        for name in macrame.__all__
+        if isinstance(obj := getattr(macrame, name), type)
+        and obj.__module__ != "macrame"
+    }
+    assert not wrong, f"classes not claiming the `macrame` module: {wrong}"
+
+
+def test_the_wheel_workflow_covers_the_platforms_the_plan_names():
+    """The matrix is a claim about what a user can `pip install`.
+
+    Dropping a target is a one-line edit with no local symptom: the wheels build,
+    CI is green, and the platform that lost its wheel finds out at install time
+    by falling back to a source build that needs a Rust toolchain it may not
+    have. `musllinux` is deliberately absent — out of scope for 0.7.0 until
+    someone asks, since it doubles the Linux matrix for a `libsql-ffi` build
+    nobody here has checked against musl.
+    """
+    workflow = _read(REPO / ".github" / "workflows" / "wheels.yml")
+    for target in (
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+        "universal2-apple-darwin",
+        "x86_64-pc-windows-msvc",
+    ):
+        assert target in workflow, f"{target} is not in the wheel matrix"
+    assert "command: sdist" in workflow, "no sdist job — the no-wheel fallback is unbuilt"
+    assert "--no-binary :all:" in workflow, (
+        "the sdist job does not force a source install, so it proves only that a "
+        "tarball was produced, not that it builds"
+    )
+
+
+def test_the_wheel_workflow_holds_no_api_token():
+    """Trusted Publishing, so there is no long-lived secret in this repository.
+
+    Asserted rather than assumed because the easy fix for a failing upload is to
+    paste a token into the workflow, and that change looks small in review.
+    """
+    workflow = _read(REPO / ".github" / "workflows" / "wheels.yml")
+    assert "secrets." not in workflow, (
+        "wheels.yml references a secret. PyPI uploads here use Trusted "
+        "Publishing (id-token: write); a token in this file is a long-lived "
+        "credential that does not need to exist."
+    )
+    assert "id-token: write" in workflow

@@ -1,0 +1,188 @@
+name: Wheels
+
+# Builds the Python distribution: one wheel per platform, plus an sdist.
+#
+# Separate from `ci.yml` because it is a different question. CI asks whether the
+# code is correct; this asks whether it *packages*, which is a property of the
+# build matrix and the target toolchains rather than of the source. It runs on
+# tags and by hand, not on every push — the matrix is not free (see the timings
+# below) and nothing on a feature branch depends on the answer.
+#
+# ## abi3 is why this matrix is small
+#
+# `pyo3` is built with `abi3-py310`, so one wheel serves CPython 3.10 through
+# whatever ships next: the extension links only the stable ABI. Without it this
+# file would be a 4-platform × 5-version matrix of 20 builds of a crate that
+# compiles the SQLite amalgamation each time. That trade — measured at ~35 µs
+# per 768-dim embedding for the buffer protocol abi3 costs us — is recorded in
+# §14.5 of the architecture set, and this is the other half of it.
+#
+# ## Measured (probe P5-a, 2026-08-01, Windows x86_64 native)
+#
+#   cold build, cargo clean first ... 54-62 s, 197 crates, libsql-ffi included
+#   wheel .......................... 4.3 MiB compressed, 11.0 MiB unpacked
+#   sdist .......................... 748 KiB, 124 members
+#   pip install from sdist ......... 183 s in a fresh venv, source only
+#
+# **Only the native target has been timed.** The plan's stated risk is aarch64
+# under QEMU emulation, where a 1-minute native build is typically 5-15x. That
+# is affordable but it is not measured, and the first run of this workflow is
+# what measures it. If emulated aarch64 turns out to exceed the runner budget,
+# the fallback is a native arm64 runner rather than dropping the target.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Upload to PyPI (otherwise build and keep artifacts only)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  wheels:
+    name: wheel (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One platform failing should not hide whether the others build: a matrix
+      # that stops at the first red tells you about one target per run.
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            manylinux: "2_28"
+            # The builder can run what it built.
+            smoke: true
+          - name: linux-aarch64
+            os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            manylinux: "2_28"
+            # Cross-built under emulation; the runner is x86_64 and cannot
+            # import an aarch64 extension. Asserted by `maturin` producing the
+            # wheel and by the auditwheel tag, not by running it. An arm64
+            # runner would close this, and is the same change that would fix a
+            # build-time problem here.
+            smoke: false
+          - name: macos-universal2
+            os: macos-latest
+            target: universal2-apple-darwin
+            manylinux: "auto"
+            smoke: true
+          - name: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            manylinux: "auto"
+            smoke: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux }}
+          # `--release` because a debug-built libSQL is slow enough to be
+          # misleading, and this is the artifact people install.
+          args: --release --out dist
+          sccache: "true"
+
+      # The one check that catches the failure this whole file exists to
+      # prevent: a wheel that builds, installs, and has no engine in it. P0's
+      # `engine_linked()` is exactly that assertion, and it is why the function
+      # was kept past P1.
+      - name: smoke test the built wheel
+        if: matrix.smoke
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --no-index --find-links dist macrame-db
+          python - <<'PY'
+          import macrame
+          assert macrame.engine_linked(), "wheel has no libSQL engine linked in"
+          import tempfile, pathlib
+          T0 = "2026-01-01T00:00:00.000000Z"
+          path = pathlib.Path(tempfile.mkdtemp()) / "kb.db"
+          with macrame.Database.open(path, snapshot_every_entries=None) as db:
+              db.write_concepts([macrame.ConceptUpsert("a", "A", valid_from=T0)])
+              db.assert_edge(macrame.EdgeAssertion("a", "a", "SELF", valid_from=T0))
+              graph = db.load_subgraph("a", 1, 1 << 20)
+              assert len(graph) == 1, graph
+              # D-093: the wheel carries `--features metrics`, so this is a real
+              # counter rather than a zero-sized type answering zero. A wheel
+              # that lost the feature is a wheel whose `metrics()` lies.
+              assert db.metrics().turns > 0, "wheel was built without --features metrics"
+          print("ok:", macrame.__version__)
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.name }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+  sdist:
+    name: sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+
+      # An sdist is the fallback for every platform this matrix does not cover,
+      # so "it was produced" is not the property worth checking — "it builds
+      # from source, with no wheel in reach" is. `--no-binary :all:` is what
+      # forces that path; without it pip would happily install the wheel this
+      # workflow just built.
+      - name: install from source only
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --no-binary :all: dist/*.tar.gz
+          python -c "import macrame; assert macrame.engine_linked(); print('sdist ok', macrame.__version__)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  publish:
+    name: publish to PyPI
+    needs: [wheels, sdist]
+    runs-on: ubuntu-latest
+    # A tag publishes; a manual run publishes only when asked. Same shape as
+    # `release.yml`, and for the same reason: a PyPI version number cannot be
+    # reused once taken, even after a delete, so a failed upload spends it.
+    if: |
+      startsWith(github.ref, 'refs/tags/v') ||
+      inputs.publish == true
+    environment: pypi # add a required reviewer here to gate uploads
+    permissions:
+      # Trusted Publishing (OIDC). **There is deliberately no API token in this
+      # workflow.** PyPI mints a short-lived credential for this repository and
+      # this workflow, so there is no long-lived secret to leak, rotate, or hand
+      # to anyone. It has to be configured once, by the project owner, at
+      # https://pypi.org/manage/project/macrame-db/settings/publishing/ —
+      # naming this repository, this workflow file, and the `pypi` environment.
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - run: ls -la dist
+      - uses: pypa/gh-action-pypi-publish@release/v1

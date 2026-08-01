@@ -18,6 +18,25 @@
 > ```rust
 > use macrame::prelude::*;
 > ```
+>
+> **The Python package resolves the same way**, deliberately — distribution
+> `macrame-db`, import `macrame`:
+>
+> ```bash
+> pip install macrame-db
+> ```
+> ```python
+> import macrame
+> ```
+>
+> One caveat the Rust side does not have. A crate's `[lib] name` is namespaced
+> per build graph, so `macrame-db` providing `macrame` collides with nothing.
+> `site-packages` is flat. The PyPI package named `macrame` is an unrelated,
+> effectively abandoned build tool (0.0.1, 2021) — but if it also installs a
+> top-level `macrame/`, then installing both leaves two distributions contending
+> for one directory, and which wins depends on install order. `pip` warns on file
+> conflicts, so this is a known and non-silent risk rather than something
+> designed around. Importing as `macrame_db` is the fallback if it ever matters.
 
 Macrame is a domain-specific embedded database layer for a knowledge-ledger application: a system in which concepts are linked by typed, weighted relationships, both concepts and relationships change over time, and the history of those changes is itself a first-class asset.
 

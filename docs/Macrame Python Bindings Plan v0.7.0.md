@@ -850,6 +850,74 @@ turns out to matter.
 - **`musllinux` is out of scope for 0.7.0** until someone asks — it doubles the Linux
   matrix for a `libsql-ffi` build that has not been checked against musl here.
 
+### P5 — ✅ **DELIVERED 2026-08-01**
+
+> Shipped: `.github/workflows/wheels.yml` (4-platform matrix + sdist + Trusted-Publishing
+> upload), 5 new packaging tests, the naming resolution written into `README.md`, and
+> [D-106](../architecture/s13-decision-register.md#d-106). **325 Python tests pass**
+> (320 → 325). The crate tarball is untouched at 109 files.
+>
+> **Probe P5-a is answered — and the answer is that the matrix is cheap.** Cold, with
+> `cargo clean` first, on Windows x86_64 native:
+>
+> | | |
+> |---|---|
+> | cold build | **54–62 s**, 197 crates, `libsql-ffi` included |
+> | wheel | **4.3 MiB** compressed · 11.0 MiB unpacked · 10.7 MiB of that the extension |
+> | sdist | **748 KiB**, 124 members |
+> | `pip install --no-binary :all:` | **183 s**, fresh virtualenv |
+>
+> That discharges this section's instruction not to assume the matrix is cheap — **for the
+> native case only**. The named risk was aarch64 under emulation at 5–15× native, which
+> from a 1-minute baseline is 5–15 minutes: affordable, and still unmeasured. The first run
+> of `wheels.yml` measures it, and the fallback stays as written (a native arm64 runner,
+> not dropping the target).
+>
+> **The sdist was verified, not assumed.** §8 asserted a source build "works, since
+> `libsql-ffi` compiles the amalgamation anyway and needs only a C compiler". That is now
+> a measurement: the tarball carries the whole workspace — root `src/`, `bindings/`,
+> `Cargo.lock`, `pyproject.toml` — and installs into a clean virtualenv with
+> `--no-binary :all:`, after which `engine_linked()` is true, a real ledger round-trips,
+> and **`metrics().turns` is non-zero**, so [D-093](../architecture/s13-decision-register.md#d-093)'s
+> feature survives the source path too. The CI job uses `--no-binary :all:` for exactly
+> this reason: without it, pip installs the wheel the same workflow just built and the job
+> proves only that a tarball exists.
+>
+> **The smoke test asserts the two failures a wheel can have without looking broken.** Not
+> "does it import" — a wheel with no engine linked in imports fine, which is why P0's
+> `engine_linked()` was kept past P1. And `metrics().turns > 0`, because a wheel built
+> without `--features metrics` also imports, also answers `metrics()`, and answers zero
+> forever. The aarch64 wheel is cross-built and **not** smoke-tested; an x86_64 runner
+> cannot import it, and saying so is better than a job that appears to check it.
+>
+> **A gap P4 opened, closed here.** P4 added twelve classes and four constants across five
+> Rust modules, and each needs a *second*, hand-written entry in
+> `python/macrame/__init__.py`. Miss one and it is invisible rather than broken: importable
+> only as `macrame._macrame.Thing`, absent from `dir()`, from `import *`, and from the
+> stubs P8 will generate from that list — and every test still passes. `test_packaging.py`
+> now compares the extension's exports against `__all__` in both directions, and checks
+> that every public class claims `module = "macrame"` rather than the private extension
+> module. **Verified by injection**: dropping `Subgraph` from `__all__`, rebuilding, and
+> confirming the test fails naming it. Nothing was actually missing.
+>
+> **No API token, deliberately.** PyPI uploads go through Trusted Publishing — OIDC, a
+> short-lived credential minted for this repository and this workflow — so there is no
+> long-lived secret in the repo and none for me to handle, which is the same position
+> taken on `CARGO_REGISTRY_TOKEN`. **The project owner has to configure it once**, at
+> `https://pypi.org/manage/project/macrame-db/settings/publishing/`, naming this
+> repository, `wheels.yml`, and the `pypi` environment. A test asserts the workflow
+> references no secret, because pasting a token in is the obvious fix for a failed upload
+> and it reviews as a small change.
+>
+> **Naming: resolved as recommended.** Distribution `macrame-db`, import `macrame`. The
+> README now carries the flat-`site-packages` caveat next to the existing crate-name note,
+> including the fallback (`macrame_db`) if the dead 2021 package ever turns out to matter.
+>
+> **What this phase did *not* do.** `wheels.yml` has never run — it cannot be exercised
+> from here, and the cross-target timings, the `manylinux_2_28` audit tags and the
+> universal2 build are all unverified claims until it does. That is a one-click
+> `workflow_dispatch` away and it is the owner's to trigger.
+
 ---
 
 ## 9. P6 — Tests
@@ -947,7 +1015,7 @@ The crates.io job can follow later (it was already noted as optional after 0.6.0
 | **P4.5** Integrity ✅ | P4.1 | rebuild/audit/rebuild_fts | ✅ both rebuild paths agree |
 | **P4.6** Introspection ✅ | P1 | `metrics()` etc. | ✅ counters non-zero — the wheel really carries the feature (D-093) |
 | **P4.7** Analytics ✅ | P4.2 | 6 algorithms; `astar` last | ✅ 21 tests; `astar` resolved without the fallback (D-104) |
-| **P5** Packaging | P4.1 | wheel matrix | probe P5-a: one full matrix timed |
+| **P5** Packaging ✅ | P4.1 | wheel matrix, sdist, naming | ✅ probe P5-a: native timed at 54–62 s / 4.3 MiB; cross-targets await one CI run |
 | **P6** Tests | P4.x | `tests_py/` | probe P6-a: R15 exposure characterised |
 | **P7** CI | P5, P6 | `python.yml`, Trusted Publishing | green on all targets |
 | **P8** Stubs/docs | P4.x | `.pyi`, `py.typed`, docstrings | stub-coverage rule test green |
