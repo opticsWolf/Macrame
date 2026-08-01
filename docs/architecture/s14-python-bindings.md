@@ -341,7 +341,7 @@ covered:
 
 | | |
 |---|---|
-| Packaging | the workspace shape, the tarball, module-name ↔ `[lib] name`, the abi3 floor ↔ `requires-python` |
+| Packaging | the workspace shape, the tarball, module-name ↔ `[lib] name`, the abi3 floor ↔ `requires-python`, and the four CI invariants of [§14.14](s14-python-bindings.md#1414-ci) |
 | Lifecycle | open/close round trip, the context manager, use-after-close, the `ResourceWarning`, GIL release under contention |
 | Errors | every variant, its class, its base, its attributes — plus the six deliberately separated pairs |
 | Coercion | `datetime` ↔ canonical string both ways, the `None` sentinel, naive rejection, embeddings |
@@ -392,7 +392,8 @@ record and the corrections each phase made to it.
 | P4.7 | six algorithms on `Subgraph`, `astar` included | ✅ |
 | P5 | wheels, sdist, the naming resolution | ✅ |
 | P6 | the suite, its gate, and the end-to-end seams | ✅ |
-| P7–P8 | CI, stubs, docs | not started |
+| P7 | CI: the binding crate compiled, the suite gated, abi3 tested | ✅ |
+| P8 | stubs and docs | not started |
 
 **Not yet settled**, and each changes what gets built:
 
@@ -500,6 +501,35 @@ The build is cheap. **Only the native target is measured**, and the plan's named
 **Uploads carry no token.** Trusted Publishing mints a short-lived OIDC credential for this repository and this workflow; there is no long-lived secret in the repo and none for anyone to handle. It is configured once on PyPI by the project owner. A packaging test asserts `wheels.yml` names no secret, because pasting a token in is the obvious fix for a failed upload and it reviews as a small change.
 
 **The public surface is now pinned in both directions.** P4 added twelve classes and four constants across five Rust modules, each registered in `lib.rs` and each needing a *second*, hand-written entry in `python/macrame/__init__.py`. A missed one is invisible rather than broken: importable only as `macrame._macrame.Thing`, absent from `dir()`, from `import *`, and from the stubs P8 will generate. `test_packaging.py` compares the extension's exports against `__all__` both ways, and checks every public class claims `module = "macrame"` rather than the private extension. Verified by injection — dropping `Subgraph` from `__all__` fails the test naming it.
+
+### 14.14 CI
+
+Three workflows, and the division between them is by *question*, not by language.
+
+| | asks | runs on |
+|---|---|---|
+| `ci.yml` | is the crate correct | push, PR, and `release.yml` |
+| `python.yml` | is the binding correct, on every platform and interpreter claimed | push, PR, and `wheels.yml` |
+| `wheels.yml` | does it *package*, on four targets | tags, and by hand |
+
+**`python.yml` does not gate on `ci.yml`** ([D-108](s13-decision-register.md#d-108)). The plan sketched it that way, from a draft where this file also built the wheels; P5 moved those out, and `workflow_call` does not deduplicate — gating would re-run the whole Rust matrix, R15 retries included, on every pull request that already ran it, and would report the Python answer late for no gain. The place the two must be green *together* is before an upload, so that is where the gate is: `wheels.yml`'s publish job calls `python.yml`, as `release.yml` calls `ci.yml`. Until P7 a tag could build four wheels, pass a six-line smoke test, and upload to PyPI with the 337-test suite never having run.
+
+**Until this file existed, nothing in CI compiled the binding crate.** `bindings/python` is a workspace member but never a *default* member, because the root package is itself a member — deliberate, and the reason `cargo publish` is still a one-package operation ([D-098](s13-decision-register.md#d-098)). The consequence went unnoticed for three phases: `ci.yml`'s clippy is scoped to `macrame-db` by that same default, and the only thing that built `macrame-py` was `wheels.yml`, on tags. A pull request could break every file P1–P4 wrote and all four checks would go green. `cargo clippy -p macrame-py --all-targets` under `-D warnings` is now a job, and it passes today rather than arriving red.
+
+What the matrix covers, and why each row is there:
+
+| | |
+|---|---|
+| ubuntu · 3.13 | the baseline |
+| ubuntu · **3.10** | the floor `pyproject.toml` declares. pip enforces `requires-python` against users and nothing enforced it against us |
+| windows · 3.13 | where R15 was measured |
+| **macOS** · 3.13 | never run before. `wheels.yml` builds a universal2 wheel and smoke-tests it in six lines; this is the first time the Python surface is exercised on Apple silicon |
+
+Installation is `pip install .`, not `maturin develop`: it goes through the PEP 517 backend, so it reads `[tool.maturin]`, builds with `--features extension-module` and in release — the path a user actually takes. The suite then runs through **`python tests_py/run_suite.py`**, never bare pytest ([D-107](s13-decision-register.md#d-107)).
+
+The `abi3` job is the only one that tests the claim funding the whole wheel matrix. Every other job builds and runs on one interpreter; this one builds on 3.10, asserts the artifact is tagged for the *ABI* rather than for a version, and runs the entire suite through 3.13 against that same file. Drop `abi3-py310` and every other job stays green while the matrix quietly becomes wrong by a factor of five.
+
+Four packaging tests pin the arrangement, each guarding a failure with no local symptom, and all four verified by injection: that some job names `-p macrame-py`, that the gate is `run_suite.py`, that `publish` still needs the suite, and that the declared Python floor is a version some job runs.
 
 <!--nav-->
 ← [previous](s13-decision-register.md) · [index](README.md) · [next](appendices.md) →

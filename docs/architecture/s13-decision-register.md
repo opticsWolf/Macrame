@@ -1,80 +1,3 @@
-<a id="d-101"></a>D-101 — `Subgraph` crosses as an **opaque handle**, and `to_dict()` is the caller's explicit purchase of a copy (0.7.0). [D-047](s13-decision-register.md#d-047), [D-087](s13-decision-register.md#d-087), [D-097](s13-decision-register.md#d-097), [§14.10](s14-python-bindings.md#1410-the-read-path-and-the-subgraph-handle).
-
-D-097 proposed this; P4.2 delivered it, and the argument survived contact. A `Subgraph` is three `BTreeMap`s and it is the one thing the crate materialises under an explicit `byte_budget`, precisely because it is the largest. Rendering it into Python dicts on return **doubles the peak memory of the single operation that already has a budget** — and does it eagerly, whether or not the caller reads more than `degree()`.
-
-So the accessors are forwarded (`out_edges`, `in_edges`, `degree`, `weighted_degree`, `total_weight`, `edge_count`, `estimated_bytes`, `is_closed`, `node`), plus `__len__`, `__contains__` and iteration over node ids. `to_dict()` exists and is spelled out at the call site.
-
-Two things this settled that D-097 did not anticipate. `is_closed` collides by name with `Database.is_closed` and means something unrelated — the closure invariant, not a shut handle — and the crate's name was kept rather than renamed, because a binding that renames the thing being bound costs every reader who moves between the two APIs. And `__iter__` materialises the id list rather than borrowing the map, because a lazy iterator would hold a borrow across arbitrary Python code; keys are a small fraction of the payload the budget bounded.
-
-<a id="d-102"></a>D-102 — `traverse(attribute_mode=OMIT)` is **refused**, and it is the one place the binding narrows what the library accepts (0.7.0). [D-085](s13-decision-register.md#d-085), [D-100](s13-decision-register.md#d-100), [§14.10](s14-python-bindings.md#1410-the-read-path-and-the-subgraph-handle).
-
-[D-100](s13-decision-register.md#d-100) closes with the rule that a binding refusing more than the library it binds is its own kind of surprise. This is the exception, and the distinction is what the library does with the input.
-
-`normalized()` not checking the calendar is a boundary the crate **chose**; tightening it would surprise someone who read the crate's docs and got a stricter answer. `AttributeMode::Omit` reaching `TraversalBuilder::execute` is a **return type that cannot express the answer** — the crate's own rustdoc says so, and says use `execute_ids` — so it answers `Ok(vec![])`, indistinguishable from a traversal that reached nothing. Forwarding it would re-export a known-ambiguous empty list to callers with strictly less context than a Rust caller has. `traverse_ids()` exists and returns exactly what the mode is for, so the refusal names it.
-
-The related pairing is *not* narrowed: `as_of` without a stated mode raises `AttributeModeUnstatedError` because the ledger raises it, and a live traversal with no `as_of` still defaults, because D-085 made the requirement about the pairing rather than about the mode.
-
-<a id="d-103"></a>D-103 — an unstated `min_weight` on `load_subgraph` is `-inf`, not `0.0` (0.7.0). [D-039](s13-decision-register.md#d-039), [D-073](s13-decision-register.md#d-073), [§14.10](s14-python-bindings.md#1410-the-read-path-and-the-subgraph-handle).
-
-Python has one `load_subgraph`, where Rust has two entry points whose defaults differ — and the difference is load-bearing rather than incidental. `Database::load_subgraph` passes `NEG_INFINITY`; `load_subgraph_with` given a default `TraversalBuilder` passes `0.0`, which **silently drops negative-weight edges**, exactly the input `NegativeEdgeWeight` exists to report given that Dijkstra and A\* are unsound over them.
-
-So the keyword is `min_weight=None` by default and means *unstated*: the floor is `-inf`, and a negative weight reaches the guard. A stated floor **filters**, because a caller who names one has asked to exclude what falls below it, and excluding it is not an error. `traverse` keeps the builder's `0.0`, because there a weight filter is only a filter.
-
-**A measured consequence worth recording**: as of 0.6.0 that guard is unreachable from a ledger this binding wrote. [D-083](s13-decision-register.md#d-083) put `CHECK (weight >= 0.0 …)` on `links`, so the row is refused at the write. It stays reachable for a file migrated from before v7 — `links_current` carries no weight check of its own — which is why the mapping was kept rather than simplified on the strength of a constraint that only holds for new writes.
-
-<a id="d-104"></a>D-104 — `astar` holds the GIL for its whole run, and a misbehaving heuristic is captured and re-raised (0.7.0). [D-095](s13-decision-register.md#d-095), [§14.12](s14-python-bindings.md#1412-the-algorithms-and-astars-inversion).
-
-The bindings plan flagged this as the one method needing its own design pass, because an arbitrary Python callable means calling **into** Python from Rust while [§14.2](s14-python-bindings.md#142-the-asyncsync-boundary)'s arrangement has the GIL released. The fallback it proposed — ship `astar` with a fixed heuristic set instead of a callable — was not needed.
-
-**It does not release the GIL, and that is the resolution rather than a compromise.** Releasing it around the search and re-attaching per expansion pays two GIL transitions per node to hold it for the arithmetic in between: strictly worse than never releasing it. Every other algorithm *does* detach — they are pure CPU over Rust-owned data with no Python object in reach — so the cost is isolated to the one method that earns it, and it is documented at the method: `heuristic=None` and `dijkstra` both release.
-
-Two hazards the callback signature creates, because `Fn(&str, &str) -> f64` cannot report failure:
-
-- **A raising heuristic** would otherwise be swallowed. The error is captured in a `RefCell` and re-raised after the search returns; `0.0` is fed to the search meanwhile, which is admissible on every graph, so the search stays well-defined and terminates rather than running on a poisoned ordering.
-- **A `NaN`** makes the priority queue's comparison incoherent and panics — *inside a callback, across an FFI boundary*, which is a far worse outcome than an exception. Non-finite returns are refused by name, and the message says which node.
-
-`heuristic=None` is the default and means a zero heuristic: the one heuristic admissible on every graph, which makes the default A\* exactly Dijkstra-with-a-path rather than a guess about the caller's metric space.
-
-<a id="d-105"></a>D-105 — search results are a `VectorHit` class, while edges stay tuples (0.7.0). [D-007](s13-decision-register.md#d-007), [§14.11](s14-python-bindings.md#1411-temporal-vector-and-the-counters).
-
-Not a style preference, and the two choices are consistent under one rule: a tuple is fine when every slot means the same kind of thing across every producer.
-
-An edge tuple's five slots are identifiers and instants in every context, so `e[3]` is a `valid_from` wherever it came from. A search result's `score` is a **cosine distance** from `search_vector` (smaller is closer, ascending), a **fused RRF score** from `hybrid_search` (larger is better, descending), and *bm25* from `keyword_search` (negative, ascending best-first). Three incompatible orderings behind one position, and `hit[1]` invites sorting the wrong way. A named field with a docstring does not prevent that; it gives the caller somewhere to look when the top result is the worst match.
-
-`keyword_search` keeps `(id, rank)` tuples, because it is the single arm whose ordering is fixed and stated at its own call.
-
-`CandidateCount` is **not** exposed as a type. Its whole content is a number and whether that number is exact, which is two attributes on `CostEstimate` — `candidates` and `candidates_capped`. A class would make a caller unwrap it to reach the number they wanted, which is how the cap ends up ignored, and the cap is the part that matters: SQLite has no histograms, so the count is measured by running the traversal under a probe, and a probe that hit its cap measured only that the set is bigger than the cap.
-
-<a id="d-106"></a>D-106 — one abi3 wheel per platform, an sdist as the universal fallback, and PyPI uploads by Trusted Publishing rather than a token (0.7.0). [D-094](s13-decision-register.md#d-094), [D-098](s13-decision-register.md#d-098), [§14.13](s14-python-bindings.md#1413-packaging-and-distribution).
-
-**The matrix is small because [D-094](s13-decision-register.md#d-094) made it small.** `pyo3` is built `abi3-py310`, so one wheel per platform serves CPython 3.10 and everything after it. Without abi3 this is four platforms times five interpreter versions — twenty builds of a crate that compiles the SQLite amalgamation each time. That is the other half of a trade whose visible cost was ~35 µs per 768-dim embedding, and it is the half that pays for it.
-
-**Probe P5-a is answered for one target and open for the rest.** Cold, `cargo clean` first, on Windows x86_64: **54–62 s, 197 crates compiled including `libsql-ffi`**; the wheel is **4.3 MiB compressed, 11.0 MiB unpacked**, of which the extension is 10.7 MiB. The sdist is 748 KiB, and `pip install --no-binary :all:` on it takes **183 s** in a fresh virtualenv. So the build is not expensive and the plan's instruction not to assume the matrix is cheap is discharged — *for the native case*. The stated risk was aarch64 under emulation, typically 5–15× native, which is affordable but unmeasured; the first run of `wheels.yml` is what measures it, and the fallback if it does not fit is a native arm64 runner rather than dropping the target.
-
-**The sdist is not a formality.** It is the install path for every platform the matrix does not cover, so the CI job proves it *builds from source with no wheel in reach* (`--no-binary :all:`) rather than proving a tarball was produced. This works because `libsql-ffi` compiles the amalgamation anyway and needs only a C compiler — verified locally end to end, including that the `metrics` feature survives the source build, which is what makes `Database.metrics()` honest in a wheel-less install too.
-
-**`musllinux` stays out of scope** until someone asks: it doubles the Linux matrix for a `libsql-ffi` build nobody here has checked against musl, and an untested wheel is worse than an sdist that works.
-
-**No API token exists for this.** PyPI uploads use Trusted Publishing — OIDC, a short-lived credential minted for one repository and one workflow — so there is no long-lived secret to leak, rotate, or hand to anyone, and the project owner configures it once on PyPI itself. `tests_py/test_packaging.py` asserts the workflow references no secret, because the easy fix for a failed upload is to paste a token in and that change looks small in review.
-
-**The naming risk is recorded rather than designed around.** Distribution `macrame-db`, import `macrame`, mirroring the crate — and unlike Rust's per-build-graph `[lib] name`, `site-packages` is flat, so a second distribution installing a top-level `macrame/` would contend for the directory. The incumbent is a dead 2021 build tool and `pip` warns on file conflicts, so the risk is known and non-silent. `macrame_db` is the fallback if it ever materialises, and the README now says all of this next to the crate-name note.
-
-<a id="d-107"></a>D-107 — the Python suite is gated by `run_suite.py`, not by pytest's exit code, and the R15 reporting hazard is **not** the same on both sides (0.7.0). [R15](s11-s12-milestones-and-risks.md#12-risks), [D-092](s13-decision-register.md#d-092), [§14.7](s14-python-bindings.md#147-r15-reaches-through-the-binding).
-
-[§14.7](s14-python-bindings.md#147-r15-reaches-through-the-binding), `pyproject.toml` and `tests_py/conftest.py` all stated that the Rust reporting hazard "carries across unchanged". **P6 measured it and it does not.** The fault is the same; the reporting is not, because the two suites have different process topologies, and the guidance that followed from the assumption was wrong in both directions.
-
-`cargo test` runs **one process per test binary**. A crash removes that binary's tests from the aggregate while every other binary still prints its summary, so the run reads as a *smaller pass count with no failures* — green, and wrong. That is the hazard as originally written and it is correct for Rust.
-
-pytest runs **one process**. Measured with a deliberate `faulthandler._sigsegv()` mid-suite: **exit code 3, and no summary line at all**. So the original advice — "key on the summary line being present, not on the exit code alone" — describes a check that would work, for a reason that does not apply: on this side the exit code alone *would* have caught it.
-
-What the exit code would not catch is the inverse, and that one is specific to this extension. `Drop for PyDatabase` enters the tokio runtime ([§14.2](s14-python-bindings.md#142-the-asyncsync-boundary)), so a fault during interpreter teardown lands **after** pytest prints its green summary: a passing suite with a non-zero exit. There, reading only the summary is wrong and reading only the exit code is right by accident.
-
-`tests_py/run_suite.py` therefore checks the summary, the failure count, the collected count and the exit code **against each other**, and names four distinguishable outcomes — `CRASH`, `FAILED`, `INCOMPLETE`, `TEARDOWN`. Only `CRASH` is retried, three times, matching `ci.yml`'s Rust retry and for the same stated reason: R15 has always passed on re-run, so a genuine failure still goes red, and re-running anything else until it is green is how a flaky assertion becomes permanent. A `TEARDOWN` result is deliberately red rather than retried — the tests passed and the process still died, which is a defect in the shutdown path rather than in an assertion.
-
-**Verified by injection in both directions**, which is the only way a gate is worth anything: an injected segfault retries three times and reports `CRASH`; an injected failing assertion reports `FAILED` on the first attempt and does not retry.
-
-Probe P6-a is closed by P1's measurement rather than by new work: `tests_py/probes/r15_concurrent_open.py` faulted **2 in 12 runs** at 48 concurrent opens, the same rate as the Rust control arm, so the boundary is transparent to R15 and the single-process constraint is measured rather than inherited.
-
 <!--nav-->
 ← [previous](s11-s12-milestones-and-risks.md) · [index](README.md) · [next](s14-python-bindings.md) →
 <!--/nav-->
@@ -1069,3 +992,93 @@ A Python caller builds a **list** and hands it to `write_bulk_atomic` or `write_
 It also makes the types mean something: an `EdgeAssertion` that exists is one the ledger will accept, so the getters can return canonical values rather than whatever was passed, and the write methods cannot fail on shape.
 
 What is **not** tightened: `normalized()` checks timestamp *shape*, not that a date is a real calendar date — `timestamp::parse` does that, later on the write path. So `2026-02-30T…` still constructs. A binding that refused more than the library it binds would be its own kind of surprise, and the boundary is left where the crate put it.
+
+<a id="d-101"></a>D-101 — `Subgraph` crosses as an **opaque handle**, and `to_dict()` is the caller's explicit purchase of a copy (0.7.0). [D-047](s13-decision-register.md#d-047), [D-087](s13-decision-register.md#d-087), [D-097](s13-decision-register.md#d-097), [§14.10](s14-python-bindings.md#1410-the-read-path-and-the-subgraph-handle).
+
+D-097 proposed this; P4.2 delivered it, and the argument survived contact. A `Subgraph` is three `BTreeMap`s and it is the one thing the crate materialises under an explicit `byte_budget`, precisely because it is the largest. Rendering it into Python dicts on return **doubles the peak memory of the single operation that already has a budget** — and does it eagerly, whether or not the caller reads more than `degree()`.
+
+So the accessors are forwarded (`out_edges`, `in_edges`, `degree`, `weighted_degree`, `total_weight`, `edge_count`, `estimated_bytes`, `is_closed`, `node`), plus `__len__`, `__contains__` and iteration over node ids. `to_dict()` exists and is spelled out at the call site.
+
+Two things this settled that D-097 did not anticipate. `is_closed` collides by name with `Database.is_closed` and means something unrelated — the closure invariant, not a shut handle — and the crate's name was kept rather than renamed, because a binding that renames the thing being bound costs every reader who moves between the two APIs. And `__iter__` materialises the id list rather than borrowing the map, because a lazy iterator would hold a borrow across arbitrary Python code; keys are a small fraction of the payload the budget bounded.
+
+<a id="d-102"></a>D-102 — `traverse(attribute_mode=OMIT)` is **refused**, and it is the one place the binding narrows what the library accepts (0.7.0). [D-085](s13-decision-register.md#d-085), [D-100](s13-decision-register.md#d-100), [§14.10](s14-python-bindings.md#1410-the-read-path-and-the-subgraph-handle).
+
+[D-100](s13-decision-register.md#d-100) closes with the rule that a binding refusing more than the library it binds is its own kind of surprise. This is the exception, and the distinction is what the library does with the input.
+
+`normalized()` not checking the calendar is a boundary the crate **chose**; tightening it would surprise someone who read the crate's docs and got a stricter answer. `AttributeMode::Omit` reaching `TraversalBuilder::execute` is a **return type that cannot express the answer** — the crate's own rustdoc says so, and says use `execute_ids` — so it answers `Ok(vec![])`, indistinguishable from a traversal that reached nothing. Forwarding it would re-export a known-ambiguous empty list to callers with strictly less context than a Rust caller has. `traverse_ids()` exists and returns exactly what the mode is for, so the refusal names it.
+
+The related pairing is *not* narrowed: `as_of` without a stated mode raises `AttributeModeUnstatedError` because the ledger raises it, and a live traversal with no `as_of` still defaults, because D-085 made the requirement about the pairing rather than about the mode.
+
+<a id="d-103"></a>D-103 — an unstated `min_weight` on `load_subgraph` is `-inf`, not `0.0` (0.7.0). [D-039](s13-decision-register.md#d-039), [D-073](s13-decision-register.md#d-073), [§14.10](s14-python-bindings.md#1410-the-read-path-and-the-subgraph-handle).
+
+Python has one `load_subgraph`, where Rust has two entry points whose defaults differ — and the difference is load-bearing rather than incidental. `Database::load_subgraph` passes `NEG_INFINITY`; `load_subgraph_with` given a default `TraversalBuilder` passes `0.0`, which **silently drops negative-weight edges**, exactly the input `NegativeEdgeWeight` exists to report given that Dijkstra and A\* are unsound over them.
+
+So the keyword is `min_weight=None` by default and means *unstated*: the floor is `-inf`, and a negative weight reaches the guard. A stated floor **filters**, because a caller who names one has asked to exclude what falls below it, and excluding it is not an error. `traverse` keeps the builder's `0.0`, because there a weight filter is only a filter.
+
+**A measured consequence worth recording**: as of 0.6.0 that guard is unreachable from a ledger this binding wrote. [D-083](s13-decision-register.md#d-083) put `CHECK (weight >= 0.0 …)` on `links`, so the row is refused at the write. It stays reachable for a file migrated from before v7 — `links_current` carries no weight check of its own — which is why the mapping was kept rather than simplified on the strength of a constraint that only holds for new writes.
+
+<a id="d-104"></a>D-104 — `astar` holds the GIL for its whole run, and a misbehaving heuristic is captured and re-raised (0.7.0). [D-095](s13-decision-register.md#d-095), [§14.12](s14-python-bindings.md#1412-the-algorithms-and-astars-inversion).
+
+The bindings plan flagged this as the one method needing its own design pass, because an arbitrary Python callable means calling **into** Python from Rust while [§14.2](s14-python-bindings.md#142-the-asyncsync-boundary)'s arrangement has the GIL released. The fallback it proposed — ship `astar` with a fixed heuristic set instead of a callable — was not needed.
+
+**It does not release the GIL, and that is the resolution rather than a compromise.** Releasing it around the search and re-attaching per expansion pays two GIL transitions per node to hold it for the arithmetic in between: strictly worse than never releasing it. Every other algorithm *does* detach — they are pure CPU over Rust-owned data with no Python object in reach — so the cost is isolated to the one method that earns it, and it is documented at the method: `heuristic=None` and `dijkstra` both release.
+
+Two hazards the callback signature creates, because `Fn(&str, &str) -> f64` cannot report failure:
+
+- **A raising heuristic** would otherwise be swallowed. The error is captured in a `RefCell` and re-raised after the search returns; `0.0` is fed to the search meanwhile, which is admissible on every graph, so the search stays well-defined and terminates rather than running on a poisoned ordering.
+- **A `NaN`** makes the priority queue's comparison incoherent and panics — *inside a callback, across an FFI boundary*, which is a far worse outcome than an exception. Non-finite returns are refused by name, and the message says which node.
+
+`heuristic=None` is the default and means a zero heuristic: the one heuristic admissible on every graph, which makes the default A\* exactly Dijkstra-with-a-path rather than a guess about the caller's metric space.
+
+<a id="d-105"></a>D-105 — search results are a `VectorHit` class, while edges stay tuples (0.7.0). [D-007](s13-decision-register.md#d-007), [§14.11](s14-python-bindings.md#1411-temporal-vector-and-the-counters).
+
+Not a style preference, and the two choices are consistent under one rule: a tuple is fine when every slot means the same kind of thing across every producer.
+
+An edge tuple's five slots are identifiers and instants in every context, so `e[3]` is a `valid_from` wherever it came from. A search result's `score` is a **cosine distance** from `search_vector` (smaller is closer, ascending), a **fused RRF score** from `hybrid_search` (larger is better, descending), and *bm25* from `keyword_search` (negative, ascending best-first). Three incompatible orderings behind one position, and `hit[1]` invites sorting the wrong way. A named field with a docstring does not prevent that; it gives the caller somewhere to look when the top result is the worst match.
+
+`keyword_search` keeps `(id, rank)` tuples, because it is the single arm whose ordering is fixed and stated at its own call.
+
+`CandidateCount` is **not** exposed as a type. Its whole content is a number and whether that number is exact, which is two attributes on `CostEstimate` — `candidates` and `candidates_capped`. A class would make a caller unwrap it to reach the number they wanted, which is how the cap ends up ignored, and the cap is the part that matters: SQLite has no histograms, so the count is measured by running the traversal under a probe, and a probe that hit its cap measured only that the set is bigger than the cap.
+
+<a id="d-106"></a>D-106 — one abi3 wheel per platform, an sdist as the universal fallback, and PyPI uploads by Trusted Publishing rather than a token (0.7.0). [D-094](s13-decision-register.md#d-094), [D-098](s13-decision-register.md#d-098), [§14.13](s14-python-bindings.md#1413-packaging-and-distribution).
+
+**The matrix is small because [D-094](s13-decision-register.md#d-094) made it small.** `pyo3` is built `abi3-py310`, so one wheel per platform serves CPython 3.10 and everything after it. Without abi3 this is four platforms times five interpreter versions — twenty builds of a crate that compiles the SQLite amalgamation each time. That is the other half of a trade whose visible cost was ~35 µs per 768-dim embedding, and it is the half that pays for it.
+
+**Probe P5-a is answered for one target and open for the rest.** Cold, `cargo clean` first, on Windows x86_64: **54–62 s, 197 crates compiled including `libsql-ffi`**; the wheel is **4.3 MiB compressed, 11.0 MiB unpacked**, of which the extension is 10.7 MiB. The sdist is 748 KiB, and `pip install --no-binary :all:` on it takes **183 s** in a fresh virtualenv. So the build is not expensive and the plan's instruction not to assume the matrix is cheap is discharged — *for the native case*. The stated risk was aarch64 under emulation, typically 5–15× native, which is affordable but unmeasured; the first run of `wheels.yml` is what measures it, and the fallback if it does not fit is a native arm64 runner rather than dropping the target.
+
+**The sdist is not a formality.** It is the install path for every platform the matrix does not cover, so the CI job proves it *builds from source with no wheel in reach* (`--no-binary :all:`) rather than proving a tarball was produced. This works because `libsql-ffi` compiles the amalgamation anyway and needs only a C compiler — verified locally end to end, including that the `metrics` feature survives the source build, which is what makes `Database.metrics()` honest in a wheel-less install too.
+
+**`musllinux` stays out of scope** until someone asks: it doubles the Linux matrix for a `libsql-ffi` build nobody here has checked against musl, and an untested wheel is worse than an sdist that works.
+
+**No API token exists for this.** PyPI uploads use Trusted Publishing — OIDC, a short-lived credential minted for one repository and one workflow — so there is no long-lived secret to leak, rotate, or hand to anyone, and the project owner configures it once on PyPI itself. `tests_py/test_packaging.py` asserts the workflow references no secret, because the easy fix for a failed upload is to paste a token in and that change looks small in review.
+
+**The naming risk is recorded rather than designed around.** Distribution `macrame-db`, import `macrame`, mirroring the crate — and unlike Rust's per-build-graph `[lib] name`, `site-packages` is flat, so a second distribution installing a top-level `macrame/` would contend for the directory. The incumbent is a dead 2021 build tool and `pip` warns on file conflicts, so the risk is known and non-silent. `macrame_db` is the fallback if it ever materialises, and the README now says all of this next to the crate-name note.
+
+<a id="d-107"></a>D-107 — the Python suite is gated by `run_suite.py`, not by pytest's exit code, and the R15 reporting hazard is **not** the same on both sides (0.7.0). [R15](s11-s12-milestones-and-risks.md#12-risks), [D-092](s13-decision-register.md#d-092), [§14.7](s14-python-bindings.md#147-r15-reaches-through-the-binding).
+
+[§14.7](s14-python-bindings.md#147-r15-reaches-through-the-binding), `pyproject.toml` and `tests_py/conftest.py` all stated that the Rust reporting hazard "carries across unchanged". **P6 measured it and it does not.** The fault is the same; the reporting is not, because the two suites have different process topologies, and the guidance that followed from the assumption was wrong in both directions.
+
+`cargo test` runs **one process per test binary**. A crash removes that binary's tests from the aggregate while every other binary still prints its summary, so the run reads as a *smaller pass count with no failures* — green, and wrong. That is the hazard as originally written and it is correct for Rust.
+
+pytest runs **one process**. Measured with a deliberate `faulthandler._sigsegv()` mid-suite: **exit code 3, and no summary line at all**. So the original advice — "key on the summary line being present, not on the exit code alone" — describes a check that would work, for a reason that does not apply: on this side the exit code alone *would* have caught it.
+
+What the exit code would not catch is the inverse, and that one is specific to this extension. `Drop for PyDatabase` enters the tokio runtime ([§14.2](s14-python-bindings.md#142-the-asyncsync-boundary)), so a fault during interpreter teardown lands **after** pytest prints its green summary: a passing suite with a non-zero exit. There, reading only the summary is wrong and reading only the exit code is right by accident.
+
+`tests_py/run_suite.py` therefore checks the summary, the failure count, the collected count and the exit code **against each other**, and names four distinguishable outcomes — `CRASH`, `FAILED`, `INCOMPLETE`, `TEARDOWN`. Only `CRASH` is retried, three times, matching `ci.yml`'s Rust retry and for the same stated reason: R15 has always passed on re-run, so a genuine failure still goes red, and re-running anything else until it is green is how a flaky assertion becomes permanent. A `TEARDOWN` result is deliberately red rather than retried — the tests passed and the process still died, which is a defect in the shutdown path rather than in an assertion.
+
+**Verified by injection in both directions**, which is the only way a gate is worth anything: an injected segfault retries three times and reports `CRASH`; an injected failing assertion reports `FAILED` on the first attempt and does not retry.
+
+Probe P6-a is closed by P1's measurement rather than by new work: `tests_py/probes/r15_concurrent_open.py` faulted **2 in 12 runs** at 48 concurrent opens, the same rate as the Rust control arm, so the boundary is transparent to R15 and the single-process constraint is measured rather than inherited.
+
+<a id="d-108"></a>D-108 — the Python workflow does **not** gate on `ci.yml`, and it is the first thing in this repository that compiles the binding crate (0.7.0). [D-098](s13-decision-register.md#d-098), [D-106](s13-decision-register.md#d-106), [D-107](s13-decision-register.md#d-107), [§14.14](s14-python-bindings.md#1414-ci).
+
+The binding plan sketched `python.yml` as `rust: uses ./.github/workflows/ci.yml` with everything else behind `needs: rust` — the shape `release.yml` uses. That shape belonged to a file that *also built the wheels*, and the rationale was "the crate must be green before the wheel is built". P5 moved the wheel matrix into its own tag-triggered `wheels.yml`, and what remained here is a test job whose failure mode is independent of the Rust suite's.
+
+`workflow_call` does not deduplicate. Gating would re-run clippy, MSRV, the two-OS Rust matrix — each arm with its own three R15 retries — and the publish dry-run on every pull request that already ran all of them, and would hold the Python answer behind work it does not depend on. Two independent signals reported separately is strictly more information than one signal reported late. Where the two **must** be green together is before an upload, and that is where the gate went: `wheels.yml`'s publish job calls this workflow, exactly as `release.yml` calls `ci.yml`. Before P7 a tag could build four wheels, pass a six-line smoke test and upload to PyPI with the suite never having run, on a version number that cannot be spent twice.
+
+**The gap this closed was not in the plan at all.** `bindings/python` is a workspace *member* but never a *default* member — the root package is itself a member, so Cargo scopes bare commands to it alone. That is deliberate, it is what keeps `cargo publish` a one-package operation ([D-098](s13-decision-register.md#d-098)), and `tests/packaging_tests.rs` pins it. Its cost went unnoticed for three phases: **nothing in CI ever compiled `macrame-py`.** `ci.yml`'s clippy is scoped to `macrame-db` by that same default, and the only thing that built the binding was `wheels.yml`, on tags. A pull request could break every file P1–P4 wrote and all four checks would go green. The lint job names `-p macrame-py` explicitly, and deliberately does not pass `--features extension-module`: the binding manifest states the crate must build without it, and a check that quietly required it would make that statement untestable.
+
+Three properties are tested rather than trusted to review, because each fails silently: that the suite runs through `run_suite.py` rather than bare pytest ([D-107](s13-decision-register.md#d-107) — replacing it reads as tidying), that the publish job still needs the suite, and that the `requires-python` floor is a version some job actually runs. All four tripwires were verified by injection.
+
+The `abi3` job is the one nothing else covers. Every other job builds and runs on a single interpreter, so none of them tests the claim that funds the small wheel matrix: *one wheel serves CPython 3.10 through whatever ships next* ([D-106](s13-decision-register.md#d-106)). It builds on 3.10, asserts the artifact is tagged `abi3` rather than for one version, and runs the whole suite through 3.13 against it. If pyo3's `abi3-py310` feature were ever dropped, every other job here would stay green while the matrix silently became wrong by a factor of five.
+

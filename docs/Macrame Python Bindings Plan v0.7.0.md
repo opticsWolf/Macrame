@@ -1059,6 +1059,64 @@ one place the Python side is unambiguously better off than the crates.io side: P
 OIDC support is mature, and it removes the "add a secret I will not touch" step entirely.
 The crates.io job can follow later (it was already noted as optional after 0.6.0).
 
+### P7 — ✅ **DELIVERED 2026-08-01**
+
+> Shipped: `.github/workflows/python.yml` (3 jobs, 6 runners), a gate added to `wheels.yml`,
+> four packaging tripwires, and [D-108](../architecture/s13-decision-register.md#d-108).
+> **18 packaging tests** (14 → 18), all four new ones verified by injection.
+>
+> **The sketch above is not what was built, and the reason is worth stating.** `rust: uses
+> ./.github/workflows/ci.yml` with everything behind `needs: rust` belonged to a draft where
+> this file *also* built the wheels — "the crate must be green before the wheel is built".
+> P5 moved the matrix into `wheels.yml`, and what remains here is a test job whose failure
+> mode is independent of the Rust suite's. `workflow_call` does not deduplicate: gating would
+> re-run clippy, MSRV, the two-OS Rust matrix — each arm with its own three R15 retries — and
+> the publish dry-run on every pull request that already ran them, and would hold the Python
+> answer behind fifteen minutes of work it does not depend on.
+>
+> Where the two **must** be green together is before an upload, and that is where the gate
+> went. `wheels.yml`'s publish job now calls `python.yml`, exactly as `release.yml` calls
+> `ci.yml`. Before this, a tag could build four wheels, pass a six-line smoke test and upload
+> to PyPI **with the 337-test suite never having run** — on a version number PyPI will not
+> let anyone spend twice.
+>
+> **The claim that `ci.yml` needs no change was right; the conclusion drawn from it was not.**
+> "None use `--workspace`, so all of them remain scoped to `macrame-db`" is true, verified
+> again here against `cargo metadata` — and it means CI never compiled the binding crate at
+> all. `bindings/python` is a workspace member but never a *default* member, because the root
+> package is itself a member (D-098, and the reason `cargo publish` is still a one-package
+> operation). So `ci.yml`'s clippy lints the ledger, `wheels.yml` builds the binding on tags,
+> and between them, for three phases, **a pull request could break every file P1–P4 wrote and
+> all four checks would go green.** `cargo clippy -p macrame-py --all-targets -D warnings` is
+> now a job of its own; measured clean today, so it arrives as a gate that passes rather than
+> as a backlog.
+>
+> **The matrix is four rows and two of them are new ground.** Ubuntu 3.13 is the baseline;
+> Ubuntu **3.10** is the floor `pyproject.toml` declares and pip enforces against users while
+> nothing enforced it against us; Windows 3.13 is where R15 was measured; **macOS** has never
+> run this suite at all — `wheels.yml` builds a universal2 wheel and smoke-tests it in six
+> lines, and this is the first time the Python surface is exercised on Apple silicon.
+>
+> **A fifth job tests the claim that funds the matrix.** abi3 is why §8 is four builds rather
+> than twenty, and no other job here could notice it breaking: each builds and runs on one
+> interpreter. The `abi3` job builds on 3.10, asserts the wheel is tagged for the *ABI* rather
+> than the version — verified locally, `macrame_db-0.6.0-cp310-abi3-win_amd64.whl` — and runs
+> the whole suite through 3.13 against that same file.
+>
+> **Installation is `pip install .`, not `maturin develop`.** It goes through the PEP 517
+> backend, so it reads `[tool.maturin]` and builds with `--features extension-module` in
+> release: the path a user takes. Verified locally rather than assumed — `pip wheel .` runs
+> maturin's backend end to end and produced the wheel named above.
+>
+> **Found while writing the decision register: D-101 through D-107 were in the wrong place.**
+> Every 0.7.0 entry had been inserted *above* `s13-decision-register.md`'s nav header, and so
+> above the document's own `## §13` title — an insertion script looked for the last `<!--nav-->`
+> in a file whose only nav block is at line 1, and found position 0. Nothing caught it: the
+> anchors resolve, so `doc_link_tests` was satisfied, and the rendered page reads plausibly.
+> `REJOIN.md` is where it would have surfaced, badly — that file is in the reassembly list, so
+> a rejoin would have emitted seven decisions before the section that contains them. Moved
+> below D-100, where they belong.
+
 ---
 
 ## 11. P8 — Stubs and docs
@@ -1094,7 +1152,7 @@ The crates.io job can follow later (it was already noted as optional after 0.6.0
 | **P4.7** Analytics ✅ | P4.2 | 6 algorithms; `astar` last | ✅ 21 tests; `astar` resolved without the fallback (D-104) |
 | **P5** Packaging ✅ | P4.1 | wheel matrix, sdist, naming | ✅ probe P5-a: native timed at 54–62 s / 4.3 MiB; cross-targets await one CI run |
 | **P6** Tests ✅ | P4.x | `tests_py/`, `run_suite.py`, end-to-end seams | ✅ 333 tests; probe P6-a closed by P1 (2/12); the hazard claim corrected (D-107) |
-| **P7** CI | P5, P6 | `python.yml`, Trusted Publishing | green on all targets |
+| **P7** CI ✅ | P5, P6 | `python.yml` (lint · 4-row matrix · abi3), the upload gate in `wheels.yml` | ✅ 18 packaging tests, 4 tripwires injected; the binding crate is compiled by CI for the first time (D-108) |
 | **P8** Stubs/docs | P4.x | `.pyi`, `py.typed`, docstrings | stub-coverage rule test green |
 
 **P0–P3 is the real risk.** Once the runtime boundary, the error tree and the coercion

@@ -160,9 +160,19 @@ jobs:
           path: dist/*.tar.gz
           if-no-files-found: error
 
+  # The full Python suite, reused rather than reimplemented — the same argument
+  # `release.yml` makes for calling `ci.yml`. Before P7 this file could take a
+  # tag, build four wheels, pass a six-line smoke test and upload to PyPI
+  # **without the 337-test suite having run at all**, on an artifact whose
+  # version number cannot be spent twice. The smoke test answers "is the engine
+  # in there"; it was never meant to answer "does it work".
+  suite:
+    name: python suite
+    uses: ./.github/workflows/python.yml
+
   publish:
     name: publish to PyPI
-    needs: [wheels, sdist]
+    needs: [wheels, sdist, suite]
     runs-on: ubuntu-latest
     # A tag publishes; a manual run publishes only when asked. Same shape as
     # `release.yml`, and for the same reason: a PyPI version number cannot be

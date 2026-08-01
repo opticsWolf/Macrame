@@ -240,3 +240,98 @@ def test_the_wheel_workflow_holds_no_api_token():
         "credential that does not need to exist."
     )
     assert "id-token: write" in workflow
+
+
+# ---------------------------------------------------------------------------
+# P7. Four claims about CI, each of which fails silently if it stops being true.
+# ---------------------------------------------------------------------------
+
+
+def test_ci_compiles_the_binding_crate_at_all():
+    """The gap the workspace layout opened, and nothing else would report.
+
+    ``bindings/python`` is a workspace *member* but never a *default* member —
+    the root package is itself a member, so Cargo scopes bare commands to it
+    alone. That property is deliberate (D-098, it is what keeps ``cargo
+    publish`` a one-package operation) and ``tests/packaging_tests.rs`` pins it.
+
+    Its cost went unnoticed until P7: **no job compiled the binding crate.**
+    ``ci.yml``'s clippy is scoped to ``macrame-db`` by that same default, and
+    the only thing that built ``macrame-py`` was ``wheels.yml``, which runs on
+    tags. A pull request could break the binding and every check would be green.
+
+    ``-p macrame-py`` is therefore load-bearing text: drop it and this file lints
+    the crate ``ci.yml`` already linted, twice, and the bindings not at all.
+    """
+    workflow = _read(REPO / ".github" / "workflows" / "python.yml")
+    assert "-p macrame-py" in workflow, (
+        "no job compiles the binding crate. Cargo will not do it for you here — "
+        "macrame-py is not a workspace default member."
+    )
+    # The invocation, not the file: this workflow *discusses* the feature in a
+    # comment, and a substring check over the whole text matched that comment.
+    invocation = re.search(r"^\s*run: (cargo clippy -p macrame-py.*)$", workflow, re.M)
+    assert invocation, "no `cargo clippy -p macrame-py` run step"
+    assert "extension-module" not in invocation.group(1), (
+        "the clippy job turned on extension-module. The binding manifest states "
+        "the crate must build without it; requiring it makes that untestable."
+    )
+
+
+def test_ci_runs_the_suite_through_the_gate_and_not_bare_pytest():
+    """D-107, asserted rather than trusted to review.
+
+    A crash inside libSQL does not raise, it kills the interpreter, and the two
+    ways that reports are not both caught by any single signal — see
+    ``run_suite.py``. Replacing the gate with ``pytest tests_py`` is a one-line
+    simplification that looks like tidying and silently reintroduces both.
+    """
+    workflow = _read(REPO / ".github" / "workflows" / "python.yml")
+    assert "tests_py/run_suite.py" in workflow, (
+        "the Python suite is not run through run_suite.py — see D-107 for what "
+        "a bare pytest invocation cannot distinguish"
+    )
+    assert not re.search(r"\bpytest\s+tests_py\b", workflow), (
+        "a bare `pytest tests_py` invocation is in python.yml. An R15 teardown "
+        "fault prints a green summary and exits non-zero; a mid-run fault prints "
+        "no summary at all. Neither is what pytest's exit code alone says."
+    )
+
+
+def test_publishing_a_wheel_requires_the_python_suite():
+    """A version number cannot be spent twice, so the gate belongs before it.
+
+    Before P7 a tag could build four wheels, pass a six-line smoke test and
+    upload, with the 333-test suite never having run. The smoke test answers
+    "is the engine linked in" — that is all it was ever meant to answer.
+    """
+    workflow = _read(REPO / ".github" / "workflows" / "wheels.yml")
+    assert "./.github/workflows/python.yml" in workflow, (
+        "wheels.yml does not call python.yml, so nothing gates a PyPI upload on "
+        "the Python suite"
+    )
+    needs = re.search(r"^  publish:.*?needs:\s*\[([^\]]+)\]", workflow, re.S | re.M)
+    assert needs, "no needs: on the publish job"
+    assert "suite" in needs.group(1), (
+        f"the publish job needs [{needs.group(1)}] — the suite is not among them, "
+        "so a red test run would not stop the upload"
+    )
+
+
+def test_the_declared_python_floor_is_the_one_ci_actually_runs():
+    """``requires-python`` is enforced against users and against nobody here.
+
+    pip refuses to install on an older interpreter on the strength of this
+    string. If the code stops working on 3.10 — a match statement, a ``|`` type
+    union in a runtime position — the only place that surfaces is a CI job that
+    actually runs 3.10, and the floor moving without that job moving is the
+    silent version of the failure.
+    """
+    floor = re.search(r'requires-python\s*=\s*">=\s*([\d.]+)"', _read(REPO / "pyproject.toml"))
+    assert floor, "no requires-python in pyproject.toml"
+    workflow = _read(REPO / ".github" / "workflows" / "python.yml")
+    assert f'python: "{floor.group(1)}"' in workflow, (
+        f'pyproject.toml claims Python {floor.group(1)}, and no CI job runs it. '
+        f"Either add it to the matrix in python.yml or raise the floor."
+    )
+

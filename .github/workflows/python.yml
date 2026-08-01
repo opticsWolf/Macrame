@@ -1,0 +1,170 @@
+name: Python
+
+# The Python side of the project: the binding crate compiles, the extension
+# builds and installs the way a user installs it, and the 337-test suite passes
+# on every platform this repository claims to support.
+#
+# ## Why this does not call `ci.yml` first
+#
+# The plan (§10) sketched this file as `rust: uses ./.github/workflows/ci.yml`
+# with everything else behind `needs: rust`. That shape belonged to a file that
+# also built the wheels — "the crate must be green before the wheel is built".
+# P5 moved the wheel matrix into `wheels.yml`, tag-triggered, and what is left
+# here is a test job whose failure mode is independent of the Rust suite's.
+#
+# `workflow_call` does not deduplicate: gating here would re-run clippy, MSRV,
+# the two-OS Rust matrix (each with its own three R15 retries) and the publish
+# dry-run on every pull request that already ran them, and would hold the Python
+# answer behind ~15 minutes of work it does not depend on. Two independent
+# signals, reported separately, is strictly more information than one signal
+# reported late.
+#
+# Where the two *must* be green together is before an upload, and that is what
+# `workflow_call` above is for: `wheels.yml`'s publish job gates on this file,
+# exactly as `release.yml` gates on `ci.yml`. See D-108.
+#
+# ## The gap this closes
+#
+# `bindings/python` is a workspace *member* but never a *default* member — the
+# root package is itself a member, so Cargo scopes bare commands to it alone,
+# which is the property `tests/packaging_tests.rs` pins and the reason `cargo
+# publish` stayed a one-package operation (D-098). The cost of that choice, not
+# noticed until now: **nothing in CI ever compiled the binding crate.** Until
+# this file existed, a pull request could break `bindings/python/src/*.rs` and
+# every check would go green, because the only thing that built it was
+# `wheels.yml`, which runs on tags.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call: # so wheels.yml can gate an upload on exactly this
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # `-p macrame-py` explicitly. Every other clippy invocation in this repository
+  # is scoped to the root package by Cargo's own default, so this one has to
+  # name the crate or it lints the same code `ci.yml` already linted.
+  #
+  # Deliberately **without** `--features extension-module`: that feature is
+  # turned on by `pyproject.toml` for maturin's build only, and the binding
+  # manifest states the crate must build without it. A check that silently
+  # required it would make that statement untestable.
+  lint:
+    name: clippy (binding crate)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: clippy
+        run: cargo clippy -p macrame-py --all-targets
+        env:
+          RUSTFLAGS: -D warnings
+
+  test:
+    name: suite (${{ matrix.os }}, py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One platform failing must not hide the others: R15 is platform-sensitive
+      # and the whole point of a three-OS matrix is knowing which ones it hit.
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python: "3.13"
+          # The floor `pyproject.toml` declares. `requires-python = ">=3.10"` is
+          # a claim pip enforces against users and nothing enforces against us.
+          - os: ubuntu-latest
+            python: "3.10"
+          - os: windows-latest
+            python: "3.13"
+          # macOS has never run this suite. `wheels.yml` builds a universal2
+          # wheel and smoke-tests it with six lines; this is the first time the
+          # ledger's Python surface is exercised on Apple silicon at all.
+          - os: macos-latest
+            python: "3.13"
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # `pip install .` rather than `maturin develop`: it goes through the PEP
+      # 517 backend, which means it reads `[tool.maturin]` and therefore builds
+      # with `--features extension-module` and in release, i.e. it is the same
+      # path a user takes. `maturin develop` would need a virtualenv here and
+      # would test a build configuration nobody installs.
+      - name: install the extension the way a user installs it
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install .
+          python -m pip install pytest
+
+      # **Not bare pytest** (D-107). R15 is an intermittent libSQL access
+      # violation on concurrent open, reproduced through this binding at 2 in 12
+      # runs, and it kills the interpreter rather than raising. `run_suite.py`
+      # distinguishes the four ways this suite can end — CRASH, FAILED,
+      # INCOMPLETE, TEARDOWN — retries only the first, three times, and reports
+      # the rest red on the first attempt. A green summary is not sufficient
+      # here and neither is a zero exit; it checks them against each other.
+      - name: python suite (through the R15 gate)
+        run: python tests_py/run_suite.py
+
+  # abi3 is what turns a 4-platform × 5-version matrix into 4 builds, and the
+  # claim underneath it — "one wheel serves CPython 3.10 through whatever ships
+  # next" — is not tested by any job above, because each of those builds and
+  # runs on a single interpreter.
+  #
+  # So: build once on the floor, install that same artifact into an interpreter
+  # it has never seen, and run the whole suite through it. If pyo3's abi3
+  # feature were ever dropped, every other job here would still pass and the
+  # wheel matrix would quietly become wrong by a factor of five.
+  abi3:
+    name: one wheel, two interpreters
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        id: floor
+        with:
+          python-version: "3.10"
+      - uses: actions/setup-python@v5
+        id: newest
+        with:
+          python-version: "3.13"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # Debug, deliberately: this job asks what the wheel is *tagged* and
+      # whether it imports, not how fast it runs. `wheels.yml` builds the
+      # release artifact.
+      - name: build one wheel, on 3.10
+        shell: bash
+        run: |
+          "${{ steps.floor.outputs.python-path }}" -m pip install --upgrade pip maturin
+          "${{ steps.floor.outputs.python-path }}" -m maturin build --out dist
+
+      - name: the tag names the ABI, not the interpreter that built it
+        shell: bash
+        run: |
+          ls -la dist
+          if ! ls dist/*-abi3-*.whl >/dev/null 2>&1; then
+            echo "::error::no abi3 wheel — pyo3's abi3-py310 feature is off, and"
+            echo "::error::the wheel matrix in wheels.yml is now wrong per Python version"
+            exit 1
+          fi
+
+      - name: run the whole suite on 3.13, against the wheel built by 3.10
+        shell: bash
+        run: |
+          "${{ steps.newest.outputs.python-path }}" -m pip install --upgrade pip pytest
+          "${{ steps.newest.outputs.python-path }}" -m pip install --no-index --find-links dist macrame-db
+          "${{ steps.newest.outputs.python-path }}" tests_py/run_suite.py
