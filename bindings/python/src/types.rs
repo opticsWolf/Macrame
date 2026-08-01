@@ -31,8 +31,8 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyString};
 
-use macrame::prelude::{Annotation, ConceptUpsert, EdgeAssertion, Interval};
 use macrame::graph::AttributeMode;
+use macrame::prelude::{Annotation, ConceptUpsert, EdgeAssertion, Interval};
 
 use crate::errors::to_py;
 use crate::timestamps::{from_canonical, to_canonical};
@@ -43,7 +43,14 @@ use crate::timestamps::{from_canonical, to_canonical};
 /// `AttributeModeUnstatedError` rather than quietly returning live text for a
 /// historical topology. `None` is *unstated*, not `CURRENT`, and the difference
 /// is the whole mechanism.
-#[pyclass(name = "AttributeMode", module = "macrame", eq, eq_int, frozen, from_py_object)]
+#[pyclass(
+    name = "AttributeMode",
+    module = "macrame",
+    eq,
+    eq_int,
+    frozen,
+    from_py_object
+)]
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum PyAttributeMode {
     /// Live attributes from `concepts`. Fast, and wrong for historical text.
@@ -233,10 +240,7 @@ impl PyEdgeAssertion {
     /// The interval this assertion claims.
     fn interval(&self) -> PyInterval {
         PyInterval {
-            inner: Interval::new(
-                self.inner.valid_from.clone(),
-                self.inner.valid_to.clone(),
-            ),
+            inner: Interval::new(self.inner.valid_from.clone(), self.inner.valid_to.clone()),
         }
     }
 

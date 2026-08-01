@@ -48,10 +48,14 @@ use pyo3::types::PyType;
 use macrame::prelude::*;
 
 use crate::errors::{closed_error, to_py};
+use crate::graph;
+use crate::observe;
 use crate::rows;
 use crate::runtime::{check_not_forked, runtime};
+use crate::temporal;
 use crate::timestamps::to_canonical;
-use crate::types::{PyAnnotation, PyConceptUpsert, PyEdgeAssertion};
+use crate::types::{PyAnnotation, PyAttributeMode, PyConceptUpsert, PyEdgeAssertion};
+use crate::vector;
 
 /// A Macrame ledger handle.
 #[pyclass(name = "Database", module = "macrame", frozen)]
@@ -88,6 +92,21 @@ impl PyDatabase {
             let db = guard.as_ref().ok_or_else(closed_error)?;
             f(db)
         })
+    }
+
+    /// The instant a read should be taken at: what the caller said, else the
+    /// handle's clock.
+    ///
+    /// Every read method takes `now` and every one of them defaults it the same
+    /// way. Reading the clock through the handle rather than calling
+    /// `SystemClock` directly matters for the same reason `open_with_clock`
+    /// exists: a handle opened against an injected clock must answer "now" with
+    /// *its* now, or a fixture's reads drift away from its writes.
+    fn instant(&self, py: Python<'_>, now: Option<&Bound<'_, PyAny>>) -> PyResult<String> {
+        match now {
+            Some(t) => to_canonical(Some(t)),
+            None => self.with_db(py, |db| Ok(db.clock().now())),
+        }
     }
 }
 
@@ -386,6 +405,561 @@ impl PyDatabase {
         })
     }
 
+    // -- read surface (P4.2) --------------------------------------------------
+    //
+    // These do **not** cross the write actor's channel. They run on the shared
+    // read connection, concurrently with each other and with writes, which is
+    // why `with_db` takes a read lock and why none of them can stall behind a
+    // rebuild the way §5.1.8 describes for the write path.
+    //
+    // `now` defaults to the handle's clock. It is exposed because the crate
+    // exposes it: `now_ts` is the caller's present, and a caller replaying a
+    // fixture needs to say what "now" means for it.
+
+    /// Node ids reachable from `start_node`, in id order (§5.2).
+    ///
+    /// Topology only. No attribute mode is involved, so this can never raise
+    /// `AttributeModeUnstatedError` — topology at an instant is unambiguous, and
+    /// it is only the *pairing* with live attributes that needed a decision.
+    ///
+    /// This is the method to use with `AttributeMode.OMIT`'s intent: it says
+    /// what it found, where `traverse` under that mode could not.
+    #[pyo3(signature = (
+        start_node, *, max_depth = 2, edge_types = None, min_weight = 0.0,
+        as_of = None, now = None
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn traverse_ids(
+        &self,
+        py: Python<'_>,
+        start_node: &str,
+        max_depth: usize,
+        edge_types: Option<Vec<String>>,
+        min_weight: f64,
+        as_of: Option<&Bound<'_, PyAny>>,
+        now: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Vec<String>> {
+        let as_of = as_of.map(|t| to_canonical(Some(t))).transpose()?;
+        let now = self.instant(py, now)?;
+        let b = graph::builder(start_node, max_depth, edge_types, min_weight, None, as_of);
+        self.with_db(py, move |db| {
+            runtime()
+                .block_on(b.execute_ids(db.read_conn(), &now))
+                .map_err(to_py)
+        })
+    }
+
+    /// Traverse and hydrate attributes, as a list of `NodeAttributes` (§5.2).
+    ///
+    /// `attribute_mode` decides *which text* comes back and `as_of` decides
+    /// *which topology*. They are independent questions, and setting `as_of`
+    /// without stating a mode raises `AttributeModeUnstatedError` rather than
+    /// defaulting (D-085): `as_of(t)` with live attributes returns the past's
+    /// graph wearing the present's titles — a legitimate thing to want and a
+    /// terrible thing to get by accident.
+    ///
+    /// `AttributeMode.OMIT` is **refused** here, with a message naming
+    /// `traverse_ids`. Under that mode there are no attributes to hydrate, so
+    /// the Rust method answers with an empty list that no caller can tell apart
+    /// from a traversal that reached nothing. See the module docs for why this
+    /// is the one place the binding refuses what the library accepts.
+    #[pyo3(signature = (
+        start_node, *, max_depth = 2, edge_types = None, min_weight = 0.0,
+        attribute_mode = None, as_of = None, now = None
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn traverse(
+        &self,
+        py: Python<'_>,
+        start_node: &str,
+        max_depth: usize,
+        edge_types: Option<Vec<String>>,
+        min_weight: f64,
+        attribute_mode: Option<PyAttributeMode>,
+        as_of: Option<&Bound<'_, PyAny>>,
+        now: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Vec<graph::PyNodeAttributes>> {
+        if attribute_mode == Some(PyAttributeMode::Omit) {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "traverse() cannot hydrate under AttributeMode.OMIT: there are no \
+                 attributes to return, so the answer would be an empty list that \
+                 you could not tell apart from a traversal that reached nothing. \
+                 Use traverse_ids(), which returns the ids OMIT is for.",
+            ));
+        }
+        let as_of = as_of.map(|t| to_canonical(Some(t))).transpose()?;
+        let now = self.instant(py, now)?;
+        let b = graph::builder(
+            start_node,
+            max_depth,
+            edge_types,
+            min_weight,
+            attribute_mode,
+            as_of,
+        );
+        let hydrated = self.with_db(py, move |db| {
+            runtime()
+                .block_on(b.execute(db.read_conn(), &now))
+                .map_err(to_py)
+        })?;
+        Ok(hydrated
+            .into_iter()
+            .map(|inner| graph::PyNodeAttributes { inner })
+            .collect())
+    }
+
+    /// Load the neighbourhood of `start_node` as a `Subgraph` (§5.4, D-073).
+    ///
+    /// `byte_budget` has **no default, because the crate has none**. It bounds
+    /// the payload this call may materialise and raises `SubgraphTooLargeError`
+    /// rather than allocating past it; how much memory this process may spend on
+    /// one graph is not a question a binding can answer.
+    ///
+    /// # `min_weight` unstated is not `0.0`
+    ///
+    /// Leave it unset and negative-weight edges reach the guard, raising
+    /// `NegativeEdgeWeightError` — which is what you want before running
+    /// `dijkstra`, unsound over them. State a floor and edges below it are
+    /// *filtered*, not refused, because a caller who states one has asked to
+    /// exclude them. That is the difference between the crate's `load_subgraph`
+    /// and `load_subgraph_with`, preserved rather than flattened.
+    ///
+    /// `edge_types` and `min_weight` bound the walk **and** the returned
+    /// adjacency. Filtering only the walk would hand a caller who asked for
+    /// `CITES` a graph reached via `CITES` and populated with `KNOWS` as well.
+    #[pyo3(signature = (
+        start_node, max_hops, byte_budget, *, edge_types = None,
+        min_weight = None, now = None
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn load_subgraph(
+        &self,
+        py: Python<'_>,
+        start_node: &str,
+        max_hops: usize,
+        byte_budget: usize,
+        edge_types: Option<Vec<String>>,
+        min_weight: Option<f64>,
+        now: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<graph::PySubgraph> {
+        let now = self.instant(py, now)?;
+        let b = graph::builder(
+            start_node,
+            max_hops,
+            edge_types,
+            min_weight.unwrap_or(f64::NEG_INFINITY),
+            None,
+            None,
+        );
+        let inner = self.with_db(py, move |db| {
+            runtime()
+                .block_on(db.load_subgraph_with(&b, &now, byte_budget))
+                .map_err(to_py)
+        })?;
+        Ok(graph::PySubgraph { inner })
+    }
+
+    // -- temporal surface (P4.3) ---------------------------------------------
+
+    /// The world as believed at `ts` (§5.5).
+    ///
+    /// Folds from the newest snapshot at or before `ts` and replays the log
+    /// forward, reading cold storage when the instant predates the archive
+    /// horizon. A snapshot is derivative state (Doctrine VI), so a missing one
+    /// makes this slower and never wrong.
+    fn reconstruct(
+        &self,
+        py: Python<'_>,
+        ts: &Bound<'_, PyAny>,
+    ) -> PyResult<temporal::PyMaterializedState> {
+        let ts = to_canonical(Some(ts))?;
+        let inner = self.with_db(py, move |db| {
+            runtime().block_on(db.reconstruct(&ts)).map_err(to_py)
+        })?;
+        Ok(temporal::PyMaterializedState { inner })
+    }
+
+    /// Edges under current belief as of `ts`, as tuples.
+    ///
+    /// Topology only, and unlike `traverse_ids` it is not anchored at a start
+    /// node: this is the whole of `links_current` filtered to the instant. On a
+    /// large ledger that is a large answer, and there is no budget on it —
+    /// `load_subgraph` is the bounded neighbourhood read.
+    #[pyo3(signature = (ts = None))]
+    fn query_as_of_edges<'py>(
+        &self,
+        py: Python<'py>,
+        ts: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Vec<Bound<'py, pyo3::types::PyTuple>>> {
+        let ts = self.instant(py, ts)?;
+        let raw = self.with_db(py, move |db| {
+            runtime()
+                .block_on(macrame::temporal::query_as_of_edges(db.read_conn(), &ts))
+                .map_err(to_py)
+        })?;
+        raw.iter().map(|e| temporal::edge_to_py(py, e)).collect()
+    }
+
+    /// Move everything strictly before `cutoff` to cold storage (§5.6).
+    ///
+    /// **One session, one hold.** This is a high-priority command and its
+    /// duration is a function of how much is being moved; every other writer
+    /// waits. `archive_windowed` is the same work in bounded sessions.
+    ///
+    /// Refuses to archive past the point where a reconstruct would lose
+    /// information — `ArchiveViolationError` — rather than deleting history it
+    /// cannot rebuild.
+    fn archive(
+        &self,
+        py: Python<'_>,
+        cutoff: &Bound<'_, PyAny>,
+    ) -> PyResult<temporal::PyArchiveReport> {
+        let cutoff = to_canonical(Some(cutoff))?;
+        let inner = self.with_db(py, move |db| {
+            runtime().block_on(db.archive(&cutoff)).map_err(to_py)
+        })?;
+        Ok(temporal::PyArchiveReport { inner })
+    }
+
+    /// Archive up to `cutoff` in windows, returning one report per session
+    /// (D-080).
+    ///
+    /// Each window is its own transaction, so the actor returns to its loop
+    /// between them and other writers interleave. T1.1 measured the longest hold
+    /// falling 3,326 → 768 ms this way.
+    ///
+    /// `window_seconds` is **refused, not clamped**, when it does not advance or
+    /// when it implies more than 4,096 sessions: rounding a narrow window up
+    /// would archive over boundaries the caller did not choose, and the caller
+    /// cannot see it happen. That arrives as `ArchiveWindowError`.
+    ///
+    /// A `timedelta` is accepted as well as a number of seconds.
+    fn archive_windowed(
+        &self,
+        py: Python<'_>,
+        cutoff: &Bound<'_, PyAny>,
+        window: &Bound<'_, PyAny>,
+    ) -> PyResult<Vec<temporal::PyArchiveReport>> {
+        let cutoff = to_canonical(Some(cutoff))?;
+        let window = to_duration(window)?;
+        let reports = self.with_db(py, move |db| {
+            runtime()
+                .block_on(db.archive_windowed(&cutoff, window))
+                .map_err(to_py)
+        })?;
+        Ok(reports
+            .into_iter()
+            .map(|inner| temporal::PyArchiveReport { inner })
+            .collect())
+    }
+
+    /// Check snapshot composition against an independent fold from genesis
+    /// (D-092).
+    ///
+    /// Reports; does not repair. See `ChainCheck` for why, and for why its two
+    /// anchor fields must not be compared with each other.
+    ///
+    /// This folds the **whole log**, which is the one thing normal operation
+    /// never does — that is the point, and it is also the cost. It is a
+    /// diagnostic, not a health check to run per request.
+    fn verify_snapshot_chain(
+        &self,
+        py: Python<'_>,
+        ts: &Bound<'_, PyAny>,
+    ) -> PyResult<temporal::PyChainCheck> {
+        let ts = to_canonical(Some(ts))?;
+        let inner = self.with_db(py, move |db| {
+            runtime()
+                .block_on(db.verify_snapshot_chain(&ts))
+                .map_err(to_py)
+        })?;
+        Ok(temporal::PyChainCheck { inner })
+    }
+
+    // -- vector surface (P4.4) ------------------------------------------------
+
+    /// Create a model's embedding table and DiskANN index (§5.9, D-048).
+    ///
+    /// Idempotent at the same dimension; registering the same name at a
+    /// *different* one raises `DimMismatchError` rather than migrating, because
+    /// the stored vectors cannot be reinterpreted at another width.
+    fn register_model(&self, py: Python<'_>, model: &str, dim: usize) -> PyResult<()> {
+        let model = vector::model_name(model)?;
+        self.with_db(py, move |db| {
+            runtime()
+                .block_on(db.register_model(&model, dim))
+                .map_err(to_py)
+        })
+    }
+
+    /// Store embeddings, chunked (D-011).
+    ///
+    /// `rows` is a sequence of `(concept_id, embedding)`. Each embedding may be
+    /// a sequence of floats or **packed little-endian float32 `bytes`** —
+    /// `arr.astype("<f4").tobytes()` — which is the fast path, measured at
+    /// 60.8 µs against 94.9 µs for the same numpy array as a sequence.
+    ///
+    /// A vector whose length is not the model's declared dimension raises
+    /// `DimMismatchError`, naming both.
+    fn upsert_embeddings(
+        &self,
+        py: Python<'_>,
+        model: &str,
+        rows: &Bound<'_, PyAny>,
+    ) -> PyResult<usize> {
+        let model = vector::model_name(model)?;
+        let mut decoded: Vec<(String, Vec<f32>)> = Vec::new();
+        for item in rows.try_iter()? {
+            let item = item?;
+            let (id, embedding): (String, Bound<'_, PyAny>) = item.extract().map_err(|_| {
+                pyo3::exceptions::PyTypeError::new_err(
+                    "upsert_embeddings takes a sequence of (concept_id, embedding) pairs",
+                )
+            })?;
+            decoded.push((id, crate::types::coerce_embedding(&embedding)?));
+        }
+        self.with_db(py, move |db| {
+            runtime()
+                .block_on(db.upsert_embeddings(&model, decoded))
+                .map_err(to_py)
+        })
+    }
+
+    /// Nearest `top_k` concepts to `query` by cosine distance (§5.9).
+    ///
+    /// Goes through the DiskANN index rather than scanning: an
+    /// `ORDER BY vector_distance_cos(…)` over the table is linear in the corpus
+    /// however small `top_k` is. Results ascend — **smaller score is closer**.
+    #[pyo3(signature = (model, query, *, top_k = 10))]
+    fn search_vector(
+        &self,
+        py: Python<'_>,
+        model: &str,
+        query: &Bound<'_, PyAny>,
+        top_k: usize,
+    ) -> PyResult<Vec<vector::PyVectorHit>> {
+        let model = vector::model_name(model)?;
+        let query = crate::types::coerce_embedding(query)?;
+        let hits = self.with_db(py, move |db| {
+            runtime()
+                .block_on(macrame::vector::search_vector(
+                    db.read_conn(),
+                    &query,
+                    &model,
+                    top_k,
+                ))
+                .map_err(to_py)
+        })?;
+        Ok(hits.into_iter().map(Into::into).collect())
+    }
+
+    /// Full-text search over concept text, as `(concept_id, rank)` (§5.9).
+    ///
+    /// **`rank` is bm25, which FTS5 returns negative**, with magnitude growing
+    /// with relevance — so the list is ascending and best-first, and sorting it
+    /// descending puts the worst match on top. Retired concepts are excluded.
+    ///
+    /// `query` goes to FTS5 as a MATCH expression. Punctuation in an untrusted
+    /// string is an FTS5 syntax error rather than a literal, so it is escaped
+    /// here unless `raw` is set — which is the same choice `hybrid_search`
+    /// makes, for the same reason.
+    #[pyo3(signature = (query, *, top_k = 10, raw = false))]
+    fn keyword_search(
+        &self,
+        py: Python<'_>,
+        query: &str,
+        top_k: usize,
+        raw: bool,
+    ) -> PyResult<Vec<(String, f64)>> {
+        let expr = if raw {
+            query.to_string()
+        } else {
+            macrame::vector::escape_fts5_query(query)
+        };
+        self.with_db(py, move |db| {
+            runtime()
+                .block_on(macrame::vector::keyword_search(
+                    db.read_conn(),
+                    &expr,
+                    top_k,
+                ))
+                .map_err(to_py)
+        })
+    }
+
+    /// Vector and keyword arms, fused by reciprocal rank (§5.9).
+    ///
+    /// Results **descend** — larger fused score is better — which is the
+    /// opposite of `search_vector`. Each hit carries `vector_rank` and
+    /// `keyword_rank`, either of which may be `None`; a concept both arms found
+    /// is a different kind of hit from one only the keyword arm found, and the
+    /// fused score alone cannot say which.
+    ///
+    /// `depth` is how deep each arm goes before fusing, defaulting to
+    /// `max(5 * top_k, 50)`. An unregistered model raises rather than degrading
+    /// to keyword-only: a caller who named a model that does not exist asked a
+    /// question this cannot answer.
+    #[pyo3(signature = (model, query_text, query_vector, *, top_k = 10, depth = None, rrf_k = None, raw = false))]
+    #[allow(clippy::too_many_arguments)]
+    fn hybrid_search(
+        &self,
+        py: Python<'_>,
+        model: &str,
+        query_text: &str,
+        query_vector: &Bound<'_, PyAny>,
+        top_k: usize,
+        depth: Option<usize>,
+        rrf_k: Option<usize>,
+        raw: bool,
+    ) -> PyResult<Vec<vector::PyVectorHit>> {
+        let model = vector::model_name(model)?;
+        let query_vector = crate::types::coerce_embedding(query_vector)?;
+        let mut search = macrame::vector::HybridSearch::new(model, query_text, query_vector)
+            .top_k(top_k)
+            .raw_match(raw);
+        if let Some(d) = depth {
+            search = search.depth(d);
+        }
+        if let Some(k) = rrf_k {
+            search = search.rrf_k(k);
+        }
+        let hits = self.with_db(py, move |db| {
+            runtime()
+                .block_on(search.execute(db.read_conn()))
+                .map_err(to_py)
+        })?;
+        Ok(hits.into_iter().map(Into::into).collect())
+    }
+
+    /// Vector search restricted to a traversal's neighbourhood (§5.3, D-007).
+    ///
+    /// Returns `(hits, plan)`. The plan comes back rather than only being
+    /// logged, because D-007's requirement is empirical tuning and that needs
+    /// the estimate next to the outcome.
+    ///
+    /// The planner prices both strategies in bytes and takes the cheaper.
+    /// `strategy` forces one, bypassing it — for tests and diagnosis, not for
+    /// production code, which should not be second-guessing a measurement it
+    /// can read.
+    #[pyo3(signature = (
+        model, query, start_node, *, max_depth = 2, edge_types = None,
+        min_weight = 0.0, top_k = 10, byte_budget = None, probe_cap = None,
+        strategy = None, now = None
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn search_filtered(
+        &self,
+        py: Python<'_>,
+        model: &str,
+        query: &Bound<'_, PyAny>,
+        start_node: &str,
+        max_depth: usize,
+        edge_types: Option<Vec<String>>,
+        min_weight: f64,
+        top_k: usize,
+        byte_budget: Option<usize>,
+        probe_cap: Option<usize>,
+        strategy: Option<vector::PyFilterStrategy>,
+        now: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<(Vec<vector::PyVectorHit>, vector::PyCostEstimate)> {
+        let model = vector::model_name(model)?;
+        let query = crate::types::coerce_embedding(query)?;
+        let now = self.instant(py, now)?;
+        let traversal = graph::builder(start_node, max_depth, edge_types, min_weight, None, None);
+
+        let mut search =
+            macrame::graph::FilteredVectorSearch::new(model, query, traversal).top_k(top_k);
+        if let Some(b) = byte_budget {
+            search = search.byte_budget(b);
+        }
+        if let Some(c) = probe_cap {
+            search = search.probe_cap(c);
+        }
+        if let Some(s) = strategy {
+            search = search.strategy(s.into());
+        }
+
+        let (hits, estimate) = self.with_db(py, move |db| {
+            runtime()
+                .block_on(search.execute_explained(db.read_conn(), &now))
+                .map_err(to_py)
+        })?;
+        Ok((
+            hits.into_iter().map(Into::into).collect(),
+            vector::PyCostEstimate::new(estimate),
+        ))
+    }
+
+    // -- integrity (P4.5) -----------------------------------------------------
+
+    /// How many rows `links_current` disagrees with `links` about (§5.8).
+    ///
+    /// `0` in steady state. `links_current` is derivative under Doctrine VI, so
+    /// drift is a repairable inconsistency in a cache rather than damage to the
+    /// ledger — the assertions are still what they were.
+    ///
+    /// A read, not a command: this does not touch the write actor.
+    fn audit_current(&self, py: Python<'_>) -> PyResult<usize> {
+        self.with_db(py, |db| {
+            runtime()
+                .block_on(macrame::integrity::audit_current(db.read_conn()))
+                .map_err(to_py)
+        })
+    }
+
+    /// Reproject `links_current` from `links` in **one transaction**.
+    ///
+    /// The whole repair is a single hold, so every other writer waits for it —
+    /// §5.8's table budgets ~5 s at 1M edges. That is the cost of atomicity
+    /// here, and `rebuild_current_chunked` is the same repair without it.
+    fn rebuild_current(&self, py: Python<'_>) -> PyResult<observe::PyRebuildReport> {
+        let inner = self.with_db(py, |db| {
+            runtime().block_on(db.rebuild_current()).map_err(to_py)
+        })?;
+        Ok(observe::PyRebuildReport { inner })
+    }
+
+    /// Reproject `links_current` via a shadow table, in chunks (D-082).
+    ///
+    /// Builds a copy across many short transactions and swaps it in under one,
+    /// so `links_current` is never partially populated and no traversal can
+    /// observe a half-built graph. Longer in wall-clock, made of
+    /// `chunk_budget_ms()`-sized holds instead of one long one.
+    ///
+    /// An `archive` landing mid-rebuild raises `RebuildInterruptedError`, which
+    /// means the repair **did not run** — `links_current` is untouched, whatever
+    /// was true of it before is still true, and the action is to retry. That is
+    /// a different thing from `RebuildFailedError`, which means the repair ran
+    /// and did not repair.
+    fn rebuild_current_chunked(&self, py: Python<'_>) -> PyResult<observe::PyRebuildReport> {
+        let inner = self.with_db(py, |db| {
+            runtime()
+                .block_on(db.rebuild_current_chunked())
+                .map_err(to_py)
+        })?;
+        Ok(observe::PyRebuildReport { inner })
+    }
+
+    /// Rebuild the `concepts_fts` index from `concepts` (D-051).
+    fn rebuild_fts(&self, py: Python<'_>) -> PyResult<()> {
+        self.with_db(py, |db| runtime().block_on(db.rebuild_fts()).map_err(to_py))
+    }
+
+    // -- introspection (P4.6) -------------------------------------------------
+
+    /// What the write actor has held the write connection for (§5.10, D-079).
+    ///
+    /// The wheel is built with the `metrics` feature on (D-093), so this always
+    /// answers with real counters — unlike a default Rust build, where the type
+    /// is zero-sized and the numbers are zero.
+    ///
+    /// Start with `.violations()`: it is the question `chunk_budget_ms()` exists
+    /// to make askable, and an empty list is the good answer.
+    fn metrics(&self, py: Python<'_>) -> PyResult<observe::PyMetricsSnapshot> {
+        let inner = self.with_db(py, |db| Ok(db.metrics()))?;
+        Ok(observe::PyMetricsSnapshot { inner })
+    }
+
     // -- diagnostic reads (pulled forward from P4.6) --------------------------
 
     /// Run a read-only query on a connection belonging to this call.
@@ -483,7 +1057,8 @@ impl Drop for PyDatabase {
         Python::attach(|py| {
             let _ = PyErr::warn(
                 py,
-                py.get_type::<pyo3::exceptions::PyResourceWarning>().as_any(),
+                py.get_type::<pyo3::exceptions::PyResourceWarning>()
+                    .as_any(),
                 std::ffi::CString::new(format!(
                     "macrame.Database for {:?} was garbage-collected without close(): \
                      the final snapshot was not written, so the next reconstruct folds \
@@ -497,6 +1072,31 @@ impl Drop for PyDatabase {
             );
         });
     }
+}
+
+/// `timedelta` or a number of seconds → `Duration`.
+///
+/// Both are accepted because both are natural: a caller who has a window in
+/// hand has a `timedelta`, and a caller typing one at a REPL types `86400`.
+/// Negative and non-finite values are refused here rather than saturating to
+/// zero, which is what `Duration::from_secs_f64` would do — and a zero window
+/// reaches `ArchiveWindowError` with a message about session counts, which is
+/// a true statement about the wrong problem.
+fn to_duration(obj: &Bound<'_, PyAny>) -> PyResult<std::time::Duration> {
+    if let Ok(d) = obj.extract::<std::time::Duration>() {
+        return Ok(d);
+    }
+    let secs: f64 = obj.extract().map_err(|_| {
+        pyo3::exceptions::PyTypeError::new_err(
+            "expected a datetime.timedelta or a number of seconds",
+        )
+    })?;
+    if !(secs.is_finite() && secs > 0.0) {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "expected a positive, finite duration, got {secs} seconds"
+        )));
+    }
+    Ok(std::time::Duration::from_secs_f64(secs))
 }
 
 /// `PathBuf` → `pathlib.Path`.

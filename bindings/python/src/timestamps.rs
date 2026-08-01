@@ -203,6 +203,9 @@ pub(crate) fn _coerce_timestamp(value: Option<&Bound<'_, PyAny>>) -> PyResult<St
 
 /// `_render_timestamp(canonical)` — the outbound half, likewise.
 #[pyfunction]
-pub(crate) fn _render_timestamp<'py>(py: Python<'py>, canonical: &str) -> PyResult<Bound<'py, PyAny>> {
+pub(crate) fn _render_timestamp<'py>(
+    py: Python<'py>,
+    canonical: &str,
+) -> PyResult<Bound<'py, PyAny>> {
     from_canonical(py, canonical)
 }

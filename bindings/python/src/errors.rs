@@ -115,7 +115,12 @@ create_exception!(
 
 // -- direct children of MacrameError ---------------------------------------
 
-create_exception!(macrame, EngineError, MacrameError, "libSQL reported an error.");
+create_exception!(
+    macrame,
+    EngineError,
+    MacrameError,
+    "libSQL reported an error."
+);
 create_exception!(
     macrame,
     MigrationError,

@@ -8,15 +8,23 @@
 //! - [`database`] — the `Database` handle's lifecycle (P1)
 //! - [`timestamps`] — `str` / aware `datetime` in, `datetime` out (P3)
 //! - [`types`] — the value types callers construct (P3)
+//! - [`graph`] — traversals and the opaque `Subgraph` handle (P4.2, D-097)
+//! - [`temporal`] — reconstruct, archive, and the chain check (P4.3)
+//! - [`observe`] — rebuild reports and actor metrics (P4.5, P4.6)
+//! - [`vector`] — embeddings, search, and the filter planner (P4.4)
 //! - [`testing`] — underscore-prefixed hooks the Python suite drives
 
 mod database;
 mod errors;
+mod graph;
+mod observe;
 mod rows;
 mod runtime;
+mod temporal;
 mod testing;
 mod timestamps;
 mod types;
+mod vector;
 
 use pyo3::prelude::*;
 
@@ -77,8 +85,7 @@ fn engine_linked() -> bool {
 /// model under-predicts the second by 7×, which is the direction that hurts.
 #[pyfunction]
 fn estimate_bulk_hold(edges: Vec<types::PyEdgeAssertion>) -> std::time::Duration {
-    let edges: Vec<macrame::prelude::EdgeAssertion> =
-        edges.into_iter().map(|e| e.inner).collect();
+    let edges: Vec<macrame::prelude::EdgeAssertion> = edges.into_iter().map(|e| e.inner).collect();
     macrame::prelude::estimated_bulk_hold(&edges)
 }
 
@@ -98,6 +105,10 @@ fn _macrame(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     errors::register(m)?;
     types::register(m)?;
+    graph::register(m)?;
+    temporal::register(m)?;
+    observe::register(m)?;
+    vector::register(m)?;
 
     m.add_class::<database::PyDatabase>()?;
 

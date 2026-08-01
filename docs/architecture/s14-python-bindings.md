@@ -309,9 +309,11 @@ must key on the summary line being present, not on the exit code alone.
 <a id="148-testing"></a>
 ### 14.8 Testing topology
 
-**The Python suite tests the binding, not the ledger.** The ledger has 25 Rust test
-binaries and 300 tests; re-asserting bitemporal semantics through Python would be a second,
-weaker copy free to drift. What is genuinely new at this boundary, and therefore what is
+**The Python suite tests the binding, not the ledger.** The ledger has **26 Rust test
+binaries and 296 tests** by default, and 30 / 325 with `--all-features` — the four
+quarantined property binaries of [R15](s11-s12-milestones-and-risks.md#12-risks)
+make up the difference. Re-asserting bitemporal semantics through Python would be a
+second, weaker copy free to drift. What is genuinely new at this boundary, and therefore what is
 covered:
 
 | | |
@@ -321,6 +323,11 @@ covered:
 | Errors | every variant, its class, its base, its attributes — plus the six deliberately separated pairs |
 | Coercion | `datetime` ↔ canonical string both ways, the `None` sentinel, naive rejection, embeddings |
 | Write path | that values built in Python reach the actor intact, and that the ledger's typed errors arrive populated |
+| Read path | the `as_of` / `attribute_mode` pairing, the `OMIT` refusal, the `min_weight` default, and that a `Subgraph` answers without being copied |
+| Temporal | that a window is refused rather than clamped, and that `ChainCheck` surfaces `diverged()` rather than two comparable anchors |
+| Vector | that a model name is refused where it is named, that both embedding forms agree, and that each search's scores arrive sorted in *its own* direction |
+| Analytics | `astar`'s callback: a raising heuristic, a `NaN`, a non-number — none of which the callback signature can report |
+| Metrics | that the counters are **real** in the wheel, which is the whole of D-093 |
 
 `tests_py/probes/` holds diagnostics that are deliberately **not** tests — R15's reproducer
 crashes the interpreter when it succeeds, and a suite that dies is not a suite that
@@ -347,7 +354,12 @@ record and the corrections each phase made to it.
 | P2 | the exception hierarchy | ✅ |
 | P3 | timestamps, value types, embeddings | ✅ |
 | P4.1 | the write path | ✅ |
-| P4.2–P4.7 | read, temporal, vector, integrity, introspection, analytics | not started |
+| P4.2 | traversals, `load_subgraph`, the `Subgraph` handle | ✅ |
+| P4.3 | reconstruct, archive, the chain check | ✅ |
+| P4.4 | embeddings, vector/keyword/hybrid/filtered search | ✅ |
+| P4.5 | audit and the two rebuilds | ✅ |
+| P4.6 | `metrics()` and the handle's introspection | ✅ |
+| P4.7 | six algorithms on `Subgraph`, `astar` included | ✅ |
 | P5–P8 | wheels, CI, stubs, docs | not started |
 
 **Not yet settled**, and each changes what gets built:
@@ -356,11 +368,72 @@ record and the corrections each phase made to it.
   Rust's per-build-graph `[lib] name`, `site-packages` is flat, so a distribution also
   installing a top-level `macrame/` would contend. The PyPI package of that name is a dead
   2021 build tool and `pip` warns on file conflicts, so this is a known, non-silent risk.
-- `Subgraph` is to cross as an opaque handle rather than a dict
-  ([D-097](s13-decision-register.md#d-097)); decided, lands with P4.2.
-- `astar`'s heuristic — an arbitrary Python callable means calling *into* Python from
-  Rust with the GIL released, which inverts §14.2's arrangement and needs its own design
-  pass.
+- ~~`Subgraph` as an opaque handle~~ — delivered in P4.2
+  ([D-101](s13-decision-register.md#d-101)).
+- ~~`astar`'s heuristic~~ — resolved in P4.7 by not releasing the GIL for that one method
+  ([D-104](s13-decision-register.md#d-104)). The proposed fallback, a fixed heuristic set
+  instead of a callable, was not needed.
+- **A rough edge in the crate, found through the binding**: `reconstruct` at an instant
+  older than anything on hand sends the fold to cold storage, so on a ledger that has
+  never been archived it raises `ReplayCorrupt` naming an archive file the caller never
+  made. Asking about a date before your data existed is not strange, and the message
+  describes an implementation detail. Left as-is rather than smoothed over here —
+  translating it into an empty state would mean claiming a *real* missing archive is also
+  nothing to worry about — and recorded for the crate.
+
+---
+
+<a id="1410-read-path"></a>
+### 14.10 The read path, and the `Subgraph` handle
+
+A traversal is a **call**, not an object. [§14.4](s14-python-bindings.md#144-timestamps-and-value-types) settled that these bindings ship no chained setters, and `TraversalBuilder` is the type that argument applies to most directly: `db.traverse(start, max_depth=3, edge_types=["CITES"])` assembles it inside the method. The cost is that a Rust caller can reuse a builder across ten instants and a Python caller passes the arguments ten times; the alternative is exporting a mutable builder across the GIL boundary, which is the shape [§14.2](s14-python-bindings.md#142-the-asyncsync-boundary) rejected for `Database` for the same reason.
+
+Three methods, and the split between them is the whole design:
+
+| | |
+|---|---|
+| `traverse_ids(start, …)` | node ids. Cannot raise `AttributeModeUnstated` — topology at an instant is unambiguous |
+| `traverse(start, …)` | ids **and** hydrated text, under a stated `attribute_mode` |
+| `load_subgraph(start, max_hops, byte_budget, …)` | the neighbourhood as a `Subgraph`, bounded |
+
+**`byte_budget` has no default because the crate has none.** How much memory a process may spend materialising one graph is not a question a binding can answer, and `SubgraphTooLarge` is the refusal it produces.
+
+**`Subgraph` is opaque** ([D-101](s13-decision-register.md#d-101)). The accessors are forwarded and `to_dict()` is the caller's explicit purchase of a copy — because converting on return would double the peak memory of the one operation that already has a budget, eagerly, whether or not the caller reads more than `degree()`. It is a *value*, not a cursor: it outlives the handle that loaded it, and the algorithms of [§14.12](s14-python-bindings.md#1412-the-algorithms-and-astars-inversion) run on it after `close()`.
+
+Two boundary decisions that are not merely translation:
+
+- **`traverse(attribute_mode=OMIT)` is refused** ([D-102](s13-decision-register.md#d-102)), naming `traverse_ids`. It is the single place the binding narrows the library, and the reason is that `execute` under `Omit` returns an empty list its own rustdoc calls indistinguishable from a traversal that reached nothing.
+- **An unstated `min_weight` is `-inf`** ([D-103](s13-decision-register.md#d-103)), not the builder's `0.0`, so a negative weight reaches `NegativeEdgeWeight` rather than being silently dropped. A *stated* floor filters, because stating one is asking to exclude.
+
+The pairing rule survives intact and is visible from Python in one test: at an instant before anything was recorded, `traverse_ids(as_of=t)` finds the topology, `AttributeMode.CURRENT` hydrates it, and `AttributeMode.AT_TIME` returns nothing — because on that date nobody had written it down. Two calls differing by one keyword, disagreeing completely, which is the concrete case [D-085](s13-decision-register.md#d-085) refuses to default.
+
+---
+
+<a id="1411-temporal-vector-counters"></a>
+### 14.11 Temporal, vector, and the counters
+
+**Shape follows meaning, not consistency for its own sake** ([D-105](s13-decision-register.md#d-105)). Edges stay `(source, target, edge_type, valid_from, valid_to)` tuples, with the two timestamps rendered as aware `datetime`s and the open sentinel as `None` — [§14.4](s14-python-bindings.md#144-timestamps-and-value-types)'s rule is about the boundary, not about which container a value arrives in. `ArchiveReport`, `ChainCheck`, `CostEstimate`, `RebuildReport`, `MetricsSnapshot` and `VectorHit` are classes, because each carries either more fields than a reader can index safely or a *relationship between fields* that a position cannot state.
+
+`ChainCheck` is the clearest case. `composed_anchor` and `folded_anchor` **may legitimately differ and must never be compared** — the composed answer anchors at the snapshot it started from plus its delta, the fold at the newest row it saw — so an equality check reports divergence that is not there, which is worse than no check because it is a check. `diverged()` is the method, the anchors are diagnostic, and a tuple would put them at index 1 and 2 next to each other.
+
+`archive_windowed` takes a `timedelta` or a number of seconds, and **refuses rather than clamps**: zero, negative and non-finite windows are rejected at the boundary. Passed through, a zero window reaches `ArchiveWindow` with a message about session counts — a true statement about the wrong problem.
+
+On the vector side, a model name is the one string in this crate that cannot be bound as a parameter, because `ModelName::table()` builds an SQL *identifier*. So every method takes a `str` and constructs the `ModelName` at the boundary: an invalid name is `InvalidModelNameError` from the call that used it, not a syntax error from underneath. Embeddings accept either coercion form from [§14.5](s14-python-bindings.md#145-embeddings-and-what-abi3-costs); `search_filtered` returns `(hits, plan)` because [D-007](s13-decision-register.md#d-007)'s requirement is empirical tuning, and that needs the estimate next to the outcome rather than in a log.
+
+**The counters are on in the wheel** ([D-093](s13-decision-register.md#d-093)), and that is a different decision for a different audience rather than a contradiction of [§5.10](s5-modules.md#510-metricsrs--what-the-actor-holds-the-lock-for)'s default. A Rust caller who wants them adds a feature flag to a `Cargo.toml` they own. A Python caller cannot rebuild the extension, so shipping the feature off would mean shipping `metrics()` as a method that exists and always answers zero — or not shipping it, leaving `chunk_budget_ms()` a number in the docs with no way to check it *in situ*, which is what T1.4 existed to fix. `MetricsSnapshot.violations()` comes first because it is the question; the per-kind histogram is the evidence.
+
+---
+
+<a id="1412-algorithms"></a>
+### 14.12 The algorithms, and `astar`'s inversion
+
+`dijkstra`, `scc`, `k_core`, `modularity` and `louvain` are methods on `Subgraph` rather than free functions, because `g.louvain()` is where a Python caller looks and there is no second kind of graph they could apply to. **All of them release the GIL**: pure CPU over Rust-owned data with no Python object in reach, and `louvain` on a budget-sized graph is long enough that holding it would stall every other thread for no reason.
+
+`astar` is the exception, and it was the plan's one flagged unknown ([D-104](s13-decision-register.md#d-104)). An arbitrary Python heuristic means calling **into** Python from Rust, inverting [§14.2](s14-python-bindings.md#142-the-asyncsync-boundary)'s arrangement. The resolution is that it **does not release the GIL at all** — re-attaching per expansion would pay two GIL transitions per node to hold it for the arithmetic in between, which is strictly worse than never releasing it. The cost is isolated to the one method that earns it, and `heuristic=None` takes the detaching path.
+
+The plan's fallback — a fixed heuristic set instead of a callable — was not needed. What was needed is two guards, because `Fn(&str, &str) -> f64` cannot report failure: a raising heuristic is captured and re-raised after the search, and a `NaN` is refused by name rather than reaching a priority queue whose comparison would then panic inside a callback across an FFI boundary. `0.0` stands in meanwhile, which is admissible on every graph, so the search stays well-defined rather than running on a poisoned ordering.
+
+`modularity` is exposed separately from `louvain` on purpose, and the reason is the same one it exists for in Rust: a detector returning one node per community satisfies "modularity did not decrease from the singleton partition" *by being* that partition, and measuring Q is what tells the two apart.
 
 <!--nav-->
 ← [previous](s13-decision-register.md) · [index](README.md) · [next](appendices.md) →

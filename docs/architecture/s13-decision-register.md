@@ -1,3 +1,50 @@
+<a id="d-101"></a>D-101 — `Subgraph` crosses as an **opaque handle**, and `to_dict()` is the caller's explicit purchase of a copy (0.7.0). [D-047](s13-decision-register.md#d-047), [D-087](s13-decision-register.md#d-087), [D-097](s13-decision-register.md#d-097), [§14.10](s14-python-bindings.md#1410-the-read-path-and-the-subgraph-handle).
+
+D-097 proposed this; P4.2 delivered it, and the argument survived contact. A `Subgraph` is three `BTreeMap`s and it is the one thing the crate materialises under an explicit `byte_budget`, precisely because it is the largest. Rendering it into Python dicts on return **doubles the peak memory of the single operation that already has a budget** — and does it eagerly, whether or not the caller reads more than `degree()`.
+
+So the accessors are forwarded (`out_edges`, `in_edges`, `degree`, `weighted_degree`, `total_weight`, `edge_count`, `estimated_bytes`, `is_closed`, `node`), plus `__len__`, `__contains__` and iteration over node ids. `to_dict()` exists and is spelled out at the call site.
+
+Two things this settled that D-097 did not anticipate. `is_closed` collides by name with `Database.is_closed` and means something unrelated — the closure invariant, not a shut handle — and the crate's name was kept rather than renamed, because a binding that renames the thing being bound costs every reader who moves between the two APIs. And `__iter__` materialises the id list rather than borrowing the map, because a lazy iterator would hold a borrow across arbitrary Python code; keys are a small fraction of the payload the budget bounded.
+
+<a id="d-102"></a>D-102 — `traverse(attribute_mode=OMIT)` is **refused**, and it is the one place the binding narrows what the library accepts (0.7.0). [D-085](s13-decision-register.md#d-085), [D-100](s13-decision-register.md#d-100), [§14.10](s14-python-bindings.md#1410-the-read-path-and-the-subgraph-handle).
+
+[D-100](s13-decision-register.md#d-100) closes with the rule that a binding refusing more than the library it binds is its own kind of surprise. This is the exception, and the distinction is what the library does with the input.
+
+`normalized()` not checking the calendar is a boundary the crate **chose**; tightening it would surprise someone who read the crate's docs and got a stricter answer. `AttributeMode::Omit` reaching `TraversalBuilder::execute` is a **return type that cannot express the answer** — the crate's own rustdoc says so, and says use `execute_ids` — so it answers `Ok(vec![])`, indistinguishable from a traversal that reached nothing. Forwarding it would re-export a known-ambiguous empty list to callers with strictly less context than a Rust caller has. `traverse_ids()` exists and returns exactly what the mode is for, so the refusal names it.
+
+The related pairing is *not* narrowed: `as_of` without a stated mode raises `AttributeModeUnstatedError` because the ledger raises it, and a live traversal with no `as_of` still defaults, because D-085 made the requirement about the pairing rather than about the mode.
+
+<a id="d-103"></a>D-103 — an unstated `min_weight` on `load_subgraph` is `-inf`, not `0.0` (0.7.0). [D-039](s13-decision-register.md#d-039), [D-073](s13-decision-register.md#d-073), [§14.10](s14-python-bindings.md#1410-the-read-path-and-the-subgraph-handle).
+
+Python has one `load_subgraph`, where Rust has two entry points whose defaults differ — and the difference is load-bearing rather than incidental. `Database::load_subgraph` passes `NEG_INFINITY`; `load_subgraph_with` given a default `TraversalBuilder` passes `0.0`, which **silently drops negative-weight edges**, exactly the input `NegativeEdgeWeight` exists to report given that Dijkstra and A\* are unsound over them.
+
+So the keyword is `min_weight=None` by default and means *unstated*: the floor is `-inf`, and a negative weight reaches the guard. A stated floor **filters**, because a caller who names one has asked to exclude what falls below it, and excluding it is not an error. `traverse` keeps the builder's `0.0`, because there a weight filter is only a filter.
+
+**A measured consequence worth recording**: as of 0.6.0 that guard is unreachable from a ledger this binding wrote. [D-083](s13-decision-register.md#d-083) put `CHECK (weight >= 0.0 …)` on `links`, so the row is refused at the write. It stays reachable for a file migrated from before v7 — `links_current` carries no weight check of its own — which is why the mapping was kept rather than simplified on the strength of a constraint that only holds for new writes.
+
+<a id="d-104"></a>D-104 — `astar` holds the GIL for its whole run, and a misbehaving heuristic is captured and re-raised (0.7.0). [D-095](s13-decision-register.md#d-095), [§14.12](s14-python-bindings.md#1412-the-algorithms-and-astars-inversion).
+
+The bindings plan flagged this as the one method needing its own design pass, because an arbitrary Python callable means calling **into** Python from Rust while [§14.2](s14-python-bindings.md#142-the-asyncsync-boundary)'s arrangement has the GIL released. The fallback it proposed — ship `astar` with a fixed heuristic set instead of a callable — was not needed.
+
+**It does not release the GIL, and that is the resolution rather than a compromise.** Releasing it around the search and re-attaching per expansion pays two GIL transitions per node to hold it for the arithmetic in between: strictly worse than never releasing it. Every other algorithm *does* detach — they are pure CPU over Rust-owned data with no Python object in reach — so the cost is isolated to the one method that earns it, and it is documented at the method: `heuristic=None` and `dijkstra` both release.
+
+Two hazards the callback signature creates, because `Fn(&str, &str) -> f64` cannot report failure:
+
+- **A raising heuristic** would otherwise be swallowed. The error is captured in a `RefCell` and re-raised after the search returns; `0.0` is fed to the search meanwhile, which is admissible on every graph, so the search stays well-defined and terminates rather than running on a poisoned ordering.
+- **A `NaN`** makes the priority queue's comparison incoherent and panics — *inside a callback, across an FFI boundary*, which is a far worse outcome than an exception. Non-finite returns are refused by name, and the message says which node.
+
+`heuristic=None` is the default and means a zero heuristic: the one heuristic admissible on every graph, which makes the default A\* exactly Dijkstra-with-a-path rather than a guess about the caller's metric space.
+
+<a id="d-105"></a>D-105 — search results are a `VectorHit` class, while edges stay tuples (0.7.0). [D-007](s13-decision-register.md#d-007), [§14.11](s14-python-bindings.md#1411-temporal-vector-and-the-counters).
+
+Not a style preference, and the two choices are consistent under one rule: a tuple is fine when every slot means the same kind of thing across every producer.
+
+An edge tuple's five slots are identifiers and instants in every context, so `e[3]` is a `valid_from` wherever it came from. A search result's `score` is a **cosine distance** from `search_vector` (smaller is closer, ascending), a **fused RRF score** from `hybrid_search` (larger is better, descending), and *bm25* from `keyword_search` (negative, ascending best-first). Three incompatible orderings behind one position, and `hit[1]` invites sorting the wrong way. A named field with a docstring does not prevent that; it gives the caller somewhere to look when the top result is the worst match.
+
+`keyword_search` keeps `(id, rank)` tuples, because it is the single arm whose ordering is fixed and stated at its own call.
+
+`CandidateCount` is **not** exposed as a type. Its whole content is a number and whether that number is exact, which is two attributes on `CostEstimate` — `candidates` and `candidates_capped`. A class would make a caller unwrap it to reach the number they wanted, which is how the cap ends up ignored, and the cap is the part that matters: SQLite has no histograms, so the count is measured by running the traversal under a probe, and a probe that hit its cap measured only that the set is bigger than the cap.
+
 <!--nav-->
 ← [previous](s11-s12-milestones-and-risks.md) · [index](README.md) · [next](s14-python-bindings.md) →
 <!--/nav-->

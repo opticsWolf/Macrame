@@ -138,7 +138,10 @@ fn public_database_methods() -> BTreeSet<String> {
 fn every_public_database_method_appears_in_appendix_a() {
     // Deliberately undocumented, each for a stated reason.
     const EXEMPT: &[(&str, &str)] = &[
-        ("raw", "#[doc(hidden)] — D-068/D-091: reachable, not advertised"),
+        (
+            "raw",
+            "#[doc(hidden)] — D-068/D-091: reachable, not advertised",
+        ),
         (
             "new",
             "constructors of other types in the same file, not handle methods",

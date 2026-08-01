@@ -198,7 +198,8 @@ fn every_document_in_the_directory_is_checked() {
     let listed: BTreeSet<String> = DOCS.iter().map(|(n, _)| n.to_string()).collect();
 
     assert_eq!(
-        on_disk, listed,
+        on_disk,
+        listed,
         "DOCS is out of step with docs/architecture. Unchecked on disk: {:?}; \
          listed but absent: {:?}",
         on_disk.difference(&listed).collect::<Vec<_>>(),
@@ -267,7 +268,8 @@ fn the_navigation_footers_form_a_single_chain() {
         .collect();
     let reached: BTreeSet<String> = walked.into_iter().collect();
     assert_eq!(
-        reached, expected,
+        reached,
+        expected,
         "the nav chain does not visit every document. Unreachable: {:?}",
         expected.difference(&reached).collect::<Vec<_>>()
     );

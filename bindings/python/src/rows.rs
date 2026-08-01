@@ -71,7 +71,10 @@ pub(crate) async fn collect(
     Ok(out)
 }
 
-pub(crate) fn rows_to_py<'py>(py: Python<'py>, rows: RawRows) -> PyResult<Vec<Bound<'py, PyTuple>>> {
+pub(crate) fn rows_to_py<'py>(
+    py: Python<'py>,
+    rows: RawRows,
+) -> PyResult<Vec<Bound<'py, PyTuple>>> {
     rows.into_iter()
         .map(|cells| {
             let values = cells

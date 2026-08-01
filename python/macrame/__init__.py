@@ -45,9 +45,15 @@ The intermediate classes — `IntegrityError`, `ValidationError`, `VectorError`,
 `TemporalError`, `WriterError`, `BudgetError` — exist to be caught as groups and
 are not raised directly.
 
-P1 shipped the handle lifecycle and P2 the error hierarchy. The write, read,
-temporal and vector surfaces arrive in P4.x — see
+The `Database` surface is complete through P4.7: writes, traversals and
+`load_subgraph`, the temporal surface, vector and hybrid search, integrity
+repair, and actor metrics. Wheels, CI and type stubs are P5-P8 — see
 ``docs/Macrame Python Bindings Plan v0.7.0.md``.
+
+A `Subgraph` is an opaque handle, not a dict: it answers `degree()`,
+`out_edges()`, `dijkstra()` and the rest without copying itself into Python,
+because it is the one thing the ledger materialises under a byte budget.
+Call `.to_dict()` when you want the copy.
 """
 
 from __future__ import annotations
@@ -55,43 +61,59 @@ from __future__ import annotations
 import os as _os
 
 from ._macrame import (
+    BUCKET_BOUNDS_MICROS,
     BULK_ATOMIC_WARN_HOLD,
+    CHAIN_CHECK_SAMPLE_LIMIT,
     OPEN,
+    RRF_K,
     Annotation,
+    ArchiveReport,
     ArchiveViolationError,
     ArchiveWindowError,
     AttributeMode,
     AttributeModeUnstatedError,
     BudgetError,
+    ChainCheck,
     ConceptUpsert,
     CurrentDriftError,
     Database,
     DiagnosticConnError,
     DimMismatchError,
     EdgeAssertion,
+    EdgeRef,
     EngineError,
+    FilterStrategy,
     IntegrityError,
     Interval,
     InvalidEdgeTypeError,
     InvalidIdError,
     InvalidModelNameError,
     InvalidTimestampError,
+    KindMetrics,
     MacrameClosedError,
     MacrameError,
+    MaterializedState,
+    MetricsSnapshot,
     MigrationError,
     ModelNotRegisteredError,
     NegativeEdgeWeightError,
+    NodeAttributes,
+    NodeData,
     NotFoundError,
     OverlappingIntervalError,
     PayloadVersionError,
     RebuildFailedError,
     RebuildInterruptedError,
+    RebuildReport,
     RecordedAtRegressionError,
     ReplayCorruptError,
     SingleOpenViolationError,
     SnapshotIncompatibleError,
+    Subgraph,
     SubgraphTooLargeError,
     TemporalError,
+    VectorHit,
+    CostEstimate,
     ValidationError,
     VectorError,
     WriterDroppedResponderError,
@@ -114,6 +136,26 @@ __all__ = [
     "Interval",
     "AttributeMode",
     "OPEN",
+    # read path (P4.2)
+    "Subgraph",
+    "NodeAttributes",
+    "NodeData",
+    "EdgeRef",
+    # temporal (P4.3)
+    "MaterializedState",
+    "ArchiveReport",
+    "ChainCheck",
+    "CHAIN_CHECK_SAMPLE_LIMIT",
+    # vector (P4.4)
+    "VectorHit",
+    "FilterStrategy",
+    "CostEstimate",
+    "RRF_K",
+    # integrity and metrics (P4.5, P4.6)
+    "RebuildReport",
+    "MetricsSnapshot",
+    "KindMetrics",
+    "BUCKET_BOUNDS_MICROS",
     # write-path budgeting
     "estimate_bulk_hold",
     "BULK_ATOMIC_WARN_HOLD",

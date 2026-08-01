@@ -714,6 +714,83 @@ GIL is released. That inverts the P1 arrangement and is the one method that need
 design pass — it is last in the list for that reason, and the fallback is to ship `astar`
 with a built-in heuristic set rather than an arbitrary callable.
 
+### P4.2 – P4.7 — ✅ **DELIVERED 2026-08-01**
+
+> Shipped in one pass: `bindings/python/src/graph.rs` (traversals, the `Subgraph` handle,
+> the six algorithms), `temporal.rs`, `vector.rs`, `observe.rs`, and 24 methods on
+> `Database`. **320 Python tests pass** (206 → 320), across four new files —
+> `test_read_path.py`, `test_temporal.py`, `test_vector.py`, `test_analytics.py`,
+> `test_observe.py`. Rust suite **26 binaries / 296 passed / 0 failed** by default and
+> **30 / 325 with `--all-features`**; clippy clean under `-D warnings`; tarball unchanged
+> at 109 files.
+>
+> **`astar` did not need the fallback.** §6 proposed shipping a built-in heuristic set if
+> the callable proved unworkable. It is workable, and the design pass produced a shorter
+> answer than expected: **do not release the GIL for that one method** ([D-104](../architecture/s13-decision-register.md#d-104)).
+> Releasing it and re-attaching per expansion pays two GIL transitions per node to hold it
+> for the arithmetic in between — strictly worse than never releasing it. Every other
+> algorithm detaches, so the cost is isolated to the method that earns it.
+>
+> What the callback signature *did* force is two guards, because `Fn(&str, &str) -> f64`
+> cannot report failure. A raising heuristic is captured and re-raised after the search
+> rather than swallowed. A `NaN` is refused by name — it makes the priority queue's
+> comparison incoherent, and the resulting panic would happen inside a callback across an
+> FFI boundary, which is a much worse outcome than an exception.
+>
+> **Three places the plan's method list was thinner than the surface.**
+>
+> 1. `load_subgraph` and `load_subgraph_with` are one Python method, not two, because the
+>    only difference between them is a default — and that default is load-bearing
+>    ([D-103](../architecture/s13-decision-register.md#d-103)). `min_weight=None` means
+>    *unstated* and floors at `-inf`, so a negative weight reaches `NegativeEdgeWeightError`;
+>    a stated floor filters. Two methods differing by one default is how a caller picks the
+>    wrong one.
+> 2. `traverse` and `traverse_ids` are both exposed, and `traverse(attribute_mode=OMIT)` is
+>    **refused** ([D-102](../architecture/s13-decision-register.md#d-102)). §5's "Subgraph
+>    stays opaque" note did not anticipate this; it is the one place the binding narrows
+>    the library, and the justification is that `execute` under `Omit` returns an empty list
+>    its own rustdoc calls indistinguishable from a traversal that reached nothing.
+> 3. `search_filtered` returns `(hits, plan)` rather than hits alone. D-007's requirement is
+>    empirical tuning, which needs the estimate next to the outcome; a method that dropped
+>    the plan would make `execute_explained` unreachable from Python.
+>
+> **A measurement that changed a mapping into a note.** `load_subgraph`'s `-inf` default
+> exists so a negative weight reaches the guard — and as of 0.6.0 that guard is
+> **unreachable from a ledger this binding wrote**, because T2.1's
+> `CHECK (weight >= 0.0 …)` refuses the row at the write. It stays reachable for a file
+> migrated from before v7, and `links_current` carries no weight check of its own, so the
+> mapping was kept rather than simplified on the strength of a constraint that only holds
+> for new writes. `test_read_path.py` asserts the write-side refusal and says why there is
+> no positive test for the guard.
+>
+> **A rough edge in the crate, found through the binding.** `reconstruct` at an instant
+> older than anything on hand sends the fold to cold storage, so on a ledger that has never
+> been archived it raises `ReplayCorruptError` naming an archive file the caller never
+> made. Asking about a date before your data existed is ordinary use, and the message
+> describes an implementation detail. Not papered over — translating it into an empty state
+> would mean claiming a *real* missing archive is also nothing to worry about — and
+> asserted as-is with the reasoning at the test.
+>
+> **Two things I got wrong, both mine and both caught by the tests I wrote to check them.**
+>
+> 1. `ArchiveReport.__repr__` rendered `horizon=Some(1)` and `ChainCheck.__repr__` rendered
+>    `diverged=false`. Rust `Debug` leaking through a `{:?}` into a repr that a Python
+>    programmer reads. Both now render `None` / `False`, and there is a test asserting
+>    `"Some("` is absent.
+> 2. I reported a run of the Rust suite as showing R15's signature — a smaller pass count
+>    with no failures. It was not: chaining `cargo test` into `grep` in a pipeline was
+>    dropping output lines. Written to a file, three consecutive runs agreed exactly at
+>    26 / 296 / 0. The counts in this document are the file-based ones. The lesson is the
+>    one R15's own note makes — a *smaller green number* is the symptom, so the measuring
+>    instrument has to be trustworthy before the reading means anything.
+>
+> **What the read-path tests found about bitemporality, stated because it looks like a
+> bug and is not.** At an instant before anything was recorded, `traverse_ids(as_of=t)`
+> finds the topology and `AttributeMode.AT_TIME` returns nothing — the edges *claim* to
+> have been true then (valid time), but nobody had written them down yet (transaction
+> time). Two calls differing by one keyword, disagreeing completely. That is the concrete
+> case D-085 refuses to default, and it now has a test named for it.
+
 ---
 
 ## 7. What is deliberately **not** exposed
@@ -864,12 +941,12 @@ The crates.io job can follow later (it was already noted as optional after 0.6.0
 | **P2** Errors ✅ | P1 | `errors.rs` (35 classes), `testing.rs` sample table | ✅ 129 Python tests; exhaustive-match tripwire verified by injection |
 | **P3** Types ✅ | P2 | `timestamps.rs`, `types.rs`, packed-bytes embeddings | ✅ 174 Python tests; probe P3-a resolved (refuted the datetime sentinel) |
 | **P4.1** Write ✅ | P3 | 7 write methods, `estimate_bulk_hold`, `rows.rs`, diagnostic reads | ✅ 206 Python tests; D-041 pinned; P2 mapping verified against the ledger |
-| **P4.2** Read | P3 | traversal, `Subgraph` pyclass | smoke; `AttributeModeUnstated` raises |
-| **P4.3** Temporal | P4.1 | reconstruct/archive/chain | smoke; `ChainCheck` surfaces divergence |
-| **P4.4** Vector | P3 | register/upsert/search/hybrid | dim-mismatch raises typed |
-| **P4.5** Integrity | P4.1 | rebuild/audit | smoke |
-| **P4.6** Introspection | P1 | `metrics()` etc. | counters non-zero after a write |
-| **P4.7** Analytics | P4.2 | 6 algorithms; `astar` last | smoke per algorithm |
+| **P4.2** Read ✅ | P3 | traversal, `Subgraph` pyclass | ✅ 31 tests; `AttributeModeUnstated` raises; `OMIT` refused (D-102) |
+| **P4.3** Temporal ✅ | P4.1 | reconstruct/archive/chain | ✅ 20 tests; window refused not clamped; `diverged()` is the method |
+| **P4.4** Vector ✅ | P3 | register/upsert/search/hybrid/filtered | ✅ 27 tests; dim-mismatch raises typed; each search sorts its own way |
+| **P4.5** Integrity ✅ | P4.1 | rebuild/audit/rebuild_fts | ✅ both rebuild paths agree |
+| **P4.6** Introspection ✅ | P1 | `metrics()` etc. | ✅ counters non-zero — the wheel really carries the feature (D-093) |
+| **P4.7** Analytics ✅ | P4.2 | 6 algorithms; `astar` last | ✅ 21 tests; `astar` resolved without the fallback (D-104) |
 | **P5** Packaging | P4.1 | wheel matrix | probe P5-a: one full matrix timed |
 | **P6** Tests | P4.x | `tests_py/` | probe P6-a: R15 exposure characterised |
 | **P7** CI | P5, P6 | `python.yml`, Trusted Publishing | green on all targets |
