@@ -300,9 +300,32 @@ Two things follow, and both are now measured rather than transferred:
 - Application guidance is unchanged from [D-092](s13-decision-register.md#d-092): a
   bounded set of handles opened once, not one per request.
 
-The reporting hazard carries across intact. The fault kills the process, so a crashed run
-comes back with a **smaller** pass count and no failures. Anything gating on either suite
-must key on the summary line being present, not on the exit code alone.
+**The reporting hazard does *not* carry across intact, and P6 measured the difference.**
+This section said it did, on the strength of the mechanism being the same fault. The
+mechanism is; the reporting is not, because the two suites have different process
+topologies.
+
+`cargo test` runs **one process per test binary**. A crash removes that binary's tests
+from the aggregate while every other binary still prints its summary, so the run reads as
+a *smaller pass count with no failures* — green, and wrong. That is the hazard as
+originally stated, and it is real for the Rust side.
+
+pytest runs **one process**. When it dies, everything dies. Measured with a deliberate
+uncatchable fault mid-suite: **exit code 3, and no summary line at all**. So for pytest an
+exit-code check would in fact catch a mid-run crash.
+
+What it would not catch is the inverse, which is specific to this extension. `Drop for
+PyDatabase` enters the tokio runtime, so a fault during interpreter teardown lands
+*after* pytest has printed `325 passed` — a **green summary with a non-zero exit**. There,
+reading only the exit code is right by accident and reading only the summary is wrong.
+
+`tests_py/run_suite.py` is the gate that follows from this rather than from the assumption:
+it requires the summary line to be present, the failure count to be zero, the collected
+count to match, and the exit code to agree with all three — and it distinguishes the four
+outcomes by name, retrying only the crash. Verified by injection in both directions: an
+injected `faulthandler._sigsegv()` retries three times and reports `CRASH`; an injected
+failing assertion reports `FAILED` on the first attempt and does not retry, because
+re-running until green is how a flaky assertion becomes permanent.
 
 ---
 
@@ -328,10 +351,17 @@ covered:
 | Vector | that a model name is refused where it is named, that both embedding forms agree, and that each search's scores arrive sorted in *its own* direction |
 | Analytics | `astar`'s callback: a raising heuristic, a `NaN`, a non-number — none of which the callback signature can report |
 | Metrics | that the counters are **real** in the wheel, which is the whole of D-093 |
+| End to end | the *seams*: a `Subgraph` outliving an archive, search agreeing with the traversal it filtered by, counters covering a whole session, a reopened ledger answering the same questions |
 
 `tests_py/probes/` holds diagnostics that are deliberately **not** tests — R15's reproducer
 crashes the interpreter when it succeeds, and a suite that dies is not a suite that
 reports. This mirrors `examples/*_diag.rs` on the Rust side.
+
+**Run `python tests_py/run_suite.py`, not bare pytest, wherever the answer gates something**
+([D-107](s13-decision-register.md#d-107)). It is not a wrapper for tidiness: the four ways
+this suite can fail are distinguishable and only one of them is worth retrying, and neither
+the summary line nor the exit code is sufficient alone — see [§14.7](s14-python-bindings.md#147-r15-reaches-through-the-binding)
+for which is wrong in which direction.
 
 Two hooks ship *in the released wheel* rather than behind a Cargo feature: the error
 sample table and the blocking probe used by the GIL test. A `testing` feature would mean
@@ -361,7 +391,8 @@ record and the corrections each phase made to it.
 | P4.6 | `metrics()` and the handle's introspection | ✅ |
 | P4.7 | six algorithms on `Subgraph`, `astar` included | ✅ |
 | P5 | wheels, sdist, the naming resolution | ✅ |
-| P6–P8 | CI, stubs, docs | not started |
+| P6 | the suite, its gate, and the end-to-end seams | ✅ |
+| P7–P8 | CI, stubs, docs | not started |
 
 **Not yet settled**, and each changes what gets built:
 

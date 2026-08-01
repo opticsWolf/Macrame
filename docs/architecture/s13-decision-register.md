@@ -59,6 +59,22 @@ An edge tuple's five slots are identifiers and instants in every context, so `e[
 
 **The naming risk is recorded rather than designed around.** Distribution `macrame-db`, import `macrame`, mirroring the crate — and unlike Rust's per-build-graph `[lib] name`, `site-packages` is flat, so a second distribution installing a top-level `macrame/` would contend for the directory. The incumbent is a dead 2021 build tool and `pip` warns on file conflicts, so the risk is known and non-silent. `macrame_db` is the fallback if it ever materialises, and the README now says all of this next to the crate-name note.
 
+<a id="d-107"></a>D-107 — the Python suite is gated by `run_suite.py`, not by pytest's exit code, and the R15 reporting hazard is **not** the same on both sides (0.7.0). [R15](s11-s12-milestones-and-risks.md#12-risks), [D-092](s13-decision-register.md#d-092), [§14.7](s14-python-bindings.md#147-r15-reaches-through-the-binding).
+
+[§14.7](s14-python-bindings.md#147-r15-reaches-through-the-binding), `pyproject.toml` and `tests_py/conftest.py` all stated that the Rust reporting hazard "carries across unchanged". **P6 measured it and it does not.** The fault is the same; the reporting is not, because the two suites have different process topologies, and the guidance that followed from the assumption was wrong in both directions.
+
+`cargo test` runs **one process per test binary**. A crash removes that binary's tests from the aggregate while every other binary still prints its summary, so the run reads as a *smaller pass count with no failures* — green, and wrong. That is the hazard as originally written and it is correct for Rust.
+
+pytest runs **one process**. Measured with a deliberate `faulthandler._sigsegv()` mid-suite: **exit code 3, and no summary line at all**. So the original advice — "key on the summary line being present, not on the exit code alone" — describes a check that would work, for a reason that does not apply: on this side the exit code alone *would* have caught it.
+
+What the exit code would not catch is the inverse, and that one is specific to this extension. `Drop for PyDatabase` enters the tokio runtime ([§14.2](s14-python-bindings.md#142-the-asyncsync-boundary)), so a fault during interpreter teardown lands **after** pytest prints its green summary: a passing suite with a non-zero exit. There, reading only the summary is wrong and reading only the exit code is right by accident.
+
+`tests_py/run_suite.py` therefore checks the summary, the failure count, the collected count and the exit code **against each other**, and names four distinguishable outcomes — `CRASH`, `FAILED`, `INCOMPLETE`, `TEARDOWN`. Only `CRASH` is retried, three times, matching `ci.yml`'s Rust retry and for the same stated reason: R15 has always passed on re-run, so a genuine failure still goes red, and re-running anything else until it is green is how a flaky assertion becomes permanent. A `TEARDOWN` result is deliberately red rather than retried — the tests passed and the process still died, which is a defect in the shutdown path rather than in an assertion.
+
+**Verified by injection in both directions**, which is the only way a gate is worth anything: an injected segfault retries three times and reports `CRASH`; an injected failing assertion reports `FAILED` on the first attempt and does not retry.
+
+Probe P6-a is closed by P1's measurement rather than by new work: `tests_py/probes/r15_concurrent_open.py` faulted **2 in 12 runs** at 48 concurrent opens, the same rate as the Rust control arm, so the boundary is transparent to R15 and the single-process constraint is measured rather than inherited.
+
 <!--nav-->
 ← [previous](s11-s12-milestones-and-risks.md) · [index](README.md) · [next](s14-python-bindings.md) →
 <!--/nav-->

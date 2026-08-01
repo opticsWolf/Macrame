@@ -10,6 +10,17 @@ hypothesis, and the reporting hazard.
 arm. The GIL does not protect us, and the reason is the point of P1: ``block_on``
 releases it, so every thread is genuinely inside a concurrent open, which is what
 the fault counts. Do not add ``pytest-xdist`` here.
+
+**How a crash reports here is not how it reports on the Rust side.** ``cargo
+test`` runs a process per binary, so a crash leaves a smaller pass count and no
+failures — green, and wrong. pytest runs one process, and P6 measured what that
+looks like: exit 3 and no summary line at all. The inverse is possible too and is
+specific to this extension — ``Drop`` enters the tokio runtime, so a fault during
+interpreter teardown lands *after* a green summary is printed.
+
+Run ``python tests_py/run_suite.py`` rather than bare pytest wherever the answer
+gates something: it keys on the summary, the counts and the exit code together,
+and retries only the crash.
 """
 
 from __future__ import annotations

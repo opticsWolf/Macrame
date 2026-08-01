@@ -61,8 +61,13 @@ testpaths = ["tests_py"]
 # the pytest-side counterpart of `RUST_TEST_THREADS = "1"`, which does not
 # reach here.
 #
-# The reporting hazard carries across unchanged and is the opposite of what you
-# expect: the fault kills the process, so a crashed run comes back with a
-# SMALLER pass count and no failures. Anything gating on this suite must key on
-# the summary line being present, not on the exit code alone.
+# The reporting hazard does NOT carry across unchanged, which is what P6
+# measured and what `tests_py/run_suite.py` is built around. `cargo test` runs a
+# process per binary, so a crash yields a smaller pass count with no failures --
+# green and wrong. pytest runs one process: a mid-run crash gives exit 3 and NO
+# summary line, while a crash during interpreter teardown (Drop enters the tokio
+# runtime) gives a green summary with a non-zero exit. Neither signal alone is
+# sufficient for both.
+#
+# Gate on `python tests_py/run_suite.py`, not on bare pytest.
 addopts = "-p no:randomly --strict-markers"

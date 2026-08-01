@@ -955,6 +955,83 @@ different (one global runtime, GIL-serialised entry) and it is possible the boun
 *reduces* exposure. Worth 20 minutes with the `r15_soak` shape before writing the
 constraint into the docs as fact.
 
+### P6 — ✅ **DELIVERED 2026-08-01**
+
+> Shipped: `tests_py/run_suite.py` (the gate), `tests_py/test_end_to_end.py` (8 tests),
+> corrections to three documents, and [D-107](../architecture/s13-decision-register.md#d-107).
+> **333 Python tests pass** (325 → 333). Rust suite and tarball untouched.
+>
+> Most of this phase had already landed with P1–P5, which is the intended shape — items 1
+> through 4 were delivered by the phases that created the need for them. Two things were
+> genuinely missing, and one of them was a documented claim that turned out to be false.
+>
+> **The reporting hazard does not carry across, and this section said it did.** §9 states
+> the pytest hazard is the Rust one unchanged — a *smaller pass count with no failures* —
+> and that any gate "must key on the summary line being present, not on the exit code
+> alone". `pyproject.toml` and `conftest.py` repeat it. **Measured, with a deliberate
+> `faulthandler._sigsegv()` mid-suite: exit code 3, and no summary line at all.**
+>
+> The mechanism is shared; the reporting is not, because the topologies differ. `cargo
+> test` runs a process per binary, so a crash subtracts one binary's tests and the rest
+> still print — green, and wrong. pytest runs one process: when it dies, everything dies.
+> So on this side the exit code alone *would* have caught a mid-run crash, and the advice
+> as written describes a check that works for a reason that does not apply.
+>
+> What the exit code would not catch is the inverse, which is specific to this extension:
+> `Drop for PyDatabase` enters the tokio runtime, so a fault during interpreter teardown
+> lands **after** a green summary is printed — a passing suite with a non-zero exit. There,
+> reading only the summary is wrong and reading only the exit code is right by accident.
+>
+> `run_suite.py` therefore checks summary, failure count, collected count and exit code
+> *against each other*, naming four outcomes — `CRASH`, `FAILED`, `INCOMPLETE`,
+> `TEARDOWN` — and retries only `CRASH`, three times, matching `ci.yml`'s Rust retry.
+> `TEARDOWN` is deliberately red rather than retried: the tests passed and the process
+> still died, which is a defect in the shutdown path, not in an assertion.
+>
+> **Verified by injection, both directions.** An injected segfault retries three times and
+> reports `CRASH`; an injected failing assertion reports `FAILED` on the first attempt and
+> does not retry. A gate nobody has seen fail is a gate nobody knows works.
+>
+> **The end-to-end tests are about seams, not coverage.** Per-phase files each build the
+> fixture their own phase needs, so nothing was asking whether a `Subgraph` loaded *before*
+> an archive still answers correctly after it (it does — it is a value, not a view), whether
+> `search_filtered`'s traversal half reaches the same nodes `traverse_ids` does, whether one
+> handle's counters span writes, a model registration, embeddings, an FTS rebuild and two
+> repairs, or whether a reopened ledger answers the same questions. Eight tests, smoke only:
+> the ledger's semantics have 325 Rust tests and a Python re-assertion of bitemporality
+> would be a second, weaker copy free to drift.
+>
+> **Probe P6-a needs no new work.** P1 already answered it — `r15_concurrent_open.py`
+> faulted **2 in 12 runs** at 48 concurrent opens, matching the Rust control arm — so the
+> boundary is transparent to R15 and the single-process constraint is measured rather than
+> assumed. §14.7 already carried that; what it also carried, and no longer does, is the
+> hazard claim above.
+>
+> **R15 fired hard during verification, and it is worth the space.** The final Rust run
+> crashed three times consecutively in `doctrine_property_tests`, and I read three-in-a-row
+> as ruling R15 out, since R15 is intermittent and has always passed on re-run. **That
+> inference was wrong.** Measured directly: **9 crashes in 15 runs** of that binary alone,
+> on a machine that had been building wheels all session. `.cargo/config.toml` already
+> records 3/4 for this binary against ~3/25 at 0.5.4, so 9/15 sits between them rather than
+> contradicting either; the config now carries the larger sample. No Rust source has changed
+> since P4 — P4–P6 touched only the binding crate, `tests_py` and docs — so the variable is
+> load, not code.
+>
+> Two things follow. `--all-features` conflates what `ci.yml` deliberately separates: the
+> main suite (`--features metrics`) is **27 binaries / 305 passed / 0 failed, exit 0, first
+> attempt**, and the quarantined property binaries are their own step precisely because no
+> retry budget makes a 60% fault rate a gate. And with `--no-fail-fast` the property step
+> returned **308 passed, 0 failed** with eight tests silently absent — a textbook instance
+> of the Rust-side hazard, arriving the same afternoon as the correction that says the
+> Python side does not share it.
+>
+> **One thing I got wrong on the way.** The first crash simulation used
+> `ctypes.string_at(0)`, which CPython on Windows converts into an `OSError` — so pytest
+> caught it, printed a normal summary, and the "measurement" would have concluded the
+> opposite of the truth. R15 faults inside libSQL where no such guard applies.
+> `faulthandler._sigsegv()` is the faithful stand-in, and the difference between the two is
+> the whole result.
+
 ---
 
 ## 10. P7 — CI
@@ -1016,7 +1093,7 @@ The crates.io job can follow later (it was already noted as optional after 0.6.0
 | **P4.6** Introspection ✅ | P1 | `metrics()` etc. | ✅ counters non-zero — the wheel really carries the feature (D-093) |
 | **P4.7** Analytics ✅ | P4.2 | 6 algorithms; `astar` last | ✅ 21 tests; `astar` resolved without the fallback (D-104) |
 | **P5** Packaging ✅ | P4.1 | wheel matrix, sdist, naming | ✅ probe P5-a: native timed at 54–62 s / 4.3 MiB; cross-targets await one CI run |
-| **P6** Tests | P4.x | `tests_py/` | probe P6-a: R15 exposure characterised |
+| **P6** Tests ✅ | P4.x | `tests_py/`, `run_suite.py`, end-to-end seams | ✅ 333 tests; probe P6-a closed by P1 (2/12); the hazard claim corrected (D-107) |
 | **P7** CI | P5, P6 | `python.yml`, Trusted Publishing | green on all targets |
 | **P8** Stubs/docs | P4.x | `.pyi`, `py.typed`, docstrings | stub-coverage rule test green |
 

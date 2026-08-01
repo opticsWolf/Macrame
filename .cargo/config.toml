@@ -85,6 +85,20 @@
 # proptest replays every previously found failure from .proptest-regressions
 # before a single new case is generated.
 #
+# Re-measured at 0.7.0 on a larger sample: doctrine_property_tests alone,
+# **9 crashes in 15 runs**, on a machine that had been building wheels all
+# session. That sits between the two figures above rather than contradicting
+# either, and it is the clearest statement of why these are quarantined: at 60%
+# no retry budget makes them a gate. The Rust source was unchanged across the
+# whole of that measurement -- P4-P6 touched only the binding crate, tests_py
+# and docs -- so the variable is load, not code.
+#
+# It also produced a textbook demonstration of the reporting hazard. With
+# --no-fail-fast the run came back **308 passed, 0 failed** and exit 101: eight
+# tests silently absent, and nothing in the pass/fail line saying so. See
+# `tests_py/run_suite.py` for the Python-side gate built around exactly this,
+# and D-107 for why the two sides need different checks.
+#
 # ---------------------------------------------------------------------------
 # Production exposure
 # ---------------------------------------------------------------------------
