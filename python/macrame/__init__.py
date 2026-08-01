@@ -45,10 +45,12 @@ The intermediate classes — `IntegrityError`, `ValidationError`, `VectorError`,
 `TemporalError`, `WriterError`, `BudgetError` — exist to be caught as groups and
 are not raised directly.
 
-The `Database` surface is complete through P4.7: writes, traversals and
-`load_subgraph`, the temporal surface, vector and hybrid search, integrity
-repair, and actor metrics. Wheels, CI and type stubs are P5-P8 — see
-``docs/Macrame Python Bindings Plan v0.7.0.md``.
+The `Database` surface is complete: writes, traversals and `load_subgraph`, the
+temporal surface, vector and hybrid search, integrity repair, and actor metrics.
+Type stubs ship alongside it and `py.typed` is set, so a checker sees the whole
+signature — including which arguments take an aware ``datetime`` and which
+return one. The reasoning behind each decision is in
+``docs/Macrame Python Bindings Plan v0.7.0.md`` and §14 of the architecture set.
 
 A `Subgraph` is an opaque handle, not a dict: it answers `degree()`,
 `out_edges()`, `dijkstra()` and the rest without copying itself into Python,

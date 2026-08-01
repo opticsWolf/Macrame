@@ -57,7 +57,7 @@ This is the original single-file architecture document, split into one file per 
 | [Modules](s5-modules.md) | §5 | The Write Actor, traversal, replay and snapshots, archive, integrity, vectors |
 | [Flows to dependencies](s6-s10-flows-to-dependencies.md) | §6 Data flows · §7 Errors · §8 Testing · §9 Performance · §10 Dependencies | Five end-to-end paths, `DbError`, what each test layer can prove, the budgets, the tree |
 | [Milestones and risks](s11-s12-milestones-and-risks.md) | §11 · §12 | M1–M5 with exit gates; R1–R15 with mitigations |
-| [Decision register](s13-decision-register.md) | §13 | D-001…D-108: the authoritative record of intent |
+| [Decision register](s13-decision-register.md) | §13 | D-001…D-109: the authoritative record of intent |
 | [Python bindings](s14-python-bindings.md) | §14 | The wheel: build topology, the async→sync boundary, errors and timestamps across the FFI, and what it deliberately does not expose |
 | [Appendices](appendices.md) | A · B · C | **Normative (A).** The API surface and what it was once promised to be; the glossary; the deferred list |
 

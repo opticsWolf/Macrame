@@ -1133,6 +1133,75 @@ The crates.io job can follow later (it was already noted as optional after 0.6.0
   `as_of` does and does not fix), `write_bulk_atomic` (the hold ceiling), and
   `diagnostic_conn` (boundary vs guardrail).
 
+### P8 — ✅ **DELIVERED 2026-08-01**
+
+> Shipped: `python/macrame/_macrame.pyi` (the full surface, hand-written),
+> `tests_py/test_stubs.py` (7 tests), a `mypy --strict` step in `python.yml`, three
+> docstring corrections, and [D-109](../architecture/s13-decision-register.md#d-109).
+> **344 Python tests pass** (337 → 344). `mypy --strict python/macrame`: clean.
+>
+> **`pyo3-stub-gen` was rejected for the reason the bullet above gives, and the reason is
+> stronger than it looks.** A generator writes `Optional[Any]` for a timestamp. The boundary
+> accepts `str | datetime`, refuses *naive* datetimes, and answers with an aware UTC
+> `datetime`; an open interval is `None` and never a sentinel; an embedding is
+> `bytes | Sequence[float]`; `astar`'s heuristic is `Callable[[str, str], float]`, which pyo3
+> sees only as a `PyObject`. Every one of those is lost by generation, and together they are
+> the whole reason to ship a stub rather than let a checker infer `Any`.
+>
+> **The rule test is the deliverable, not the stub.** A `.pyi` is documentation, so it fails
+> the way documentation fails: it is not executed, and nothing notices when it stops being
+> true. `test_stubs.py` parses it with `ast` and compares it against the live module in both
+> directions, class by class and member by member — 62 exported names, `Database` alone with
+> 40 members across five phases' worth of Rust modules.
+>
+> It compares the public surface plus the dunders that change how an object is *used*
+> (`__len__`, `__iter__`, `__contains__`, `__enter__`, `__exit__`). The first version compared
+> everything and failed immediately on `__ge__`, `__int__` and `__new__` — pyo3's codegen, not
+> this library's surface. A test that pinned those would be a transcript of pyo3 and would go
+> red on an upgrade that changed nothing here.
+>
+> **Exception attributes needed a different mechanism, and it is the more interesting half.**
+> The mapping layer sets them with `setattr` on the *raised instance*, so
+> `hasattr(NotFoundError, "id")` is correctly False and the class carries no trace of what a
+> raised error will hold. They are compared against `errors.rs` — the file that changes when a
+> `DbError` variant gains a field. That alone would be two documents agreeing with each other,
+> so a third test pushes every variant through `_raise_db_error` and asserts the raised object
+> really carries what the stub promises. **Stub → source → runtime**, closed.
+>
+> **Verified by injection, five ways**: a module-level name dropped, a class member dropped, a
+> member invented, an exception attribute forgotten, an exception attribute invented. Each was
+> caught, and by the test that should catch it — the fourth and fifth firing *two* tests, which
+> is the source-agreement check and the runtime check reporting the same defect independently.
+>
+> **What none of that can see is a wrong type.** `-> int` where the runtime answers a
+> `datetime` satisfies every name comparison, and it is precisely the error a stub exists to
+> prevent. Only a checker reads annotations, so `mypy --strict python/macrame` is a CI step,
+> measured clean, with a sixth test asserting the step is still there. Both halves are needed
+> and neither subsumes the other.
+>
+> **`py.typed` was already in place from P0** and is now asserted against the *installed*
+> package rather than the repository, along with the stub. maturin copies the `python-source`
+> directory by default rather than by declaration, and without the marker a checker ignores the
+> stub entirely: every call type-checks as `Any`, which is the failure that looks most like
+> success. Confirmed against a built wheel — `macrame/__init__.py`, `_macrame.pyd`,
+> `_macrame.pyi`, `py.typed`.
+>
+> **Three docstrings were pointing at work that had already shipped.** `diagnostic_query` ended
+> with *"The typed read surface is P4.2. This is not it"*, `chunk_budget_ms` said `metrics()`
+> *"arrives in P4.6"*, and the package docstring described wheels, CI and stubs as P5–P8. All
+> three were true when written and all three are user-visible — the first two through
+> `help()`, the third on `import macrame`. Rewritten to say what the surface *is*. The four
+> docstrings this bullet names were checked and needed no change: they already carry the
+> arguments, not the signatures.
+>
+> **R15 was observed through the gate for the first time, unprovoked.** One run of
+> `run_suite.py` reported *passed on attempt 2/3*. Since the gate returns immediately for
+> `FAILED`, `INCOMPLETE` and `TEARDOWN` and retries only `CRASH`, reaching a second attempt
+> means the first died without a summary — R15's shape, in the Python suite, not injected.
+> Three consecutive re-runs afterwards passed on attempt 1. That is the retry earning itself:
+> under a bare `pytest` invocation that run would have been a red build with no failing test
+> named.
+
 ---
 
 ## 12. Sequencing
@@ -1153,7 +1222,7 @@ The crates.io job can follow later (it was already noted as optional after 0.6.0
 | **P5** Packaging ✅ | P4.1 | wheel matrix, sdist, naming | ✅ probe P5-a: native timed at 54–62 s / 4.3 MiB; cross-targets await one CI run |
 | **P6** Tests ✅ | P4.x | `tests_py/`, `run_suite.py`, end-to-end seams | ✅ 333 tests; probe P6-a closed by P1 (2/12); the hazard claim corrected (D-107) |
 | **P7** CI ✅ | P5, P6 | `python.yml` (lint · 4-row matrix · abi3), the upload gate in `wheels.yml` | ✅ 18 packaging tests, 4 tripwires injected; the binding crate is compiled by CI for the first time (D-108) |
-| **P8** Stubs/docs | P4.x | `.pyi`, `py.typed`, docstrings | stub-coverage rule test green |
+| **P8** Stubs/docs ✅ | P4.x | `_macrame.pyi` hand-written, `py.typed`, `mypy --strict` in CI | ✅ 344 tests; the stub compared to the extension both ways and to `errors.rs`, verified by 5 injections (D-109) |
 
 **P0–P3 is the real risk.** Once the runtime boundary, the error tree and the coercion
 layer are right, P4.x is mechanical breadth — repetitive, but each phase is small and

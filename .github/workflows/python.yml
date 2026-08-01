@@ -66,6 +66,23 @@ jobs:
         env:
           RUSTFLAGS: -D warnings
 
+      # `tests_py/test_stubs.py` compares the stub's *names* against the
+      # extension in both directions. It cannot see a wrong **type** — a stub
+      # that says `-> int` where the runtime answers a `datetime` passes every
+      # one of those checks. A type checker is what reads the annotations, so
+      # one runs here, over the stub and the package that re-exports it.
+      #
+      # No Rust toolchain needed and no extension built: `--strict` on a `.pyi`
+      # is a pure text analysis. Measured clean at 0.7.0, so this is a gate that
+      # passes rather than a backlog.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: mypy (the stub, and the package that re-exports it)
+        run: |
+          python -m pip install --upgrade pip mypy
+          python -m mypy --strict python/macrame
+
   test:
     name: suite (${{ matrix.os }}, py${{ matrix.python }})
     runs-on: ${{ matrix.os }}

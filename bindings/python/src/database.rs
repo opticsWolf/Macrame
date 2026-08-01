@@ -970,7 +970,9 @@ impl PyDatabase {
     /// as the canonical string, not a `datetime`, because this is the diagnostic
     /// path and its job is to show what is actually there.
     ///
-    /// The typed read surface is P4.2. This is not it.
+    /// For ordinary reads use the typed surface — `traverse`, `load_subgraph`,
+    /// `reconstruct`, the search methods — which coerces and validates. This one
+    /// is for looking at the file when a typed answer is the thing in doubt.
     #[pyo3(signature = (sql, params = None))]
     fn diagnostic_query<'py>(
         &self,

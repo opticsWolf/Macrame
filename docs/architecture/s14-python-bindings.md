@@ -393,7 +393,7 @@ record and the corrections each phase made to it.
 | P5 | wheels, sdist, the naming resolution | ✅ |
 | P6 | the suite, its gate, and the end-to-end seams | ✅ |
 | P7 | CI: the binding crate compiled, the suite gated, abi3 tested | ✅ |
-| P8 | stubs and docs | not started |
+| P8 | the stub, `py.typed`, and the docstrings that carry reasons | ✅ |
 
 **Not yet settled**, and each changes what gets built:
 
@@ -500,7 +500,7 @@ The build is cheap. **Only the native target is measured**, and the plan's named
 
 **Uploads carry no token.** Trusted Publishing mints a short-lived OIDC credential for this repository and this workflow; there is no long-lived secret in the repo and none for anyone to handle. It is configured once on PyPI by the project owner. A packaging test asserts `wheels.yml` names no secret, because pasting a token in is the obvious fix for a failed upload and it reviews as a small change.
 
-**The public surface is now pinned in both directions.** P4 added twelve classes and four constants across five Rust modules, each registered in `lib.rs` and each needing a *second*, hand-written entry in `python/macrame/__init__.py`. A missed one is invisible rather than broken: importable only as `macrame._macrame.Thing`, absent from `dir()`, from `import *`, and from the stubs P8 will generate. `test_packaging.py` compares the extension's exports against `__all__` both ways, and checks every public class claims `module = "macrame"` rather than the private extension. Verified by injection — dropping `Subgraph` from `__all__` fails the test naming it.
+**The public surface is now pinned in both directions.** P4 added twelve classes and four constants across five Rust modules, each registered in `lib.rs` and each needing a *second*, hand-written entry in `python/macrame/__init__.py`. A missed one is invisible rather than broken: importable only as `macrame._macrame.Thing`, absent from `dir()`, from `import *`, and from the stub ([§14.15](s14-python-bindings.md#1415-the-stub-and-what-keeps-it-true)). `test_packaging.py` compares the extension's exports against `__all__` both ways, and checks every public class claims `module = "macrame"` rather than the private extension. Verified by injection — dropping `Subgraph` from `__all__` fails the test naming it.
 
 ### 14.14 CI
 
@@ -530,6 +530,27 @@ Installation is `pip install .`, not `maturin develop`: it goes through the PEP 
 The `abi3` job is the only one that tests the claim funding the whole wheel matrix. Every other job builds and runs on one interpreter; this one builds on 3.10, asserts the artifact is tagged for the *ABI* rather than for a version, and runs the entire suite through 3.13 against that same file. Drop `abi3-py310` and every other job stays green while the matrix quietly becomes wrong by a factor of five.
 
 Four packaging tests pin the arrangement, each guarding a failure with no local symptom, and all four verified by injection: that some job names `-p macrame-py`, that the gate is `run_suite.py`, that `publish` still needs the suite, and that the declared Python floor is a version some job runs.
+
+### 14.15 The stub, and what keeps it true
+
+`python/macrame/_macrame.pyi` is hand-written ([D-109](s13-decision-register.md#d-109)). `pyo3-stub-gen` would add a build step and generate `Optional[Any]` where the boundary actually says `str | datetime | None` — and that difference is the whole reason to ship a stub. Four conventions carry most of the value, none of which a generator could infer:
+
+| | |
+|---|---|
+| a timestamp **in** | `str \| datetime`, aware only — naive is refused at runtime, which no annotation can say, so the stub says it in prose |
+| a timestamp **out** | always an aware UTC `datetime` |
+| an open interval | `None`, never a sentinel datetime — `OPEN` is the stored string, and `datetime` cannot carry it safely |
+| `astar`'s heuristic | `Callable[[str, str], float]`, which pyo3 sees only as a `PyObject` |
+
+**A stub is not executed, so nothing notices when it stops being true.** The defect is narrow: a method added in Rust and never stubbed works perfectly, and surfaces as a type error in somebody else's editor months later. `tests_py/test_stubs.py` therefore parses the `.pyi` and compares it against the live module in both directions, class by class and member by member.
+
+It deliberately compares the *public* surface plus the dunders that change how an object is used — `__len__`, `__iter__`, `__contains__`, `__enter__`, `__exit__`. The six rich-comparison slots, `__int__` on the enums and `__new__` are pyo3's codegen rather than this library's surface; requiring them would make the test a transcript of pyo3 and would go red on an upgrade that changed nothing here.
+
+Exception attributes need a different check, because they do not exist on the class: the mapping layer sets them on the raised instance, so `hasattr(NotFoundError, "id")` is correctly False. They are compared against `errors.rs`, and then a third test pushes every `DbError` variant through `_raise_db_error` and asserts the raised object carries what the stub promised — **stub → source → runtime**, rather than two documents agreeing with each other.
+
+None of that can see a wrong *type*. `mypy --strict` over `python/macrame` runs in CI for exactly that half ([§14.14](s14-python-bindings.md#1414-ci)); a fifth test asserts the step is still there.
+
+**Four docstrings had to survive the crossing in substance, not just in signature**, and they are the ones where the Python surface would otherwise mislead: `close()` (why it is not optional — the final snapshot *and* the write actor's exit status, which no other method can return), `AttributeMode` (that `None` is *unstated*, not `CURRENT`), `write_bulk_atomic` (the hold ceiling, with T1.3's measured numbers, and the pointer to `bulk_import` for callers who want the latency bound instead), and `diagnostic_query` (a boundary — `SQLITE_OPEN_READ_ONLY` on its own connection — not a guardrail, returning values as stored). They live in the Rust source, where they are the same text a `cargo doc` reader sees, and the load-bearing ones are repeated in the stub because editors read stubs first.
 
 <!--nav-->
 ← [previous](s13-decision-register.md) · [index](README.md) · [next](appendices.md) →

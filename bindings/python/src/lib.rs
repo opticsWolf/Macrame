@@ -91,9 +91,10 @@ fn estimate_bulk_hold(edges: Vec<types::PyEdgeAssertion>) -> std::time::Duration
 
 /// The chunk budget the write actor holds itself to, in milliseconds.
 ///
-/// The crate's one cross-cutting number. The observability that makes it
-/// meaningful — `Database.metrics()` — arrives in P4.6, on the counters this
-/// wheel is built with (D-093).
+/// The crate's one cross-cutting number. What makes it meaningful rather than
+/// an aspiration is `Database.metrics()`, whose counters are real in this wheel
+/// because it is built with `--features metrics` unconditionally (D-093):
+/// `metrics().violations()` is the list of kinds that exceeded this budget.
 #[pyfunction]
 fn chunk_budget_ms() -> u64 {
     macrame::CHUNK_BUDGET.as_millis() as u64
