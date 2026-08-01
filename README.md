@@ -31,15 +31,6 @@
 > ```python
 > import macrame
 > ```
->
-> One caveat the Rust side does not have. A crate's `[lib] name` is namespaced
-> per build graph, so `macrame-db` providing `macrame` collides with nothing.
-> `site-packages` is flat. The PyPI package named `macrame` is an unrelated,
-> effectively abandoned build tool (0.0.1, 2021) — but if it also installs a
-> top-level `macrame/`, then installing both leaves two distributions contending
-> for one directory, and which wins depends on install order. `pip` warns on file
-> conflicts, so this is a known and non-silent risk rather than something
-> designed around. Importing as `macrame_db` is the fallback if it ever matters.
 
 Macrame is a domain-specific embedded database layer for a knowledge-ledger application: a system in which concepts are linked by typed, weighted relationships, both concepts and relationships change over time, and the history of those changes is itself a first-class asset.
 
@@ -472,6 +463,12 @@ Independent of all four: the **R15 upstream report** against libSQL 0.9.30, outs
 - [Python bindings](docs/architecture/s14-python-bindings.md) — §14: the async→sync boundary, the error tree, what abi3 costs, and why `Subgraph` stays opaque
 - [Python bindings plan](docs/Macrame%20Python%20Bindings%20Plan%20v0.7.0.md) — P0 … P8, each with its delivery note and the corrections that phase made to the plan
 - [Decision register](docs/architecture/s13-decision-register.md) — D-001 … D-109, each with its rationale and the disqualifying flaw of the alternative
+
+## Naming
+
+Distribution `macrame-db`, import `macrame` — on both crates.io and PyPI. The Rust side has no caveat: a crate's `[lib] name` is namespaced per build graph, so `macrame-db` providing `macrame` collides with nothing. `site-packages` is flat.
+
+The PyPI package `macrame` is an unrelated, effectively abandoned build tool (0.0.1, 2021). If it installs a top-level `macrame/`, then installing both leaves two distributions contending for one directory — `pip` warns on file conflicts, so this is a known and non-silent risk. Importing as `macrame_db` is the fallback if it ever matters.
 
 ## License
 
