@@ -1,8 +1,11 @@
 # Macrame
 
 [![CI](https://github.com/opticsWolf/Macrame/actions/workflows/ci.yml/badge.svg)](https://github.com/opticsWolf/Macrame/actions/workflows/ci.yml)
+[![Python](https://github.com/opticsWolf/Macrame/actions/workflows/python.yml/badge.svg)](https://github.com/opticsWolf/Macrame/actions/workflows/python.yml)
 [![crates.io](https://img.shields.io/crates/v/macrame-db.svg)](https://crates.io/crates/macrame-db)
 [![docs.rs](https://img.shields.io/docsrs/macrame-db)](https://docs.rs/macrame-db)
+[![PyPI](https://img.shields.io/pypi/v/macrame-db.svg)](https://pypi.org/project/macrame-db/)
+[![Python versions](https://img.shields.io/pypi/pyversions/macrame-db.svg)](https://pypi.org/project/macrame-db/)
 [![MSRV](https://img.shields.io/crates/msrv/macrame-db.svg)](#minimum-supported-rust-version)
 [![License](https://img.shields.io/crates/l/macrame-db.svg)](#license)
 
@@ -13,7 +16,7 @@
 >
 > ```toml
 > [dependencies]
-> macrame-db = "0.6"
+> macrame-db = "0.7"
 > ```
 > ```rust
 > use macrame::prelude::*;
@@ -163,6 +166,114 @@ src/
     └── clock.rs            # Clock trait; SystemClock; FakeClock
 ```
 
+## Python Bindings
+
+The crate is the product; the binding is a second front door onto the same
+ledger. Everything below runs against the same engine, the same schema and the
+same Write Actor — no reimplementation, no second source of truth.
+
+```bash
+pip install macrame-db
+```
+
+```python
+import macrame
+
+T0 = "2026-01-01T00:00:00.000000Z"
+
+with macrame.Database.open("kb.db") as db:
+    db.write_concepts([
+        macrame.ConceptUpsert("bitemporal", "Bitemporal Modelling", valid_from=T0),
+        macrame.ConceptUpsert("valid-time", "Valid Time", valid_from=T0),
+    ])
+    # Both endpoints must exist: `links` carries a foreign key onto `concepts`.
+    db.assert_edge(
+        macrame.EdgeAssertion("bitemporal", "valid-time", "CITES", valid_from=T0)
+    )
+
+    graph = db.load_subgraph("bitemporal", 3, 1 << 20)
+    print(graph.dijkstra("bitemporal"))
+```
+
+**Use the context manager.** `close()` is the only path that writes the final
+snapshot *and* the only one that can report the write actor's exit status. A
+handle that is merely garbage-collected loses both, at a time Python chooses.
+
+### What crosses the boundary
+
+| | |
+|---|---|
+| Writes | `assert_edge`, `retire_edge`, `upsert_concept`, `write_concepts`, `bulk_import`, `write_bulk_atomic`, annotations |
+| Reads | `traverse`, `traverse_ids`, `load_subgraph` → an opaque `Subgraph` handle |
+| Analytics | `dijkstra`, `astar`, `scc`, `k_core`, `louvain`, `modularity` — on the `Subgraph`, not on a copy of it |
+| Temporal | `reconstruct`, `archive`, `archive_windowed`, `verify_snapshot_chain`, `query_as_of_edges` |
+| Vector | `register_model`, `upsert_embeddings`, `search_vector`, `keyword_search`, `hybrid_search`, `search_filtered` |
+| Integrity | `audit_current`, `rebuild_current`, `rebuild_current_chunked`, `rebuild_fts` |
+| Introspection | `metrics()` — real counters, because the wheel is built with `--features metrics` unconditionally. A Rust consumer can turn a feature on; a Python one cannot |
+
+The API is **synchronous**. The tokio runtime is process-global and lives behind
+the boundary; every call releases the GIL for its duration, so other Python
+threads run while a write is in flight. `astar` is the one exception — it holds
+the GIL, because its heuristic is a Python callable and re-attaching once per
+node expansion would cost more than releasing saves.
+
+### Where Python differs, and why
+
+- **Timestamps** are aware `datetime` objects or canonical
+  `YYYY-MM-DDTHH:MM:SS.ffffffZ` strings. Naive datetimes are refused rather than
+  assumed to be UTC.
+- **An open interval is `None`**, in both directions — never a sentinel
+  datetime. The stored sentinel is exactly `datetime.max`, and `.astimezone()`
+  overflows on it for any zone east of UTC.
+- **Values validate in their constructor.** A malformed `EdgeAssertion` fails on
+  the line that built it, not on the write that consumed ten thousand of them
+  with no index to say which.
+- **Every error is typed and carries its fields as attributes** — 35 exception
+  classes under `MacrameError`, with six intermediate groups (`IntegrityError`,
+  `ValidationError`, `VectorError`, `TemporalError`, `WriterError`,
+  `BudgetError`) that exist to be caught as sets:
+
+  ```python
+  try:
+      db.assert_edge(edge)
+  except macrame.OverlappingIntervalError as e:
+      print(e.source_id, e.valid_from, e.existing_from)
+  ```
+
+- **`Subgraph` is an opaque handle, not a dict.** It is the one thing the ledger
+  materialises under a byte budget, so it answers questions about itself rather
+  than copying itself into Python. `.to_dict()` is the explicit purchase of the
+  copy.
+- **Deliberately not exposed**: the `TraversalBuilder` (Python gets keyword
+  arguments), `AttributeMode.OMIT` on traversals, and `raw()` — an escape hatch
+  whose safety is a Rust convention that does not survive the crossing.
+  `diagnostic_query()` is the read-only replacement.
+
+### Distribution
+
+One **abi3** wheel per platform, CPython **3.10+**: the extension links only the
+stable ABI, so a single wheel serves 3.10 through whatever ships next instead of
+one build per minor version. An sdist is the fallback for platforms the matrix
+does not cover — it builds from source and needs a Rust toolchain. Type stubs
+ship inside the wheel and `py.typed` is set, so a checker sees the whole
+signature, including which arguments take an aware `datetime` and which return
+one.
+
+**One process, one open handle per database path.** Not a style preference: R15
+(below) faults on *concurrent open* of local libSQL databases, and it reproduces
+through this binding at the same rate as through the crate. Use threads — the
+GIL release is what makes them worth having. If you need processes, use the
+`spawn` start method; a `fork()` guard poisons inherited handles rather than
+letting a child write to a database no actor is serialising.
+
+> **Not on PyPI yet.** The wheel matrix and the publish workflow exist and have
+> never run, so the two PyPI badges above will read *not found* until the first
+> release is uploaded. Until then, `pip install .` from a checkout goes through
+> the same maturin backend the wheels do.
+
+Full reasoning: [§14 of the architecture set](docs/architecture/s14-python-bindings.md)
+and the [bindings plan](docs/Macrame%20Python%20Bindings%20Plan%20v0.7.0.md).
+
 ## Testing
 
 ```bash
@@ -171,9 +282,14 @@ cargo test --no-fail-fast
 
 # Property tests (generated-history binaries, run serially)
 cargo test --features property-tests --no-fail-fast
+
+# The Python suite — through the gate, never bare pytest
+python tests_py/run_suite.py
 ```
 
 `--no-fail-fast` is not optional for reading the totals: without it cargo stops at the first failing binary and everything alphabetically behind it never runs. That is how the archive defect U sat unnoticed behind a known-red `concurrency_tests`.
+
+`run_suite.py` is not a convenience wrapper. R15 kills the interpreter rather than raising, and the two ways that reports — no summary at all mid-run, or a *green* summary with a non-zero exit when the fault lands in `Drop` — are not both caught by any single signal. It checks the summary, the counts and the exit code against each other, names four outcomes, and retries only the crash.
 
 ### Test Layers
 
@@ -185,7 +301,9 @@ cargo test --features property-tests --no-fail-fast
 | Scenario tests | Attribute fidelity across `AttributeMode` values; corrupt-then-rebuild roundtrip |
 | Regression tests | `tests/wave1_regression_tests.rs` — one per Wave 1 defect, each verified to fail against the pre-fix tree. Its header names the three that pass either way and says why, rather than letting them look like coverage they are not |
 
-**Current baseline: 216 passing, 0 failing** on plain `cargo test`; 235 with `--features property-tests --no-fail-fast`.
+**Current baseline: 296 passing, 0 failing** across 26 binaries on plain `cargo test`, and **305** with `--features metrics`, which is how CI runs it. The Python suite is a separate **344**.
+
+Read a property-test total with care. `--features property-tests` most recently reported *308 passed, 0 failed* with **eight tests silently absent**: R15 had killed a binary, and since `cargo test` runs one process per binary the others still printed their summaries and the aggregate looked green.
 
 Benchmarks are separate and are **measurements, not gates** — §9's numbers are stated for named hardware, so an absolute threshold in CI would gate on whichever runner picked up the job:
 
@@ -351,7 +469,9 @@ Independent of all four: the **R15 upstream report** against libSQL 0.9.30, outs
 
 - [Architecture specification](docs/architecture/README.md) — normative surfaces: §4 (schema) and Appendix A (API). One file per section.
 - [Implementation plan](docs/Macrame%20Implementation%20Plan%20v0.5.6.md) — delivery status, open items, defect register. Start at **§8.5** (the 2026-07-30 review, with reproductions), **§8.6** (bounds that are stated and not bounded) and **§9** (the four waves).
-- [Decision register](docs/architecture/s13-decision-register.md) — D-001 … D-059, each with its rationale and the disqualifying flaw of the alternative
+- [Python bindings](docs/architecture/s14-python-bindings.md) — §14: the async→sync boundary, the error tree, what abi3 costs, and why `Subgraph` stays opaque
+- [Python bindings plan](docs/Macrame%20Python%20Bindings%20Plan%20v0.7.0.md) — P0 … P8, each with its delivery note and the corrections that phase made to the plan
+- [Decision register](docs/architecture/s13-decision-register.md) — D-001 … D-109, each with its rationale and the disqualifying flaw of the alternative
 
 ## License
 

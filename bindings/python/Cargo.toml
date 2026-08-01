@@ -4,7 +4,7 @@ name = "macrame-py"
 # `tests/packaging_tests.rs` asserts the two agree, because a wheel reporting a
 # version the ledger underneath it does not have is the kind of drift nobody
 # notices until a bug report cites the wrong one.
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 # Not the root's floor restated. pyo3 0.29 declares 1.83, which is *under*
 # `macrame-db`'s 1.88, so the binding adds no MSRV pressure — the floor is
