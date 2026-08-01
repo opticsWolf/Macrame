@@ -1,10 +1,10 @@
 <!--nav-->
-← [previous](s13-decision-register.md) · [index](README.md)
+← [previous](s14-python-bindings.md) · [index](README.md)
 <!--/nav-->
 
 ## Appendix A — Public API (normative)
 
-Rewritten in 0.5.4 against the implementation ([D-040](s13-decision-register.md#d-040)). The prior text was a sketch written before the code existed and had drifted from it in about half its entries; a normative surface that does not describe the surface is worse than none, because it is cited. A.1 is what the crate exposes today. A.2 records what the sketch promised and the crate does not have, so the gap is legible from this document rather than only from a compile error.
+Rewritten in 0.5.4 against the implementation ([D-040](s13-decision-register.md#d-040)). The prior text was a sketch written before the code existed and had drifted from it in about half its entries; a normative surface that does not describe the surface is worse than none, because it is cited. A.1 is what the crate exposes today. **Refreshed again in 0.7.0**: it had gone two releases without one and cited nothing past [D-075](s13-decision-register.md#d-075), so the whole 0.6.0 surface was absent from a document marked normative — `diagnostic_conn`, `verify_snapshot_chain`, `rebuild_current_chunked`, `shadow_step`, `archive_windowed`, `estimated_bulk_hold`, `metrics`, `path`, and `TraversalBuilder::as_of`. `tests/doc_sync_tests.rs` now fails the build when a public `Database` method is missing here. A.2 records what the sketch promised and the crate does not have, so the gap is legible from this document rather than only from a compile error.
 
 A.1 — The surface as it exists
 
@@ -18,13 +18,32 @@ use macrame::prelude::*;
 let db = Database::open("macrame_knowledge.db").await?;   // migrations run here
 db.close().await?;                                        // drain the actor, then final snapshot
 
+// The cadence is tunable and `None` disables it (0.5.5, D-053). An injected
+// clock is floored against the ledger before the actor starts (0.6.0, D-062),
+// so it cannot issue a stamp below what is already stored.
+let db = Database::open_with_cadence(path, Some(SnapshotCadence::default())).await?;
+let db = Database::open_with_clock(path, None, Arc::new(FakeClock::new(t0))).await?;
+
 // Accessors on the handle. There is no public write connection: the sole
 // write-capable connection lives inside the actor and cannot be named.
 db.read_conn();        // &libsql::Connection, PRAGMA query_only = ON (D-019)
+db.path();             // &Path -- the file this handle opened (0.6.0)
 db.clock();            // &Arc<dyn Clock>
 db.schema_version();   // u32
 db.archive_path();     // &Path
 db.snapshots_dir();    // &Path
+
+// A read-only connection of the caller's own (0.6.0, D-091). SQLITE_OPEN_READ_ONLY
+// is an OS-level boundary; read_conn()'s PRAGMA is a guardrail its holder can
+// turn off in one statement, and it is *shared*, so a long reporting query there
+// competes with every traversal in the process.
+let conn = db.diagnostic_conn().await?;
+
+// Actor latency counters, behind --features metrics (0.6.0, D-079). Off by
+// default because the crate's contract is a latency bound, and instrumentation
+// that is nearly free of cost is not free of risk.
+#[cfg(feature = "metrics")]
+let snap: MetricsSnapshot = db.metrics();
 
 // -- Edges (high-priority tier) --
 // The builder is a value type, not a method chain off the handle. It is
@@ -51,17 +70,37 @@ let concept = ConceptUpsert::new(id, title)
 db.upsert_concept(concept).await?;
 
 // -- Bulk writes: the fidelity boundary of §5.1.6 --
+// write_bulk_atomic is the one write with no latency bound. Ask first
+// (0.6.0, D-081): the batch is one act under one stamp and cannot be chunked,
+// so this duration is time every other writer spends waiting.
+let held: Duration = estimated_bulk_hold(&edges);   // ~34 ms / 500 rows, ~2.6 s / 20K
+if held > BULK_ATOMIC_WARN_HOLD { /* 250 ms; the call warns above this */ }
+
 db.write_bulk_atomic(edges).await?;    // one transaction, one stamp, one stall
 db.bulk_import(edges).await?;          // chunked at chunk_rows::EDGES, atomic per chunk
 db.write_concepts(concepts).await?;    // chunked at chunk_rows::CONCEPTS, atomic per chunk
+
+// The four chunk sizes are per-path and measured, not one shared number
+// (0.5.6, D-058): chunk_rows::{EDGES 90, CONCEPTS 70, ANNOTATIONS 600,
+// EMBEDDINGS 30}. util::limits::HYDRATE_CHUNK (400) is a different kind of
+// constant -- a bind-variable ceiling SQLite imposes, not a latency choice.
 
 // -- Traversal (read side; takes a connection, not the handle) --
 let ids = TraversalBuilder::new(root)
     .max_depth(3)
     .edge_types(vec!["CITES".into()])
     .min_weight(0.5)
-    .attribute_mode(AttributeMode::AtTime)
+    .as_of(past_ts)                                   // 0.6.0 (D-085): fixes the *topology*
+    .attribute_mode(AttributeMode::AtTime)            // ...and this fixes the *text*
     .execute_ids(db.read_conn(), ts).await?;          // ids only
+
+// as_of without a stated attribute mode is an error, not a default
+// (0.6.0, D-085). The two are independent questions, and as_of(t) with a
+// defaulted Current returns the past's graph wearing the present's titles -- a
+// legitimate thing to want and a terrible thing to get by accident. It was a
+// tracing::warn! until 0.6.0, which reaches nobody without a subscriber.
+TraversalBuilder::new(root).as_of(past_ts)
+    .execute(db.read_conn(), ts).await;               // Err(AttributeModeUnstated)
 let rows = TraversalBuilder::new(root)
     .attribute_mode(AttributeMode::AtTime)
     .execute(db.read_conn(), ts).await?;              // ids + hydrated attributes
@@ -79,6 +118,21 @@ state.seq_anchor;   // i64
 state.timestamp;    // String
 state.concepts;     // HashMap<String, NodeAttributes>
 state.edges;        // Vec<(source, target, edge_type, valid_from, valid_to)>
+
+// Snapshot n composes onto snapshot n-1 and nothing ever folds the whole log,
+// so an error at any link is copied forward and every read agrees with it.
+// This folds from genesis independently and compares (0.6.0, D-092).
+let check: ChainCheck = db.verify_snapshot_chain(ts).await?;
+check.diverged();                          // bool -- the question worth asking
+check.composed_anchor;                     // reported, *never compared*: the composed
+check.folded_anchor;                       //   answer and the fold legitimately differ
+check.concept_disagreements;               // Vec<String>, capped at SAMPLE_LIMIT = 32
+check.edge_disagreements;                  // edges are compared as a *set*
+check.truncated;                           // true when either list hit the cap
+// It reports and does not repair. Under Doctrine VI a snapshot is derivative:
+// the fix is to delete the snapshot directory, which the caller can do without
+// this function, and rewriting the file would destroy the only evidence that
+// composition has a defect.
 
 // -- Vectors: writes through the handle (D-048), reads direct --
 let model = ModelName::new("nomic_v1")?;
@@ -112,9 +166,35 @@ let drift  = audit_current(db.read_conn()).await?;     // usize; 0 in steady sta
 let report = db.rebuild_current().await?;              // RebuildReport, drift_after == 0
                                                        // see §5.8 for sizing (D-023)
 
+// The chunked repair (0.6.0, D-082). It builds a shadow table across many small
+// transactions and swaps it in under one, so links_current is never partially
+// populated -- which is what makes chunking safe here at all.
+let report = db.rebuild_current_chunked().await?;      // RebuildReport
+
+// Or drive the states directly. The actor is stateless per command, so the
+// epoch travels out to the caller and back rather than being remembered: one
+// remembered slot would be shared, and silently corrupted, by two rebuilds at
+// once.
+let ShadowOutcome::Started { build_start, epoch } =
+        db.shadow_step(ShadowStep::Begin).await? else { unreachable!() };
+db.shadow_step(ShadowStep::Fill { after: last }).await?;         // -> Filled { last }
+db.shadow_step(ShadowStep::Swap { build_start, epoch }).await?;  // -> Swapped { rows }
+// An archive between Begin and Swap invalidates the work in progress:
+// DbError::RebuildInterrupted, which means the repair *did not run*.
+// links_current is untouched and the action is to retry.
+
+db.rebuild_fts().await?;                               // rebuild concepts_fts (D-051)
+
 // -- Archive --
 let report = db.archive(cutoff).await?;                // ArchiveReport { links_archived,
                                                        //   log_entries_archived, horizon }
+
+// Windowed: many bounded sessions instead of one unbounded hold (0.6.0, D-080).
+// A window that never advances, or one implying more than MAX_ARCHIVE_SESSIONS
+// (4,096), is refused rather than clamped -- rounding it up would archive over
+// boundaries the caller did not choose, and the caller cannot see it happen.
+let reports: Vec<ArchiveReport> =
+    db.archive_windowed(cutoff, Duration::from_secs(86_400)).await?;
 ```
 
 Every method backed by a `HighPriCommand` or a `LowPriCommand` carries the `# Latency` rustdoc section [§5.1.8](s5-modules.md#518-write-queue-latency-and-caller-timeouts-052-d-028) specifies, including the rule that a `tokio::time::timeout` bounds the caller's wait and does not cancel the command ([D-028](s13-decision-register.md#d-028)).

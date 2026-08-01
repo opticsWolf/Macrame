@@ -38,7 +38,22 @@ analytics       ---await rx_k--> send k+1 ---await rx_{k+1}--> ...
 
 The invariant, stated precisely: a high-priority command sent at any instant commits before any low-priority chunk accepted after that instant. The chunk already in flight is the irreducible cost — one transaction's worth of lock time — and [§5.1.5](s5-modules.md#515-cooperative-chunking--the-golden-rule) is the rule that keeps it one transaction's worth. The one operation that has no chunk boundaries is the archive ([§5.7](s5-modules.md#57-temporalarchivers--cold-storage)), and [§5.1.8](s5-modules.md#518-write-queue-latency-and-caller-timeouts-052-d-028) is where a caller is told what that costs them.
 
+**The four bulk paths are one function (0.6.0, [D-086](s13-decision-register.md#d-086)).** `bulk_import`, `write_concepts`, `write_analytics_annotations` and `upsert_embeddings` had a chunk loop each — four copies of *split, send, await, sum, stop on the first error* differing only in the constant and the command they built. `Database::low_chunked` is that loop once, taking the chunks and a closure that names the command. It is not a tidying: four copies of a loop that must yield between chunks are four places for the yield to be lost, and a lost yield is a latency regression no test asserts on because every chunk still commits.
+
+**`archive_windowed` is the same argument applied to the archive (0.6.0, [D-080](s13-decision-register.md#d-080)).** `archive(cutoff)` is one session and one unbounded hold; `archive_windowed(cutoff, window)` walks the same range in bounded sessions, each its own transaction, so the actor returns to its `select!` between them. It refuses rather than clamps: a window that never advances, or one implying more than `MAX_ARCHIVE_SESSIONS` (4,096), is [`DbError::ArchiveWindow`](s6-s10-flows-to-dependencies.md#7-errors) — rounding a narrow window up would archive over boundaries the caller did not choose, and the caller cannot see it happen.
+
 ## §7 Errors
+
+**Reproduced from `src/error.rs`, doc comments elided; that file is the authority.**
+This block was hand-maintained through 0.6.0 and had fallen **eleven variants behind** —
+`InvalidModelName`, `ModelNotRegistered`, `NegativeEdgeWeight`, `AttributeModeUnstated`,
+`DiagnosticConn`, `ArchiveWindow`, `InvalidTimestamp`, `InvalidId`, `OverlappingInterval`,
+`RebuildInterrupted` and `WriterStopped` were all missing — while also naming
+`SingleOpenViolation`'s fields `source` / `target`, which the code cannot use because
+`source` is reserved by `thiserror`. A copy that drifts is worse than a pointer, so
+`tests/doc_sync_tests.rs` now fails the build when the variant set here stops matching
+the enum.
+
 ```rust
 #[derive(Debug, thiserror::Error)]
 pub enum DbError {
@@ -51,17 +66,43 @@ pub enum DbError {
     #[error("invalid edge type {0} (must match [A-Z0-9]+)")]
     InvalidEdgeType(String),
 
-    #[error("{source} -> {target} ({edge_type}) already has an open interval; retire it first")]
-    SingleOpenViolation { source: String, target: String, edge_type: String },
+    // NOTE: the spec (§7) names these fields `source` / `target`. `source` is a
+    // reserved field name for thiserror (it is inferred as the error source and
+    // requires `std::error::Error`), so the schema column names are used instead.
+    #[error(
+        "{source_id} -> {target_id} ({edge_type}) already has an open interval; retire it first"
+    )]
+    SingleOpenViolation {
+        source_id: String,
+        target_id: String,
+        edge_type: String,
+    },
 
     #[error("node {0} not found")]
     NotFound(String),
 
     #[error("embedding dim {got}, expected {expected} for model {model}")]
-    DimMismatch { got: usize, expected: usize, model: String },
+    DimMismatch {
+        got: usize,
+        expected: usize,
+        model: String,
+    },
+
+    #[error("invalid embedding model name {0:?}: expected [a-z][a-z0-9_]* up to 48 characters")]
+    InvalidModelName(String),
+
+    #[error("embedding model {model} is not registered (no {table} table)")]
+    ModelNotRegistered { model: String, table: String },
 
     #[error("subgraph exceeds budget ({n} > {budget})")]
     SubgraphTooLarge { n: usize, budget: usize },
+
+    #[error("edge {source_id} -> {target_id} has weight {weight}, which shortest-path analytics cannot use")]
+    NegativeEdgeWeight {
+        source_id: String,
+        target_id: String,
+        weight: f64,
+    },
 
     #[error("replay corrupt at seq {seq}: {reason}")]
     ReplayCorrupt { seq: i64, reason: String },
@@ -75,11 +116,43 @@ pub enum DbError {
     #[error("physical delete blocked outside archive session ({table})")]
     ArchiveViolation { table: String },
 
+    #[error(
+        "traversal as_of({as_of}) did not state an attribute mode: topology at \
+         {as_of} would be returned with attributes as they are *now*. Call \
+         .attribute_mode(AttributeMode::AtTime) for attributes as believed at \
+         {as_of}, or .attribute_mode(AttributeMode::Current) to confirm live \
+         attributes are intended"
+    )]
+    AttributeModeUnstated { as_of: String },
+    #[error("cannot open {path} read-only for diagnostics: {reason}")]
+    DiagnosticConn { path: String, reason: String },
+    #[error("archive window {window:?} is unusable: {reason}")]
+    ArchiveWindow {
+        window: std::time::Duration,
+        reason: String,
+    },
+
+    #[error("timestamp {value:?} is not canonical: {reason}")]
+    InvalidTimestamp { value: String, reason: String },
+
+    #[error("invalid identifier {id:?}: {reason}")]
+    InvalidId { id: String, reason: String },
+
+    #[error(
+        "edge {} -> {} ({}) already holds [{}, {}), which overlaps the asserted [{}, {})",
+        .overlap.source_id, .overlap.target_id, .overlap.edge_type,
+        .overlap.existing_from, .overlap.existing_to,
+        .overlap.valid_from, .overlap.valid_to
+    )]
+    OverlappingInterval { overlap: Box<Overlap> },
+
     #[error("links_current drift detected: {n} intervals diverge")]
     CurrentDrift { n: usize },
 
     #[error("rebuild verification failed: {n} intervals still diverge")]
     RebuildFailed { n: usize },
+    #[error("chunked rebuild abandoned: {reason}")]
+    RebuildInterrupted { reason: String },
 
     // -- 0.4.5: writer-actor containment --
     #[error("write actor is not running (reopen the Database)")]
@@ -87,6 +160,9 @@ pub enum DbError {
 
     #[error("write actor dropped the response channel mid-request")]
     WriterDroppedResponder,
+
+    #[error("write actor did not shut down cleanly: {0}")]
+    WriterStopped(String),
 
     // -- 0.5.0: concept integrity --
     #[error("recorded_at must advance on concept update (got {got}, had {had})")]
@@ -99,6 +175,13 @@ The error philosophy is threefold. Nothing panics across the API boundary — ev
 The 0.4.5 variants encode one policy: the failure of the writer task must be containable. An in-flight oneshot whose actor has panicked resolves to WriterDroppedResponder rather than a panic of its own; every subsequent operation resolves to WriterUnavailable. The application learns precisely what happened and what to do — reopen — and the cascade stops at the crate boundary. The actor's death itself is reported through tracing with the underlying cause, so the crash report exists even when the user-facing error is deliberately terse.
 
 The 0.5.0 RecordedAtRegression variant surfaces the concept monotonicity trigger ([§4.3](s4-schema.md#43-the-transaction-log)) as a typed error rather than a raw engine abort, carrying both the rejected and existing timestamps so the caller can diagnose the clock or code path at fault.
+
+
+**The 0.5.6 and 0.6.0 variants exist to name the right subject, and that is a policy rather than a habit ([D-069](s13-decision-register.md#d-069)).** An error that names the wrong thing sends a caller to fix the wrong thing, so each of these was split out of a variant that already covered the case badly. `InvalidTimestamp` and `InvalidId` were `ReplayCorrupt { seq: 0 }` and `NotFound` — the first claiming the ledger was damaged when the caller's input was malformed, carrying a sequence number that cannot exist because `AUTOINCREMENT` starts at 1; the second telling a caller the thing is missing and inviting them to create it with the same id, which would be refused again. `DiagnosticConn` is its own variant because a file is not a node ([D-091](s13-decision-register.md#d-091)). `RebuildInterrupted` is distinct from `RebuildFailed` because *the repair did not run* is not *the repair did not repair*: `links_current` is untouched, whatever was true of it before is still true, and the action is to retry ([D-082](s13-decision-register.md#d-082)). `AttributeModeUnstated` was a `tracing::warn!` until 0.6.0, which is invisible in any application that has not configured a subscriber — it is now a value the caller cannot miss ([D-085](s13-decision-register.md#d-085)).
+
+**`OverlappingInterval` is boxed, and it is the only variant that is ([D-075](s13-decision-register.md#d-075)).** Seven `String`s is 168 bytes, which put `DbError` — and therefore every `Result` in the crate, on the `Ok` path too — over `clippy::result_large_err`'s threshold the moment [D-060](s13-decision-register.md#d-060) added it. Boxing the rarest variant keeps the whole error small rather than trimming what a caller is told, and `matches!(err, OverlappingInterval { .. })` is unaffected. A unit test pins the size at 128 bytes, because the failure mode is a warning in a build log rather than a broken test.
+
+**Guard aborts are classified in exactly one place.** SQLite reports a `RAISE(ABORT)` as a generic constraint failure carrying the message, so the message is the only thing separating "you violated the single-open-interval rule" from "the disk is full". `error::abort_kind` matches on it, once, against the `schema::ddl` constants spliced into the triggers themselves, so guard and classifier cannot drift. Scattered across call sites, an upstream wording change would silently degrade an unknown number of typed errors into opaque ones.
 
 ## §8 Testing Strategy
 

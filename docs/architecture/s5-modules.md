@@ -383,6 +383,35 @@ This is correct behavior, not a defect: under WAL, readers are unaffected, so th
 
 That last paragraph is the substance of [D-028](s13-decision-register.md#d-028) and the reason crate-level write cancellation was declined. A cancellable write command would require the actor to dequeue and discard, which introduces a failure mode the ledger does not want: a command reported as cancelled that in fact ran, or ran partially. The channel is a commitment queue, not a work queue.
 
+#### 5.1.9 The two read paths off the handle (0.6.0, D-091)
+
+`read_conn()` and `diagnostic_conn()` both hand out something that cannot write, and they are not the same kind of thing.
+
+`read_conn()` returns a **shared** `&libsql::Connection` carrying `PRAGMA query_only = ON`. That pragma is per-connection and reversible by its holder in one statement, so it is a *guardrail*: it prevents an accident, not an intent. [§4.7](s4-schema.md#47-what-this-schema-does-not-enforce) invariant 2 cited it as the read-only path, and that citation was doing more work than the mechanism supports.
+
+`diagnostic_conn()` opens the file again with `SQLITE_OPEN_READ_ONLY` and returns a connection **of the caller's own**. That is an OS-level boundary: `PRAGMA query_only = OFF` is accepted and changes nothing, and the next write fails with `readonly`. `tests/diagnostic_conn_tests.rs` asserts the pair in *both* directions, because asserting only that the diagnostic connection refuses a write would pass equally for a second `query_only` connection — what distinguishes them is what happens after the pragma comes off.
+
+The second need it serves is independence. `read_conn()` is shared, so a long reporting query on it competes with every traversal and fold in the process; two diagnostic connections hold their own per-connection state.
+
+Two consequences worth stating rather than discovering. `SQLITE_OPEN_READ_ONLY` drops `SQLITE_OPEN_CREATE` with it, so a path that does not exist is `SQLITE_CANTOPEN` rather than a fresh empty database — reported as [`DbError::DiagnosticConn`](s6-s10-flows-to-dependencies.md#7-errors), which names the file and says why, rather than as `NotFound`, which renders "node {0} not found" and would send a caller looking for a concept. And the stronger boundary is not uniformly stronger: `CREATE TEMP TABLE` **succeeds** on a read-only connection and is refused by `query_only`, because temp tables live in a separate writable temporary database. That is the mechanism [D-050](s13-decision-register.md#d-050) measured when it removed `TwoPhaseTempTable`, so one of that decision's two reasons no longer applies to every connection this crate can offer. Recorded, not acted on — D-050's other reason is untouched.
+
+`Database::raw()` is `#[doc(hidden)]` rather than private ([D-068](s13-decision-register.md#d-068), [D-091](s13-decision-register.md#d-091)): the file is reachable by any SQLite client on the machine, so removing the supported way to reach it would buy the appearance of a guarantee rather than the guarantee.
+
+#### 5.1.10 `ActorShared` — what the actor shares with the handle
+
+The actor owns its state and is stateless per command. Two things nevertheless have to be visible from both sides, and they live in one struct behind an `Arc`:
+
+```rust
+struct ActorShared {
+    metrics: crate::metrics::ActorMetrics,
+    archive_epoch: std::sync::atomic::AtomicU64,
+}
+```
+
+`metrics` is the hold-time histogram [§5.10](s5-modules.md#510-metricsrs--what-the-actor-holds-the-lock-for) describes: written by the actor, read by `Database::metrics()`.
+
+`archive_epoch` is **not a measurement**, and it is deliberately outside `ActorMetrics` for that reason. It is the interlock that makes the chunked rebuild safe ([§5.8](s5-modules.md#58-integrity--audit-and-rebuild)): every completed archive increments it, and a shadow swap presenting a stale epoch is refused. Putting it in `ActorMetrics` would have made a correctness mechanism vanish when the `metrics` feature is off — which is the default. A counter that guards an invariant and a counter that reports a duration look identical in a struct and are not the same kind of thing.
+
 ### 5.2 graph/builder.rs — traversal, valid time, and attribute fidelity
 
 The builder compiles every traversal into a recursive CTE over `links_current`, with every parameter bound and none interpolated — edge types included, as of 0.5.4.
@@ -627,7 +656,19 @@ Because the archive is a single atomic transaction, the cooperative chunking of 
 
 **Sizing and operational guidance (0.5.1, [D-023](s13-decision-register.md#d-023)).** Rebuild is a recovery operation, not a routine one. In steady state the triggers maintain `links_current` correctly and the audit returns zero; a nonzero result indicates a bug — a trigger failure, manual manipulation, or a restore from an inconsistent backup — that should be investigated rather than papered over.
 
-The rebuild is atomic by necessity. A chunked rebuild would create a window in which `links_current` is partially populated, and concurrent traversals on `read_conn` would silently omit edges — a correctness failure worse than a latency stall. Unlike the archive, where partial state between scheduled windows is recoverable and detectable, a partial rebuild is actively harmful.
+**"The rebuild is atomic by necessity" was the claim here through 0.5.6, and 0.6.0 falsified it ([D-082](s13-decision-register.md#d-082)).** The argument ran: a chunked rebuild would create a window in which `links_current` is partially populated, concurrent traversals on `read_conn` would silently omit edges, and that is a correctness failure worse than a latency stall. Every step is true *of the shape it imagined* — chunking the `DELETE` and `INSERT` in place. It is not true of the operation, and the difference is where the partial state lives.
+
+`rebuild_current_chunked` builds a **shadow table** and swaps it. `links_current` is not touched until the swap, which is one transaction, so there is no window in which it is partially populated and no traversal can observe one. The chunks build something nobody is reading. What the old paragraph established is therefore still exactly right — a partially populated `links_current` is actively harmful — and it is an argument against one implementation rather than against the goal.
+
+The cost of the atomic form is real and is what motivated the work: at 1M edges the table above budgets a ~5 s hold, during which every other writer waits. The chunked form trades that for a longer wall-clock repair made of [`CHUNK_BUDGET`](s5-modules.md#515-cooperative-chunking--the-golden-rule)-sized holds, which is the golden rule applied to the one operation that had been exempt from it.
+
+**The states are driven by the caller, and the actor remembers nothing between them.** The three `ShadowStep`s each answer with a `ShadowOutcome`. `Begin` drops any orphan shadow and creates a fresh one, answering `Started { build_start, epoch }` with the actor's archive epoch; `Fill { after }` projects the next `SOURCES_PER_CHUNK` (256) sources and answers `Filled { last }` with the last `source_id` it reached, or `None` when the table is exhausted; `Swap { build_start, epoch }` catches up on writes since `build_start` and swaps, in one transaction, answering `Swapped { rows }`. `Database::rebuild_current_chunked` is the loop over those three for callers who do not want to hold the state themselves.
+
+*The epoch travels out to the caller and back rather than being remembered by the actor, and that is the load-bearing detail.* The actor is stateless per command by construction ([§5.1.4](s5-modules.md#514-the-actor-loop)); a single remembered slot would be shared — and silently corrupted — by two rebuilds running at once. It lives in `ActorShared` beside the metrics rather than in `ActorMetrics`, because it is not a measurement: it is a correctness interlock, and a build that compiles without the `metrics` feature must still have it ([§5.1.10](s5-modules.md#5110-actorshared--what-the-actor-shares-with-the-handle)).
+
+**The interlock is against `archive`, and it fails closed.** An archive between `Begin` and `Swap` physically deletes rows the shadow was built from, so the shadow describes a `links` that no longer exists. The epoch check catches that and the swap is abandoned with [`DbError::RebuildInterrupted`](s6-s10-flows-to-dependencies.md#7-errors) — distinct from `RebuildFailed`, and the distinction is the whole point: `RebuildFailed` means the repair ran and did not repair, which is a reason to distrust the ledger. `RebuildInterrupted` means the repair **did not run**. `links_current` is untouched, whatever was true of it before is still true, and the action is to retry.
+
+`links_current_shadow` is a transient table and carries no triggers ([§4.2](s4-schema.md#42-links-assertion-history-and-current-belief-materialization)). It is dropped and recreated by `Begin` rather than reused, so an orphan left by a process that died mid-rebuild costs one `DROP` and never a wrong answer.
 
 | Edge count | Expected lock hold | Notes |
 |---|---|---|
@@ -669,3 +710,26 @@ Hybrid search runs FTS5 keyword retrieval and vector top-k and fuses the two ran
 
 One correction landed with it: `reciprocal_rank_fusion` sorted on the fused score alone, leaving ties in `HashMap` iteration order. Ties are the *common* case here — two documents at the same pair of ranks score identically by construction — so the same query could return the same set in a different order on the next run. The sort now breaks ties by id. This is the procedural-versus-structural determinism trap [D-047](s13-decision-register.md#d-047) names, arriving as a search result that will not sit still.
 
+### 5.10 metrics.rs — what the actor holds the lock for
+
+**Off by default, and the default is the argument (0.6.0, [D-079](s13-decision-register.md#d-079)).** Every latency claim in this crate before 0.6.0 was a `cargo bench` figure. A [`CHUNK_BUDGET`](s5-modules.md#515-cooperative-chunking--the-golden-rule) that cannot be checked *in situ* is an aspiration, not a bound: it describes what a benchmark measured on one machine, not what the actor is doing in an application under real contention.
+
+`--features metrics` records, per [`CommandKind`](s5-modules.md#513-the-two-tier-command-channel), a histogram of how long the actor held the write connection. `MetricsSnapshot::budget_violations()` returns the kinds whose holds exceeded the budget, which is the question an operator actually has.
+
+*The instrumentation is arranged as two impls of one type rather than `#[cfg]` inside the actor loop.* With the feature off, `HoldTimer::start()` reads no clock and `ActorMetrics`'s methods are empty on a zero-sized type, so the loop compiles to what it compiled to before. The alternative — conditional compilation inside the loop — makes the loop's shape depend on a feature flag, and the loop is the one piece of this crate where an accidental early return or a missed `select!` arm is a deadlock rather than a wrong answer. One shape, always.
+
+Buckets are fixed at `BUCKET_BOUNDS_MICROS` rather than computed. A histogram whose bucket edges move between builds cannot be compared across them, and comparison across builds is the only reason to keep the numbers.
+
+### 5.11 util/ — ids, clocks, timestamps, and engine ceilings
+
+`ids.rs` generates and validates ULIDs. Validation is not cosmetic: a link's `transaction_log.entity_id` concatenates `source|target|type|valid_from`, so an id containing the separator makes the row unattributable on replay ([D-061](s13-decision-register.md#d-061)). A rejected id is [`DbError::InvalidId`](s6-s10-flows-to-dependencies.md#7-errors) — *refused*, not *missing*, which is why it is not `NotFound`: telling a caller the thing does not exist invites them to create it with the same id and be refused again.
+
+`clock.rs` is the `Clock` trait, `SystemClock` (monotonic floor plus strict parser) and `FakeClock`. [§5.1.2](s5-modules.md#512-handle-shape-and-the-clock-contract) has the contract.
+
+`timestamp.rs` owns the canonical form — `YYYY-MM-DDTHH:MM:SS.ffffffZ`, exactly 27 bytes ([D-029](s13-decision-register.md#d-029)). `normalize` accepts the canonical form and the legacy second-precision one and **refuses everything else rather than guessing**: an offset, a missing `Z`, millisecond precision. `parse` additionally validates the calendar, because `2026-02-30T…` has canonical *shape* and is not a date, and accepting it would let a timestamp exist that no round trip can reproduce. `OPEN_SENTINEL` is the open-interval end.
+
+`util/limits.rs` is the one that needs its existence explained, because it looks like the tuning constants in `connection::chunk_rows` and is the opposite of them (0.6.0, T3.1). **`chunk_rows` holds choices; `limits` holds ceilings the engine imposes.** `HYDRATE_CHUNK` (400) is how many ids go into one `IN (…)` list, and it is not a latency budget — these are reads, and `CHUNK_BUDGET` bounds what the *writer* holds. It is a bind-variable ceiling: `SQLITE_MAX_VARIABLE_NUMBER` is 999 on a stock build, and hydrating a budget-sized subgraph in one statement would fail at the driver with an error that says nothing about node count. The margin is doubled rather than exact, because a hydrate query carries other bound parameters too and a query that gains one should not be what discovers the ceiling.
+
+It was defined twice before T3.1 — in `graph::subgraph` and `temporal::as_of`, both 400, one carrying the reasoning and the other a `// See as_of::HYDRATE_CHUNK` comment. That works until someone tunes one of them, at which point two constants that must be equal silently are not, and the symptom is a driver error on one code path and not the other. The cross-reference comment was evidence the duplication was known and being managed by convention; a shared constant is what replaces a convention.
+
+The relationship is asserted at **compile time**, not in a test: `const _: () = assert!(HYDRATE_CHUNK * 2 < SQLITE_MAX_VARIABLE_NUMBER)`. A `#[test]` was the first form, and clippy was right to object — both sides are constants, so the assertion has a constant value. A const block fails the build rather than a test run, which matters because the failure it guards is someone raising `HYDRATE_CHUNK`, plausibly in a release build, plausibly without running the suite.

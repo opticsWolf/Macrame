@@ -118,11 +118,19 @@ macrame/
 │   │   ├── registry.rs         # §5.9 — register_model, declared_dimension
 │   │   └── search.rs           # §5.9 — top-k, RRF fusion
 │   ├── integrity/
-│   │   ├── mod.rs
+│   │   ├── mod.rs              # LATEST_BELIEF_PROJECTION — the single definition (D-077)
 │   │   ├── audit.rs            # audit_current() — read-side
-│   │   └── rebuild.rs          # rebuild_current() — high-priority command
+│   │   ├── rebuild.rs          # rebuild_current() — high-priority command
+│   │   └── shadow.rs           # §5.8 — ShadowStep/ShadowOutcome, the chunked
+│   │                           #   shadow-swap rebuild (0.6.0, D-082)
+│   ├── metrics.rs              # §5.10 — actor hold-time histogram, behind
+│   │                           #   --features metrics (0.6.0, D-079)
 │   └── util/
 │       ├── ids.rs              # ULID generation & validation
+│       ├── timestamp.rs        # §5.11 — the canonical form, normalize/parse,
+│       │                       #   OPEN_SENTINEL (D-029)
+│       ├── limits.rs           # §5.11 — engine ceilings, not tuning choices:
+│       │                       #   HYDRATE_CHUNK under SQLITE_MAX_VARIABLE_NUMBER
 │       └── clock.rs            # Clock trait; SystemClock (monotonic floor + strict parser),
 │                               #   FakeClock (Send + Sync interior)
 └── tests/
