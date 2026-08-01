@@ -1,6 +1,6 @@
 # Macrame — Architecture Quick Reference
 
-**v0.6.0 · A Bitemporal Graph Ledger on libSQL**
+**v0.7.0 · A Bitemporal Graph Ledger on libSQL**
 
 ---
 
@@ -59,9 +59,9 @@ Rows leave the hot database only through the archive path, which runs inside a d
 **Code:** `src/schema/ddl.rs` (guards), `src/temporal/archive.rs`
 
 ### VI. Derivative state is disposable
-`links_current` is a materialization — a cache of current belief — and is rebuildable from `links` at any moment by a single deterministic query. Because it can be rebuilt, it can be trusted: drift is detectable by audit, recoverable by rebuild.
+`links_current` is a materialization — a cache of current belief — and is rebuildable from `links` at any moment by a single deterministic query. Because it can be rebuilt, it can be trusted: drift is detectable by audit, recoverable by rebuild (atomic via `rebuild_current()` or chunked via `rebuild_current_chunked()` with shadow-swap).
 
-**Code:** `src/integrity/shadow.rs`, `src/schema/ddl.rs`
+**Code:** `src/integrity/rebuild.rs`, `src/integrity/shadow.rs`, `src/schema/ddl.rs`
 
 ### VII. Embeddings are immutable per version and excluded from the ledger
 A vector is a derived artifact of a specific model applied to specific content. It never appears in `transaction_log` payloads; it lives in per-model tables so that a model migration can never produce a row whose dimension violates its type.
@@ -125,10 +125,12 @@ recent log                detached on archive
 | `graph` | `graph/builder.rs`, `graph/subgraph.rs`, `graph/vector_filter.rs` | CTE compilation, subgraph loading, vector filter strategies, byte budget |
 | `temporal` | `temporal/replay.rs`, `temporal/snapshot.rs`, `temporal/as_of.rs` | `reconstruct()`, `as_of()`, snapshot cadence/retention, archive |
 | `vector` | `vector/mod.rs`, `vector/registry.rs`, `vector/model.rs`, `vector/hybrid.rs` | Model registration, embedding upsert, DiskANN search, hybrid RRF fusion |
-| `integrity` | `integrity/shadow.rs` | `audit_current()`, `rebuild_current()`, shadow-swap rebuild |
-| `util` | `util/clock.rs`, `util/timestamp.rs`, `util/ids.rs` | `Clock` trait, timestamp normalization/parsing, ULID generation |
-| `connection` | `connection.rs` | `Database` handle, Write Actor, priority channels, chunking constants |
+| `integrity` | `integrity/shadow.rs`, `integrity/rebuild.rs` | `audit_current()`, `rebuild_current()` (atomic), `rebuild_current_chunked()` (shadow-swap), `ShadowStep`/`ShadowOutcome` |
+| `metrics` | `metrics.rs` | `ActorMetrics`, `HoldTimer`, `CommandKind`, `MetricsSnapshot` — feature-gated, zero-cost when off |
+| `util` | `util/clock.rs`, `util/timestamp.rs`, `util/ids.rs`, `util/limits.rs` | `Clock` trait, timestamp normalization/parsing, ULID generation, `CHUNK_BUDGET`, `HYDRATE_CHUNK` |
+| `connection` | `connection.rs` | `Database` handle, Write Actor, priority channels, `low_chunked()`, `ActorShared` |
 | `error` | `error.rs` | `DbError` enum, error classification |
+| `prelude` | `prelude.rs` | Re-exports `AttributeMode`, `EdgeAssertion`, `TraversalBuilder` (not `Subgraph` or algorithms) |
 
 ---
 
@@ -166,6 +168,7 @@ Every temporal column is exactly 27 characters: `YYYY-MM-DDTHH:MM:SS.ffffffZ`
 | v5 | `idx_lc_open_interval` (overlap guard index) |
 | v6 | Overlapping closed intervals refused in actor |
 | v7 | `CHECK (weight >= 0.0 AND weight < 9e999 AND typeof(weight) = 'real')` |
+| v8 | `idx_annotations_label`, `idx_lc_tgt_active` — unreadable indices (D-089), scheduled for removal in 0.7.0 |
 
 ---
 
@@ -199,7 +202,7 @@ impl Database {
 
 **`raw()`**: `#[doc(hidden)]` — exposes the raw `libsql::Database` handle. Left public to provoke a guard (§4.7 invariant 2).
 
-**`verify_snapshot_chain(ts)`**: Folds from genesis by withholding the snapshot directory, compares against the composed answer. Reports and does not repair — under Doctrine VI a snapshot is disposable.
+**`verify_snapshot_chain(ts)`**: Folds from genesis by withholding the snapshot directory, compares against the composed answer. Reports and does not repair — under Doctrine VI a snapshot is disposable. `seq_anchor` is reported but never compared (the composed answer and the fold legitimately differ); edges are compared as a *set*; results capped at `SAMPLE_LIMIT = 32` with a `truncated` flag (D-092).
 
 ### 5.2 Concepts
 
@@ -285,8 +288,8 @@ impl TraversalBuilder {
     pub fn attribute_mode(mut self, mode: AttributeMode) -> Self
     pub fn as_of(mut self, ts: impl Into<String>) -> Self
     pub fn build_sql(&self) -> String
-    pub async fn execute_ids(&self, conn: &libsql::Connection) -> Result<Vec<String>>
-    pub async fn execute(&self, conn: &libsql::Connection) -> Result<MaterializedState>
+    pub async fn execute_ids(&self, conn: &libsql::Connection, ts: Option<String>) -> Result<Vec<String>>
+    pub async fn execute(&self, conn: &libsql::Connection, ts: Option<String>) -> Result<MaterializedState>
 }
 
 pub struct Subgraph {
@@ -338,9 +341,11 @@ impl Database {
 }
 ```
 
-**`as_of(ts)`**: Sets a valid-time query. The traversal returns topology at `ts` under current belief.
+**`as_of(ts)`** (D-085): Sets a valid-time query on the *topology*. The traversal returns edges at `ts` under current belief. When `as_of` is set and `attribute_mode` is left unspecified, returns `DbError::AttributeModeUnstated` — the crate no longer silently defaults to `Current`.
 
-**`attribute_mode`**: `Current` returns live attributes (fast, wrong for historical text). `AtTime` hydrates from `transaction_log` (correct for historical text). `Omit` returns topology only. When `as_of` is set and mode is defaulted, returns `DbError::AttributeModeUnstated`.
+**`attribute_mode`**: `Current` returns live attributes (fast, wrong for historical text). `AtTime` hydrates from `transaction_log` (correct for historical text). `Omit` returns topology only. `as_of(ts)` + `attribute_mode` are independent: `as_of` fixes the topology, `attribute_mode` fixes the text. Conflating them was the silent wrong answer D-085 corrected.
+
+**`TraversalBuilder` uses `UNION` not `UNION ALL`** (D-076): The recursive step dedupes on entry, bounding walk rows at `V × (depth+1)` rather than `V × (depth+1) × branching_factor`. The old `UNION ALL` form was a walk (one row per path); the current form is a traversal (one row per node).
 
 **`load_subgraph()`**: Walks `links_current` under the same bounded CTE shape as traversal, hydrates node attributes, returns a `Subgraph`. Enforces byte budget (`SubgraphTooLarge`) and negative/NaN weight refusal.
 
@@ -385,7 +390,7 @@ pub struct SnapshotCadence {
 pub async fn query_as_of_edges(conn, ts, filter) -> Result<MaterializedState>
 pub async fn reconstruct(conn, ts, archive_path, snapshots) -> Result<MaterializedState>
 pub async fn archive(cutoff: &str) -> Result<ArchiveReport>
-pub async fn archive_windowed(cutoff, window) -> Result<ArchiveReport>
+pub async fn archive_windowed(cutoff, window) -> Result<Vec<ArchiveReport>>
 pub async fn save_snapshot(snapshots_dir, state) -> Result<PathBuf>
 pub async fn load_snapshot(path) -> Result<MaterializedState>
 pub async fn write_final(read_conn, snap_dir) -> Result<()>
@@ -394,6 +399,12 @@ pub async fn audit_current(conn) -> Result<i64>
 pub async fn rebuild_current() -> Result<RebuildReport>
 pub async fn rebuild_current_chunked() -> Result<RebuildReport>
 pub async fn hydrate_attributes(conn, ids, ts, mode) -> Result<HashMap<String, NodeAttributes>>
+
+// Handle methods
+impl Database {
+    pub async fn archive_windowed(&self, cutoff: &str, window: Duration) -> Result<Vec<ArchiveReport>>
+    pub async fn shadow_step(&self, step: ShadowStep) -> Result<ShadowOutcome>
+}
 ```
 
 **`query_as_of_edges()`**: Valid-time query over `links_current`. Returns topology at `ts` under current belief.
@@ -402,7 +413,7 @@ pub async fn hydrate_attributes(conn, ids, ts, mode) -> Result<HashMap<String, N
 
 **`archive(cutoff)`**: Moves closed intervals to cold database. One atomic session — copy-then-delete.
 
-**`archive_windowed(cutoff, window)`**: N small atomic sessions instead of one. Longest hold reduced (3,326→768 ms at 8K keys). Session skips rebuild when nothing archived.
+**`archive_windowed(cutoff, window)`** (D-080): N small atomic sessions instead of one. Refuses rather than clamps — a window that never advances, or one implying more than `MAX_ARCHIVE_SESSIONS` (4,096), raises `DbError::ArchiveWindow`. Longest hold reduced (3,326→768 ms at 8K keys). Session skips rebuild when nothing archived.
 
 **`save_snapshot()` / `load_snapshot()`**: Compose and deserialize `MaterializedState` to/from disk. Format v2 header carries snapshot instant for retention bucketing.
 
@@ -410,9 +421,9 @@ pub async fn hydrate_attributes(conn, ids, ts, mode) -> Result<HashMap<String, N
 
 **`audit_current()`**: Returns symmetric difference between `links` and `links_current`. Zero means in sync.
 
-**`rebuild_current()`**: One act, audits itself, works inside a caller's transaction. O(E) delete + O(E log E) window reprojection + two audit passes.
+**`rebuild_current()`** (D-023): One act, audits itself, works inside a caller's transaction. O(E) delete + O(E log E) window reprojection + two audit passes. Single atomic transaction — a crash mid-rebuild leaves `links_current` partially populated.
 
-**`rebuild_current_chunked()`**: Shadow-swap with catch-up. Longest hold 353→47 ms (7.6×). 2.3× cheaper total. Interlock against archive interleaving via `RebuildInterrupted`.
+**`rebuild_current_chunked()`** (D-082): Shadow-swap with catch-up. Builds `links_current_shadow` across many small transactions and swaps it in under one, so `links_current` is never partially populated. Longest hold 353→47 ms (7.6×). 2.3× cheaper total. Interlock against archive interleaving via `ActorShared::archive_epoch` — an archive between `Begin` and `Swap` raises `DbError::RebuildInterrupted`, meaning the repair *did not run* and the action is to retry. Drives the full state machine via `shadow_step(ShadowStep)` or calls `rebuild_current_chunked()` for the all-in-one path.
 
 ### 5.6 Vector Search
 
@@ -513,17 +524,16 @@ pub fn escape_fts5_query(input: &str) -> String
 
 ```rust
 pub enum ShadowStep {
-    BuildStart,
-    BuildChunk { source_id_range: (i64, i64) },
-    BuildIndex,
-    CatchUp { recorded_at: String },
-    Swap { triggers_dropped: bool },
-    FinalCatchUp,
+    Begin,
+    Fill { after: i64 },
+    Swap { build_start: i64, epoch: u64 },
 }
 
 pub enum ShadowOutcome {
-    Complete { edges_rebuilt: usize },
-    Interrupted { archive_count_at_build: i64, archive_count_at_swap: i64 },
+    Started { build_start: i64, epoch: u64 },
+    Filled { last: i64 },
+    Swapped { edges_rebuilt: usize },
+    Interrupted { reason: String },
     Failed { reason: String },
 }
 
@@ -603,11 +613,19 @@ pub fn format(st: SystemTime) -> String
 pub const TIMESTAMP_LEN: usize = 27
 pub const OPEN_SENTINEL: &str = "9999-12-31T23:59:59.999999Z"
 pub const HYDRATE_CHUNK: usize = 400
+pub const CHUNK_BUDGET: Duration = Duration::from_millis(3)
+pub const BULK_ATOMIC_WARN_HOLD: Duration = Duration::from_millis(250)
+pub const SAMPLE_LIMIT: usize = 32
+pub const MAX_ARCHIVE_SESSIONS: usize = 4_096
+
+pub fn estimated_bulk_hold(edges: &[EdgeAssertion]) -> Duration  // ~34 ms / 500 rows
 ```
 
 **`Clock` trait**: Injectable clock for deterministic testing. `SystemClock` enforces monotonicity by flooring to `MAX(recorded_at)`. `FakeClock` advances explicitly.
 
 **`normalize()`**: Widens second-precision timestamps to canonical form. Rejects offsets, missing Z, millisecond precision.
+
+**`util/limits.rs`**: Centralises chunking and operational constants. `CHUNK_BUDGET` (3 ms) is the duration bound for all chunking; `HYDRATE_CHUNK` (400) is a bind-variable ceiling imposed by SQLite; `BULK_ATOMIC_WARN_HOLD` (250 ms) is the threshold above which `write_bulk_atomic` warns; `SAMPLE_LIMIT` (32) caps `ChainCheck` disagreement lists; `MAX_ARCHIVE_SESSIONS` (4,096) bounds `archive_windowed`.
 
 ---
 
@@ -617,29 +635,34 @@ pub const HYDRATE_CHUNK: usize = 400
 
 | Path | Chunk Size | Measured at | Per-row cost |
 |---|---|---|---|
-| Edges (`write_edges_atomic`) | 90 | ~2.39 ms | ~11 µs (empty db), superlinear on degree |
-| Concepts (`write_concepts_atomic`) | 70 | ~2.35 ms | ~2.5 µs |
-| Annotations (`write_annotations_atomic`) | 600 | ~2.36 ms | ~2.5 µs |
-| Embeddings (`upsert_embedding_chunk`) | 30 | ~2.06 ms | ~135 µs (DiskANN insertion) |
+| Edges (`bulk_import`) | 90 | ~2.39 ms | ~11 µs (empty db), ~135 µs at 8K edges |
+| Concepts (`write_concepts`) | 70 | ~2.35 ms | ~2.5 µs |
+| Annotations (`write_analytics_annotations`) | 600 | ~2.36 ms | ~2.5 µs |
+| Embeddings (`upsert_embeddings`) | 30 | ~2.06 ms | ~135 µs (DiskANN insertion) |
 
-**Bound**: 3 ms (`CHUNK_BUDGET`). Per-transaction overhead: ~0.8 ms (BEGIN, COMMIT, fsync).
+**Bound**: 3 ms (`CHUNK_BUDGET`). Per-transaction overhead: ~0.8 ms (BEGIN, COMMIT, fsync). The four sizes are derived from measurement ([D-058](s13-decision-register.md#d-058)), not one shared constant. Two paths are superlinear in *table size* (edges via `trg_links_single_open`'s wrong index — fixed in v6 by `idx_lc_open_interval`; embeddings via DiskANN graph growth) — chunking costs throughput on every path.
+
+**`Database::low_chunked`** (D-086): The four bulk paths are one deduplicated function taking the chunks and a closure that names the command. Four copies of a yield-critical loop are four places for the yield to be lost.
 
 ### 6.2 Performance Budgets (§9)
 
 | Operation | Budget | Measured | Notes |
 |---|---|---|---|
 | Single assertion | ≤ 5 ms | — | Empty db; degrades on high-degree nodes without index |
-| Chunk commit (90 edges) | ≤ 3 ms | ~2.39 ms | Fully amplified (triggers included) |
+| Chunk commit, edges 90 rows | ≤ 3 ms | ~2.39 ms | Fully amplified (triggers included) |
+| Chunk commit, concepts 70 rows | ≤ 3 ms | ~2.35 ms | |
+| Chunk commit, annotations 600 rows | ≤ 3 ms | ~2.36 ms | |
+| Chunk commit, embeddings 30 rows | ≤ 3 ms | ~2.06 ms | |
 | Three-hop traversal | ≤ 10 ms | 2.1 ms | On `star_of_stars` fixture |
 | `audit_current` | ≤ 200 ms | 13.8 ms | |
 | Vector top-10 | ≤ 20 ms | 294 µs | |
 | Hybrid top-10 | ≤ 50 ms | 2.0 ms | |
 | Full fold (reconstruct) | ≤ 100 ms | 21 ms | |
 | Composition | ≤ 100 ms | 3.4 ms | Snapshot + delta fold |
-| Archive (2000 edges) | ≤ 30 s | 26.8 ms | One session; windowed trades total for latency |
+| Archive (100K closed intervals) | ≤ 30 s | ~26.8 ms for 2K | One session; windowed trades total for latency |
 | Rebuild (10M edges) | ~50 s | — | Chunked: 7.6× less hold, 2.3× cheaper total |
 
-**Measurement caveat**: Absolute timings are hardware-dependent. All budgets measured on named reference hardware. Criterion baselines detect regression; machine against itself.
+**Measurement caveat**: Absolute timings are hardware-dependent. All budgets measured on named reference hardware. Criterion baselines detect regression; machine against itself. **Budgets are measured, not CI gates** (D-055): absolute durations on arbitrary hardware are the wrong shape for a CI check — regression detection compares a machine against itself.
 
 ---
 
@@ -653,6 +676,8 @@ pub const HYDRATE_CHUNK: usize = 400
 | **Covering index wins over selective** | High | `EXPLAIN QUERY PLAN` assertions on every index | ✅ D-042, D-059, D-064 |
 | **Superlinear chunk cost on large tables** | Medium | Index on `(source_id, target_id, edge_type, valid_to, valid_from)` shipped as v5→v6 | ✅ D-059 |
 | **Snapshot chain divergence** | Low | `verify_snapshot_chain()` reports but does not repair | ✅ D-092 |
+| **Rebuild interrupted by archive during shadow-swap** | Medium | `ActorShared::archive_epoch` interlock; `RebuildInterrupted` error (not `RebuildFailed`) | ✅ D-082 |
+| **Unreadable indices cost per-insert** | Low | `idx_annotations_label`, `idx_lc_tgt_active` — scheduled for removal in 0.7.0 | ⚠️ D-089 |
 
 ---
 
@@ -666,8 +691,12 @@ pub const HYDRATE_CHUNK: usize = 400
 | **Benchmarks** | Performance budgets; regression detection via baselines | `benches/budgets.rs` |
 | **Soak tests** | R15 claim defended under sustained load | `examples/r15_soak.rs` |
 | **Diagnostic examples** | Measurement and diagnosis; not part of test suite | `examples/*.rs` |
+| **Doc sync tests** | API surface matches architecture | `tests/doc_sync_tests.rs` (build failure on mismatch) |
+| **Fixture matrix** | Four-shape fixture; every decision names fixture | `tests/fixtures.rs` (D-088) |
+| **Plan-pinning** | Index plans asserted by `EXPLAIN QUERY PLAN` | `tests/plan_pinning.rs` (D-089) |
+| **Bench controls** | Control row distinguishes machine shift from baseline shift | `benches/budgets.rs` (D-090) |
 
-**Total**: 240 tests (221 plain + 19 property)
+**Total**: 240+ tests (221+ plain + 19+ property). The suite is pinned by `tests/doc_sync_tests.rs` which fails the build when the public API diverges from this document.
 
 ---
 
@@ -684,7 +713,57 @@ pub const HYDRATE_CHUNK: usize = 400
 | **Archive windowing not default** | D-080 | Windowing costs more total work; only pays when backlog is large |
 | **Snapshot chain: report, don't repair** | D-092 | Under Doctrine VI a snapshot is disposable; repair evidence would be destroyed |
 | **Metrics feature-gated, zero cost when off** | D-079 | `HoldTimer` reads no clock; `ActorMetrics` is empty ZST |
+| **Four chunk sizes, not one** | D-058 | Per-row costs span 60×; one constant cannot express one duration across paths |
+| **Chunking is ~11% slower as throughput** | D-059 | Smaller chunks buy latency and cost throughput on every path |
+| **`low_chunked` deduplicates four bulk loops** | D-086 | Four copies of a yield-critical loop are four places for the yield to be lost |
+| **`RebuildInterrupted` ≠ `RebuildFailed`** | D-082 | The repair *did not run* is not *the repair did not repair*; action is to retry |
+| **`OverlappingInterval` boxed (168 bytes)** | D-075 | Only variant that is boxed; keeps `DbError` under `clippy::result_large_err` threshold |
+| **NaN is not a schema gap** | D-078 | `weight REAL NOT NULL` rejects NaN; listing it as a gap claimed the schema was silent where it is strict |
+| **`weight >= 0.0` via `CHECK`** | D-083 | Schema v7 closes the third §4.7 invariant; negative and text weights refused at engine level |
+| **Deferred: `rowid_pk` (D-084)** | D-084 | Deferred to erasure release — triggers on concept archival, which is itself deferred |
+| **Deferred: `Subgraph` interning (D-087)** | D-087 | Deferred to 0.7.0 — cost/benefit assessed post-baseline, `hydrate`'s N+1 buries it |
 
 ---
 
-*Last updated: 2026-07-31 · v0.6.0*
+## 10. Python Bindings (v0.7.0)
+
+A synchronous Python binding built on pyo3 0.29 and maturin, delivered as a wheel alongside the Rust crate. The binding is **synchronous** (D-095): the Write Actor serialises every write through one channel, so exposing `await` on the write path advertises concurrency the architecture does not grant. A mixed async/sync surface is worse than either pure form.
+
+**Runtime boundary.** Every `Database` method runs inside `Python::detach` around `Runtime::block_on`, releasing the GIL for the duration of the call. A single process-global multi-threaded runtime is behind a `OnceLock`; per-handle runtimes would mean N thread pools and a panic risk (tokio `Runtime::drop` panics from inside a runtime). The `PyDatabase` struct is `#[pyclass(frozen)]` over `RwLock<Option<Database>>` — reads take a read lock and run concurrently; `close()` takes the write lock and waits. The lock must be acquired *inside* the GIL-released closure, not outside, or `close()` blocks on the GIL and deadlocks. A `fork()` guard poisons the runtime on Linux `multiprocessing` children, converting a silent hang into an exception.
+
+**Error mapping.** Every `DbError` variant maps to its own Python exception class with its fields as attributes — `MacrameError` is the base, with trees under `IntegrityError`, `ValidationError`, `VectorError`, `TemporalError`, `WriterError`, etc. Completeness is enforced by an exhaustive `match` over `DbError` with no wildcard arm; adding a variant fails to compile `macrame-py` before a wheel is built. The `#[error]` rendering survives as `str(e)`, so callers who only want the sentence get it.
+
+**Value types and coercion.** Timestamps accept both `str` (passes through) and aware `datetime` (converted); naive datetimes and bare `date` objects are rejected rather than assumed UTC. Outbound timestamps are always `datetime` with `tzinfo=utc`. An open interval (`9999-12-31T23:59:59.999999Z`) crosses as `None`, not as a sentinel datetime — `datetime.max` cannot survive `.astimezone()` east of UTC. `macrame.OPEN` is the stored string for callers who need to name it. Embeddings accept `bytes` (fast path, 60.8 µs for 768 dims) or any sequence of floats (94.9 µs). `Subgraph` stays opaque — a `#[pyclass]` with forwarded accessors, with an explicit `.to_dict()` for callers who want the copy. Value types validate in their constructor (not at the point of use), so a `write_bulk_atomic` failure points at the line that built the offending value.
+
+**What is not exposed.** `Database::raw()`, `Database::read_conn()`, the bare-connection `register_model`/`upsert_embedding`, and `open_with_clock` are all deliberately unexposed. `diagnostic_conn()` *is* exposed, but as methods that run a query and return rows — `db.explain(sql)` and `db.diagnostic_query(sql, params)` — not as a connection object. Opening per call is also the R15-safe shape: 500 sequential opens measured clean. `FakeClock` is available only in a separate `macrame.testing` submodule, gated and documented as unsupported.
+
+**Lifecycle.** `__enter__`/`__exit__` are the supported path because Python's GC is non-deterministic and `close()` (which takes `self` by value in Rust) cannot be called from `#[pymethods]`. A dropped-without-close handle emits a `ResourceWarning` via `__del__`.
+
+**Packaging.** Distribution `macrame-db`, import `macrame`. Wheels: `manylinux_2_28` x86_64 + aarch64, macOS universal2, Windows x86_64. `abi3-py310` (D-094): one wheel per platform rather than one per Python minor version. The wheel ships with `metrics` on (D-093) because a feature flag does not survive into a binary artifact. Smoke test asserts `engine_linked()` and `metrics().turns > 0` — a wheel that imports but has no engine or no counters would pass a bare import test. Cold build ~54–62 s; wheel 4.3 MiB compressed. Uploads use Trusted Publishing (OIDC), no token stored.
+
+**Testing.** `tests_py/` runs single-process (no xdist), because `pytest-xdist` opens a database per worker — exactly the concurrent-open shape that reproduces R15. R15 is transparent to the boundary: `block_on` releases the GIL, so 48 concurrent opens from 48 threads fault 2/12, matching the Rust control arm. The gate (`run_suite.py`) checks summary, failure count, collected count and exit code against each other, naming four outcomes (`CRASH`, `FAILED`, `INCOMPLETE`, `TEARDOWN`) and retrying only `CRASH`. The reporting hazard differs from Rust: pytest runs one process, so a mid-run crash gives exit code 3 with no summary line (exit code *is* sufficient), but a fault during interpreter teardown after a green summary gives a green summary with non-zero exit (exit code alone is wrong).
+
+**Stubs.** Hand-written `_macrame.pyi`, compared to the live extension both ways and to `errors.rs`, verified by five injection tests. `mypy --strict` in CI. `py.typed` marker ensures stubs are consulted. Stub conventions: timestamps **in** are `str | datetime` (aware only), **out** are always aware UTC `datetime`; open interval is `None`; `astar`'s heuristic is `Callable[[str, str], float]`.
+
+**R15 through the boundary.** The concurrent-open fault reproduces through Python at the same rate as Rust — `block_on` releases the GIL, so threads are genuinely concurrent inside `open`. The boundary is transparent. The pytest suite's reporting hazard differs from Rust: see Testing above.
+
+---
+
+## 11. Deferred Decisions
+
+| Decision | Reference | Trigger |
+|---|---|---|
+| **`rowid_pk` on `links`** | D-084 | Deferred to erasure release — concept archival, which is itself deferred (D-022) |
+| **`Subgraph` key interning** | D-087 | Deferred to 0.7.0 — cost/benefit assessed post-baseline, `hydrate`'s N+1 buries it |
+| **Concept archival** | D-022, Appendix C | Deferred — rehydration cost and identity semantics need their own decision |
+| **Automatic writer restart** | D-015, Appendix C | Deferred — containment errors support it; operational experience will decide |
+| **Crate-level write cancellation** | D-028, Appendix C | Deferred — application-layer `CancellationToken` checked before `send` |
+| **Graph-neural-network features** | Appendix C | Deferred — belongs to the application layer, not the ledger |
+| **`Subgraph` as opaque handle** | D-101 | Delivered in P4.2 — converting eagerly doubles peak memory |
+| **`astar` heuristic** | D-104 | Resolved: does not release GIL; raising heuristic captured and re-raised; `NaN` refused by name |
+| **`traverse` vs `traverse_ids`** | D-102, D-103 | `OMIT` on `traverse` is refused (points to `traverse_ids`); unstated `min_weight` is `-inf`, not `0.0` |
+| **`ChainCheck` anchors** | D-105 | `composed_anchor` and `folded_anchor` may legitimately differ and must never be compared — `diverged()` is the method |
+
+---
+
+*Last updated: 2026-07-31 · v0.7.0 · Synced against architecture (s4–s14, appendices A–C) · Pinned by `tests/doc_sync_tests.rs`*
