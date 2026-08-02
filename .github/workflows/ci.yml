@@ -141,6 +141,22 @@ jobs:
       # INCOMPLETE, TEARDOWN, BUILD — and retries only CRASH. A genuine failure
       # is now reported on attempt 1 with the test named. D-107 did this for the
       # Python suite; D-110 brings it back to Rust.
+      # The classifier is verified before it is trusted, and this step exists
+      # because verifying it by injection was not enough. Both injections were
+      # run locally and both were correct; the first CI run then reported
+      # `BUILD` on a suite in which all 27 targets passed, because
+      # `CARGO_TERM_COLOR: always` (set above, and not set locally) wraps every
+      # cargo status line in SGR escapes and the stderr parse matched nothing.
+      #
+      # Injection proves the classifier reads a real cargo run. It cannot prove
+      # it reads a run shaped the way *this workflow* shapes one. The fixtures
+      # include the coloured shape, cost no compile, and run first so a broken
+      # classifier is reported as a broken classifier rather than as a broken
+      # suite.
+      - name: suite gate self-test
+        shell: bash
+        run: python scripts/run_rust_suite.py --self-test
+
       - name: test (with R15 retry)
         shell: bash
         run: python scripts/run_rust_suite.py --features metrics --attempts 3

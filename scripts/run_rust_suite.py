@@ -74,6 +74,21 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 
+# `ci.yml` sets `CARGO_TERM_COLOR: always`, so on CI every cargo status line
+# arrives wrapped in SGR escapes:
+#
+#     '\x1b[1m\x1b[92m     Running\x1b[0m tests/foo.rs (target/debug/...)'
+#
+# The first version of this file matched `^\s*Running` and therefore matched
+# nothing on CI, found zero targets, and reported `BUILD` on a run in which all
+# 27 targets had passed. Locally it was invisible: the variable is set in the
+# workflow, and cargo turns colour off for a non-tty by default.
+#
+# Stripped rather than tolerated in each pattern, because "every regex in this
+# file must also allow for colour" is a rule that holds until someone adds the
+# next regex.
+ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
 # Announcements on stderr. `Doc-tests` is not a `Running` line and is easy to
 # drop; it is a target with a summary like any other and losing it would put
 # every later section one out of step.
@@ -104,7 +119,7 @@ class Outcome:
 def targets_from(stderr: str) -> list[str]:
     """Announced targets, in the order cargo ran them."""
     names = []
-    for line in stderr.splitlines():
+    for line in ANSI.sub("", stderr).splitlines():
         m = RUNNING.match(line)
         if m:
             names.append(Path(m.group(1)).stem)
@@ -118,7 +133,7 @@ def targets_from(stderr: str) -> list[str]:
 def sections_from(stdout: str) -> list[dict]:
     """One entry per `running N tests` block, whether or not it finished."""
     sections: list[dict] = []
-    for line in stdout.splitlines():
+    for line in ANSI.sub("", stdout).splitlines():
         m = SECTION.match(line)
         if m:
             sections.append(
@@ -146,23 +161,45 @@ def classify(proc: subprocess.CompletedProcess) -> Outcome:
     targets = targets_from(proc.stderr)
     sections = sections_from(proc.stdout)
 
-    # 0. Nothing ran. A compile or link error, which is a real answer available
-    #    on attempt 1 -- not one of the four run outcomes, and given its own
-    #    name rather than squeezed into the nearest one. Classified before
-    #    anything else because every check below reads a section list that a
-    #    build failure leaves empty, and an empty list satisfies "all green"
-    #    vacuously.
-    if not targets:
+    # Positional pairing, and it degrades instead of lying. If the stderr parse
+    # ever comes up short again -- a new cargo status wording, a colour scheme
+    # this file has not met -- the sections on stdout are still the evidence of
+    # what ran, and a target nobody could name is better reported by position
+    # than not reported at all.
+    def name(i: int) -> str:
+        return targets[i] if i < len(targets) else f"target#{i + 1}"
+
+    # 0. Nothing ran at all: no announcement AND no test output. A compile or
+    #    link error, which is a real answer available on attempt 1, given its
+    #    own name rather than squeezed into the nearest one.
+    #
+    #    **Both halves are required, and the first version required only the
+    #    first.** It read `if not targets` and reported `BUILD` on a CI run
+    #    where every target had passed, because `CARGO_TERM_COLOR: always` had
+    #    defeated the stderr parse. The stdout sections were sitting right
+    #    there. An empty target list is not evidence that nothing ran; it is
+    #    evidence that nothing was *parsed*, and those differ exactly when this
+    #    file has a bug.
+    if not targets and not sections:
+        if proc.returncode == 0:
+            # No targets, no output, and cargo is happy. Whatever this is, it
+            # is not a passing suite, and it must not be reported as one.
+            return Outcome(
+                "INCOMPLETE",
+                "cargo exited 0 having produced no test targets and no test "
+                "output. Nothing ran, and nothing said why.",
+            )
         return Outcome(
             "BUILD",
-            f"cargo produced no test targets (exit {proc.returncode}). "
-            f"The suite did not run; this is a build failure.",
+            f"cargo produced no test targets and no test output "
+            f"(exit {proc.returncode}). The suite did not run; this is a "
+            f"build failure.",
         )
 
     # 1. A target announced but with no section at all: it never reached its
     #    first test. Distinct from a crash mid-run and not retried, because
     #    nothing about it looks like R15.
-    if len(sections) < len(targets):
+    if targets and len(sections) < len(targets):
         missing = targets[len(sections):] or ["(position not recoverable)"]
         return Outcome(
             "INCOMPLETE",
@@ -175,7 +212,7 @@ def classify(proc: subprocess.CompletedProcess) -> Outcome:
     #    the whole point of the exercise: `for attempt in 1 2 3` would have
     #    spent two more full suite runs to print the same thing less clearly.
     failing = [
-        (targets[i], s) for i, s in enumerate(sections)
+        (name(i), s) for i, s in enumerate(sections)
         if s["result"] and not s["result"]["ok"]
     ]
     if failing:
@@ -196,7 +233,7 @@ def classify(proc: subprocess.CompletedProcess) -> Outcome:
     #    The one outcome worth retrying, and the one that a pass-count sum
     #    reports as a slightly smaller green.
     crashed = [
-        (targets[i], s) for i, s in enumerate(sections) if s["result"] is None
+        (name(i), s) for i, s in enumerate(sections) if s["result"] is None
     ]
     if crashed:
         names = ", ".join(t for t, _ in crashed)
@@ -220,6 +257,100 @@ def classify(proc: subprocess.CompletedProcess) -> Outcome:
 
     total = sum(s["result"]["passed"] for s in sections)
     return Outcome("PASSED", f"{total} passed across {len(sections)} targets")
+
+
+# --------------------------------------------------------------------------
+# Self-test
+# --------------------------------------------------------------------------
+#
+# Why this exists, and why it runs in CI as its own step.
+#
+# The classifier was verified by injection before it shipped -- a real `panic!`
+# and a real `std::process::abort()`, both reported correctly -- and it still
+# went wrong on its first CI run, because the injections were run *locally* and
+# the defect was an environment difference: `CARGO_TERM_COLOR: always`.
+# Injection proves the classifier reads a real cargo run; it cannot prove it
+# reads a cargo run *shaped the way CI shapes it*.
+#
+# So the shapes are pinned as fixtures, including the coloured one, and the
+# step costs no compile. A gate that can only be tested by the thing it gates
+# is a gate that gets tested once.
+
+GREEN_STDOUT = (
+    "\nrunning 2 tests\ntest a ... ok\ntest b ... ok\n\n"
+    "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; "
+    "0 filtered out; finished in 0.01s\n\n"
+    "\nrunning 1 test\ntest c ... ok\n\n"
+    "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; "
+    "0 filtered out; finished in 0.01s\n"
+)
+PLAIN_STDERR = (
+    "   Compiling macrame-db v0.7.0 (/x)\n"
+    "    Finished `test` profile [unoptimized + debuginfo] target(s) in 1s\n"
+    "     Running unittests src/lib.rs (target/debug/deps/macrame-abc)\n"
+    "   Doc-tests macrame\n"
+)
+# The real shape from CI, reproduced locally with CARGO_TERM_COLOR=always.
+COLOUR_STDERR = (
+    "\x1b[1m\x1b[92m   Compiling\x1b[0m macrame-db v0.7.0 (/x)\n"
+    "\x1b[1m\x1b[92m    Finished\x1b[0m `test` profile target(s) in 1s\n"
+    "\x1b[1m\x1b[92m     Running\x1b[0m unittests src/lib.rs "
+    "(target/debug/deps/macrame-abc)\n"
+    "\x1b[1m\x1b[92m   Doc-tests\x1b[0m macrame\n"
+)
+
+
+def _self_test() -> int:
+    def proc(out: str, err: str, code: int) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(["cargo"], code, out, err)
+
+    crashed = GREEN_STDOUT[: GREEN_STDOUT.rindex("test result:")]
+    red = GREEN_STDOUT.replace(
+        "test c ... ok\n\ntest result: ok. 1 passed; 0 failed",
+        "test c ... FAILED\n\ntest result: FAILED. 0 passed; 1 failed",
+    )
+
+    cases = [
+        # The regression this exists for: identical run, colour on and off.
+        ("green, plain stderr", proc(GREEN_STDOUT, PLAIN_STDERR, 0), "PASSED"),
+        ("green, COLOURED stderr", proc(GREEN_STDOUT, COLOUR_STDERR, 0), "PASSED"),
+        ("crash, coloured", proc(crashed, COLOUR_STDERR, 101), "CRASH"),
+        ("failure, coloured", proc(red, COLOUR_STDERR, 101), "FAILED"),
+        ("green summaries, bad exit", proc(GREEN_STDOUT, PLAIN_STDERR, 101), "TEARDOWN"),
+        # A target announced that never started.
+        (
+            "one section missing",
+            proc(GREEN_STDOUT[: GREEN_STDOUT.index("\nrunning 1 test")], PLAIN_STDERR, 101),
+            "INCOMPLETE",
+        ),
+        # Nothing at all, both ways round.
+        ("build failure", proc("", "error: could not compile\n", 101), "BUILD"),
+        ("silent success", proc("", "", 0), "INCOMPLETE"),
+        # Degradation: stdout intact, stderr unparseable. Must NOT be BUILD.
+        ("stderr unreadable", proc(GREEN_STDOUT, "<<garbage>>\n", 0), "PASSED"),
+    ]
+
+    bad = 0
+    for label, p, expected in cases:
+        got = classify(p)
+        ok = got.kind == expected
+        bad += not ok
+        print(f"  {'ok  ' if ok else 'FAIL'} {label:<26} expected {expected:<10} got {got.kind}")
+        if not ok:
+            print(f"       {got.detail}")
+
+    # The colour pair is the whole point: assert they agree, not merely that
+    # each lands somewhere.
+    plain = classify(proc(GREEN_STDOUT, PLAIN_STDERR, 0))
+    colour = classify(proc(GREEN_STDOUT, COLOUR_STDERR, 0))
+    if plain.detail != colour.detail:
+        bad += 1
+        print(f"  FAIL colour changes the answer:\n       {plain.detail}\n       {colour.detail}")
+    else:
+        print("  ok   colour makes no difference to the detail line")
+
+    print("self-test FAILED" if bad else "self-test passed")
+    return 1 if bad else 0
 
 
 def run_once(cargo_args: list[str]) -> Outcome:
@@ -252,10 +383,18 @@ def main() -> int:
         # failure into a pass, which was the objection to raising it before.
         help="how many times to retry a CRASH (nothing else is retried)",
     )
+    parser.add_argument(
+        "--self-test",
+        action="store_true",
+        help="classify fixed fixtures and exit; runs no cargo, compiles nothing",
+    )
     # Anything unrecognised goes straight to cargo. This is what lets the
     # injection checks in the exit gate run one target instead of rebuilding
     # the world: `--test bench_control_tests`.
     args, passthrough = parser.parse_known_args()
+
+    if args.self_test:
+        return _self_test()
 
     cargo_args = ["--features", args.features] if args.features else []
     cargo_args += passthrough
