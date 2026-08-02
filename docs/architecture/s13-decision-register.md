@@ -1112,3 +1112,26 @@ What the name comparison cannot see is a wrong *type*: `-> int` where the runtim
 **The budget then moves, and only then.** The quarantined step goes to six attempts (≈5% red instead of ≈22%). Raising it was rejected while the loop existed, and the rejection was right at the time: more attempts also meant more chances to launder a real failure into a pass. The classifier removes that consequence — `FAILED` returns on attempt 1 and is never retried — so six attempts now buys tolerance for the one outcome known to be noise and nothing else. The main suite stays at three, and `tests_py/run_suite.py` stays at three; the number is a property of how often a given step faults, not a house style.
 
 **Rejected.** *Five retries alone* — lowers a rate and preserves the property that genuine red is indistinguishable from noise, which is the actual defect. *`continue-on-error`* — deletes the signal instead of reading it. *Dropping the property binaries* — they are the only model-based checks of the doctrine invariants ([D-030](s13-decision-register.md#d-030)). *Summing pass counts across targets* — the exact thing the reporting hazard defeats. *Folding a build failure into `INCOMPLETE`* — an empty target list satisfies every "all green" check vacuously, so `BUILD` is classified first and named separately.
+
+<a id="d-111"></a>D-111 — `libsql` **stays at 0.9.30**: R15 reproduces on `0.10.0-pre.4`, on both sides of the Python boundary (0.8.0). [D-092](s13-decision-register.md#d-092), [D-095](s13-decision-register.md#d-095), [D-110](s13-decision-register.md#d-110), [R15](s11-s12-milestones-and-risks.md#r15).
+
+R15 is expensive: it costs `RUST_TEST_THREADS = "1"`, the `property-tests` quarantine, the crash-retry half of two suite gates, a Python suite forbidden `pytest-xdist`, the longest row in the risk register, and — until [D-110](s13-decision-register.md#d-110) — a red `main` on documentation-only commits. All of it becomes deletable if the fault is gone upstream. `0.9.30` has not moved since the fault was reported against it on 2026-07-31; `0.10.0-pre.4` (2026-06-02) had never been compiled here. So it was probed rather than guessed at.
+
+**It builds and it passes.** `0.10.0-pre.4` resolves and compiles unchanged, and the full suite is **305 passed across 27 targets on the first attempt**. Nothing in this crate depends on anything the 0.10 line moved, which is worth knowing on its own: whenever 0.10 goes stable, the upgrade is a version bump and not a port.
+
+**And the fault is still there.** Measured in one session on one machine, so the arms are comparable to each other:
+
+| arm | 0.9.30, recorded 0.6.0/0.7.0 | 0.9.30, this session | `0.10.0-pre.4`, this session |
+|---|---|---|---|
+| Rust `control` — 48 concurrent opens, 15 s × 10 | 2/10 | **0/10** | **1/10** |
+| Rust `claim` — one long-lived `Database`, 15 s × 10 | 0/10 | — | **0/10** |
+| Python probe — 48 opens from 48 threads × 12 | 2/12 | — | **1/12** |
+| full suite | 305 passed | 305 passed | 305 passed |
+
+**The row that matters most is the one that looks like good news.** `0.9.30` faulted **0/10** this session against the 2/10 recorded for it at 0.6.0. Against p≈0.2 a clean run of ten happens about 11% of the time, so this is noise behaving exactly as noise does — but it is decisive for method. Had the probe run only the new engine and seen a clean arm, the honest-looking conclusion would have been *fixed*. Had it compared 1/10 against the *historical* 2/10 baseline, the conclusion would have been *improved*. Run side by side, the old engine scored better than the new one, and the only defensible reading is that **ten runs cannot distinguish these rates at all**. This is the same argument `examples/r15_soak.rs` was built around — a clean arm means nothing without a control — applied one level up, to the comparison between engines rather than between arms.
+
+So the question this probe can answer is binary, and it answers it: **the fault is observed directly on `0.10.0-pre.4`, on both sides of the boundary.** Any non-zero rate keeps every mitigation, so no further runs would change the decision, and bounding the *rate* to the precision that would distinguish 1/10 from 2/10 needs a sample far larger than the decision is worth.
+
+**Two things found on the way.** `bindings/python/Cargo.toml` pins `libsql` **independently** of the root — deliberately, and its comment says so — so a dependency move is a two-manifest edit. It is self-detecting rather than silent: the first attempt here failed with `Engine(#[from] libsql::Error)` mismatching across two resolved versions, which is a compile error and the right failure. And the whole probe ran in a detached `git worktree`, so the working tree never held a dependency change that was never going to be committed.
+
+**Rejected.** *Moving to `0.10.0-pre.4` anyway* — it is a pre-release, the fault it would be adopted to fix is still present, and the mitigations would all have to stay. *Reading the clean `0.9.30` arm as a rate change* — the sample cannot support it, in either direction. *Skipping the Python arm because the Rust arm settled the decision* — the transparency of the boundary is a measured property ([D-095](s13-decision-register.md#d-095)), not one to re-derive from a mechanism argument on a new engine. *Deleting any mitigation* — nothing measured here licenses it.

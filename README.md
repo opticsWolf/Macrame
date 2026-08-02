@@ -121,8 +121,9 @@ Every design decision derives from these invariants:
 | v4 | FTS5 external-content index |
 | v5 | Overlap guard index |
 | v6 | Overlapping closed intervals refused in actor |
-| v7 | `CHECK (weight >= 0.0)` on `links.weight` |
-| v8 | Unreadable indices (scheduled for removal) |
+| v7 | `CHECK (weight >= 0.0)` on `links.weight` — **current** |
+
+There is no v8. `idx_annotations_label` and `idx_lc_tgt_active` ship in the v7 baseline with no query that seeks on them (D-089); dropping them is what a v8 rung will be for.
 
 ---
 
@@ -134,8 +135,8 @@ Every design decision derives from these invariants:
 | MSRV | **1.88** (verified, not declared) |
 | Runtime | tokio async, single process |
 | Engine | libSQL 0.9.30 (MIT, unmodified) |
-| Schema version | 7 (v8 indices in flight) |
-| Test suite | 240+ tests, all green |
+| Schema version | 7 |
+| Test suite | 296 Rust · 305 with `metrics` · 316 with `property-tests` · 344 Python — all green (measured 2026-08-02) |
 | Dependencies | tokio, serde, bincode, zstd, thiserror, tracing, ulid |
 
 ### Module Map
@@ -178,7 +179,7 @@ Every design decision derives from these invariants:
 
 | Operation | Budget | Measured |
 |---|---|---|
-| Single assertion | ≤ 5 ms | — |
+| Single assertion | ≤ 5 ms | **not met at high out-degree** — O(out-degree), not O(1) (D-059) |
 | Chunk commit (edges, 90 rows) | ≤ 3 ms | ~2.39 ms |
 | Three-hop traversal | ≤ 10 ms | 2.1 ms |
 | Vector top-10 | ≤ 20 ms | 294 µs |

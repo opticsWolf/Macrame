@@ -267,6 +267,37 @@ carries its own history — append, do not replace); `s6-s10` §10 if the versio
 
 **Sequenced second**, before Track B: the answer changes how much of A1's classifier 0.9.0 keeps.
 
+> **Delivered 2026-08-02** — the answer is **no**, and nothing is deletable.
+> [D-111](architecture/s13-decision-register.md#d-111).
+>
+> `0.10.0-pre.4` resolves, compiles unchanged, and passes **305/305 on the first attempt** —
+> a genuinely useful side result, because it means an eventual 0.10 upgrade is a version bump
+> and not a port. And R15 reproduces on it: Rust `control` **1/10** at 48 concurrent opens,
+> Python probe **1/12** at the same width, Rust `claim` **0/10**.
+>
+> **The decisive row is the baseline, and it is the one that looks like good news.** Re-run in
+> the same session on the same machine, `0.9.30` faulted **0/10** against the 2/10 recorded
+> for it at 0.6.0. Had this probe run only the new engine, a clean arm would have read as
+> *fixed*; had it compared 1/10 against the historical 2/10, as *improved*. Side by side the
+> old engine scored better than the new one, so the only defensible reading is that **ten runs
+> cannot distinguish these rates in either direction**. That is `r15_soak`'s own control-arm
+> argument applied one level up — between engines rather than between arms — and it is why
+> the exit gate's "fault counts at matched widths" was run as a paired comparison rather than
+> against the numbers already in the register.
+>
+> The question the probe can settle is binary, and it is settled by direct observation. No
+> sample size worth paying for would change the decision, because **any** non-zero rate keeps
+> every mitigation. A1's classifier keeps all of its job in 0.9.0.
+>
+> **Two findings on the way.** `bindings/python/Cargo.toml` pins `libsql` independently of the
+> root, so a dependency move is a two-manifest edit — deliberate, documented there, and
+> self-detecting: the first wheel build failed on `libsql::Error` mismatching across two
+> resolved versions, which is a compile error and the right failure. The whole probe ran in a
+> detached `git worktree`, so the working tree never held a dependency change that was never
+> going to be committed.
+>
+> `s6-s10` §10 needed no edit: the version does not move.
+
 ### A3 · Make the documents describe this codebase
 
 | Where | Says | Is |
@@ -287,6 +318,57 @@ Date it; M5's "measured, not gated" correction ([D-055](architecture/s13-decisio
 is load-bearing and must survive the edit.
 
 **Documents.** All of the above, plus `architecture/README.md`'s decision range.
+
+> **Delivered 2026-08-02.** Every row re-measured rather than taken from this table.
+>
+> **Counts, measured today:** **296** Rust default · **305** `metrics` · **316** `property-tests`
+> · **344** Python, all green. The plan's table listed three of those four; `property-tests` at
+> 316 was missing, and it is the one a reader would most want, because it is the number the
+> quarantined CI step produces. All four now appear in `README.md` and `quickref.md` **with the
+> date they were measured**, which is the part that makes the next drift visible.
+>
+> **The "v8" rows were worse than stale — they were never true.** `README.md:125` and
+> `quickref.md:171` both carried a **v8** row for the two unread indices. `SCHEMA_VERSION` is 7
+> with rungs 2→3→4→5→6→7, and `idx_annotations_label` / `idx_lc_tgt_active` are in
+> `ddl::CREATE_INDICES` — the **v7 baseline**, created on every fresh database. There is no v8
+> rung and there never was; what was scheduled for 0.7.0 was their *removal*. So the rows
+> described a migration that would delete them as though it had already added them. Both now
+> say what is actually on disk, and that dropping them is what a v8 rung will be for (B4).
+> `architecture/README.md:43` carried the same error inside a historical 0.6.0 row and its
+> factual half is corrected in place.
+>
+> **`README.md:182`'s dash is the row that mattered most**, because a published front page said
+> `≤ 5 ms | —` and a dash reads as *unmeasured* when §9 has known since 0.5.5 that the budget is
+> **not met at high out-degree** — the single-open guard scans the source's whole out-degree, so
+> it is O(degree), not O(1) ([D-059](architecture/s13-decision-register.md#d-059)). No number was
+> invented for it: D-059's figures are for 90-row chunks into a hub, and using them for a single
+> assertion would be a category error. The cell states the shape and cites the decision.
+>
+> **The §11 status paragraph was three releases stale in the direction that matters.** It was
+> headed *(0.5.4)*, claimed M3 incomplete "except hybrid RRF, which has no FTS5 table behind
+> it", and claimed M5's benchmark gates "do not exist". `concepts_fts` arrived on the `v4 → v5`
+> rung at 0.5.5b ([D-051](architecture/s13-decision-register.md#d-051)), so the paragraph spent
+> three releases denying a feature that shipped. **M1–M5 are all delivered**, it is dated, and
+> [D-055](architecture/s13-decision-register.md#d-055)'s *measured, not gated* correction is
+> restated explicitly rather than left to survive an edit — it is load-bearing and an
+> unqualified "the gates exist now" would have quietly undone it.
+>
+> **What was deliberately not touched.** Historical release rows in
+> `architecture/README.md` keep their contemporaneous numbers ("Suite: 240+ tests" in the 0.6.0
+> row), on the same principle that pins
+> [`LINKS_V7`](architecture/s13-decision-register.md#d-032) as text: **a release row is a
+> statement about the past.** Only claims about the *present* were corrected, plus outright
+> factual errors about the schema wherever they appeared.
+>
+> Also fixed: "the 337-test suite" → 344 in `python.yml:4`, `wheels.yml:166` and `s14:515`; the
+> decision range in `architecture/README.md:62` → D-001…D-111. Gates green (`doc_link_tests`,
+> `doc_sync_tests`, `packaging_tests`, `index_plan_tests`).
+>
+> **No register entry.** A3 corrects statements; it decides nothing, and a decision entry for
+> "the documents now say what is true" would dilute the register. The *class* of failure it
+> belongs to is [A5](#a5--a-decision-that-names-a-release-must-not-outlive-it)'s, and that is
+> where the tripwire and the decision go — none of these could have gone red, which is the
+> finding, not the fix.
 
 ### A4 · The two CI gaps that are not about R15
 

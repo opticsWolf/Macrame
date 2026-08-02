@@ -168,7 +168,7 @@ Every temporal column is exactly 27 characters: `YYYY-MM-DDTHH:MM:SS.ffffffZ`
 | v5 | `idx_lc_open_interval` (overlap guard index) |
 | v6 | Overlapping closed intervals refused in actor |
 | v7 | `CHECK (weight >= 0.0 AND weight < 9e999 AND typeof(weight) = 'real')` |
-| v8 | `idx_annotations_label`, `idx_lc_tgt_active` — unreadable indices (D-089), scheduled for removal in 0.7.0 |
+| — | `idx_annotations_label`, `idx_lc_tgt_active` are unread indices (D-089) shipped in the **v7 baseline**, not a rung. There is no v8; dropping them is what one will be for |
 
 ---
 
@@ -677,7 +677,7 @@ pub fn estimated_bulk_hold(edges: &[EdgeAssertion]) -> Duration  // ~34 ms / 500
 | **Superlinear chunk cost on large tables** | Medium | Index on `(source_id, target_id, edge_type, valid_to, valid_from)` shipped as v5→v6 | ✅ D-059 |
 | **Snapshot chain divergence** | Low | `verify_snapshot_chain()` reports but does not repair | ✅ D-092 |
 | **Rebuild interrupted by archive during shadow-swap** | Medium | `ActorShared::archive_epoch` interlock; `RebuildInterrupted` error (not `RebuildFailed`) | ✅ D-082 |
-| **Unreadable indices cost per-insert** | Low | `idx_annotations_label`, `idx_lc_tgt_active` — scheduled for removal in 0.7.0 | ⚠️ D-089 |
+| **Unreadable indices cost per-insert** | Low | `idx_annotations_label`, `idx_lc_tgt_active` — still present in v7; removal is a v8 rung, not yet written | ⚠️ D-089 |
 
 ---
 
@@ -696,7 +696,7 @@ pub fn estimated_bulk_hold(edges: &[EdgeAssertion]) -> Duration  // ~34 ms / 500
 | **Plan-pinning** | Index plans asserted by `EXPLAIN QUERY PLAN` | `tests/plan_pinning.rs` (D-089) |
 | **Bench controls** | Control row distinguishes machine shift from baseline shift | `benches/budgets.rs` (D-090) |
 
-**Total**: 240+ tests (221+ plain + 19+ property). The suite is pinned by `tests/doc_sync_tests.rs` which fails the build when the public API diverges from this document.
+**Total** (measured 2026-08-02): **296** Rust with default features, **305** with `metrics`, **316** with `property-tests`, **344** Python. The suite is pinned by `tests/doc_sync_tests.rs` which fails the build when the public API diverges from this document.
 
 **How to run it so the answer means something** (D-110). Use `python scripts/run_rust_suite.py --features metrics`, not bare `cargo test`. Under R15 a crashed target prints no `test result:` line while every other target prints its own, so the run comes back with a *smaller pass count and zero failures* — green to anything summing passes. The script classifies each run as `CRASH`, `FAILED`, `INCOMPLETE`, `TEARDOWN` or `BUILD` and retries only `CRASH`; a genuine failure is named on attempt 1. Both CI steps go through it, at three attempts for the main suite and six for the quarantined property step, which faults far more often. Same shape as `tests_py/run_suite.py` (D-107), deliberately not the same implementation.
 
