@@ -1223,21 +1223,37 @@ async fn the_unfiltered_loader_still_returns_everything() {
 // Wave 5 — the FTS index, and why VACUUM cannot disturb it (D-071)
 // ---------------------------------------------------------------------------
 
-/// **`VACUUM` does not renumber `concepts.rowid`, so the FTS index survives it.**
+/// **`VACUUM` does not renumber `concepts.rowid_pk`, so the FTS index survives
+/// it — and since v8 that is true by design rather than by accident.**
 ///
-/// External-content FTS5 is keyed on `concepts.rowid`, which is implicit, and
-/// `VACUUM` renumbers implicit rowids — the standard hazard, and the one this
-/// schema was flagged for by inspection.
+/// External-content FTS5 is keyed on `concepts`'s rowid, and `VACUUM` renumbers
+/// *implicit* rowids — the standard hazard, and the one this schema was flagged
+/// for by inspection.
 ///
-/// It does not arise, and this pins why: `concepts` can never be deleted from
-/// (D-022, `trg_concepts_guard_delete`, unconditional) and upserts go through
-/// `ON CONFLICT DO UPDATE`, which preserves rowids. So the rowids are dense
-/// `1..n` and `VACUUM`'s renumbering is the identity map.
+/// # What this test used to prove, and why that was not enough
 ///
-/// **The delete guard is therefore load-bearing for the search index**, not only
-/// for the ledger — which nothing recorded before D-071. If concept archival or
-/// GDPR erasure ever lands (both deferred in Appendix C), rowids go sparse, this
-/// test fails, and whichever change made them sparse owes a rebuild.
+/// Through v7 the rowid was implicit and the hazard was unreachable only *by
+/// consequence*: `concepts` can never be deleted from (D-022,
+/// `trg_concepts_guard_delete`, unconditional) and upserts go through
+/// `ON CONFLICT DO UPDATE`, which preserves rowids — so the rowids were dense
+/// `1..n` and `VACUUM`'s renumbering was the identity map. The test passed, and
+/// it passed for a reason that had nothing to do with the mechanism it was
+/// named after.
+///
+/// It turns out to have been safe for a *second* reason nobody had measured
+/// either: `VACUUM` on this engine renumbers a sparse implicit rowid only for a
+/// table with no index at all, and v7's `concepts` had the autoindex from
+/// `id TEXT PRIMARY KEY` (D-120). Two accidents stacked, neither chosen, and
+/// the test could not have told you if either stopped holding.
+///
+/// # What it proves now (v8, D-119)
+///
+/// `rowid_pk INTEGER PRIMARY KEY` is a stored column, so `VACUUM` preserves it
+/// whether the numbering is dense or not — and
+/// [`vacuum_preserves_a_sparse_rowid_pk`] runs the sparse case explicitly, which
+/// is the one the identity map used to hide. The delete guard is no longer
+/// load-bearing for the search index, which is the point: 0.9.0 can make it
+/// conditional without owing this test a rebuild.
 #[tokio::test]
 async fn vacuum_does_not_disturb_the_fts_index() {
     let harness = TestHarness::new();
@@ -1267,7 +1283,7 @@ async fn vacuum_does_not_disturb_the_fts_index() {
         let conn = db.read_conn().clone();
         async move {
             let mut rows = conn
-                .query("SELECT rowid, id FROM concepts ORDER BY rowid", ())
+                .query("SELECT rowid_pk, id FROM concepts ORDER BY rowid_pk", ())
                 .await
                 .unwrap();
             let mut v = Vec::new();
@@ -1279,12 +1295,16 @@ async fn vacuum_does_not_disturb_the_fts_index() {
     };
 
     let before = rowids(&db).await;
+    // Still asserted, but no longer as the load-bearing premise — the write path
+    // does produce dense numbering, and this pins that it has not started
+    // churning. The argument the test rests on has moved to the column being
+    // explicit; the sparse case is [`vacuum_preserves_a_sparse_rowid_pk`].
     assert!(
         before
             .iter()
             .enumerate()
             .all(|(i, (r, _))| *r == i as i64 + 1),
-        "rowids must be dense for the argument to hold: {before:?}"
+        "the write path stopped producing dense rowids: {before:?}"
     );
     assert_eq!(
         hits(&db).await,
@@ -1307,6 +1327,219 @@ async fn vacuum_does_not_disturb_the_fts_index() {
         hits(&db).await,
         20,
         "the index must still find every concept after VACUUM"
+    );
+
+    db.close().await.unwrap();
+}
+
+/// **The sparse case, which is the one the old test could not reach** (v8,
+/// D-119).
+///
+/// `vacuum_does_not_disturb_the_fts_index` passed for six versions on a
+/// premise — dense rowids, so renumbering is the identity map — that made it
+/// unable to fail. Any implementation passes a test whose input renumbers to
+/// itself, including an implementation with the bug.
+///
+/// So this one makes the numbering sparse first. Through v7 that was not
+/// expressible at all: the rowid was implicit, the write path never produced a
+/// gap, and the delete guard made one impossible. With `rowid_pk` an explicit
+/// column the gap can simply be written, and `VACUUM` must leave it alone.
+///
+/// **What the control arm found, and what it costs the story** (D-120). The
+/// hazard D-071 recorded is not reproducible on this engine for the v7 shape:
+/// `VACUUM` renumbers a sparse implicit rowid only when the table has *no
+/// index*, and v7's `concepts` had the autoindex from `id TEXT PRIMARY KEY`.
+/// So v7 was safe — by an accident of an optimisation nobody chose, documented
+/// nowhere, and one index-definition change away from not holding. `rowid_pk`
+/// is still right, and its justification is now the honest one: SQLite
+/// *permits* the renumbering, so the index's correctness should not rest on an
+/// engine detail that happens to decline to.
+///
+/// Gaps are seeded through `raw()` rather than the API deliberately. There is no
+/// supported way to choose a concept's `rowid_pk`, and there should not be —
+/// this is standing in for what 0.9.0's archival will do to the table, and the
+/// question is whether the *schema* survives it, not whether the crate has an
+/// entry point for it.
+#[tokio::test]
+async fn vacuum_preserves_a_sparse_rowid_pk() {
+    let harness = TestHarness::new();
+    let db = Database::open(&harness.db_path).await.unwrap();
+
+    let raw = db.raw().connect().unwrap();
+    for pk in [1i64, 4, 5, 9, 100, 1_000_000] {
+        raw.execute(
+            "INSERT INTO concepts (rowid_pk, id, title, content, valid_from, \
+             valid_to, recorded_at) \
+             VALUES (?1, ?2, 'T', 'searchable body text', ?3, \
+                     '9999-12-31T23:59:59.999999Z', ?3)",
+            libsql::params![pk, format!("c{pk:07}"), T0],
+        )
+        .await
+        .unwrap();
+    }
+
+    let read = |db: &Database| {
+        let conn = db.read_conn().clone();
+        async move {
+            let mut rows = conn
+                .query("SELECT rowid_pk, id FROM concepts ORDER BY rowid_pk", ())
+                .await
+                .unwrap();
+            let mut v = Vec::new();
+            while let Some(r) = rows.next().await.unwrap() {
+                v.push((r.get::<i64>(0).unwrap(), r.get::<String>(1).unwrap()));
+            }
+            v
+        }
+    };
+
+    // **The control arm**, and the shape of it is a finding in its own right.
+    //
+    // Without a control this test proves an outcome and not a mechanism: if
+    // `VACUUM` on this engine never renumbered anything, the assertion below
+    // would hold against the v7 schema too.
+    //
+    // The first control written here *was* the v7 shape — `id TEXT PRIMARY KEY`,
+    // implicit rowid — and it did not move. `examples/vacuum_rowid_probe.rs`
+    // measured six shapes and found the rule: **`VACUUM` renumbers a sparse
+    // implicit rowid only for a table carrying no index at all.** Any index —
+    // an autoindex from `PRIMARY KEY` or `UNIQUE`, or a plain secondary one —
+    // and the numbering is preserved. So v7's `concepts`, which had the `id`
+    // autoindex, was never actually renumbered on this build. See D-120.
+    //
+    // The control is therefore the no-index shape, which is the narrowest thing
+    // that still proves `VACUUM` reassigns rowids at all. What it can no longer
+    // claim is that v7 was broken — it was not, by an accident nobody chose.
+    raw.execute("CREATE TABLE probe_implicit (id TEXT NOT NULL)", ())
+        .await
+        .unwrap();
+    for pk in [1i64, 4, 5, 9, 100, 1_000_000] {
+        raw.execute(
+            "INSERT INTO probe_implicit (rowid, id) VALUES (?1, ?2)",
+            libsql::params![pk, format!("c{pk:07}")],
+        )
+        .await
+        .unwrap();
+    }
+    let probe = |db: &Database| {
+        let conn = db.read_conn().clone();
+        async move {
+            let mut rows = conn
+                .query("SELECT rowid FROM probe_implicit ORDER BY rowid", ())
+                .await
+                .unwrap();
+            let mut v = Vec::new();
+            while let Some(r) = rows.next().await.unwrap() {
+                v.push(r.get::<i64>(0).unwrap());
+            }
+            v
+        }
+    };
+    let probe_before = probe(&db).await;
+
+    let before = read(&db).await;
+    assert_eq!(before.len(), 6);
+    // The vacuity guard. If this ever holds, the fixture has silently become
+    // the dense one and the test below proves nothing.
+    assert!(
+        before.iter().enumerate().any(|(i, (r, _))| *r != i as i64 + 1),
+        "the fixture is not sparse, so VACUUM's renumbering would be the \
+         identity map and this test could not fail: {before:?}"
+    );
+    assert_eq!(hits(&db).await, 6, "every concept is indexed to begin with");
+
+    db.raw()
+        .connect()
+        .unwrap()
+        .execute("VACUUM", ())
+        .await
+        .unwrap();
+
+    assert_ne!(
+        probe(&db).await,
+        probe_before,
+        "the control did not move: VACUUM left an unindexed table's sparse \
+         implicit rowids alone, so this engine no longer renumbers at all and \
+         the assertion below holds for a reason that has nothing to do with \
+         `rowid_pk`. Re-run `examples/vacuum_rowid_probe.rs` — D-120's \
+         measurement is what this test rests on."
+    );
+
+    assert_eq!(
+        read(&db).await,
+        before,
+        "VACUUM renumbered a sparse rowid_pk — which is exactly what the \
+         control above just did, and what the explicit column exists to prevent"
+    );
+    assert_eq!(
+        hits(&db).await,
+        6,
+        "the index must still find every concept after VACUUM"
+    );
+
+    db.close().await.unwrap();
+}
+
+/// **`trg_concepts_fts_delete` is installed, and cannot fire** (v8, D-119, §4.6).
+///
+/// Both halves, because either alone is misleading. That it exists is what
+/// 0.9.0 needs and what makes this rung the last one before 1.0; that it cannot
+/// fire is why installing it in 0.8.0 changes nothing observable.
+///
+/// The inertness is not a property of the trigger — it is `trg_concepts_guard_delete`,
+/// a `BEFORE DELETE` that always aborts, so the statement never reaches
+/// `AFTER DELETE`. That dependency is the reason to pin it rather than assume
+/// it: when 0.9.0 makes the guard conditional this test is what says so.
+#[tokio::test]
+async fn the_fts_delete_trigger_is_installed_and_inert() {
+    let harness = TestHarness::new();
+    let db = Database::open(&harness.db_path).await.unwrap();
+
+    db.upsert_concept(
+        ConceptUpsert::new("c0", "Title")
+            .content("searchable body text")
+            .valid_from(T0),
+    )
+    .await
+    .unwrap();
+
+    let installed: i64 = db
+        .read_conn()
+        .query(
+            "SELECT COUNT(*) FROM sqlite_master \
+             WHERE type = 'trigger' AND name = 'trg_concepts_fts_delete'",
+            (),
+        )
+        .await
+        .unwrap()
+        .next()
+        .await
+        .unwrap()
+        .unwrap()
+        .get(0)
+        .unwrap();
+    assert_eq!(
+        installed, 1,
+        "v8 was supposed to install the third FTS trigger; without it 0.9.0's \
+         archival silently stales the search index"
+    );
+
+    // And it is unreachable: the delete guard refuses first.
+    let refused = db
+        .raw()
+        .connect()
+        .unwrap()
+        .execute("DELETE FROM concepts WHERE id = 'c0'", ())
+        .await;
+    assert!(
+        refused.is_err(),
+        "a concept was physically deleted (D-022), which also means the FTS \
+         delete trigger is no longer inert"
+    );
+    assert_eq!(
+        hits(&db).await,
+        1,
+        "the refused delete must leave the index alone"
     );
 
     db.close().await.unwrap();

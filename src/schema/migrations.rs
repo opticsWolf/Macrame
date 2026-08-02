@@ -13,7 +13,7 @@ use crate::schema::ddl::*;
 /// guarantee D-029 buys would be void on it while `user_version` insisted all
 /// was well. Reserving 1 as a value this build refuses by name is what makes
 /// "no legacy support" an enforced property instead of a README sentence.
-pub const SCHEMA_VERSION: u32 = 7;
+pub const SCHEMA_VERSION: u32 = 8;
 
 type StepFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
 
@@ -115,6 +115,16 @@ const STEPS: &[Step] = &[
         name: "links-weight-check",
         suspends_foreign_keys: false,
         apply: |conn| Box::pin(add_weight_check(conn)),
+    },
+    Step {
+        from: 7,
+        to: 8,
+        name: "concepts-rowid-pk-and-unread-indices",
+        // The only rung that needs it, and the reason the flag exists. See
+        // `Step::suspends_foreign_keys` for the four approaches the probe
+        // refuted.
+        suspends_foreign_keys: true,
+        apply: |conn| Box::pin(add_concepts_rowid_pk(conn)),
     },
 ];
 
@@ -295,7 +305,8 @@ async fn apply_step_inner(conn: &libsql::Connection, step: &Step) -> Result<()> 
                 return Err(DbError::Migration {
                     to: step.to,
                     reason: format!(
-                        "step {:?} suspended foreign keys and left a violation                          in {table:?}; the rung is wrong, not the check",
+                        "step {:?} suspended foreign keys and left a violation \
+                         in {table:?}; the rung is wrong, not the check",
                         step.name
                     ),
                 });
@@ -531,6 +542,133 @@ async fn add_weight_check(conn: &libsql::Connection) -> Result<()> {
     for trigger_ddl in CREATE_TRIGGERS {
         conn.execute(trigger_ddl, ()).await?;
     }
+
+    Ok(())
+}
+
+/// The v8 shape of `concepts`, pinned as text (B4, D-119).
+///
+/// Pinned for the reason [`LINKS_V7`] states: a rung that rebuilds a table must
+/// produce the shape that rung is *about*, not whatever
+/// [`CREATE_CONCEPTS_TABLE`] happens to say the day it runs. A migration rung is
+/// a statement about the past.
+const CONCEPTS_V8: &str = r#"
+CREATE TABLE concepts_v8 (
+    rowid_pk         INTEGER PRIMARY KEY,
+    id               TEXT NOT NULL UNIQUE,
+    title            TEXT NOT NULL,
+    content          TEXT NOT NULL DEFAULT '',
+    embedding_model  TEXT,
+    valid_from       TEXT NOT NULL,
+    valid_to         TEXT NOT NULL DEFAULT '9999-12-31T23:59:59.999999Z',
+    recorded_at      TEXT NOT NULL,
+    retired          INTEGER NOT NULL DEFAULT 0,
+    -- (the timestamp CHECK, spelled out for the same pinning reason)
+    CHECK (valid_from GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z' AND valid_to GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z' AND recorded_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z' AND 1)
+)
+"#;
+
+/// The six triggers a v7 `concepts` carries, dropped by name before the rebuild.
+///
+/// By name and not by discovery: a rung is a statement about the past, and the
+/// past is a fixed set. Enumerating what v7 had means a v9 trigger added later
+/// cannot be silently swept up by a `DROP` loop over `sqlite_master`.
+const CONCEPTS_TRIGGERS_V7: &[&str] = &[
+    "trg_concepts_monotonic_ra",
+    "trg_concepts_log_insert",
+    "trg_concepts_log_update",
+    "trg_concepts_guard_delete",
+    "trg_concepts_fts_insert",
+    "trg_concepts_fts_update",
+];
+
+/// v7 → v8: `concepts` gains `rowid_pk`, the FTS index gains its third trigger,
+/// and the two indices with no reader are dropped (B4, D-118, D-119).
+///
+/// # Why this rung must be taken pre-1.0 or never
+///
+/// `rowid_pk INTEGER PRIMARY KEY` means `id` stops being the primary key, and
+/// SQLite allows exactly one per table. That is a **primary-key change**, which
+/// [D-036](../../docs/architecture/s13-decision-register.md) forbids outright
+/// after 1.0 and classes as needing a major version with an explicit ETL path.
+/// Pre-1.0, D-032 makes it a baseline re-issue. There is no third option and no
+/// later cheap moment.
+///
+/// # What it buys
+///
+/// `concepts_fts` is external-content keyed on `concepts`'s rowid, which through
+/// v7 was **implicit** — and `VACUUM` renumbers implicit rowids, decoupling the
+/// index from its rows with no error and no integrity-check failure. D-071
+/// showed the hazard unreachable today only because the delete guard is
+/// unconditional, so rowids are dense and the renumbering is the identity map.
+/// 0.9.0's archival makes them sparse. This installs the fix while the fix is
+/// still free, and installs `trg_concepts_fts_delete` in the same rung so 0.9.0
+/// needs no migration of its own.
+///
+/// # Why it needs `suspends_foreign_keys`, and what still checks the result
+///
+/// `concepts` has inbound foreign keys from `links` (twice),
+/// `analytics_annotations` and every registered `embeddings_*` table, so the
+/// `links`-style rebuild is not available: the `DROP TABLE` fails with keys on,
+/// and the three obvious ways to turn them off inside the transaction all fail
+/// differently. See [`Step::suspends_foreign_keys`] for the four measured
+/// refutations. [`apply_step`] therefore toggles the pragma around the
+/// transaction and runs `PRAGMA foreign_key_check` inside it before committing.
+///
+/// **One consequence worth stating.** That check reports violations across the
+/// whole database, not only ones this rung could have caused. A v7 file that
+/// already held an orphaned `links` row — reachable only if it was written with
+/// enforcement off — will fail to migrate. That is the right outcome and it is
+/// not a silent one: the error names the table.
+///
+/// # Order, and the two traps in it
+///
+/// The triggers and `concepts_fts` come down **before** the table is touched,
+/// not after. Recreating the triggers while the old FTS table was still present
+/// would bind them to an index about to be dropped, and dropping `concepts_fts`
+/// while triggers still named it is the schema-reparse failure the `links` rung
+/// hit from the other direction. So: indices, triggers, FTS, then the rebuild,
+/// then the new FTS, then the triggers, then the rebuild of the index content.
+///
+/// `rowid` is copied into `rowid_pk` **by value** rather than left to
+/// auto-assign. On today's dense numbering the two agree, so this looks
+/// redundant; it is what makes the rung correct on a file whose rowids are not
+/// dense, and it means the migration preserves row identity rather than merely
+/// preserving row order.
+async fn add_concepts_rowid_pk(conn: &libsql::Connection) -> Result<()> {
+    // (a) The two indices with no reader (D-089, completed by D-118).
+    conn.execute("DROP INDEX IF EXISTS idx_annotations_label", ())
+        .await?;
+    conn.execute("DROP INDEX IF EXISTS idx_lc_tgt_active", ())
+        .await?;
+
+    // (b) Clear the way: triggers, then the FTS index, then the table.
+    for name in CONCEPTS_TRIGGERS_V7 {
+        conn.execute(&format!("DROP TRIGGER IF EXISTS {name}"), ())
+            .await?;
+    }
+    conn.execute("DROP TABLE IF EXISTS concepts_fts", ()).await?;
+
+    conn.execute(CONCEPTS_V8, ()).await?;
+    conn.execute(
+        "INSERT INTO concepts_v8 (rowid_pk, id, title, content, embedding_model, \
+         valid_from, valid_to, recorded_at, retired) \
+         SELECT rowid, id, title, content, embedding_model, \
+                valid_from, valid_to, recorded_at, retired \
+         FROM concepts ORDER BY rowid",
+        (),
+    )
+    .await?;
+    conn.execute("DROP TABLE concepts", ()).await?;
+    conn.execute("ALTER TABLE concepts_v8 RENAME TO concepts", ())
+        .await?;
+
+    // (c) Put it back, in the order the trigger bodies require.
+    conn.execute(CREATE_CONCEPTS_FTS, ()).await?;
+    for trigger_ddl in CREATE_TRIGGERS {
+        conn.execute(trigger_ddl, ()).await?;
+    }
+    conn.execute(REBUILD_CONCEPTS_FTS, ()).await?;
 
     Ok(())
 }

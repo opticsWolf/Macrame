@@ -129,10 +129,34 @@ pub const ABORT_DELETE_GUARD: &str = abort_delete_guard!();
 /// duration, so no other connection can reach the guard at all.
 pub const ARCHIVE_SESSION_MARKER: &str = "macrame_archive_session";
 
+/// The `concepts` ledger table (§4.1).
+///
+/// # `rowid_pk` is explicit, and that is the whole point (v8, D-119)
+///
+/// Through v7 this table declared `id TEXT PRIMARY KEY`, which left its rowid
+/// **implicit** — and `concepts_fts` is external-content keyed on that rowid.
+/// `VACUUM` renumbers implicit rowids, which would silently decouple the search
+/// index from the rows it indexes: no error, no integrity-check failure, just
+/// results that stop matching.
+///
+/// [D-071](../../docs/architecture/s13-decision-register.md) proved the hazard
+/// unreachable *by consequence rather than by design* — `trg_concepts_guard_delete`
+/// is unconditional, so rowids are dense `1..n` and `VACUUM`'s renumbering is
+/// the identity map. 0.9.0's archival makes them sparse and makes the hazard
+/// real, so v8 replaces the accident with a column: an `INTEGER PRIMARY KEY` is
+/// a stored value, and `VACUUM` preserves it whether the numbering is dense or
+/// not (measured in `examples/concepts_rebuild_probe.rs` §5).
+///
+/// SQLite permits one primary key per table, so `id` becomes `NOT NULL UNIQUE`.
+/// That keeps it a valid foreign-key parent for `links.source_id` /
+/// `links.target_id` and keeps `ON CONFLICT(id)` working, but it **is** a
+/// primary-key change — which [D-036](../../docs/architecture/s13-decision-register.md)
+/// forbids outright after 1.0. Taken pre-1.0 on purpose, or never.
 pub const CREATE_CONCEPTS_TABLE: &str = concat!(
     r#"
 CREATE TABLE IF NOT EXISTS concepts (
-    id               TEXT PRIMARY KEY,
+    rowid_pk         INTEGER PRIMARY KEY,
+    id               TEXT NOT NULL UNIQUE,
     title            TEXT NOT NULL,
     content          TEXT NOT NULL DEFAULT '',
     embedding_model  TEXT,
@@ -310,12 +334,17 @@ CREATE TABLE IF NOT EXISTS analytics_annotations (
 /// `UPDATE` must retract the *old* terms before adding the new ones, using the
 /// old column values. That is what `trg_concepts_fts_update` does, and getting
 /// it wrong leaves an index that still matches text no concept contains.
+///
+/// **`content_rowid` names `rowid_pk`, not `rowid` (v8, D-119).** They are the
+/// same value — an `INTEGER PRIMARY KEY` *is* the rowid — but naming the column
+/// is what makes the key a declared one rather than an implicit one `VACUUM` is
+/// free to renumber. See [`CREATE_CONCEPTS_TABLE`].
 pub const CREATE_CONCEPTS_FTS: &str = r#"
 CREATE VIRTUAL TABLE IF NOT EXISTS concepts_fts USING fts5(
     title,
     content,
     content='concepts',
-    content_rowid='rowid'
+    content_rowid='rowid_pk'
 );
 "#;
 
@@ -342,8 +371,22 @@ pub const VERIFY_CONCEPTS_FTS: &str =
 pub const REBUILD_CONCEPTS_FTS: &str =
     "INSERT INTO concepts_fts (concepts_fts) VALUES ('rebuild');";
 
+/// Every index the schema declares.
+///
+/// # Two entries left in v8, and why the list is now allowed to be short
+///
+/// `idx_annotations_label` and `idx_lc_tgt_active` were dropped by the v7 → v8
+/// rung ([D-089](../../docs/architecture/s13-decision-register.md), completed by
+/// D-118). Neither had a reader anywhere in the crate — `analytics_annotations`
+/// is never selected from here at all, and no query seeks on
+/// `links_current.target_id` as a leading column — so each was an index write
+/// per insert, forever, buying nothing. One of them was on the crate's hottest
+/// write path.
+///
+/// `tests/index_plan_tests.rs` now requires the unread set to be **empty**,
+/// which turns "these two are known bad" into "an index with no reader is a red
+/// test". That is the guarantee this list is kept short by.
 pub const CREATE_INDICES: &[&str] = &[
-    "CREATE INDEX IF NOT EXISTS idx_annotations_label ON analytics_annotations (label);",
     // Covering index for the traversal CTE (§5.2, D-042).
     //
     // Column order is load-bearing and was measured with EXPLAIN QUERY PLAN.
@@ -364,7 +407,6 @@ pub const CREATE_INDICES: &[&str] = &[
     // writes per assertion on a table that already takes three writes.
     "CREATE INDEX IF NOT EXISTS idx_lc_traversal_cover ON links_current \
      (source_id, valid_from, valid_to, weight, edge_type, target_id);",
-    "CREATE INDEX IF NOT EXISTS idx_lc_tgt_active ON links_current (target_id, valid_to);",
     // The single-open-interval probe's own index (D-059, shipped v5 -> v6).
     //
     // `trg_links_single_open` runs an `EXISTS` on every edge insert, keyed on
@@ -574,7 +616,7 @@ pub const CREATE_TRIGGERS: &[&str] = &[
     AFTER INSERT ON concepts
     BEGIN
         INSERT INTO concepts_fts (rowid, title, content)
-        VALUES (NEW.rowid, NEW.title, NEW.content);
+        VALUES (NEW.rowid_pk, NEW.title, NEW.content);
     END;
     "#,
     // The retraction is not optional and not symmetric with the insert. An
@@ -588,17 +630,36 @@ pub const CREATE_TRIGGERS: &[&str] = &[
     AFTER UPDATE ON concepts
     BEGIN
         INSERT INTO concepts_fts (concepts_fts, rowid, title, content)
-        VALUES ('delete', OLD.rowid, OLD.title, OLD.content);
+        VALUES ('delete', OLD.rowid_pk, OLD.title, OLD.content);
         INSERT INTO concepts_fts (rowid, title, content)
-        VALUES (NEW.rowid, NEW.title, NEW.content);
+        VALUES (NEW.rowid_pk, NEW.title, NEW.content);
     END;
     "#,
-    // There is deliberately no delete trigger. `trg_concepts_guard_delete` is
-    // unconditional (D-022) — concepts are never physically deleted, not even
-    // inside an archive session — so a delete path does not exist to keep in
-    // sync. If that guard ever becomes conditional, this array needs a third
-    // trigger issuing the same `'delete'` command, and the index is silently
-    // stale until it gets one.
+    // The third trigger, installed **inert** by v8 (§4.6, D-119).
+    //
+    // Through v7 this array had no delete trigger, and the stated reason was
+    // that `trg_concepts_guard_delete` is unconditional (D-022) so no delete
+    // path exists to keep in sync. That was true and it was the wrong shape:
+    // the index's correctness depended on a *different* trigger staying
+    // unconditional, and nothing connected the two except a comment.
+    //
+    // It cannot fire today — the guard is a `BEFORE DELETE` that always aborts,
+    // so the statement never reaches `AFTER DELETE`. It is here because 0.9.0's
+    // archive session is what makes the guard conditional, and the moment that
+    // lands the index would go silently stale without this. Installing the
+    // capability in the rung that is already rebuilding the table costs nothing
+    // and means 0.9.0 needs no migration of its own.
+    //
+    // `the_fts_delete_trigger_is_installed_and_inert` (wave1_regression_tests)
+    // pins both halves rather than assuming either.
+    r#"
+    CREATE TRIGGER IF NOT EXISTS trg_concepts_fts_delete
+    AFTER DELETE ON concepts
+    BEGIN
+        INSERT INTO concepts_fts (concepts_fts, rowid, title, content)
+        VALUES ('delete', OLD.rowid_pk, OLD.title, OLD.content);
+    END;
+    "#,
 ];
 
 #[cfg(test)]

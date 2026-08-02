@@ -18,8 +18,9 @@
 //! there is no query to write one against. It is pure cost: an index write on
 //! every insert into its table, forever, and nothing reads it.
 //!
-//! **Running the registry found exactly that, twice** — see
-//! [`the_unread_indices_are_the_two_already_known`].
+//! **Running the registry found exactly that, twice** (D-089). Both were dropped
+//! by the v7 → v8 rung (D-118), so [`the_unread_index_set_is_empty`] now asserts
+//! the standard rather than tallying the exceptions.
 //!
 //! # The reproduced-query hazard, and what bounds it
 //!
@@ -48,9 +49,15 @@ enum Justification {
         sql: &'static str,
         source: Option<(&'static str, &'static str)>,
     },
-    /// Nothing in the crate reads it. Recorded rather than removed: dropping an
-    /// index is a schema change and needs a migration rung, which is not a
-    /// 0.6.0 hardening item. See D-089.
+    /// Nothing in the crate reads it.
+    ///
+    /// **Currently unconstructed, and that is the assertion** — see
+    /// [`the_unread_index_set_is_empty`]. The variant stays because the category
+    /// has to outlive its instances: it is what a future unjustifiable index
+    /// would have to be recorded as, and recording one is what makes the test go
+    /// red. Deleting the variant would turn a red test into a compile error at
+    /// the wrong place, and then into a temptation to skip the entry entirely.
+    #[allow(dead_code)]
     NoReader { why: &'static str },
 }
 
@@ -108,23 +115,9 @@ const REGISTRY: &[(&str, Justification)] = &[
             )),
         },
     ),
-    (
-        "idx_annotations_label",
-        NoReader {
-            why: "nothing in the crate selects from analytics_annotations at all. \
-                  The table is written by `write_analytics_annotations` and read \
-                  only by callers, through their own connection.",
-        },
-    ),
-    (
-        "idx_lc_tgt_active",
-        NoReader {
-            why: "no query in the crate seeks on target_id as a leading column. \
-                  Every links_current predicate leads on source_id (the walk) or \
-                  binds all three key columns (the guards); `Subgraph::in_adj` is \
-                  built in Rust from the forward rows the walk already returned.",
-        },
-    ),
+    // `idx_annotations_label` and `idx_lc_tgt_active` were the two `NoReader`
+    // entries this registry found (D-089). The v7 → v8 rung dropped them both
+    // (D-118), so they are gone from `CREATE_INDICES` and gone from here.
 ];
 
 async fn migrated(harness: &TestHarness) -> libsql::Connection {
@@ -197,34 +190,45 @@ async fn every_justified_index_is_the_one_the_planner_picks() {
     }
 }
 
-/// The two unread indexes are exactly the two already known.
+/// **No index in this schema is unread**, and that is now the standard rather
+/// than a tally (D-089, completed by D-118).
 ///
-/// A tripwire rather than a fix. Removing them is a `DROP INDEX` migration
-/// rung, which is a schema change in a release whose other items are additive —
-/// the same reason T3.3's interning was deferred — so D-089 schedules it and
-/// this keeps a third from joining them unnoticed.
+/// Through 0.7.0 this test pinned the unread *set* — `["idx_annotations_label",
+/// "idx_lc_tgt_active"]` — because removing an index needs a `DROP INDEX` rung
+/// and no release had one to put it in. That form is a tripwire against a
+/// *third* joining them; it accepts the two. The v7 → v8 rung dropped both, so
+/// the assertion can be the one D-089 was actually arguing for: an index with no
+/// reader is a red test, full stop.
+///
+/// The `NoReader` variant deliberately survives its last instance. Recording a
+/// new index as unread is how this test is made to fail, so the category has to
+/// remain available for that failure to be expressible.
 #[test]
-fn the_unread_indices_are_the_two_already_known() {
-    let unread: Vec<&str> = REGISTRY
-        .iter()
-        .filter(|(_, j)| matches!(j, NoReader { .. }))
-        .map(|(n, _)| *n)
-        .collect();
-    let reasons = REGISTRY
+fn the_unread_index_set_is_empty() {
+    let unread: Vec<String> = REGISTRY
         .iter()
         .filter_map(|(n, j)| match j {
             NoReader { why } => Some(format!("  {n}: {why}")),
             _ => None,
         })
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert_eq!(
-        unread,
-        vec!["idx_annotations_label", "idx_lc_tgt_active"],
-        "the set of indexes with no reader in the crate has changed. If one \
-         gained a reader, move it to a Query entry. If a new one lost its \
-         reader, that is an index write per insert buying nothing — see D-089.\
-         \nCurrently recorded as unread:\n{reasons}"
+        .collect();
+
+    assert!(
+        unread.is_empty(),
+        "an index in `ddl::CREATE_INDICES` has no reader in the crate. That is \
+         an index write on every insert into its table, forever, buying nothing \
+         — and one of the two v8 removed was on the hottest write path (D-089). \
+         Either name the query that seeks on it, or drop it in a rung.\
+         \nUnread:\n{}",
+        unread.join("\n")
+    );
+
+    // The registry is not empty, or the assertion above holds vacuously.
+    assert!(
+        REGISTRY.len() >= 4,
+        "the registry has shrunk to {} entries; an empty unread set means \
+         nothing if there is nothing to be unread",
+        REGISTRY.len()
     );
 }
 

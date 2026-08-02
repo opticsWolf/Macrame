@@ -214,9 +214,11 @@ async fn the_indexes_come_back_with_their_declared_names() {
 
     assert_eq!(
         names,
+        // `idx_lc_tgt_active` was here through v7 and was dropped by the v7 → v8
+        // rung: no query in the crate seeks on `target_id` as a leading column
+        // (D-089, D-118), so it was an index write per assertion buying nothing.
         vec![
             "idx_lc_open_interval".to_string(),
-            "idx_lc_tgt_active".to_string(),
             "idx_lc_traversal_cover".to_string(),
         ],
         "the swap left links_current indexed under different names than \

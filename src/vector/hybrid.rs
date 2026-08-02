@@ -82,6 +82,11 @@ pub fn escape_fts5_query(input: &str) -> String {
 /// excluded: a soft-deleted concept is not a search result, and the index cannot
 /// filter on `retired` itself because external-content FTS5 indexes only the
 /// columns it was declared over.
+///
+/// The join names `c.rowid_pk` rather than `c.rowid` (v8, D-119). They are the
+/// same value — an `INTEGER PRIMARY KEY` *is* the rowid — but `concepts_fts`
+/// declares `content_rowid='rowid_pk'`, and the join should say which key it is
+/// joining on rather than rely on the alias holding.
 pub async fn keyword_search(
     conn: &libsql::Connection,
     query: &str,
@@ -93,7 +98,7 @@ pub async fn keyword_search(
 
     let sql = "SELECT c.id, bm25(concepts_fts) AS rank
                  FROM concepts_fts
-                 JOIN concepts c ON c.rowid = concepts_fts.rowid
+                 JOIN concepts c ON c.rowid_pk = concepts_fts.rowid
                 WHERE concepts_fts MATCH ?1
                   AND c.retired = 0
                 ORDER BY rank ASC, c.id ASC

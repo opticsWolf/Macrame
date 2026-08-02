@@ -121,9 +121,10 @@ Every design decision derives from these invariants:
 | v4 | FTS5 external-content index |
 | v5 | Overlap guard index |
 | v6 | Overlapping closed intervals refused in actor |
-| v7 | `CHECK (weight >= 0.0)` on `links.weight` — **current** |
+| v7 | `CHECK (weight >= 0.0)` on `links.weight` |
+| v8 | `concepts.rowid_pk`, the third FTS trigger, and the two unread indices dropped — **current** |
 
-There is no v8. `idx_annotations_label` and `idx_lc_tgt_active` ship in the v7 baseline with no query that seeks on them (D-089); dropping them is what a v8 rung will be for.
+v8 is the last rung before the 1.0 freeze that could take it: `rowid_pk INTEGER PRIMARY KEY` costs `id` the primary key, and D-036 forbids a primary-key change after 1.0 (D-119). It also drops `idx_annotations_label` and `idx_lc_tgt_active`, which shipped in the v7 baseline with no query that seeks on them — measured at −7.9% off `assert_edge` (D-089, D-118).
 
 ---
 
@@ -135,7 +136,7 @@ There is no v8. `idx_annotations_label` and `idx_lc_tgt_active` ship in the v7 b
 | MSRV | **1.88** (verified, not declared) |
 | Runtime | tokio async, single process |
 | Engine | libSQL 0.9.30 (MIT, unmodified) |
-| Schema version | 7 |
+| Schema version | 8 |
 | Test suite | 296 Rust · 305 with `metrics` · 316 with `property-tests` · 344 Python — all green (measured 2026-08-02) |
 | Dependencies | tokio, serde, bincode, zstd, thiserror, tracing, ulid |
 

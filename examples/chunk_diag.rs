@@ -405,7 +405,9 @@ async fn main() {
                     let (_raw, conn) = raw_conn(&dir, &name).await;
                     drop_triggers(&conn, &["trg_links_single_open"]).await;
                     if drop_idx {
-                        for i in ["idx_lc_traversal_cover", "idx_lc_tgt_active"] {
+                        // idx_lc_tgt_active was the third here until v8 dropped
+                        // it (D-118); it never had a reader to disturb.
+                        for i in ["idx_lc_traversal_cover"] {
                             conn.execute(&format!("DROP INDEX IF EXISTS {i}"), ())
                                 .await
                                 .unwrap();

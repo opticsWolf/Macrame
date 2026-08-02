@@ -13,7 +13,8 @@ All SQL identifiers — table names, column names, index names, trigger names �
 ### 4.1 Concepts and per-model embeddings
 ```sql
 CREATE TABLE concepts (
-    id               TEXT PRIMARY KEY,          -- ULID, 26-char Crockford base32
+    rowid_pk         INTEGER PRIMARY KEY,       -- v8: the rowid, made explicit (D-119)
+    id               TEXT NOT NULL UNIQUE,      -- ULID, 26-char Crockford base32
     title            TEXT NOT NULL,
     content          TEXT NOT NULL DEFAULT '',
     embedding_model  TEXT,                      -- names the embeddings* table holding the vector
@@ -131,7 +132,13 @@ CREATE INDEX idx_lc_traversal_cover ON links_current
 -- Subsumes the former idx_lc_src_active (source_id, valid_to), dropped by the
 -- v3 -> v4 rung: same seek column, strictly more payload, and keeping both
 -- costs a second index write on every assertion.
-CREATE INDEX idx_lc_tgt_active ON links_current (target_id, valid_to);
+--
+-- idx_lc_tgt_active (target_id, valid_to) stood here through v7 and was
+-- dropped by the v7 -> v8 rung (D-089, D-118). No query in the crate seeks on
+-- target_id as a leading column -- every links_current predicate leads on
+-- source_id or binds all three key columns, and Subgraph::in_adj is built in
+-- Rust from the forward rows the walk already returned. Measured at -7.9% off
+-- assert_edge on star_of_stars.
 
 -- Every assertion upserts current belief; an out-of-order insert
 -- cannot clobber a newer belief.
@@ -353,9 +360,9 @@ CREATE TABLE IF NOT EXISTS analytics_annotations (
     PRIMARY KEY (concept_id, label),
     CHECK (computed_at GLOB '<canonical form>' AND 1)
 );
-
-CREATE INDEX IF NOT EXISTS idx_annotations_label ON analytics_annotations (label);
 ```
+
+`idx_annotations_label ON analytics_annotations (label)` stood here through v7 and was dropped by the `v7 → v8` rung ([D-089](s13-decision-register.md#d-089), [D-118](s13-decision-register.md#d-118)): nothing in the crate selects from this table at all — it is written by `write_analytics_annotations` and read only by callers, through their own connection — so the index was an insert-time cost with no reader.
 
 Everything about this table is the opposite of the four above, and each opposite is deliberate.
 
@@ -374,7 +381,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS concepts_fts USING fts5(
     title,
     content,
     content='concepts',       -- external content: index the tokens, not the text
-    content_rowid='rowid'
+    content_rowid='rowid_pk'  -- v8: a declared column, not an implicit rowid (D-119)
 );
 ```
 
@@ -384,7 +391,11 @@ The keyword half of hybrid search ([§5.9](s5-modules.md#59-vector--embeddings-t
 
 **Two triggers, and the second is the one that is easy to get wrong.** `trg_concepts_fts_insert` adds a new concept's terms. `trg_concepts_fts_update` must first issue FTS5's `'delete'` command **with the old column values**, because an external-content index stores terms rather than text and cannot work out what to retract on its own. Omit that half and the index goes on matching words the concept no longer contains, with no error and no symptom except a search that returns something that is no longer there.
 
-**No delete trigger, by consequence rather than by choice.** `trg_concepts_guard_delete` is unconditional ([D-022](s13-decision-register.md#d-022)) — concepts are never physically deleted, not even inside an archive session — so there is no delete path to keep in sync. Should that guard ever become conditional, this index needs a third trigger and is silently stale until it gets one. The note is here because the dependency runs the wrong way round to be obvious: a change to the *archive* would break the *search index*.
+**The third trigger, installed inert (v8, [D-119](s13-decision-register.md#d-119)).** Through v7 there was no delete trigger, and the recorded reason was that `trg_concepts_guard_delete` is unconditional ([D-022](s13-decision-register.md#d-022)) — concepts are never physically deleted, not even inside an archive session — so there was no delete path to keep in sync. That was true, and it was the wrong shape: this index's correctness depended on a *different* trigger staying unconditional, and nothing but a paragraph connected them.
+
+`trg_concepts_fts_delete` now exists and issues the same `'delete'` command with `OLD` values. It **cannot fire today** — the guard is a `BEFORE DELETE` that always aborts, so no statement reaches `AFTER DELETE` — and that is the point: 0.9.0's archive session is what makes the guard conditional, and installing the capability in a rung that was already rebuilding the table means **0.9.0 needs no migration of its own**. `the_fts_delete_trigger_is_installed_and_inert` asserts both halves, because the inertness belongs to the other trigger and that dependency is exactly what a test should hold.
+
+**Why `content_rowid` names a column now.** An external-content index is keyed on the content table's rowid, and through v7 `concepts`'s was implicit — which SQLite's documentation permits `VACUUM` to renumber. [D-071](s13-decision-register.md#d-071) argued the hazard unreachable because the delete guard keeps rowids dense; [D-120](s13-decision-register.md#d-120) measured a second reason nobody had identified, which is that `VACUUM` renumbers a sparse implicit rowid only for a table with **no index at all**, and `concepts` has always carried the `id` autoindex. So v7 was safe twice over, by two accidents. `rowid_pk INTEGER PRIMARY KEY` replaces both with a guarantee.
 
 **Retirement is filtered at query time, not indexed.** An external-content index covers only the columns it declares, so `retired` is not among them and `keyword_search` filters it on the join back to `concepts`. That makes "a retired concept is not a search result" a property of one query rather than of the schema, which is exactly the kind of thing that silently stops happening — hence its own test.
 

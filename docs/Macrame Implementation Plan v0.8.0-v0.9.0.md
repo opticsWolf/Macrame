@@ -769,6 +769,13 @@ because the delete guard is unconditional, so rowids are dense and `VACUUM`'s re
 identity map. **0.9.0's archival makes them sparse and makes the hazard real.** D-071 says so
 itself: *"either one makes `concepts.rowid` sparse and makes this hazard real."*
 
+> **This paragraph is wrong, and B4's own exit gate is what found it** — see
+> [D-120](architecture/s13-decision-register.md#d-120). `VACUUM` renumbers a sparse implicit
+> rowid **only for a table with no index at all**, and `concepts` has always carried the `id`
+> autoindex, so archival would not have made the hazard real either. The rung stays; its
+> justification is that SQLite *permits* the renumbering, not that anything was observed to
+> perform it.
+
 > **Confirmed by probe** (`examples/concepts_rebuild_probe.rs`, §5): an explicit
 > `rowid_pk INTEGER PRIMARY KEY` survives `VACUUM` **including when sparse** — `1:c0 3:c2 5:c4
 > 6:c5` before and after. The mechanism D-084 proposes is sound.
@@ -849,31 +856,59 @@ cost and this project does not ship an unmeasured performance claim
 ([D-088](architecture/s13-decision-register.md#d-088)). `vacuum_does_not_disturb_the_fts_index`
 extended to a **sparse** `rowid_pk`.
 
-> **Step 1 delivered 2026-08-02; steps 2–8 are not started.**
-> [D-117](architecture/s13-decision-register.md#d-117). Suites **314** / **325** / **344**,
-> clippy clean.
+> **DELIVERED 2026-08-02.** `SCHEMA_VERSION = 8`.
+> [D-117](architecture/s13-decision-register.md#d-117) (mechanism),
+> [D-118](architecture/s13-decision-register.md#d-118) (the indices),
+> [D-119](architecture/s13-decision-register.md#d-119) (the rung),
+> [D-120](architecture/s13-decision-register.md#d-120) (a correction the exit gate produced).
 >
-> `Step` has `suspends_foreign_keys`, `apply_step` toggles the pragma around the transaction and
-> runs `PRAGMA foreign_key_check` inside it before committing, and the pragma is restored on
-> **every** path including the error one — the guarantee should not depend on the caller
-> discarding the connection.
+> **The decision numbers this plan projected were taken.** B4 was written down as D-115/D-116;
+> B2 and B3 had consumed those by the time it landed, so the entries are D-118 and D-119. The
+> cross-reference table in §6 is corrected in place.
 >
-> **Both arms tested, and the failing one pinned to the check rather than to failure in
-> general**: a DDL statement failing for its own reasons also produces an error mentioning
-> foreign keys, and a looser assertion would pass while proving nothing. The rung that leaves an
-> orphan must fail *at `foreign_key_check`*, leave `user_version` unstamped, and still restore
-> enforcement.
+> **Step 1 landed first and separately**, on 2026-08-02: the mechanism is the part the probe
+> changed, it is testable on its own, and a schema rung is a bad place to be debugging the ladder
+> underneath it.
 >
-> **`SCHEMA_VERSION` is still 7 and no rung sets the flag.** The mechanism went first because it
-> is the part the probe changed, it is testable on its own, and the inside of a schema rung is a
-> bad place to be debugging the ladder underneath it.
+> **Steps 2–8 as specified**, with two departures worth naming. The rung's order is *triggers and
+> `concepts_fts` down before the table is touched*, not the plan's "recreate triggers, then drop
+> and recreate the FTS table" — the plan's order binds the new triggers to an index about to be
+> dropped, and drops a table triggers still name, which is the schema-reparse failure the `links`
+> rung hit from the other direction. And `rowid` is copied into `rowid_pk` **by value** rather
+> than relying on `ORDER BY rowid` to reproduce it: identical on today's dense numbering, correct
+> on a file where it is not.
 >
-> **What remains:** steps 2–8 — the v7 → v8 rung itself, `CONCEPTS_V8` pinned as text, the
-> `ddl.rs` changes including `trg_concepts_fts_delete`, the four callers, `index_plan_tests`'
-> empty unread set, and the whole exit gate (`assert_edge` measured on `star_of_stars` before
-> and after; `vacuum_does_not_disturb_the_fts_index` extended to a sparse `rowid_pk`;
-> `migration_tests` with `links` rows present, which is the condition the probe showed breaks
-> the naive shape).
+> **The exit gate found two defects in its own tests before it found none in the rung.**
+> `a_v7_database_climbs_to_v8_and_gains_rowid_pk` needed a genuine v7 fixture — built from
+> `ddl::` constants it would have been a v8 database wearing a v7 stamp, testing the rung against
+> a table that had already had its change — so `CONCEPTS_V7` is hand-written, and
+> `the_v8_rung_needs_the_suspension_and_links_rows_prove_it` pins that the `links` rows are what
+> make the suspension necessary. Verified by injection: `suspends_foreign_keys: false` fails three
+> tests.
+>
+> **The bigger finding is [D-120](architecture/s13-decision-register.md#d-120), and it corrects
+> this plan.** `vacuum_preserves_a_sparse_rowid_pk` was given a control arm on the principle that
+> a test asserting *nothing moved* proves an outcome and not a mechanism. The control — the v7
+> shape, implicit rowid, same gaps — **did not move**. `examples/vacuum_rowid_probe.rs` measured
+> six shapes: `VACUUM` renumbers a sparse implicit rowid **only for a table with no index at
+> all**, and `concepts` has always carried the `id` autoindex. So the hazard this section calls
+> *real* — *"0.9.0's archival makes them sparse and makes the hazard real"* — was never live.
+> The rung is still right and its justification is now the honest one: SQLite *documents* the
+> renumbering as permitted, and an index's correctness should not rest on an optimisation that
+> happens to decline to exercise the permission. 1.0 closes the door either way.
+>
+> **The performance claim is measured** ([D-088](architecture/s13-decision-register.md#d-088)).
+> `examples/tgt_index_cost_probe.rs`, `star_of_stars`, 3,999 `assert_edge` calls, five repeats,
+> arms alternated: **1,010.3 ms with `idx_lc_tgt_active`, 931.0 ms without — −7.9%, 19.8 µs per
+> assertion.**
+>
+> `index_plan_tests` asserts the unread set is **empty**, with the `NoReader` variant kept under
+> `#[allow(dead_code)]` so a future unjustifiable index can still be recorded as one — which is
+> how the test is made to fail — plus a vacuity guard that the registry is not itself empty.
+> `compat_contract_tests` records the primary-key change explicitly, since post-1.0 that entry
+> becomes a release blocker.
+>
+> Suites **321** / **332** / **344**, clippy clean, doc gates green.
 
 **Documents.** `s4-schema.md` §4.1 (the `concepts` DDL), §4.2, §4.5, §4.6 (the third trigger
 arrives — rewrite the "no delete trigger, by consequence rather than by choice" paragraph),
@@ -1172,7 +1207,7 @@ NOW      A1  gate classifier ........... main is red; nothing below is measurabl
 0.8.0    B1  privatise + accessors ..... ┐
          B2  intern behind them ........ ├ Subgraph moves once, in this order
          B3  content out of default .... ┘
-         B4  schema v8 ................. independent; needs the apply_step change first
+         B4  schema v8 ................. DELIVERED (v7 -> v8, D-117/118/119/120)
          B5  reconstruct below floor ... independent
          B6  Louvain aggregation ....... gated on B2 — skip and close if Q agrees
          B7  binding + stub + wheel .... LAST: needs B2, B3, B5 settled
@@ -1202,7 +1237,7 @@ they have not been done.
 | B1 | `subgraph.rs`, 13 call-site files, Appendix A, §5.4, quickref | — | **yes — Rust only** |
 | B2 | `subgraph.rs`, `graph.rs` internals, `budget_density_diag.rs` | — | no (after B1) |
 | B3 | `subgraph.rs`, loader, `to_dict()` | — | behaviour |
-| B4 | `migrations.rs` (+`Step`), `ddl.rs`, 4 callers, `index_plan_tests.rs` | **v7 → v8** | no |
+| B4 | `migrations.rs` (+`Step`), `ddl.rs`, 4 callers, `index_plan_tests.rs` | **v7 → v8** — delivered | no |
 | B5 | `replay.rs`, `temporal_tests.rs` | — | behaviour |
 | B6 | `algorithms.rs` | — | no |
 | B7 | `bindings/python/src/{graph,database,temporal}.rs`, `_macrame.pyi`, `tests_py/`, 3 manifests, `s14` | — | **yes — Python, one getter** |
@@ -1232,8 +1267,9 @@ they have not been done.
 | **D-112** | A decision entry naming a release is a claim with a deadline, and deadlines get tripwires (A5) |
 | **D-113** | `Subgraph`'s fields are private and its keys interned; **supersedes [D-087](architecture/s13-decision-register.md#d-087)**, corrects its blast-radius estimate, carries [D-063](architecture/s13-decision-register.md#d-063)'s pre-registered two-orderings test (B1, B2) |
 | **D-114** | `content` is not loaded by default; `Subgraph` serves the algorithms first (B3) |
-| **D-115** | Schema v8 drops the two indices with no reader; the `NoReader` category becomes empty rather than known-bad. **Completes [D-089](architecture/s13-decision-register.md#d-089)** (B4a) |
-| **D-116** | `concepts` gains `rowid_pk` and the FTS index its third trigger, taken pre-1.0 under [D-036](architecture/s13-decision-register.md#d-036)'s deadline. **Completes [D-084](architecture/s13-decision-register.md#d-084) and corrects its migration shape** — a rung rebuilding a table with inbound foreign keys needs FK enforcement suspended *around* the transaction, measured four ways (B4b) |
+| **D-118** | Schema v8 drops the two indices with no reader; the `NoReader` category becomes empty rather than known-bad, and the win is measured at −7.9% off `assert_edge`. **Completes [D-089](architecture/s13-decision-register.md#d-089)** (B4a). *Recorded as D-115 in this plan; B2 took that number first.* |
+| **D-119** | `concepts` gains `rowid_pk` and the FTS index its third trigger, taken pre-1.0 under [D-036](architecture/s13-decision-register.md#d-036)'s deadline. **Completes [D-084](architecture/s13-decision-register.md#d-084) and corrects its migration shape** — a rung rebuilding a table with inbound foreign keys needs FK enforcement suspended *around* the transaction, measured four ways (B4b). *Recorded as D-116 in this plan; B3 took that number first.* |
+| **D-120** | Unplanned, and produced by B4's own exit gate: `VACUUM` renumbers a sparse implicit rowid **only for a table with no index at all**, so [D-071](architecture/s13-decision-register.md#d-071)'s hazard was never live and this plan's "makes the hazard real" is wrong. Does not change the rung; changes why it is right |
 | **D-117** | **Erasure is refused on doctrine, not deferred**; the alternative is pseudonymous ids with identifying content held by the application. **Supersedes [D-022](architecture/s13-decision-register.md#d-022)'s open framing** ([§2](#2-doctrine-position-erasure-is-refused-archival-is-sanctioned)) |
 | **D-118** | A `reconstruct` below the log floor on a never-archived ledger is the empty state, not a corruption; the hot-side marker is designed and deferred to C4 (B5) |
 | **D-119** | Louvain's aggregation phase, taken or closed on a Q comparison at the post-interning ceiling (B6) |
@@ -1257,7 +1293,7 @@ they have not been done.
 | The id table cancels the memory win | Low | Medium | Per-node cost against per-edge saving; measured by `estimated_bytes()` rather than argued |
 | B3 surprises a caller reading `content` | Medium | Low | `Option<String>`, so absence cannot be mistaken for emptiness; named in the release note |
 | A1's classifier masks a real property failure | Low | High | Verified by injection in both directions before it is trusted |
-| 0.9.0 needs a rung after all | Low | **High** — forfeits the shared rebuild | B4 installs `rowid_pk` *and* the inert delete trigger, which is the full set C2 needs. Re-check before tagging 0.8.0 |
+| 0.9.0 needs a rung after all | Low | **High** — forfeits the shared rebuild | B4 installed `rowid_pk` *and* the inert delete trigger, which is the full set C2 needs, and `the_fts_delete_trigger_is_installed_and_inert` pins both. Still re-check before tagging 0.8.0 |
 | **B7/C5 skipped** — everything before them is green when they start | **Medium** | High — a wheel whose stub describes the previous release | `test_stubs.py` goes red on the first surface change and stays red; it is the only signal, so it is in the per-release definition of done rather than only in the item |
 | The suite is read against a stale wheel | Medium | Medium | Rebuild-and-reinstall is a named step in B7/C5 and a per-release gate. This was missed once in 0.7.0 |
 | A new `DbError` variant reaches Python untyped | Low | Medium | Cannot happen silently — the exhaustive `match` in `errors.rs` fails to compile `macrame-py` ([D-099](architecture/s13-decision-register.md#d-099)). The stub still has to follow by hand |

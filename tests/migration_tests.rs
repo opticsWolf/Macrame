@@ -257,8 +257,12 @@ async fn a_v2_database_climbs_to_v3_and_gains_the_annotations_table() {
         .await
         .unwrap();
     for index_ddl in ddl::CREATE_INDICES {
-        // idx_annotations_label has no table yet; the rest do.
-        let _ = conn.execute(index_ddl, ()).await;
+        // Every remaining index has its table in this fixture. Through v7 one
+        // did not — `idx_annotations_label`, which is why this loop used to
+        // swallow its result — and v8 dropped it (D-118). Swallowing errors is
+        // how a fixture stops testing anything, so now that none is expected,
+        // none is tolerated.
+        conn.execute(index_ddl, ()).await.unwrap();
     }
     for trigger_ddl in ddl::CREATE_TRIGGERS {
         conn.execute(trigger_ddl, ()).await.unwrap();
@@ -336,7 +340,7 @@ async fn a_v5_database_climbs_to_v6_and_gains_the_open_interval_index() {
 #[test]
 fn a_version_bump_must_bring_its_own_rung_test() {
     assert_eq!(
-        SCHEMA_VERSION, 7,
+        SCHEMA_VERSION, 8,
         "SCHEMA_VERSION moved. Add a test for the new rung — one that starts \
          from a database at the previous version and asserts what the rung is \
          *for*, not merely that `run` reached the top."
@@ -451,6 +455,318 @@ async fn a_v6_database_climbs_to_v7_and_gains_the_weight_check() {
             .await;
         assert!(refused.is_err(), "a {label} weight survived the rung");
     }
+}
+
+// ---------------------------------------------------------------------------
+// The v7 → v8 rung (B4, D-118, D-119)
+// ---------------------------------------------------------------------------
+
+/// The v7 shape of `concepts`, and the two FTS triggers that went with it.
+///
+/// Hand-written, and the module's own warning applies: a copy of an old schema
+/// is a second description that can drift. It is written out anyway because the
+/// alternative is worse. The v6 fixture could be built by re-issuing today's
+/// baseline and *removing* one CHECK, so the copy was nearly the real thing.
+/// v8 changes `concepts`'s primary key and re-keys the FTS index onto a column
+/// that did not exist, so there is no subtractive route: a fixture assembled
+/// from `ddl::` constants would be a v8 database wearing a v7 stamp, and the
+/// rung would be tested against a table that already had its change.
+const CONCEPTS_V7: &str = r#"
+CREATE TABLE concepts (
+    id               TEXT PRIMARY KEY,
+    title            TEXT NOT NULL,
+    content          TEXT NOT NULL DEFAULT '',
+    embedding_model  TEXT,
+    valid_from       TEXT NOT NULL,
+    valid_to         TEXT NOT NULL DEFAULT '9999-12-31T23:59:59.999999Z',
+    recorded_at      TEXT NOT NULL,
+    retired          INTEGER NOT NULL DEFAULT 0,
+    CHECK (valid_from GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z' AND valid_to GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z' AND recorded_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z' AND 1)
+)
+"#;
+
+const CONCEPTS_FTS_V7: &str = r#"
+CREATE VIRTUAL TABLE concepts_fts USING fts5(
+    title, content, content='concepts', content_rowid='rowid'
+)
+"#;
+
+const FTS_TRIGGERS_V7: &[&str] = &[
+    r#"
+    CREATE TRIGGER trg_concepts_fts_insert AFTER INSERT ON concepts
+    BEGIN
+        INSERT INTO concepts_fts (rowid, title, content)
+        VALUES (NEW.rowid, NEW.title, NEW.content);
+    END;
+    "#,
+    r#"
+    CREATE TRIGGER trg_concepts_fts_update AFTER UPDATE ON concepts
+    BEGIN
+        INSERT INTO concepts_fts (concepts_fts, rowid, title, content)
+        VALUES ('delete', OLD.rowid, OLD.title, OLD.content);
+        INSERT INTO concepts_fts (rowid, title, content)
+        VALUES (NEW.rowid, NEW.title, NEW.content);
+    END;
+    "#,
+];
+
+/// The two indices v8 drops, as v7 declared them.
+const UNREAD_INDICES_V7: &[&str] = &[
+    "CREATE INDEX idx_annotations_label ON analytics_annotations (label)",
+    "CREATE INDEX idx_lc_tgt_active ON links_current (target_id, valid_to)",
+];
+
+/// Build a genuine v7 database, seeded, and stamp it v7.
+///
+/// `links` rows are **not** optional garnish. The probe's finding is that the
+/// naive rebuild fails on `concepts`'s *inbound* foreign keys, and a `concepts`
+/// with nothing pointing at it exercises none of that: the rung would pass with
+/// the suspension removed. So every fixture here carries links, and
+/// [`the_v8_rung_needs_the_suspension_and_links_rows_prove_it`] pins that the
+/// links are what make it true.
+async fn seeded_v7(conn: &libsql::Connection, concepts: &[&str]) {
+    // Everything except `concepts` and its FTS index is byte-identical between
+    // v7 and v8, so those parts come from the crate's DDL rather than a copy.
+    conn.execute(CONCEPTS_V7, ()).await.unwrap();
+    conn.execute(ddl::CREATE_LINKS_TABLE, ()).await.unwrap();
+    conn.execute(ddl::CREATE_LINKS_CURRENT_TABLE, ())
+        .await
+        .unwrap();
+    conn.execute(ddl::CREATE_TRANSACTION_LOG_TABLE, ())
+        .await
+        .unwrap();
+    conn.execute(ddl::CREATE_ANALYTICS_ANNOTATIONS_TABLE, ())
+        .await
+        .unwrap();
+    conn.execute(CONCEPTS_FTS_V7, ()).await.unwrap();
+
+    for index_ddl in ddl::CREATE_INDICES.iter().chain(UNREAD_INDICES_V7) {
+        conn.execute(index_ddl, ()).await.unwrap();
+    }
+    // v8's triggers name `rowid_pk`, which this table does not have, so the two
+    // FTS ones come from the v7 copy and the delete trigger does not exist yet.
+    for trigger_ddl in ddl::CREATE_TRIGGERS {
+        if trigger_ddl.contains("trg_concepts_fts_") {
+            continue;
+        }
+        conn.execute(trigger_ddl, ()).await.unwrap();
+    }
+    for trigger_ddl in FTS_TRIGGERS_V7 {
+        conn.execute(trigger_ddl, ()).await.unwrap();
+    }
+
+    for id in concepts {
+        conn.execute(
+            "INSERT INTO concepts (id, title, content, valid_from, recorded_at) \
+             VALUES (?1, 'N', 'findable body text', ?2, ?2)",
+            libsql::params![*id, TS],
+        )
+        .await
+        .unwrap();
+    }
+    for pair in concepts.windows(2) {
+        conn.execute(
+            "INSERT INTO links (source_id, target_id, edge_type, valid_from, valid_to, \
+             weight, properties, recorded_at) \
+             VALUES (?1, ?2, 'KNOWS', ?3, '9999-12-31T23:59:59.999999Z', 1.0, '{}', ?3)",
+            libsql::params![pair[0], pair[1], TS],
+        )
+        .await
+        .unwrap();
+    }
+
+    conn.execute("PRAGMA user_version = 7", ()).await.unwrap();
+}
+
+async fn count(conn: &libsql::Connection, sql: &str) -> i64 {
+    conn.query(sql, ())
+        .await
+        .unwrap()
+        .next()
+        .await
+        .unwrap()
+        .unwrap()
+        .get(0)
+        .unwrap()
+}
+
+/// The v7 → v8 rung rebuilds `concepts` with an explicit `rowid_pk`, keeps every
+/// row and every rowid, re-keys the FTS index onto the new column, and drops the
+/// two indices with no reader (D-118, D-119).
+///
+/// The rung runs with foreign-key enforcement suspended, which is a thing worth
+/// being nervous about, so what is asserted afterwards is not "it reached v8"
+/// but the four things the suspension could have broken: the rows, the identity
+/// of the rows, the referential integrity of what points at them, and the search
+/// index that is keyed on their rowids.
+#[tokio::test]
+async fn a_v7_database_climbs_to_v8_and_gains_rowid_pk() {
+    let harness = TestHarness::new();
+    let conn = connect(&harness).await;
+    conn.execute("PRAGMA foreign_keys = ON", ()).await.unwrap();
+    seeded_v7(&conn, &["c0", "c1", "c2", "c3"]).await;
+
+    // Recorded before, compared after: the rung claims to preserve identity,
+    // not merely order.
+    let rowids_before = ids_by_rowid(&conn, "rowid").await;
+    assert_eq!(rowids_before.len(), 4);
+
+    migrations::run(&conn).await.unwrap();
+    assert_eq!(user_version(&conn).await, SCHEMA_VERSION);
+
+    assert_eq!(count(&conn, "SELECT COUNT(*) FROM concepts").await, 4);
+    assert_eq!(count(&conn, "SELECT COUNT(*) FROM links").await, 3);
+    assert_eq!(
+        ids_by_rowid(&conn, "rowid_pk").await,
+        rowids_before,
+        "the rebuild renumbered the concepts; the FTS index is keyed on these"
+    );
+
+    // The suspension is the reason this has to be asserted rather than assumed:
+    // with enforcement off, an orphan is exactly what the rung could have left.
+    assert_eq!(
+        count(&conn, "SELECT COUNT(*) FROM pragma_foreign_key_check").await,
+        0,
+        "the rung committed a foreign-key violation"
+    );
+
+    // Enforcement is back on, on this very connection.
+    assert!(
+        conn.execute(
+            "INSERT INTO links (source_id, target_id, edge_type, valid_from, valid_to, \
+             weight, properties, recorded_at) \
+             VALUES ('c0','nobody','KNOWS',?1,'9999-12-31T23:59:59.999999Z',1.0,'{}',?1)",
+            libsql::params![TS],
+        )
+        .await
+        .is_err(),
+        "foreign keys were not restored after the rung"
+    );
+
+    // The search index still finds every concept, which is the property the
+    // whole rung exists to protect.
+    assert_eq!(
+        count(
+            &conn,
+            "SELECT COUNT(*) FROM concepts_fts WHERE concepts_fts MATCH 'findable'"
+        )
+        .await,
+        4,
+        "the FTS index did not survive the re-keying"
+    );
+
+    // (a): the two indices with no reader are gone, and nothing else went with
+    // them.
+    let indices = index_names(&conn).await;
+    for gone in ["idx_annotations_label", "idx_lc_tgt_active"] {
+        assert!(!indices.contains(&gone.to_string()), "{gone} survived v8");
+    }
+    assert_eq!(
+        indices.len(),
+        ddl::CREATE_INDICES.len(),
+        "v8 left a different index set than CREATE_INDICES declares: {indices:?}"
+    );
+}
+
+/// **The suspension is load-bearing, and the `links` rows are what make it so.**
+///
+/// Written because the previous test would pass against a rung with
+/// `suspends_foreign_keys: false` if `concepts` had nothing pointing at it —
+/// which is the shape D-084 originally specified and the probe refuted. This
+/// pins the refutation: the same rebuild, on the same fixture, with enforcement
+/// left on, must fail. If it ever stops failing, the flag has become
+/// unnecessary and should be removed rather than carried.
+#[tokio::test]
+async fn the_v8_rung_needs_the_suspension_and_links_rows_prove_it() {
+    let harness = TestHarness::new();
+    let conn = connect(&harness).await;
+    conn.execute("PRAGMA foreign_keys = ON", ()).await.unwrap();
+    seeded_v7(&conn, &["c0", "c1"]).await;
+
+    // The rung's central act, attempted the way a rung without the flag would
+    // reach it: inside a transaction, with enforcement on.
+    conn.execute("BEGIN IMMEDIATE", ()).await.unwrap();
+    let dropped = conn.execute("DROP TABLE concepts", ()).await;
+    let _ = conn.execute("ROLLBACK", ()).await;
+
+    assert!(
+        dropped.is_err(),
+        "`DROP TABLE concepts` succeeded with foreign keys enforced, so \
+         `suspends_foreign_keys` is buying nothing on this engine. Either the \
+         engine changed or the fixture lost its `links` rows — check the latter \
+         first, because a `concepts` with no inbound rows makes this pass \
+         vacuously."
+    );
+}
+
+/// A v7 database that already holds an orphaned link is refused, not silently
+/// migrated.
+///
+/// The honest cost of the suspension, pinned so it is a documented behaviour
+/// rather than a surprise. `foreign_key_check` runs over the whole database, so
+/// a violation that predates the rung fails the rung — and the alternative is
+/// worse: enforcement is off during the rebuild, so without the check such a
+/// database would migrate cleanly and carry the damage forward under a schema
+/// version asserting it had been examined.
+#[tokio::test]
+async fn a_v7_database_with_a_pre_existing_orphan_is_refused() {
+    let harness = TestHarness::new();
+    let conn = connect(&harness).await;
+    // Off for the seed, which is the only way to write the orphan at all — and
+    // is how such a file would have come to exist.
+    conn.execute("PRAGMA foreign_keys = OFF", ()).await.unwrap();
+    seeded_v7(&conn, &["c0", "c1"]).await;
+    conn.execute(
+        "INSERT INTO links (source_id, target_id, edge_type, valid_from, valid_to, \
+         weight, properties, recorded_at) \
+         VALUES ('c0','ghost','KNOWS',?1,'9999-12-31T23:59:59.999999Z',1.0,'{}',?1)",
+        libsql::params![TS],
+    )
+    .await
+    .unwrap();
+
+    let reason = refusal_reason(migrations::run(&conn).await.unwrap_err());
+    assert!(
+        reason.contains("suspended foreign keys and left a violation")
+            && reason.contains("links"),
+        "the refusal should name the check and the table, not merely fail: {reason}"
+    );
+    assert_eq!(
+        user_version(&conn).await,
+        7,
+        "a refused rung must leave the database honestly at its old version"
+    );
+}
+
+async fn ids_by_rowid(conn: &libsql::Connection, col: &str) -> Vec<(i64, String)> {
+    let mut rows = conn
+        .query(
+            &format!("SELECT {col}, id FROM concepts ORDER BY {col}"),
+            (),
+        )
+        .await
+        .unwrap();
+    let mut out = Vec::new();
+    while let Some(r) = rows.next().await.unwrap() {
+        out.push((r.get(0).unwrap(), r.get(1).unwrap()));
+    }
+    out
+}
+
+async fn index_names(conn: &libsql::Connection) -> Vec<String> {
+    let mut rows = conn
+        .query(
+            "SELECT name FROM sqlite_master WHERE type = 'index' \
+             AND name NOT LIKE 'sqlite_%' ORDER BY name",
+            (),
+        )
+        .await
+        .unwrap();
+    let mut out = Vec::new();
+    while let Some(r) = rows.next().await.unwrap() {
+        out.push(r.get(0).unwrap());
+    }
+    out
 }
 
 /// A database holding a weight the v7 constraint rejects is refused, and told

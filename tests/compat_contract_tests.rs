@@ -113,10 +113,24 @@ async fn the_ledger_tables_have_the_shape_the_contract_freezes() {
         "links is a frozen ledger table (D-003: the 5-column bitemporal PK)"
     );
 
+    // **This entry records a primary-key change, and that is the point of it
+    // being here.** Through v7 `concepts` was `id TEXT PRIMARY KEY` — the fourth
+    // field below was `1` on `id` and there was no `rowid_pk`. v8 made the rowid
+    // an explicit column so `VACUUM` cannot renumber it out from under
+    // `concepts_fts` (D-119), which costs `id` the primary key, because SQLite
+    // permits one per table.
+    //
+    // That is exactly the diff this contract forbids **after 1.0**: not additive,
+    // not migratable by `CREATE TABLE AS SELECT` in the general case. Pre-1.0 it
+    // is a deliberate edit to this list, which is what it is. It is also the last
+    // opportunity — D-036 names a primary-key change as requiring a major version
+    // and a purpose-built ETL, so if this had waited for 0.9.0's archival to make
+    // the hazard visible, the fix would have arrived after the door closed.
     assert_eq!(
         shape(&conn, "concepts").await,
         vec![
-            ("id".into(), "TEXT".into(), 0, 1),
+            ("rowid_pk".into(), "INTEGER".into(), 0, 1),
+            ("id".into(), "TEXT".into(), 1, 0),
             ("title".into(), "TEXT".into(), 1, 0),
             ("content".into(), "TEXT".into(), 1, 0),
             ("embedding_model".into(), "TEXT".into(), 0, 0),

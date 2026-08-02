@@ -128,7 +128,6 @@ async fn main() {
         // The fourth question: the old table's index names, immediately reused.
         "CREATE INDEX idx_lc_traversal_cover ON links_current \
          (source_id, valid_from, valid_to, weight, edge_type, target_id)",
-        "CREATE INDEX idx_lc_tgt_active ON links_current (target_id, valid_to)",
         "CREATE INDEX idx_lc_open_interval ON links_current \
          (source_id, target_id, edge_type, valid_to, valid_from)",
     ] {

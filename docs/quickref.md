@@ -168,7 +168,7 @@ Every temporal column is exactly 27 characters: `YYYY-MM-DDTHH:MM:SS.ffffffZ`
 | v5 | `idx_lc_open_interval` (overlap guard index) |
 | v6 | Overlapping closed intervals refused in actor |
 | v7 | `CHECK (weight >= 0.0 AND weight < 9e999 AND typeof(weight) = 'real')` |
-| — | `idx_annotations_label`, `idx_lc_tgt_active` are unread indices (D-089) shipped in the **v7 baseline**, not a rung. There is no v8; dropping them is what one will be for |
+| v8 | `concepts.rowid_pk INTEGER PRIMARY KEY` + `id TEXT NOT NULL UNIQUE`; `concepts_fts` re-keyed to `content_rowid='rowid_pk'`; `trg_concepts_fts_delete` installed **inert**; `idx_annotations_label` and `idx_lc_tgt_active` dropped. Sets `suspends_foreign_keys` — the only rung that does (D-117, D-118, D-119) |
 
 ---
 
@@ -701,7 +701,8 @@ pub fn estimated_bulk_hold(edges: &[EdgeAssertion]) -> Duration  // ~34 ms / 500
 | **Superlinear chunk cost on large tables** | Medium | Index on `(source_id, target_id, edge_type, valid_to, valid_from)` shipped as v5→v6 | ✅ D-059 |
 | **Snapshot chain divergence** | Low | `verify_snapshot_chain()` reports but does not repair | ✅ D-092 |
 | **Rebuild interrupted by archive during shadow-swap** | Medium | `ActorShared::archive_epoch` interlock; `RebuildInterrupted` error (not `RebuildFailed`) | ✅ D-082 |
-| **Unreadable indices cost per-insert** | Low | `idx_annotations_label`, `idx_lc_tgt_active` — still present in v7; removal is a v8 rung, not yet written | ⚠️ D-089 |
+| **Unreadable indices cost per-insert** | Low | Both dropped by the `v7 → v8` rung; the unread set is now asserted **empty**. Measured −7.9% off `assert_edge` | ✅ D-089, D-118 |
+| **FTS index keyed on a rowid `VACUUM` may renumber** | Low | `rowid_pk INTEGER PRIMARY KEY` in v8. Never actually live — `VACUUM` renumbers only unindexed tables (measured) | ✅ D-071, D-119, D-120 |
 
 ---
 
