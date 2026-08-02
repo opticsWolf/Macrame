@@ -849,6 +849,32 @@ cost and this project does not ship an unmeasured performance claim
 ([D-088](architecture/s13-decision-register.md#d-088)). `vacuum_does_not_disturb_the_fts_index`
 extended to a **sparse** `rowid_pk`.
 
+> **Step 1 delivered 2026-08-02; steps 2–8 are not started.**
+> [D-117](architecture/s13-decision-register.md#d-117). Suites **314** / **325** / **344**,
+> clippy clean.
+>
+> `Step` has `suspends_foreign_keys`, `apply_step` toggles the pragma around the transaction and
+> runs `PRAGMA foreign_key_check` inside it before committing, and the pragma is restored on
+> **every** path including the error one — the guarantee should not depend on the caller
+> discarding the connection.
+>
+> **Both arms tested, and the failing one pinned to the check rather than to failure in
+> general**: a DDL statement failing for its own reasons also produces an error mentioning
+> foreign keys, and a looser assertion would pass while proving nothing. The rung that leaves an
+> orphan must fail *at `foreign_key_check`*, leave `user_version` unstamped, and still restore
+> enforcement.
+>
+> **`SCHEMA_VERSION` is still 7 and no rung sets the flag.** The mechanism went first because it
+> is the part the probe changed, it is testable on its own, and the inside of a schema rung is a
+> bad place to be debugging the ladder underneath it.
+>
+> **What remains:** steps 2–8 — the v7 → v8 rung itself, `CONCEPTS_V8` pinned as text, the
+> `ddl.rs` changes including `trg_concepts_fts_delete`, the four callers, `index_plan_tests`'
+> empty unread set, and the whole exit gate (`assert_edge` measured on `star_of_stars` before
+> and after; `vacuum_does_not_disturb_the_fts_index` extended to a sparse `rowid_pk`;
+> `migration_tests` with `links` rows present, which is the condition the probe showed breaks
+> the naive shape).
+
 **Documents.** `s4-schema.md` §4.1 (the `concepts` DDL), §4.2, §4.5, §4.6 (the third trigger
 arrives — rewrite the "no delete trigger, by consequence rather than by choice" paragraph),
 §4.7 if any row moves; `s5-modules.md` §5.1 (the ladder gains a rung kind); `s13` (D-115, D-116,

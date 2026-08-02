@@ -23,6 +23,47 @@ struct Step {
     to: u32,
     name: &'static str,
     apply: for<'a> fn(&'a libsql::Connection) -> StepFuture<'a>,
+    /// Suspend foreign-key enforcement **around** this rung's transaction
+    /// (0.8.0, B4, D-117).
+    ///
+    /// # Why a rung would need this, and why the obvious ways do not work
+    ///
+    /// A rung that rebuilds a table with inbound foreign keys cannot use the
+    /// `links`-style recipe. `links` has no inbound keys; `concepts` has two
+    /// (`links.source_id`, `links.target_id`). `examples/concepts_rebuild_probe.rs`
+    /// measured four approaches on libSQL 0.9.30 and **all four fail**:
+    ///
+    /// 1. `PRAGMA foreign_keys = OFF` *inside* the transaction — **silently
+    ///    ignored**. `execute` returns `Ok`, the value reads back `1`. The
+    ///    pragma is a no-op inside a transaction, and [`apply_step`] wraps every
+    ///    rung in `BEGIN IMMEDIATE`.
+    /// 2. `DROP TABLE concepts` with keys on — `FOREIGN KEY constraint failed`,
+    ///    with **or without** the delete guard. The guard is not the obstacle.
+    /// 3. `PRAGMA defer_foreign_keys = ON`, which is designed for exactly this —
+    ///    every statement succeeds and `foreign_key_check` reports **0
+    ///    violations**, and then **COMMIT fails**. SQLite counts deferred
+    ///    violation *events*; re-adding an equivalent parent row does not
+    ///    decrement the counter.
+    /// 4. Rename-around, with `legacy_alter_table` both on and off — the drop
+    ///    of the orphaned table fails either way.
+    ///
+    /// What works is toggling the pragma *outside* the transaction. So the
+    /// ladder has to know, and this flag is how a rung says so.
+    ///
+    /// # Why this does not weaken atomicity
+    ///
+    /// The rung is still **one transaction and one commit**, with the
+    /// `user_version` stamp inside it — [D-032](../../docs/architecture/s13-decision-register.md)'s
+    /// property is untouched. `PRAGMA foreign_keys` is per-*connection*, and the
+    /// migration connection is created in `open()` and discarded if the
+    /// migration fails, so a crash between the toggle and the reset cannot
+    /// leave a long-lived connection with enforcement off.
+    ///
+    /// And the suspension cannot hide a real violation: [`apply_step`] runs
+    /// `PRAGMA foreign_key_check` **inside** the transaction before committing,
+    /// and any row it reports fails the rung. Enforcement is suspended for the
+    /// duration; verification is not.
+    suspends_foreign_keys: bool,
 }
 
 /// The ladder, in no particular order — `run` walks it by matching `from`.
@@ -37,36 +78,42 @@ const STEPS: &[Step] = &[
         from: 0,
         to: SCHEMA_VERSION,
         name: "baseline-0.5.4",
+        suspends_foreign_keys: false,
         apply: |conn| Box::pin(baseline(conn)),
     },
     Step {
         from: 2,
         to: 3,
         name: "analytics-annotations",
+        suspends_foreign_keys: false,
         apply: |conn| Box::pin(add_analytics_annotations(conn)),
     },
     Step {
         from: 3,
         to: 4,
         name: "traversal-covering-index",
+        suspends_foreign_keys: false,
         apply: |conn| Box::pin(add_traversal_cover(conn)),
     },
     Step {
         from: 4,
         to: 5,
         name: "concepts-fts",
+        suspends_foreign_keys: false,
         apply: |conn| Box::pin(add_concepts_fts(conn)),
     },
     Step {
         from: 5,
         to: 6,
         name: "single-open-interval-index",
+        suspends_foreign_keys: false,
         apply: |conn| Box::pin(add_open_interval_index(conn)),
     },
     Step {
         from: 6,
         to: 7,
         name: "links-weight-check",
+        suspends_foreign_keys: false,
         apply: |conn| Box::pin(add_weight_check(conn)),
     },
 ];
@@ -209,12 +256,52 @@ fn no_path_from(current: u32) -> DbError {
 /// leaves a database that is still honestly at its old version, rather than one
 /// stamped for a schema it only partly has.
 async fn apply_step(conn: &libsql::Connection, step: &Step) -> Result<()> {
+    // Outside the transaction, because inside it the pragma is silently
+    // ignored — see `Step::suspends_foreign_keys` for the four approaches that
+    // do not work and the probe that measured them.
+    if step.suspends_foreign_keys {
+        conn.execute("PRAGMA foreign_keys = OFF", ()).await?;
+    }
+
+    let res = apply_step_inner(conn, step).await;
+
+    // Restored on **every** path, including the error one. A rung that fails
+    // must not leave the connection with enforcement off, even though that
+    // connection is about to be discarded: the guarantee should not depend on
+    // the caller's disposal habits.
+    if step.suspends_foreign_keys {
+        conn.execute("PRAGMA foreign_keys = ON", ()).await?;
+    }
+
+    res
+}
+
+async fn apply_step_inner(conn: &libsql::Connection, step: &Step) -> Result<()> {
     let tx = conn
         .transaction_with_behavior(libsql::TransactionBehavior::Immediate)
         .await?;
 
     let res: Result<()> = async {
         (step.apply)(&tx).await?;
+
+        // Suspension is not permission. A rung that ran with enforcement off
+        // must still leave a database the engine would accept, so the check
+        // runs inside the transaction and its rows fail the rung — which means
+        // the rollback below, not a committed database nobody checked.
+        if step.suspends_foreign_keys {
+            let mut rows = tx.query("PRAGMA foreign_key_check", ()).await?;
+            if let Some(row) = rows.next().await? {
+                let table: String = row.get(0).unwrap_or_else(|_| "?".to_string());
+                return Err(DbError::Migration {
+                    to: step.to,
+                    reason: format!(
+                        "step {:?} suspended foreign keys and left a violation                          in {table:?}; the rung is wrong, not the check",
+                        step.name
+                    ),
+                });
+            }
+        }
+
         // PRAGMA takes no bind parameters; `to` is a u32 read from a const.
         tx.execute(&format!("PRAGMA user_version = {}", step.to), ())
             .await?;
@@ -650,6 +737,133 @@ mod tests {
         assert!(
             !STEPS.iter().any(|s| s.from == 1),
             "a step out of v1 reintroduces pre-0.5.4 databases as a supported input"
+        );
+    }
+
+    // -- the foreign-key suspension mechanism (0.8.0, B4, D-117) -------------
+    //
+    // No shipped rung sets `suspends_foreign_keys` yet — v7 → v8 is what will.
+    // The mechanism lands first and is tested first, because the thing that
+    // makes it safe is not that the rebuild works (the probe measured that) but
+    // that a rung which suspends enforcement **still cannot commit a violation**.
+    // A flag that turns checking off is only acceptable if something else turns
+    // verification on, and that is what these two tests hold.
+
+    async fn scratch() -> libsql::Connection {
+        let db = libsql::Builder::new_local(":memory:").build().await.unwrap();
+        let conn = db.connect().unwrap();
+        conn.execute("PRAGMA foreign_keys = ON", ()).await.unwrap();
+        conn.execute("CREATE TABLE parent (id TEXT PRIMARY KEY)", ())
+            .await
+            .unwrap();
+        conn.execute(
+            "CREATE TABLE child (id TEXT PRIMARY KEY, p TEXT NOT NULL \
+             REFERENCES parent(id))",
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute("INSERT INTO parent VALUES ('a')", ())
+            .await
+            .unwrap();
+        conn.execute("INSERT INTO child VALUES ('c', 'a')", ())
+            .await
+            .unwrap();
+        conn
+    }
+
+    /// The shape the probe found: rebuild a table that has inbound foreign keys
+    /// by dropping and renaming, which is impossible with enforcement on.
+    #[tokio::test]
+    async fn a_suspending_rung_can_rebuild_a_table_with_inbound_keys() {
+        let conn = scratch().await;
+        let step = Step {
+            from: 0,
+            to: 99,
+            name: "test-rebuild",
+            suspends_foreign_keys: true,
+            apply: |tx| {
+                Box::pin(async move {
+                    tx.execute("CREATE TABLE parent_new (rowid_pk INTEGER PRIMARY KEY, id TEXT NOT NULL UNIQUE)", ()).await?;
+                    tx.execute("INSERT INTO parent_new (id) SELECT id FROM parent ORDER BY rowid", ()).await?;
+                    tx.execute("DROP TABLE parent", ()).await?;
+                    tx.execute("ALTER TABLE parent_new RENAME TO parent", ()).await?;
+                    Ok(())
+                })
+            },
+        };
+
+        apply_step(&conn, &step).await.expect("the rung must apply");
+
+        // The rebuild happened, the child still resolves, and — the part that
+        // matters — enforcement is back on afterwards.
+        let mut rows = conn
+            .query("SELECT rowid_pk FROM parent WHERE id = 'a'", ())
+            .await
+            .unwrap();
+        assert!(rows.next().await.unwrap().is_some(), "parent lost its row");
+
+        let orphan = conn
+            .execute("INSERT INTO child VALUES ('d', 'nonexistent')", ())
+            .await;
+        assert!(
+            orphan.is_err(),
+            "foreign keys were not restored after the rung"
+        );
+    }
+
+    /// **The reason the flag is safe.** A rung that suspends enforcement and
+    /// leaves a genuine violation must not commit: `foreign_key_check` runs
+    /// inside the transaction and its rows fail the rung.
+    ///
+    /// Without this, `suspends_foreign_keys` would be a way to write a corrupt
+    /// database on purpose and have the ladder call it a success.
+    #[tokio::test]
+    async fn a_suspending_rung_that_leaves_a_violation_is_refused() {
+        let conn = scratch().await;
+        let step = Step {
+            from: 0,
+            to: 99,
+            name: "test-orphan",
+            suspends_foreign_keys: true,
+            // Drops the parent and puts nothing back: `child.p` now points at
+            // nothing. With enforcement on this could not even be attempted,
+            // which is exactly why the check has to exist.
+            apply: |tx| {
+                Box::pin(async move {
+                    tx.execute("DROP TABLE parent", ()).await?;
+                    tx.execute("CREATE TABLE parent (id TEXT PRIMARY KEY)", ())
+                        .await?;
+                    Ok(())
+                })
+            },
+        };
+
+        let err = apply_step(&conn, &step)
+            .await
+            .expect_err("a rung that orphans a row must not commit");
+        // Pinned to *this* wording, not to "foreign key" generally. A DDL
+        // statement failing for its own reasons would also produce an error
+        // mentioning foreign keys, and the test would then pass while proving
+        // nothing about the check that is the point of the flag.
+        let text = err.to_string();
+        assert!(
+            text.contains("suspended foreign keys and left a violation"),
+            "the rung must fail at `foreign_key_check`, not merely fail: {text}"
+        );
+        assert!(text.contains("test-orphan"), "the error should name the rung: {text}");
+
+        // Rolled back, and enforcement restored despite the failure.
+        let mut rows = conn.query("PRAGMA user_version", ()).await.unwrap();
+        let v: u32 = rows.next().await.unwrap().unwrap().get(0).unwrap();
+        assert_eq!(v, 0, "a failed rung must not stamp its version");
+
+        let orphan = conn
+            .execute("INSERT INTO child VALUES ('d', 'nonexistent')", ())
+            .await;
+        assert!(
+            orphan.is_err(),
+            "foreign keys must be restored even when the rung failed"
         );
     }
 }

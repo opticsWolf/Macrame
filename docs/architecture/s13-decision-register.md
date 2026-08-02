@@ -1257,3 +1257,26 @@ Through 0.7.0 all three types had public fields, and the three `BTreeMap`s were 
 **In Rust this is a behaviour change without a compile break**, so it belongs in the release note by name: `load_subgraph` and `load_subgraph_with` no longer populate `content` unless asked. In Python it **is** a break — `NodeData.content` is `str | None` — and B7 carries the stub, `s14`, the README example and the `content=` keyword that will let a Python caller ask for it. **Until B7 there is no way to request content from Python at all**; that gap is named in `tests_py/test_read_path.py` rather than left to be discovered.
 
 **Rejected.** *An empty string for absent* — see above; indistinguishable from the real thing. *Loading content and discarding it in Rust* — keeps the I/O, which is most of what this avoids; the column is replaced by `NULL` in the query so the engine never reads the text off disk. *A separate `load_subgraph_with_content` method* — two loaders differing in one flag, and the flag belongs with the other traversal options. *Making it a parameter of `load_subgraph`* — a fifth positional argument on the documented main entry point, to express something only the filtered form needs.
+
+<a id="d-117"></a>D-117 — the migration ladder gains a rung kind: `suspends_foreign_keys`, with `PRAGMA foreign_key_check` inside the transaction (0.8.0). [D-032](s13-decision-register.md#d-032), [D-036](s13-decision-register.md#d-036), [D-084](s13-decision-register.md#d-084), [§5.1](s5-modules.md#51-connectionrs--the-handle-the-pragmas-and-the-write-actor).
+
+**This is scope the plan named before implementation because a probe refuted the specified shape.** [D-084](s13-decision-register.md#d-084) specifies the `concepts` rowid rung as a `links`-style rebuild. `links` has no inbound foreign keys; `concepts` has two (`links.source_id`, `links.target_id`), and `examples/concepts_rebuild_probe.rs` was written to find out whether the rung is writable at all. On libSQL 0.9.30, **four approaches fail**:
+
+| # | approach | result |
+|---|---|---|
+| 1 | `PRAGMA foreign_keys = OFF` inside the rung's transaction | **silently ignored** — `execute` returns `Ok` and the value reads back `1`. The pragma is a no-op inside a transaction, and [`apply_step`] wraps every rung in `BEGIN IMMEDIATE` |
+| 2 | `DROP TABLE concepts` with keys on | `FOREIGN KEY constraint failed`, **with or without** the delete guard — the guard is not the obstacle |
+| 3 | `PRAGMA defer_foreign_keys = ON`, designed for this | every statement succeeds, `foreign_key_check` reports **0 violations**, and **COMMIT fails**: SQLite counts deferred violation *events*, and re-adding an equivalent parent does not decrement the counter |
+| 4 | rename-around, `legacy_alter_table` on and off | the drop of the orphan fails both ways |
+
+The fifth works: toggle the pragma **outside** the transaction. So the ladder has to know which rungs need that, and a rung says so with this flag.
+
+**Atomicity is not weakened.** The rung is still one transaction and one commit with the `user_version` stamp inside it — [D-032](s13-decision-register.md#d-032)'s property is untouched. The pragma is per-*connection*, and the migration connection is created in `open()` and discarded on failure, so a crash between the toggle and the reset cannot leave a long-lived connection with enforcement off. It is restored on **every** path including the error one, deliberately: the guarantee should not depend on the caller's disposal habits.
+
+**Suspension is not permission, and that is the whole safety argument.** A flag that turns enforcement off is only acceptable if something else turns verification on. `apply_step` runs `PRAGMA foreign_key_check` **inside** the transaction before committing, and any row it reports fails the rung — so a rung that suspends enforcement and leaves a violation rolls back rather than committing a database nobody checked.
+
+**Both arms are tested, and the failing one is pinned to the check rather than to failure in general.** `a_suspending_rung_can_rebuild_a_table_with_inbound_keys` performs the drop-and-rename that is impossible with enforcement on, then asserts enforcement is back. `a_suspending_rung_that_leaves_a_violation_is_refused` orphans a row and requires the rung to fail, `user_version` to stay put, and enforcement to be restored despite the failure — asserting on the specific wording, because a DDL statement failing for its own reasons would also produce an error mentioning foreign keys and the test would then pass while proving nothing.
+
+**Landed with no rung using it.** `SCHEMA_VERSION` is still 7; v7 → v8 is what will set the flag. The mechanism goes first because it is the part the probe changed, it is testable on its own, and a schema rung is a bad place to be debugging the ladder underneath it.
+
+**Rejected.** *Doing it inside the rung body* — measured to be silently ignored, which is worse than failing. *`defer_foreign_keys`* — the documented tool for this, and it does not work here; recorded so nobody re-derives it. *Skipping `foreign_key_check`* — turns the flag into a supported way to write a corrupt database. *Restoring the pragma only on success* — makes a correctness guarantee depend on the caller discarding the connection.
