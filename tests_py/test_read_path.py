@@ -228,16 +228,72 @@ def test_node_returns_the_hydrated_concept(db):
     assert n.valid_from == dt.datetime(2026, 1, 1, tzinfo=UTC)
     assert n.valid_to is None  # the open sentinel, as None
 
-    # `content` is **not loaded by default** as of 0.8.0 (B3, D-116), and `None`
+    # `content` is **not loaded by default** as of 0.8.0 (D-116), and `None`
     # means "not loaded" rather than "empty" — a sentinel that is a valid value
     # of the type could not be told apart from a genuinely empty document.
     #
-    # This asserted `n.content == "body of a"` until B3. There is currently **no
-    # way to request content through the binding**: `load_subgraph` grows a
-    # `content=` keyword in B7, which is where the stub, `s14` and the README
-    # example are updated too. Until then this is a real gap in the Python
-    # surface, and it is named here rather than left for someone to discover.
+    # This asserted `n.content == "body of a"` until B3, and for one item there
+    # was no way to ask for it from Python at all. B7 closed that with the
+    # `content=` keyword below.
     assert n.content is None
+
+
+def test_content_is_returned_when_asked_for(db):
+    """The other half of the default, and the gap B3 opened (D-123).
+
+    A default that cannot be overridden is not a default, it is a removal.
+    """
+    g = db.load_subgraph("a", 3, ROOMY, content=True)
+    assert g.node("a").content == "body of a"
+    assert g.node("b").content == "body of b"
+
+    # And the two loads are the same graph, so the keyword changes what is
+    # carried and not what was found.
+    plain = db.load_subgraph("a", 3, ROOMY)
+    assert list(plain) == list(g)
+    assert plain.edge_count() == g.edge_count()
+
+
+def test_content_is_none_not_empty_string(db):
+    """`None` and `""` are different answers and the binding keeps them apart.
+
+    The whole reason `content` is `str | None` rather than `str`: a concept whose
+    text is genuinely empty and one whose text was not fetched are different
+    facts, and they differ exactly when a caller is deciding whether to go back
+    to the database.
+    """
+    db.upsert_concept(macrame.ConceptUpsert("e", "E", valid_from=T0, content=""))
+    db.assert_edge(macrame.EdgeAssertion("a", "e", "CITES", valid_from=T0))
+
+    asked = db.load_subgraph("a", 3, ROOMY, content=True)
+    assert asked.node("e").content == ""
+    assert asked.node("a").content == "body of a"
+
+    not_asked = db.load_subgraph("a", 3, ROOMY)
+    assert not_asked.node("e").content is None
+
+
+def test_the_algorithms_do_not_notice_content(db):
+    """B3's claim, asserted from the Python side (D-116, D-123).
+
+    The crate has the same assertion over the same six algorithms. It is repeated
+    here because the binding is where the `content` keyword lives, and a boundary
+    that silently changed an answer depending on how much text it carried would
+    be invisible to the Rust test.
+    """
+    off = db.load_subgraph("a", 3, ROOMY)
+    on = db.load_subgraph("a", 3, ROOMY, content=True)
+
+    # The fixture has to actually carry text, or this passes vacuously.
+    assert on.node("a").content
+    assert off.node("a").content is None
+
+    assert off.dijkstra("a") == on.dijkstra("a")
+    assert off.astar("a", "c") == on.astar("a", "c")
+    assert off.scc() == on.scc()
+    assert off.k_core(1) == on.k_core(1)
+    assert off.louvain() == on.louvain()
+    assert off.modularity(off.louvain()) == on.modularity(on.louvain())
 
 
 def test_edge_intervals_render_as_datetimes_with_none_for_open(db):

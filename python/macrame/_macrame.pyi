@@ -237,9 +237,10 @@ class NodeData:
     def content(self) -> str | None:
         """The document text, or `None` when the load did not fetch it.
 
-        Not loaded by default since 0.8.0 (B3, D-116). `None` means *not
-        loaded*, never *empty*. `load_subgraph` gains a `content=` keyword in
-        B7; until then there is no way to request it from Python.
+        Not loaded by default since 0.8.0 (D-116). `None` means *not loaded*,
+        never *empty* — the same refusal of a valid-value sentinel that makes an
+        open interval `None` rather than a far-future datetime. Pass
+        `content=True` to `load_subgraph` to fetch it.
         """
         ...
     @property
@@ -295,7 +296,12 @@ class Subgraph:
     def is_closed(self) -> bool:
         """True when every edge endpoint is also a node in this subgraph."""
 
-    def to_dict(self) -> dict[str, Any]: ...
+    def to_dict(self) -> dict[str, Any]:
+        """A plain-`dict` copy: `{"nodes": {id: NodeData}, "out_adj": …, "in_adj": …}`.
+
+        The node values are `NodeData` objects, not nested dicts, so absent
+        content is `NodeData.content is None` rather than a missing key.
+        """
     def dijkstra(self, start: str) -> dict[str, float]: ...
     def astar(
         self,
@@ -598,12 +604,18 @@ class Database:
         edge_types: Sequence[str] | None = None,
         min_weight: float | None = None,
         now: Timestamp | None = None,
+        content: bool = False,
     ) -> Subgraph:
         """Materialise a neighbourhood under a byte budget.
 
         An unstated `min_weight` is `-inf`, not `0.0` (D-103): this loader is for
         analysis, and a default of zero would silently drop the negative weights
         the algorithms are allowed to see.
+
+        `content=False` leaves `NodeData.content` as `None` (D-116). No algorithm
+        on the returned graph reads the text, and at realistic document sizes it
+        is most of `byte_budget`, so asking for it is opt-in. The default matches
+        the crate's rather than softening it.
         """
 
     # -- temporal --------------------------------------------------------------

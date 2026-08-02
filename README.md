@@ -35,7 +35,7 @@ Macrame stores concepts linked by typed, weighted relationships — where both c
 
 ```toml
 [dependencies]
-macrame-db = "0.7"
+macrame-db = "0.8"
 ```
 
 ```rust
@@ -154,7 +154,7 @@ v8 is the last rung before the 1.0 freeze that could take it: `rowid_pk INTEGER 
 
 ---
 
-## Python Bindings (v0.7.0)
+## Python Bindings (v0.8.0)
 
 | Detail | Value |
 |---|---|
@@ -169,8 +169,9 @@ v8 is the last rung before the 1.0 freeze that could take it: `rowid_pk INTEGER 
 ### Key design decisions
 
 - **Synchronous surface** — The Write Actor serialises every write through one channel, so exposing `await` advertises concurrency the architecture does not grant.
-- **Opaque `Subgraph`** — A `#[pyclass]` with forwarded accessors; `.to_dict()` for callers who want the copy.
+- **Opaque `Subgraph`** — A `#[pyclass]` with forwarded accessors; `.to_dict()` for callers who want the copy. It paid for itself in 0.8.0: the crate re-represented `EdgeRef` and **no binding signature moved**, because there is no converted copy whose layout had to follow (D-101, D-123).
 - **Open intervals cross as `None`** — Not a sentinel datetime, because `datetime.max` cannot survive `.astimezone()` east of UTC.
+- **Absent `content` crosses as `None`** — `load_subgraph` does not fetch document text unless asked (`content=True`). `""` cannot mark *not loaded*, because it is a valid value of the type (D-116, D-123).
 - **Every error is typed** — 35 exception classes under `MacrameError`, with six intermediate groups for catching sets: `IntegrityError`, `ValidationError`, `VectorError`, `TemporalError`, `WriterError`, `BudgetError`.
 - **`metrics` shipped on** — The wheel ships with the `metrics` feature enabled because feature flags do not survive into binary artifacts.
 
@@ -212,7 +213,7 @@ All budgets measured on named reference hardware. Regression detection uses crit
 ## Documentation
 
 - [Architecture specification](docs/architecture/README.md) — normative surfaces: §4 (schema) and Appendix A (API)
-- [Architecture Quick Reference](docs/quickref.md) — v0.7.0 reference: API, schema, decisions, performance
+- [Architecture Quick Reference](docs/quickref.md) — v0.8.0 reference: API, schema, decisions, performance
 - [Python bindings](docs/architecture/s14-python-bindings.md) — §14: async→sync boundary, error tree, stubs
 - [Decision register](docs/architecture/s13-decision-register.md) — D-001…D-109 with rationale
 

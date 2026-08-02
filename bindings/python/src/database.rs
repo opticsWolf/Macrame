@@ -527,9 +527,26 @@ impl PyDatabase {
     /// `edge_types` and `min_weight` bound the walk **and** the returned
     /// adjacency. Filtering only the walk would hand a caller who asked for
     /// `CITES` a graph reached via `CITES` and populated with `KNOWS` as well.
+    ///
+    /// # `content` is off, and asking for it is what spends the budget
+    ///
+    /// `NodeData.content` is `None` unless `content=True` (0.8.0, D-116). No
+    /// algorithm on this graph reads it — `dijkstra`, `astar`, `scc`, `k_core`,
+    /// `louvain` and `modularity` touch topology and weight only — and at
+    /// realistic document sizes the text is most of the payload, so the default
+    /// was spending `byte_budget` on bytes nothing would look at. A caller who
+    /// wants the text asks, and pays.
+    ///
+    /// **`False` here matches the crate's default rather than softening it.** A
+    /// binding that disagreed with the layer below about a default would be a
+    /// second source of truth, which is the thing the opaque `Subgraph` handle
+    /// exists to avoid.
+    ///
+    /// `traverse` is unaffected: it hydrates by `attribute_mode`, which asks a
+    /// different question — *which* text, not *whether* (D-102).
     #[pyo3(signature = (
         start_node, max_hops, byte_budget, *, edge_types = None,
-        min_weight = None, now = None
+        min_weight = None, now = None, content = false
     ))]
     #[allow(clippy::too_many_arguments)]
     fn load_subgraph(
@@ -541,6 +558,7 @@ impl PyDatabase {
         edge_types: Option<Vec<String>>,
         min_weight: Option<f64>,
         now: Option<&Bound<'_, PyAny>>,
+        content: bool,
     ) -> PyResult<graph::PySubgraph> {
         let now = self.instant(py, now)?;
         let b = graph::builder(
@@ -550,7 +568,8 @@ impl PyDatabase {
             min_weight.unwrap_or(f64::NEG_INFINITY),
             None,
             None,
-        );
+        )
+        .content(content);
         let inner = self.with_db(py, move |db| {
             runtime()
                 .block_on(db.load_subgraph_with(&b, &now, byte_budget))

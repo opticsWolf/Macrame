@@ -752,7 +752,7 @@ pub fn estimated_bulk_hold(edges: &[EdgeAssertion]) -> Duration  // ~34 ms / 500
 
 ---
 
-## 10. Python Bindings (v0.7.0)
+## 10. Python Bindings (v0.8.0)
 
 A synchronous Python binding built on pyo3 0.29 and maturin, delivered as a wheel alongside the Rust crate. The binding is **synchronous** (D-095): the Write Actor serialises every write through one channel, so exposing `await` on the write path advertises concurrency the architecture does not grant. A mixed async/sync surface is worse than either pure form.
 
@@ -760,7 +760,7 @@ A synchronous Python binding built on pyo3 0.29 and maturin, delivered as a whee
 
 **Error mapping.** Every `DbError` variant maps to its own Python exception class with its fields as attributes — `MacrameError` is the base, with trees under `IntegrityError`, `ValidationError`, `VectorError`, `TemporalError`, `WriterError`, etc. Completeness is enforced by an exhaustive `match` over `DbError` with no wildcard arm; adding a variant fails to compile `macrame-py` before a wheel is built. The `#[error]` rendering survives as `str(e)`, so callers who only want the sentence get it.
 
-**Value types and coercion.** Timestamps accept both `str` (passes through) and aware `datetime` (converted); naive datetimes and bare `date` objects are rejected rather than assumed UTC. Outbound timestamps are always `datetime` with `tzinfo=utc`. An open interval (`9999-12-31T23:59:59.999999Z`) crosses as `None`, not as a sentinel datetime — `datetime.max` cannot survive `.astimezone()` east of UTC. `macrame.OPEN` is the stored string for callers who need to name it. Embeddings accept `bytes` (fast path, 60.8 µs for 768 dims) or any sequence of floats (94.9 µs). `Subgraph` stays opaque — a `#[pyclass]` with forwarded accessors, with an explicit `.to_dict()` for callers who want the copy. Value types validate in their constructor (not at the point of use), so a `write_bulk_atomic` failure points at the line that built the offending value.
+**Value types and coercion.** Timestamps accept both `str` (passes through) and aware `datetime` (converted); naive datetimes and bare `date` objects are rejected rather than assumed UTC. Outbound timestamps are always `datetime` with `tzinfo=utc`. An open interval (`9999-12-31T23:59:59.999999Z`) crosses as `None`, not as a sentinel datetime — `datetime.max` cannot survive `.astimezone()` east of UTC. `macrame.OPEN` is the stored string for callers who need to name it. Embeddings accept `bytes` (fast path, 60.8 µs for 768 dims) or any sequence of floats (94.9 µs). Absent `content` also crosses as `None`: `load_subgraph` does not fetch document text unless `content=True` is passed, and `""` cannot mark *not loaded* because it is a valid value of the type (D-116, D-123). `Subgraph` stays opaque — a `#[pyclass]` with forwarded accessors, with an explicit `.to_dict()` for callers who want the copy, whose node values are `NodeData` objects rather than nested dicts. Opacity paid for itself in 0.8.0: the crate interned `EdgeRef` and no binding signature moved. Value types validate in their constructor (not at the point of use), so a `write_bulk_atomic` failure points at the line that built the offending value.
 
 **What is not exposed.** `Database::raw()`, `Database::read_conn()`, the bare-connection `register_model`/`upsert_embedding`, and `open_with_clock` are all deliberately unexposed. `diagnostic_conn()` *is* exposed, but as methods that run a query and return rows — `db.explain(sql)` and `db.diagnostic_query(sql, params)` — not as a connection object. Opening per call is also the R15-safe shape: 500 sequential opens measured clean. `FakeClock` is available only in a separate `macrame.testing` submodule, gated and documented as unsupported.
 
@@ -780,8 +780,8 @@ A synchronous Python binding built on pyo3 0.29 and maturin, delivered as a whee
 
 | Decision | Reference | Trigger |
 |---|---|---|
-| **`rowid_pk` on `links`** | D-084 | Deferred to erasure release — concept archival, which is itself deferred (D-022) |
-| **`Subgraph` key interning** | D-087 | Deferred to 0.7.0 — cost/benefit assessed post-baseline, `hydrate`'s N+1 buries it |
+| ~~**`rowid_pk` on `concepts`**~~ | D-084 → **D-119** | **Delivered in 0.8.0**, ahead of its trigger: D-036 forbids a primary-key change after 1.0, so waiting for the release that needed it would have waited past the last release allowed to make it |
+| ~~**`Subgraph` key interning**~~ | D-087 → **D-115** | **Delivered in 0.8.0** — 24-byte `EdgeRef` against a per-graph pool, measured 5.8×–6.8× rather than the projected 7.1×–9.5× |
 | **Concept archival** | D-022, Appendix C | Deferred — rehydration cost and identity semantics need their own decision |
 | **Automatic writer restart** | D-015, Appendix C | Deferred — containment errors support it; operational experience will decide |
 | **Crate-level write cancellation** | D-028, Appendix C | Deferred — application-layer `CancellationToken` checked before `send` |

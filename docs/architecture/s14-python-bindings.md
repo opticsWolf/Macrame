@@ -192,6 +192,15 @@ naive value does not say which instant it names and picking one is a wrong answe
 temporal query later, shifted by an amount nothing records. A bare `date` is refused for
 the same reason: which midnight, in which zone, is exactly what it does not answer.
 
+**Absent `content` crosses as `None` too, and for the same reason** (0.8.0,
+[D-123](s13-decision-register.md#d-123)). `NodeData.content` is `str | None`: since
+[D-116](s13-decision-register.md#d-116) a `Subgraph` does not carry document text unless
+`load_subgraph(..., content=True)` asks for it, and `""` cannot be the marker for *not
+loaded* because it is a valid value of the type — a concept whose text really is empty and
+one whose text was not fetched would be indistinguishable exactly when a caller is deciding
+whether to go back to the database. Same refusal, same shape, one layer along from the
+interval sentinel below.
+
 **An open interval crosses as `None`, in both directions.** The sentinel
 `9999-12-31T23:59:59.999999Z` is exactly `datetime.max`, so exposing it as a `datetime`
 constant was the obvious design and it does not survive measurement:
@@ -394,6 +403,9 @@ record and the corrections each phase made to it.
 | P6 | the suite, its gate, and the end-to-end seams | ✅ |
 | P7 | CI: the binding crate compiled, the suite gated, abi3 tested | ✅ |
 | P8 | the stub, `py.typed`, and the docstrings that carry reasons | ✅ |
+| B7 (0.8.0) | the surface tracks the crate's 0.8.0 changes: `content=` on `load_subgraph`, `NodeData.content` as `str \| None`, `MaterializedState.predates_recorded_history`, version to 0.8.0 | ✅ |
+
+**0.8.0 crossed less than expected, and the reason is a decision paying off.** [B2](../Macrame%20Implementation%20Plan%20v0.8.0-v0.9.0.md)'s interning of `EdgeRef` changed the crate's representation and **nothing** in `#[pymethods]`, because [D-101](s13-decision-register.md#d-101) had already made `Subgraph` an opaque handle rather than a converted dict — the copy that would have had to track the layout is one the binding declines to make. [B4](../Macrame%20Implementation%20Plan%20v0.8.0-v0.9.0.md)'s schema v8 is likewise invisible at the surface, but the version bump is not cosmetic: a wheel built against v7 opens a v8 database and refuses it by design, which is the whole point of `user_version`.
 
 **Not yet settled**, and each changes what gets built:
 
@@ -432,7 +444,7 @@ Three methods, and the split between them is the whole design:
 |---|---|
 | `traverse_ids(start, …)` | node ids. Cannot raise `AttributeModeUnstated` — topology at an instant is unambiguous |
 | `traverse(start, …)` | ids **and** hydrated text, under a stated `attribute_mode` |
-| `load_subgraph(start, max_hops, byte_budget, …)` | the neighbourhood as a `Subgraph`, bounded |
+| `load_subgraph(start, max_hops, byte_budget, …, content=False)` | the neighbourhood as a `Subgraph`, bounded. `content=True` fetches document text; without it `NodeData.content` is `None` ([D-116](s13-decision-register.md#d-116), [D-123](s13-decision-register.md#d-123)) |
 
 **`byte_budget` has no default because the crate has none.** How much memory a process may spend materialising one graph is not a question a binding can answer, and `SubgraphTooLarge` is the refusal it produces.
 

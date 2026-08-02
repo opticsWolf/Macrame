@@ -1175,6 +1175,53 @@ weaker: a generator writes `Optional[Any]` exactly where the interesting distinc
 binding that disagrees with the crate about a default is a second source of truth, and the whole
 argument for the opaque handle is that there is one.
 
+> **DELIVERED 2026-08-02.** [D-123](architecture/s13-decision-register.md#d-123). Python **348
+> passed** on a rebuilt `0.8.0` wheel, `mypy --strict` clean, Rust **321** (`metrics`), clippy
+> clean, doc gates green.
+>
+> **The gap B3 opened is closed.** `load_subgraph(..., content=False)`, keyword-only.
+> `test_content_is_returned_when_asked_for`, `test_content_is_none_not_empty_string` — which
+> writes a concept with `content=""` and requires `""` when asked and `None` when not, since a
+> flag that is only ever checked one way is decoration — and
+> `test_the_algorithms_do_not_notice_content`, which is [B3](#b3--content-leaves-the-default-load)'s
+> claim asserted from the Python side over all six algorithms with a guard that the fixture
+> actually carries text.
+>
+> **Step 1's premise was wrong and is corrected in place.** It says *"`to_dict()`'s node entries
+> change shape when content is absent"* and asks for an explicit `None` rather than an omitted
+> key. `to_dict()` returns `{id: NodeData}`, not nested plain dicts, so absent content is a
+> property returning `None` and the `KeyError` hazard does not exist. No code change was needed;
+> the stub now states the shape, which the signature `dict[str, Any]` does not.
+>
+> **Step 3's naming suggestion was not taken, and the reason is the one it gave.** It proposed
+> `folded_from_genesis` / `had_no_history`. The first names the branch — exactly what the step
+> warns against — and the second is ambiguous with *the graph is empty*. B5 shipped
+> `predates_recorded_history`, which names the fact.
+>
+> **What did not cross is the more interesting half.** [B2](#b2--edgeref-is-interned)'s interning
+> re-represented the largest structure the crate materialises and **no `#[pymethods]` signature
+> moved** — because [D-101](architecture/s13-decision-register.md#d-101) had already made
+> `Subgraph` an opaque handle, so there is no converted copy whose layout had to follow. A 0.7.0
+> decision taken for API-shape reasons paid for a 0.8.0 change nobody had planned when it was
+> taken.
+>
+> **Exit gate, item by item.** Suite green on a **rebuilt** wheel (`Installed macrame-db-0.8.0`),
+> not a stale artifact — the step 0.7.0 missed. `mypy --strict` clean. Stub injections
+> re-verified rather than assumed: an invented member is caught
+> (*`NodeData: in the stub only: ['invented_member']`*) and a dropped one is caught
+> (*`MaterializedState: not in the stub: ['predates_recorded_history']`*). The six-algorithm
+> equality asserted from Python. `macrame.__version__` read out of the installed extension:
+> **`0.8.0`**. Version bumped in all four places, `Cargo.lock` included. **The README example run
+> verbatim** from a clean directory — `{'entanglement': 1.0, 'quantum': 0.0}` — which is the
+> check that caught a broken example in 0.7.0.
+>
+> **Not verified here:** `python.yml`'s `abi3` job, which builds on 3.10 and runs the suite on
+> 3.13. That is CI's, and it has not run against this tree.
+>
+> **Still open and not B7's:** the `property-tests` gate is red on committed code
+> ([R15](architecture/s11-s12-milestones-and-risks.md#r15)). 0.8.0 should not be tagged until
+> that is understood.
+
 ---
 
 ## Track C — 0.9.0, concept archival
@@ -1308,7 +1355,7 @@ NOW      A1  gate classifier ........... main is red; nothing below is measurabl
          B4  schema v8 ................. DELIVERED (v7 -> v8, D-117/118/119/120)
          B5  reconstruct below floor ... DELIVERED (D-121; no marker needed)
          B6  Louvain aggregation ....... CLOSED, not taken (D-122; Q was the wrong gate)
-         B7  binding + stub + wheel .... LAST: needs B2, B3, B5 settled
+         B7  binding + stub + wheel .... DELIVERED (D-123; 0.8.0 wheel, stub, README)
          A3  doc truth pass ............ README rows before the tag
          A4  macOS row, checkout@v5
 
@@ -1383,13 +1430,13 @@ they have not been done.
 | **D-120** | — | **Unprojected, and produced by B4's own exit gate.** `VACUUM` renumbers a sparse implicit rowid **only for a table with no index at all**, so [D-071](architecture/s13-decision-register.md#d-071)'s hazard was never live and this plan's "makes the hazard real" is wrong. Does not change the rung; changes why it is right |
 | **D-121** | D-118 | A `reconstruct` below the log floor on a never-archived ledger is the empty state, not a corruption — and the hot-side marker is **not** needed to get there, because `seq_id` already answers it (B5) |
 | **D-122** | D-119 | Louvain's aggregation phase **closed, not taken** — and the Q criterion this plan specified is what the measurement refuted: ΔQ is positive and growing, but it is the resolution limit merging true communities, not structure found (B6) |
+| **D-123** | D-123 | Absent `content` crosses to Python as `None`, not `""`, and `load_subgraph` gains the `content=` keyword that makes the default overridable; the stub stays hand-written and the interning is **confirmed** invisible at the boundary — the one entry this plan projected exactly, number included (B7) |
 
 **Still projected**, and the numbers below are now estimates a second time, so they are written as
 *next free* rather than as claims:
 
 | | recorded as | |
 |---|---|---|
-| **D-123** | D-123 | Absent `content` crosses to Python as `None`, not `""` — the same refusal of a valid-value sentinel that [D-096](architecture/s13-decision-register.md#d-096) made for open intervals; the stub stays hand-written and the interning is confirmed invisible at the boundary (B7) |
 | **D-124** | D-117 | **Erasure is refused on doctrine, not deferred**; the alternative is pseudonymous ids with identifying content held by the application. **Supersedes [D-022](architecture/s13-decision-register.md#d-022)'s open framing** ([§2](#2-doctrine-position-erasure-is-refused-archival-is-sanctioned)) |
 | **D-125** | D-120 | Concept archival: archivability is reachability, not expiry; the delete guard becomes marker-gated (C1, C2) |
 | **D-126** | D-121 | Rehydration is a physical move back and mints no transaction-time facts — **derived from the traceability requirement**, closing Appendix C's open Doctrine III question (C3) |
