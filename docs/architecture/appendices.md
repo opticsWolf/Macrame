@@ -153,6 +153,11 @@ db.write_analytics_annotations(vec![
 ]).await?;                                             // chunked, low-priority
 
 let g = db.load_subgraph(root, max_hops, ts, byte_budget).await?;   // -> Subgraph
+// Fields are private since 0.8.0 (D-114). The surface is accessors:
+//   g.node_count()  g.contains_node(id)  g.node(id) -> Option<&NodeData>
+//   g.node_ids()    g.nodes()            g.out_edges(id) / g.in_edges(id)
+//   g.out_adjacency() / g.in_adjacency() g.insert_node(..) / g.add_edge(..)
+// NodeData and EdgeRef likewise: title(), content(), weight(), node(), ....
 let dist  = dijkstra(&g, start);                       // BTreeMap<String, f64>
 let path  = astar(&g, start, goal, heuristic);         // Option<(f64, Vec<String>)>
 let comps = scc(&g);                                   // Vec<Vec<String>>

@@ -496,3 +496,131 @@ fn the_delivery_marker_is_what_settles_an_overdue_entry() {
         "a marker naming one release must not settle a claim on another"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The `Subgraph` surface is documented where it is quoted (0.8.0, B1, D-114)
+// ---------------------------------------------------------------------------
+//
+// `docs/quickref.md` reproduces the three analytics types **verbatim**, fields
+// and all, and that block was correct until B1 made every one of those fields
+// private. A copied declaration is the same failure mode §7 and Appendix A had
+// (this file's opening comment): it is not executed, and nothing notices when
+// it stops being true.
+//
+// Two directions, and the second is the one that actually rots:
+//
+// * no document may still advertise a **field** that is now private — the
+//   specific untruth B1 introduces;
+// * every public **method** on `Subgraph` must appear in the quoted block —
+//   the drift that accumulates afterwards, one accessor at a time.
+//
+// Deliberately shallow, for the reason the rest of this file is: mentioned by
+// name, not matched on signature. A stricter check fails on reformatting and
+// gets relaxed the first time it cries wolf.
+
+const QUICKREF: &str = include_str!("../docs/quickref.md");
+const SUBGRAPH_RS: &str = include_str!("../src/graph/subgraph.rs");
+
+/// The three types whose fields B1 made private.
+///
+/// **Scoped to these declarations, and the first version was not.** It searched
+/// the whole document for `pub title:`, `pub content:`, `pub weight:` and so on,
+/// and went red on `ConceptUpsert` and `EdgeAssertion` — different types, whose
+/// fields are genuinely public and share five of the names. That is the D-088
+/// failure exactly: a check wide enough to fire on correct documentation is one
+/// that gets deleted rather than fixed. It survived about a minute.
+const PRIVATE_FIELD_TYPES: &[&str] = &["Subgraph", "NodeData", "EdgeRef"];
+
+/// The body of `pub struct <name> {` in `doc`, or `None` if it is not declared.
+fn documented_struct_body<'a>(doc: &'a str, name: &str) -> Option<&'a str> {
+    let header = format!("pub struct {name} ");
+    let at = doc
+        .find(&header)
+        .or_else(|| doc.find(&format!("pub struct {name} {{")))?;
+    let open = at + doc[at..].find('{')?;
+    let mut depth = 0usize;
+    for (i, c) in doc[open..].char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&doc[open + 1..open + i]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Public method names declared in a `impl <name> {` block of the source.
+fn public_methods_of(source: &str, header: &str) -> BTreeSet<String> {
+    block_after(source, header)
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("pub "))
+        .map(|l| l.trim_start_matches("async ").trim_start_matches("fn "))
+        .filter_map(|l| l.split(['(', '<', ' ']).next())
+        .filter(|n| !n.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+#[test]
+fn no_document_still_advertises_a_field_b1_made_private() {
+    let leaked: Vec<String> = PRIVATE_FIELD_TYPES
+        .iter()
+        .filter_map(|name| {
+            let body = documented_struct_body(QUICKREF, name)?;
+            body.contains("pub ")
+                .then(|| format!("{name} {{{}}}", body.trim()))
+        })
+        .collect();
+
+    assert!(
+        leaked.is_empty(),
+        "docs/quickref.md still declares public fields on types B1 made \
+         private:\n  {}\n\
+         The accessors are the surface now. A document that reproduces a \
+         declaration has the same failure mode as a copied error enum: nobody \
+         executes it.",
+        leaked.join("\n  ")
+    );
+
+    // The check is only worth anything if it found the declarations at all.
+    for name in PRIVATE_FIELD_TYPES {
+        assert!(
+            documented_struct_body(QUICKREF, name).is_some(),
+            "docs/quickref.md no longer declares `{name}` — either it was \
+             dropped from the document, or this test is looking for the wrong \
+             thing and is now passing vacuously"
+        );
+    }
+}
+
+#[test]
+fn the_quoted_subgraph_surface_lists_every_public_method() {
+    let declared = public_methods_of(SUBGRAPH_RS, "impl Subgraph {");
+    assert!(
+        declared.len() > 10,
+        "parsed only {} methods off `impl Subgraph`, which means this test is \
+         reading the wrong thing rather than that the type shrank: {declared:?}",
+        declared.len()
+    );
+
+    // The loaders are `Database` methods documented elsewhere in the same file,
+    // and `write_back_annotations` is listed under its own heading.
+    let missing: Vec<&String> = declared
+        .iter()
+        .filter(|m| !QUICKREF.contains(m.as_str()))
+        .collect();
+
+    assert!(
+        missing.is_empty(),
+        "`impl Subgraph` has public methods that docs/quickref.md does not \
+         mention: {missing:?}\n\
+         quickref reproduces this surface verbatim, so an accessor added \
+         without it is a document that describes a smaller type than the crate \
+         has."
+    );
+}

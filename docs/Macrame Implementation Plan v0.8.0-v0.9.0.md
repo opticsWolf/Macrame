@@ -551,6 +551,52 @@ A, since two documents quote the field list this item deletes.
 `quickref.md:296` (the struct is reproduced verbatim there); `s13` (D-113); `s14` §14.10 if any
 wording implies field access.
 
+> **Delivered 2026-08-02** — [D-114](architecture/s13-decision-register.md#d-114), not D-113:
+> A5 took that number. Suites **308** / **319** / **344**, clippy clean.
+>
+> **Zero behavioural diff, measured rather than asserted.** `fixture_matrix_diag` was run
+> against the pre-B1 commit in a detached worktree and against this one: every structural
+> column identical on all four fixtures, `estimated_bytes` at 339,638 / 2,168,375 / 324,653 /
+> 30,744,680. The property suites are what cover *same partitions, same distances* — they
+> compare against brute-force oracles, so a changed answer fails by construction.
+>
+> **The blast radius was right about `algorithms.rs` and wrong about the number.** This item's
+> correction to [D-087](architecture/s13-decision-register.md#d-087) holds: adjacency is reached
+> **only** through `out_edges()` / `in_edges()`, 0 sites on either map. But "ten mechanical
+> substitutions" counted only `.nodes`. The file also reads `EdgeRef` fields off those borrowed
+> slices at **15 further sites**, which move once `EdgeRef` is closed — **26, not 10**. All
+> mechanical; none a design question.
+>
+> **`NodeData` and `EdgeRef` had to be closed here, and the step list implies but never says
+> why.** Leaving their fields public would make B1 cheap and then break the API twice more:
+> B2 changes `EdgeRef::node` to `u32`, B3 changes `NodeData::content` to `Option`. *The break
+> taken once* is this item's premise, and a break taken once per field is what it exists to
+> avoid.
+>
+> **"The Python surface does not move" was read as "the binding needs no work".** The first
+> half is exactly right — [D-101](architecture/s13-decision-register.md#d-101)'s opacity means
+> **not one `#[pymethods]` signature changes.** But ~20 lines *behind* those methods read the
+> Rust fields directly, and they now call accessors. `to_dict` needed the two new adjacency
+> iterators. Worth separating, because the plan recorded only the surface half.
+>
+> **`add_edge` is public now**, which the steps did not anticipate. Three fixtures, a property
+> generator and a diagnostic each built adjacency by hand, each doing its own
+> `back.node = source` — five copies of an invariant the type already had one function for.
+> They call it. A real improvement fell out of a mechanical change.
+>
+> **Two new tests, both verified by injection**: no document may advertise a field this item
+> made private, and every public `Subgraph` method must appear in the block `quickref.md`
+> quotes. **The first version of the field check went red on correct documentation** — it
+> searched the whole file for `pub title:`, `pub weight:` and friends, which `ConceptUpsert`
+> and `EdgeAssertion` legitimately declare, sharing five names. Scoped to the three
+> declarations. That is [D-088](architecture/s13-decision-register.md#d-088)'s lesson landing
+> for the third time this release, inside a test whose own comment warns about it.
+>
+> **One environment hazard worth knowing.** `cargo build` reported `Finished` in 0.22 s
+> **without rebuilding** after the first edit to `subgraph.rs`, and reported success on code
+> that does not compile. The repo is owned by a different Windows user; touching the file
+> forced the rebuild. A green build here is not by itself evidence that the build ran.
+
 ### B2 · Intern the keys
 
 `EdgeRef` becomes `{u32, u32, f64, u32, u32}` — 24 bytes, no heap payload — against 104 bytes

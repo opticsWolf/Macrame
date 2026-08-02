@@ -30,29 +30,20 @@ fn node_id(i: usize) -> String {
 fn build(n: usize, edges: &[(usize, usize, f64)]) -> Subgraph {
     let mut g = Subgraph::default();
     for i in 0..n {
-        g.nodes.insert(
+        g.insert_node(
             node_id(i),
-            NodeData {
-                title: node_id(i),
-                content: String::new(),
-                embedding_model: None,
-                valid_from: T0.to_string(),
-                valid_to: OPEN.to_string(),
-            },
+            NodeData::new(node_id(i), String::new(), T0.to_string(), OPEN.to_string()),
         );
     }
     for &(s, t, w) in edges {
-        let fwd = EdgeRef {
-            node: node_id(t),
-            edge_type: "KNOWS".to_string(),
-            weight: w,
-            valid_from: T0.to_string(),
-            valid_to: OPEN.to_string(),
-        };
-        let mut back = fwd.clone();
-        back.node = node_id(s);
-        g.out_adj.entry(node_id(s)).or_default().push(fwd);
-        g.in_adj.entry(node_id(t)).or_default().push(back);
+        let fwd = EdgeRef::new(
+            node_id(t),
+            "KNOWS".to_string(),
+            w,
+            T0.to_string(),
+            OPEN.to_string(),
+        );
+        g.add_edge(node_id(s), node_id(t), fwd);
     }
     g
 }
@@ -95,17 +86,17 @@ fn oracle_distances(g: &Subgraph, start: &str) -> BTreeMap<String, f64> {
         best: &mut BTreeMap<String, f64>,
     ) {
         for e in g.out_edges(at) {
-            if seen.contains(&e.node) {
+            if seen.contains(e.node()) {
                 continue;
             }
-            let c = cost + e.weight;
-            let entry = best.entry(e.node.clone()).or_insert(f64::INFINITY);
+            let c = cost + e.weight();
+            let entry = best.entry(e.node().to_string()).or_insert(f64::INFINITY);
             if c < *entry {
                 *entry = c;
             }
-            seen.insert(e.node.clone());
-            walk(g, &e.node, c, seen, best);
-            seen.remove(&e.node);
+            seen.insert(e.node().to_string());
+            walk(g, e.node(), c, seen, best);
+            seen.remove(e.node());
         }
     }
 
@@ -119,7 +110,7 @@ fn oracle_distances(g: &Subgraph, start: &str) -> BTreeMap<String, f64> {
 /// u and v share a component exactly when each reaches the other. Computed as a
 /// naive O(V^3) closure, with no reference to any SCC algorithm.
 fn oracle_scc(g: &Subgraph) -> Vec<Vec<String>> {
-    let ids: Vec<String> = g.nodes.keys().cloned().collect();
+    let ids: Vec<String> = g.node_ids().map(str::to_string).collect();
     let n = ids.len();
     let idx: BTreeMap<&String, usize> = ids.iter().enumerate().map(|(i, s)| (s, i)).collect();
 
@@ -127,7 +118,7 @@ fn oracle_scc(g: &Subgraph) -> Vec<Vec<String>> {
     for (i, id) in ids.iter().enumerate() {
         reach[i][i] = true;
         for e in g.out_edges(id) {
-            if let Some(&j) = idx.get(&e.node) {
+            if let Some(&j) = idx.get(&e.node().to_string()) {
                 reach[i][j] = true;
             }
         }
@@ -169,7 +160,7 @@ fn oracle_scc(g: &Subgraph) -> Vec<Vec<String>> {
 /// rather than maintaining them incrementally, which is exactly the step
 /// `k_core` optimises and therefore the step worth checking.
 fn oracle_k_core(g: &Subgraph, k: usize) -> BTreeSet<String> {
-    let mut alive: BTreeSet<String> = g.nodes.keys().cloned().collect();
+    let mut alive: BTreeSet<String> = g.node_ids().map(str::to_string).collect();
     loop {
         let mut doomed = BTreeSet::new();
         for node in &alive {
@@ -177,7 +168,7 @@ fn oracle_k_core(g: &Subgraph, k: usize) -> BTreeSet<String> {
                 .out_edges(node)
                 .iter()
                 .chain(g.in_edges(node))
-                .filter(|e| alive.contains(&e.node))
+                .filter(|e| alive.contains(e.node()))
                 .count();
             if deg < k {
                 doomed.insert(node.clone());
@@ -198,7 +189,7 @@ fn oracle_k_core(g: &Subgraph, k: usize) -> BTreeSet<String> {
 /// that `a[i] <= 1 + max(a[0..i])`. That enumerates each set partition exactly
 /// once. Bell numbers grow fast, so callers keep n small.
 fn oracle_best_modularity(g: &Subgraph) -> f64 {
-    let ids: Vec<String> = g.nodes.keys().cloned().collect();
+    let ids: Vec<String> = g.node_ids().map(str::to_string).collect();
     let n = ids.len();
     let mut assign = vec![0usize; n];
     let mut best = f64::NEG_INFINITY;
@@ -269,7 +260,7 @@ proptest! {
         let start = node_id(0);
         let dist = dijkstra(&g, &start);
 
-        for target in g.nodes.keys() {
+        for target in g.node_ids() {
             let found = astar(&g, &start, target, |_, _| 0.0);
             match (dist.get(target), found) {
                 (None, f) => prop_assert!(f.is_none(), "unreachable {} reported reachable", target),
@@ -277,7 +268,7 @@ proptest! {
                 (Some(&want), Some((cost, path))) => {
                     prop_assert!((cost - want).abs() < 1e-9);
                     prop_assert_eq!(path.first().map(String::as_str), Some(start.as_str()));
-                    prop_assert_eq!(path.last(), Some(target));
+                    prop_assert_eq!(path.last().map(String::as_str), Some(target));
 
                     // Every consecutive pair must be a real edge, and the
                     // cheapest such edge sums to the reported cost.
@@ -285,8 +276,8 @@ proptest! {
                     for pair in path.windows(2) {
                         let step = g.out_edges(&pair[0])
                             .iter()
-                            .filter(|e| e.node == pair[1])
-                            .map(|e| e.weight)
+                            .filter(|e| e.node() == pair[1])
+                            .map(|e| e.weight())
                             .fold(f64::INFINITY, f64::min);
                         prop_assert!(step.is_finite(), "{} -> {} is not an edge", pair[0], pair[1]);
                         sum += step;
@@ -322,10 +313,10 @@ proptest! {
         let g = build(n, &edges);
         let comms = louvain(&g);
 
-        prop_assert_eq!(comms.len(), g.nodes.len(), "every node must be assigned");
+        prop_assert_eq!(comms.len(), g.node_count(), "every node must be assigned");
 
         let singletons: BTreeMap<String, usize> =
-            g.nodes.keys().enumerate().map(|(i, x)| (x.clone(), i)).collect();
+            g.node_ids().enumerate().map(|(i, x)| (x.to_string(), i)).collect();
 
         let q = modularity(&g, &comms);
         prop_assert!(q >= modularity(&g, &singletons) - 1e-9);

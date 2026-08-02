@@ -86,36 +86,27 @@ fn main() {
         let mut g = Subgraph::default();
         let n = 200usize;
         for i in 0..n {
-            g.nodes.insert(
+            g.insert_node(
                 format!("c{i:07}"),
-                NodeData {
-                    title: "A title".to_string(),
-                    content: "x".repeat(content),
-                    embedding_model: None,
-                    valid_from: TS.to_string(),
-                    valid_to: OPEN.to_string(),
-                },
+                NodeData::new("A title".to_string(), "x".repeat(content), TS.to_string(), OPEN.to_string()),
             );
         }
         for i in 0..n {
             for k in 1..=20usize {
-                // `add_edge` is private, so the two adjacency entries it would
-                // write are built here directly — which is also the clearer
-                // statement of the thing being measured: one edge, two owned
-                // copies, differing only in which endpoint `node` names.
+                // `add_edge` writes both adjacency entries, which is exactly
+                // the thing being measured: one edge, two owned copies,
+                // differing only in which endpoint `node` names. It was private
+                // until 0.8.0 and this loop built the pair by hand.
                 let source = format!("c{i:07}");
                 let target = format!("c{:07}", (i + k) % n);
-                let fwd = EdgeRef {
-                    node: target.clone(),
-                    edge_type: "LINKS".to_string(),
-                    weight: 1.0,
-                    valid_from: TS.to_string(),
-                    valid_to: OPEN.to_string(),
-                };
-                let mut back = fwd.clone();
-                back.node = source.clone();
-                g.out_adj.entry(source).or_default().push(fwd);
-                g.in_adj.entry(target).or_default().push(back);
+                let fwd = EdgeRef::new(
+                    target.clone(),
+                    "LINKS".to_string(),
+                    1.0,
+                    TS.to_string(),
+                    OPEN.to_string(),
+                );
+                g.add_edge(source, target, fwd);
             }
         }
 

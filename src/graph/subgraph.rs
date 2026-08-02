@@ -46,35 +46,196 @@ const NO_EDGES: &[EdgeRef] = &[];
 /// every present and future algorithm to preserve edges whose endpoint the
 /// caller is not entitled to read. Retirement is the supported path — concepts
 /// are never deleted (D-022) — so this is ordinary use, not a corner.
+///
+/// # Why the fields are private (0.8.0, B1, D-114)
+///
+/// They were `pub` through 0.7.0, and the three maps were the crate's most
+/// widely read data structure. That made **every detail of the representation
+/// part of the public API** — the `BTreeMap`, the `String` keys, the fact that
+/// adjacency is stored as two maps at all — none of which was ever a promise
+/// anyone intended to make.
+///
+/// The immediate reason is D-087: interning the keys to `u32` cannot be done
+/// at all while `EdgeRef::node` is a public `String`. The break is taken **once**, here, with the representation
+/// unchanged, so that anything depending on the old shape fails against code
+/// that still behaves identically.
+///
+/// Accessors return borrowed views, so nothing here costs an allocation that
+/// field access did not.
 #[derive(Debug, Clone, Default)]
 pub struct Subgraph {
-    pub nodes: BTreeMap<String, NodeData>,
-    pub out_adj: BTreeMap<String, Vec<EdgeRef>>,
-    pub in_adj: BTreeMap<String, Vec<EdgeRef>>,
+    nodes: BTreeMap<String, NodeData>,
+    out_adj: BTreeMap<String, Vec<EdgeRef>>,
+    in_adj: BTreeMap<String, Vec<EdgeRef>>,
 }
 
+/// The attributes of one node, as of the instant the graph was loaded.
+///
+/// Fields are private for the reason given on [`Subgraph`]; `content` is the
+/// one whose type is expected to move.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NodeData {
-    pub title: String,
-    pub content: String,
-    pub embedding_model: Option<String>,
-    pub valid_from: String,
-    pub valid_to: String,
+    title: String,
+    content: String,
+    embedding_model: Option<String>,
+    valid_from: String,
+    valid_to: String,
+}
+
+impl NodeData {
+    /// A node with no embedding model. Use [`Self::with_embedding_model`] to
+    /// add one.
+    pub fn new(
+        title: impl Into<String>,
+        content: impl Into<String>,
+        valid_from: impl Into<String>,
+        valid_to: impl Into<String>,
+    ) -> Self {
+        Self {
+            title: title.into(),
+            content: content.into(),
+            embedding_model: None,
+            valid_from: valid_from.into(),
+            valid_to: valid_to.into(),
+        }
+    }
+
+    #[must_use]
+    pub fn with_embedding_model(mut self, model: Option<String>) -> Self {
+        self.embedding_model = model;
+        self
+    }
+
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+
+    pub fn content(&self) -> &str {
+        &self.content
+    }
+
+    pub fn embedding_model(&self) -> Option<&str> {
+        self.embedding_model.as_deref()
+    }
+
+    pub fn valid_from(&self) -> &str {
+        &self.valid_from
+    }
+
+    pub fn valid_to(&self) -> &str {
+        &self.valid_to
+    }
 }
 
 /// One end of an edge in an adjacency list.
 ///
-/// `node` is the *other* end: the target in `out_adj`, the source in `in_adj`.
+/// [`Self::node`] is the *other* end: the target in the outgoing index, the
+/// source in the incoming one. Fields are private for the reason given on
+/// [`Subgraph`]; this is the type interning changes.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EdgeRef {
-    pub node: String,
-    pub edge_type: String,
-    pub weight: f64,
-    pub valid_from: String,
-    pub valid_to: String,
+    node: String,
+    edge_type: String,
+    weight: f64,
+    valid_from: String,
+    valid_to: String,
+}
+
+impl EdgeRef {
+    pub fn new(
+        node: impl Into<String>,
+        edge_type: impl Into<String>,
+        weight: f64,
+        valid_from: impl Into<String>,
+        valid_to: impl Into<String>,
+    ) -> Self {
+        Self {
+            node: node.into(),
+            edge_type: edge_type.into(),
+            weight,
+            valid_from: valid_from.into(),
+            valid_to: valid_to.into(),
+        }
+    }
+
+    /// The far end of the edge.
+    pub fn node(&self) -> &str {
+        &self.node
+    }
+
+    pub fn edge_type(&self) -> &str {
+        &self.edge_type
+    }
+
+    pub fn weight(&self) -> f64 {
+        self.weight
+    }
+
+    pub fn valid_from(&self) -> &str {
+        &self.valid_from
+    }
+
+    pub fn valid_to(&self) -> &str {
+        &self.valid_to
+    }
 }
 
 impl Subgraph {
+    /// Whether `id` is a hydrated node of this graph.
+    ///
+    /// By the closure invariant this is also the answer to "may an algorithm
+    /// look this id up", which is why every algorithm asks it rather than
+    /// probing adjacency.
+    pub fn contains_node(&self, id: &str) -> bool {
+        self.nodes.contains_key(id)
+    }
+
+    /// The attributes of `id`, or `None` when it is not in the graph.
+    pub fn node(&self, id: &str) -> Option<&NodeData> {
+        self.nodes.get(id)
+    }
+
+    /// Node ids in ascending order.
+    ///
+    /// The order is `BTreeMap`'s and is load-bearing rather than incidental:
+    /// Louvain breaks ties by first-seen community and returns a different
+    /// partition under a randomised order.
+    pub fn node_ids(&self) -> impl ExactSizeIterator<Item = &str> + '_ {
+        self.nodes.keys().map(String::as_str)
+    }
+
+    pub fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+
+    /// Every node with its attributes, in id order.
+    pub fn nodes(&self) -> impl ExactSizeIterator<Item = (&str, &NodeData)> + '_ {
+        self.nodes.iter().map(|(id, d)| (id.as_str(), d))
+    }
+
+    /// The outgoing index: each node that has outgoing edges, with them.
+    ///
+    /// For one node prefer [`Self::out_edges`]. This exists for callers that
+    /// must walk the whole index — the Python `to_dict`, and the diagnostics.
+    pub fn out_adjacency(&self) -> impl Iterator<Item = (&str, &[EdgeRef])> + '_ {
+        self.out_adj.iter().map(|(id, e)| (id.as_str(), e.as_slice()))
+    }
+
+    /// The incoming index. See [`Self::out_adjacency`].
+    pub fn in_adjacency(&self) -> impl Iterator<Item = (&str, &[EdgeRef])> + '_ {
+        self.in_adj.iter().map(|(id, e)| (id.as_str(), e.as_slice()))
+    }
+
+    /// Add or replace a node, returning what was there before.
+    ///
+    /// Public so that callers who build a graph by hand — the test fixtures,
+    /// the diagnostics — can still do so now the fields are private. It does
+    /// **not** establish the closure invariant on its own: adjacency naming an
+    /// id never inserted is still dangling, exactly as before.
+    pub fn insert_node(&mut self, id: impl Into<String>, data: NodeData) -> Option<NodeData> {
+        self.nodes.insert(id.into(), data)
+    }
+
     /// Outgoing edges of `node`, empty when it has none or is absent.
     pub fn out_edges(&self, node: &str) -> &[EdgeRef] {
         self.out_adj.get(node).map_or(NO_EDGES, Vec::as_slice)
@@ -169,11 +330,24 @@ impl Subgraph {
     /// here — degree, k-core peeling, Louvain's `k_i` — reads them as a pair. An
     /// `in_adj` that lags `out_adj` would not fail loudly; it would return a
     /// plausible wrong number.
-    fn add_edge(&mut self, source: String, target: String, edge: EdgeRef) {
+    /// **Public since 0.8.0.** The callers that used to push into both maps by
+    /// hand cannot now the fields are private, and routing them through the one
+    /// function that maintains the pair is the point rather than a consolation:
+    /// hand-written adjacency was two chances to get the reverse edge wrong,
+    /// and every such call site was already doing the `back.node = source`
+    /// dance itself. `edge.node` is expected to be `target`; the reverse entry
+    /// is derived here.
+    pub fn add_edge(
+        &mut self,
+        source: impl Into<String>,
+        target: impl Into<String>,
+        edge: EdgeRef,
+    ) {
+        let source = source.into();
         let mut incoming = edge.clone();
         incoming.node = source.clone();
         self.out_adj.entry(source).or_default().push(edge);
-        self.in_adj.entry(target).or_default().push(incoming);
+        self.in_adj.entry(target.into()).or_default().push(incoming);
     }
 
     /// Estimated payload bytes for one node, keyed by `id`.
@@ -605,7 +779,7 @@ mod tests {
     #[test]
     fn adding_an_edge_indexes_it_in_both_directions() {
         let mut g = Subgraph::default();
-        g.add_edge("A".into(), "B".into(), edge("B", 0.5));
+        g.add_edge("A", "B", edge("B", 0.5));
 
         assert_eq!(g.out_edges("A").len(), 1);
         assert_eq!(g.out_edges("A")[0].node, "B");

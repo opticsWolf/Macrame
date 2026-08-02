@@ -15,27 +15,26 @@ fn graph_of(edges: &[(&str, &str, f64)]) -> Subgraph {
     let mut g = Subgraph::default();
     for (s, t, w) in edges {
         for id in [s, t] {
-            g.nodes
-                .entry(id.to_string())
-                .or_insert(macrame::graph::NodeData {
-                    title: id.to_string(),
-                    content: String::new(),
-                    embedding_model: None,
-                    valid_from: T0.to_string(),
-                    valid_to: OPEN.to_string(),
-                });
+            if !g.contains_node(id) {
+                g.insert_node(
+                    id.to_string(),
+                    macrame::graph::NodeData::new(
+                        id.to_string(),
+                        String::new(),
+                        T0.to_string(),
+                        OPEN.to_string(),
+                    ),
+                );
+            }
         }
-        let fwd = EdgeRef {
-            node: t.to_string(),
-            edge_type: "KNOWS".to_string(),
-            weight: *w,
-            valid_from: T0.to_string(),
-            valid_to: OPEN.to_string(),
-        };
-        let mut back = fwd.clone();
-        back.node = s.to_string();
-        g.out_adj.entry(s.to_string()).or_default().push(fwd);
-        g.in_adj.entry(t.to_string()).or_default().push(back);
+        let fwd = EdgeRef::new(
+            t.to_string(),
+            "KNOWS".to_string(),
+            *w,
+            T0.to_string(),
+            OPEN.to_string(),
+        );
+        g.add_edge(s.to_string(), t.to_string(), fwd);
     }
     g
 }
@@ -147,7 +146,7 @@ async fn test_traversal_execution_and_subgraph_bridge() {
     assert_eq!(results.len(), 3, "A, B and C are reachable");
 
     let g = db.load_subgraph("A", 2, T0, 1 << 20).await.unwrap();
-    assert_eq!(g.nodes.len(), 3);
+    assert_eq!(g.node_count(), 3);
     assert_eq!(g.edge_count(), 2);
 
     let distances = dijkstra(&g, "A");
@@ -461,10 +460,9 @@ fn louvain_beats_the_singleton_partition_it_starts_from() {
 
     let comms = louvain(&g);
     let singletons: std::collections::BTreeMap<String, usize> = g
-        .nodes
-        .keys()
+        .node_ids()
         .enumerate()
-        .map(|(i, n)| (n.clone(), i))
+        .map(|(i, n)| (n.to_string(), i))
         .collect();
 
     let q = modularity(&g, &comms);
@@ -488,15 +486,9 @@ fn louvain_beats_the_singleton_partition_it_starts_from() {
 fn louvain_on_an_edgeless_graph_is_all_singletons() {
     let mut g = Subgraph::default();
     for id in ["A", "B"] {
-        g.nodes.insert(
+        g.insert_node(
             id.to_string(),
-            macrame::graph::NodeData {
-                title: id.to_string(),
-                content: String::new(),
-                embedding_model: None,
-                valid_from: T0.to_string(),
-                valid_to: OPEN.to_string(),
-            },
+            macrame::graph::NodeData::new(id.to_string(), String::new(), T0.to_string(), OPEN.to_string()),
         );
     }
     let comms = louvain(&g);

@@ -67,7 +67,7 @@ pub fn dijkstra(graph: &Subgraph, start: &str) -> BTreeMap<String, f64> {
     let mut dist = BTreeMap::new();
     let mut heap = BinaryHeap::new();
 
-    if !graph.nodes.contains_key(start) {
+    if !graph.contains_node(start) {
         return dist;
     }
 
@@ -82,12 +82,12 @@ pub fn dijkstra(graph: &Subgraph, start: &str) -> BTreeMap<String, f64> {
         }
 
         for edge in graph.out_edges(&node) {
-            let next = &edge.node;
-            let new_dist = d + edge.weight;
+            let next = edge.node();
+            let new_dist = d + edge.weight();
 
             if new_dist < *dist.get(next).unwrap_or(&f64::INFINITY) {
-                dist.insert(next.clone(), new_dist);
-                heap.push(Reverse((OrdF64(new_dist), next.clone())));
+                dist.insert(next.to_string(), new_dist);
+                heap.push(Reverse((OrdF64(new_dist), next.to_string())));
             }
         }
     }
@@ -110,7 +110,7 @@ pub fn astar<F>(
 where
     F: Fn(&str, &str) -> f64,
 {
-    if !graph.nodes.contains_key(start) || !graph.nodes.contains_key(goal) {
+    if !graph.contains_node(start) || !graph.contains_node(goal) {
         return None;
     }
 
@@ -125,7 +125,7 @@ where
         let current_g = g_score[&current];
 
         if current == goal {
-            return Some((current_g, reconstruct(&came_from, goal, graph.nodes.len())));
+            return Some((current_g, reconstruct(&came_from, goal, graph.node_count())));
         }
 
         // A stale entry, superseded by a cheaper route to the same node.
@@ -134,18 +134,18 @@ where
         }
 
         for edge in graph.out_edges(&current) {
-            let neighbor = &edge.node;
-            let tentative_g = current_g + edge.weight;
+            let neighbor = edge.node();
+            let tentative_g = current_g + edge.weight();
 
             if tentative_g < *g_score.get(neighbor).unwrap_or(&f64::INFINITY) {
                 // `start` never gets a predecessor, so `reconstruct` cannot
                 // walk into a cycle at the head of the path.
-                if neighbor.as_str() != start {
-                    came_from.insert(neighbor.clone(), current.clone());
+                if neighbor != start {
+                    came_from.insert(neighbor.to_string(), current.clone());
                 }
-                g_score.insert(neighbor.clone(), tentative_g);
+                g_score.insert(neighbor.to_string(), tentative_g);
                 let f = tentative_g + heuristic(neighbor, goal);
-                heap.push(Reverse((OrdF64(f), neighbor.clone())));
+                heap.push(Reverse((OrdF64(f), neighbor.to_string())));
             }
         }
     }
@@ -186,11 +186,11 @@ pub fn scc(graph: &Subgraph) -> Vec<Vec<String>> {
     let mut order = Vec::new();
 
     // Pass 1: post-order finish times on the graph as given.
-    for node in graph.nodes.keys() {
+    for node in graph.node_ids() {
         if visited.contains(node) {
             continue;
         }
-        let mut stack = vec![(node.clone(), false)];
+        let mut stack = vec![(node.to_string(), false)];
         while let Some((curr, exhausted)) = stack.pop() {
             if exhausted {
                 order.push(curr);
@@ -204,8 +204,8 @@ pub fn scc(graph: &Subgraph) -> Vec<Vec<String>> {
             stack.push((curr.clone(), true));
 
             for edge in graph.out_edges(&curr) {
-                if !visited.contains(&edge.node) {
-                    stack.push((edge.node.clone(), false));
+                if !visited.contains(edge.node()) {
+                    stack.push((edge.node().to_string(), false));
                 }
             }
         }
@@ -230,8 +230,8 @@ pub fn scc(graph: &Subgraph) -> Vec<Vec<String>> {
             comp.push(curr.clone());
 
             for edge in graph.in_edges(&curr) {
-                if !visited.contains(&edge.node) {
-                    stack.push(edge.node.clone());
+                if !visited.contains(edge.node()) {
+                    stack.push(edge.node().to_string());
                 }
             }
         }
@@ -251,9 +251,8 @@ pub fn scc(graph: &Subgraph) -> Vec<Vec<String>> {
 /// three, which is what makes this a multigraph core.
 pub fn k_core(graph: &Subgraph, k: usize) -> BTreeSet<String> {
     let mut degree: BTreeMap<String, usize> = graph
-        .nodes
-        .keys()
-        .map(|n| (n.clone(), graph.degree(n)))
+        .node_ids()
+        .map(|n| (n.to_string(), graph.degree(n)))
         .collect();
 
     let mut queue: VecDeque<String> = degree
@@ -286,20 +285,19 @@ pub fn k_core(graph: &Subgraph, k: usize) -> BTreeSet<String> {
             // it panic turns the invariant into an assertion — an `in_adj` that
             // has drifted out of step with `out_adj` fails here loudly instead
             // of being absorbed into a plausible wrong core.
-            if let Some(d) = degree.get_mut(&edge.node) {
+            if let Some(d) = degree.get_mut(edge.node()) {
                 *d -= 1;
-                if *d < k && !removed.contains(&edge.node) {
-                    queue.push_back(edge.node.clone());
+                if *d < k && !removed.contains(edge.node()) {
+                    queue.push_back(edge.node().to_string());
                 }
             }
         }
     }
 
     graph
-        .nodes
-        .keys()
+        .node_ids()
         .filter(|n| !removed.contains(*n))
-        .cloned()
+        .map(str::to_string)
         .collect()
 }
 
@@ -319,15 +317,15 @@ pub fn modularity(graph: &Subgraph, communities: &BTreeMap<String, usize>) -> f6
     let mut internal: BTreeMap<usize, f64> = BTreeMap::new();
     let mut total_deg: BTreeMap<usize, f64> = BTreeMap::new();
 
-    for node in graph.nodes.keys() {
+    for node in graph.node_ids() {
         let Some(&c) = communities.get(node) else {
             continue;
         };
         *total_deg.entry(c).or_insert(0.0) += graph.weighted_degree(node);
 
         for edge in graph.out_edges(node) {
-            if communities.get(&edge.node) == Some(&c) {
-                *internal.entry(c).or_insert(0.0) += edge.weight;
+            if communities.get(edge.node()) == Some(&c) {
+                *internal.entry(c).or_insert(0.0) += edge.weight();
             }
         }
     }
@@ -370,10 +368,9 @@ pub fn louvain(graph: &Subgraph) -> BTreeMap<String, usize> {
     // Every node its own community: the only sensible answer with no edges, and
     // the baseline the modularity gain is measured against.
     let mut comm: BTreeMap<String, usize> = graph
-        .nodes
-        .keys()
+        .node_ids()
         .enumerate()
-        .map(|(i, n)| (n.clone(), i))
+        .map(|(i, n)| (n.to_string(), i))
         .collect();
 
     if m == 0.0 {
@@ -381,14 +378,14 @@ pub fn louvain(graph: &Subgraph) -> BTreeMap<String, usize> {
     }
 
     let mut sigma_tot: BTreeMap<usize, f64> = BTreeMap::new();
-    for node in graph.nodes.keys() {
+    for node in graph.node_ids() {
         *sigma_tot.entry(comm[node]).or_insert(0.0) += graph.weighted_degree(node);
     }
 
     for _ in 0..LOUVAIN_MAX_SWEEPS {
         let mut moved = false;
 
-        for node in graph.nodes.keys() {
+        for node in graph.node_ids() {
             let curr_comm = comm[node];
             let k_i = graph.weighted_degree(node);
 
@@ -399,10 +396,10 @@ pub fn louvain(graph: &Subgraph) -> BTreeMap<String, usize> {
             // Weight from this node into each neighbouring community.
             let mut k_i_c: BTreeMap<usize, f64> = BTreeMap::new();
             for edge in graph.out_edges(node).iter().chain(graph.in_edges(node)) {
-                if &edge.node == node {
+                if edge.node() == node {
                     continue; // a self-loop joins no community
                 }
-                *k_i_c.entry(comm[&edge.node]).or_insert(0.0) += edge.weight;
+                *k_i_c.entry(comm[edge.node()]).or_insert(0.0) += edge.weight();
             }
 
             // dQ = k_i_in/m - (sigma_tot * k_i)/(2m^2), the standard reduced
@@ -424,7 +421,7 @@ pub fn louvain(graph: &Subgraph) -> BTreeMap<String, usize> {
             *sigma_tot.entry(best_comm).or_insert(0.0) += k_i;
 
             if best_comm != curr_comm {
-                comm.insert(node.clone(), best_comm);
+                comm.insert(node.to_string(), best_comm);
                 moved = true;
             }
         }

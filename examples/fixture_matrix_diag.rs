@@ -68,7 +68,7 @@ async fn main() {
         println!(
             "{:>14} {:>7} {:>8} {:>9.1} {:>9.1} {:>8} {:>10} {:>9.1}",
             shape.name(),
-            g.nodes.len(),
+            g.node_count(),
             edges,
             seed_ms,
             load_ms,
@@ -93,7 +93,7 @@ async fn main() {
         covered.push((
             shape.name(),
             d,
-            g.nodes.len(),
+            g.node_count(),
             t.elapsed().as_secs_f64() * 1e3,
             g.estimated_bytes(),
         ));

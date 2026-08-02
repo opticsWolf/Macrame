@@ -283,9 +283,9 @@ async fn a_short_id_inside_a_longer_one_does_not_prune_the_walk() {
 
     let graph = db.load_subgraph("start", 3, NOW, 1 << 20).await.unwrap();
     assert!(
-        graph.nodes.contains_key("b"),
+        graph.contains_node("b"),
         "`b` was pruned because `abc` contains it: {:?}",
-        graph.nodes.keys().collect::<Vec<_>>()
+        graph.node_ids().collect::<Vec<_>>()
     );
 
     db.close().await.unwrap();
@@ -449,20 +449,20 @@ async fn a_retired_neighbour_leaves_no_dangling_adjacency() {
         graph.is_closed(),
         "every adjacency endpoint must be a hydrated node"
     );
-    assert!(!graph.nodes.contains_key("c"), "the retired node is absent");
+    assert!(!graph.contains_node("c"), "the retired node is absent");
     assert_eq!(graph.edge_count(), 1, "and so is the edge into it");
 
     // louvain: used to panic here.
     let comm = louvain(&graph);
-    assert_eq!(comm.len(), graph.nodes.len());
-    assert!(comm.keys().all(|k| graph.nodes.contains_key(k)));
+    assert_eq!(comm.len(), graph.node_count());
+    assert!(comm.keys().all(|k| graph.contains_node(k)));
 
     // scc: used to emit `c` as a component of its own.
     let components = scc(&graph);
     for component in &components {
         for node in component {
             assert!(
-                graph.nodes.contains_key(node),
+                graph.contains_node(node),
                 "scc returned a phantom component member {node:?}"
             );
         }
@@ -479,7 +479,7 @@ async fn a_retired_neighbour_leaves_no_dangling_adjacency() {
     let dist = dijkstra(&graph, "a");
     for node in dist.keys() {
         assert!(
-            graph.nodes.contains_key(node),
+            graph.contains_node(node),
             "dijkstra reached {node:?}, which the caller cannot look up"
         );
     }
@@ -516,7 +516,7 @@ async fn retiring_the_start_node_yields_an_empty_graph() {
     let graph = db.load_subgraph("a", 3, NOW, 1 << 20).await.unwrap();
 
     assert!(graph.is_closed());
-    assert!(!graph.nodes.contains_key("a"));
+    assert!(!graph.contains_node("a"));
     assert_eq!(graph.edge_count(), 0, "no edge can survive its source");
 
     db.close().await.unwrap();
@@ -558,7 +558,7 @@ async fn load_subgraph_totals_agree_with_the_derivation() {
     }
 
     let graph = db.load_subgraph("n000", 50, NOW, 1 << 20).await.unwrap();
-    assert_eq!(graph.nodes.len(), 40);
+    assert_eq!(graph.node_count(), 40);
     assert!(graph.is_closed());
 
     // The budget the loader enforces and the figure a caller can compute are the
@@ -1094,7 +1094,7 @@ async fn load_subgraph_with_filters_the_returned_edges_not_only_the_walk() {
     let types: Vec<&str> = graph
         .out_edges("hub")
         .iter()
-        .map(|e| e.edge_type.as_str())
+        .map(|e| e.edge_type())
         .collect();
     assert_eq!(
         types,
@@ -1103,9 +1103,9 @@ async fn load_subgraph_with_filters_the_returned_edges_not_only_the_walk() {
     );
     assert!(graph.is_closed());
     assert!(
-        !graph.nodes.contains_key("c") && !graph.nodes.contains_key("d"),
+        !graph.contains_node("c") && !graph.contains_node("d"),
         "KNOWS-only neighbours are not reached either: {:?}",
-        graph.nodes.keys().collect::<Vec<_>>()
+        graph.node_ids().collect::<Vec<_>>()
     );
 
     db.close().await.unwrap();
@@ -1130,7 +1130,7 @@ async fn load_subgraph_with_honours_min_weight() {
         .unwrap();
 
     assert_eq!(graph.edge_count(), 2, "only the weight-1.0 edges survive");
-    assert!(graph.out_edges("hub").iter().all(|e| e.weight >= 0.5));
+    assert!(graph.out_edges("hub").iter().all(|e| e.weight() >= 0.5));
     assert!(graph.is_closed());
 
     db.close().await.unwrap();
@@ -1214,7 +1214,7 @@ async fn the_unfiltered_loader_still_returns_everything() {
         4,
         "all four edges, both types, both weights"
     );
-    assert_eq!(graph.nodes.len(), 5);
+    assert_eq!(graph.node_count(), 5);
 
     db.close().await.unwrap();
 }

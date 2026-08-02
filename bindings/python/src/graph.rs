@@ -113,27 +113,27 @@ pub(crate) struct PyNodeData {
 impl PyNodeData {
     #[getter]
     fn title(&self) -> &str {
-        &self.inner.title
+        self.inner.title()
     }
     #[getter]
     fn content(&self) -> &str {
-        &self.inner.content
+        self.inner.content()
     }
     #[getter]
     fn embedding_model(&self) -> Option<&str> {
-        self.inner.embedding_model.as_deref()
+        self.inner.embedding_model()
     }
     #[getter]
     fn valid_from<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        from_canonical(py, &self.inner.valid_from)
+        from_canonical(py, self.inner.valid_from())
     }
     /// `None` for an open interval, per P3's sentinel rule.
     #[getter]
     fn valid_to<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        from_canonical(py, &self.inner.valid_to)
+        from_canonical(py, self.inner.valid_to())
     }
     fn __repr__(&self) -> String {
-        format!("<macrame.NodeData title={:?}>", self.inner.title)
+        format!("<macrame.NodeData title={:?}>", self.inner.title())
     }
 }
 
@@ -151,28 +151,30 @@ pub(crate) struct PyEdgeRef {
 impl PyEdgeRef {
     #[getter]
     fn node(&self) -> &str {
-        &self.inner.node
+        self.inner.node()
     }
     #[getter]
     fn edge_type(&self) -> &str {
-        &self.inner.edge_type
+        self.inner.edge_type()
     }
     #[getter]
     fn weight(&self) -> f64 {
-        self.inner.weight
+        self.inner.weight()
     }
     #[getter]
     fn valid_from<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        from_canonical(py, &self.inner.valid_from)
+        from_canonical(py, self.inner.valid_from())
     }
     #[getter]
     fn valid_to<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        from_canonical(py, &self.inner.valid_to)
+        from_canonical(py, self.inner.valid_to())
     }
     fn __repr__(&self) -> String {
         format!(
             "<macrame.EdgeRef node={:?} type={:?} weight={}>",
-            self.inner.node, self.inner.edge_type, self.inner.weight
+            self.inner.node(),
+            self.inner.edge_type(),
+            self.inner.weight()
         )
     }
 }
@@ -259,18 +261,17 @@ impl PySubgraph {
     /// The hydrated concept, or `None` if `node` is not in this graph.
     fn node(&self, node: &str) -> Option<PyNodeData> {
         self.inner
-            .nodes
-            .get(node)
+            .node(node)
             .map(|d| PyNodeData { inner: d.clone() })
     }
 
     /// Node count.
     fn __len__(&self) -> usize {
-        self.inner.nodes.len()
+        self.inner.node_count()
     }
 
     fn __contains__(&self, node: &str) -> bool {
-        self.inner.nodes.contains_key(node)
+        self.inner.contains_node(node)
     }
 
     /// Iterate node ids, in id order.
@@ -280,7 +281,7 @@ impl PySubgraph {
     /// of the map across arbitrary Python code, and this class is `frozen`
     /// precisely so nothing has to.
     fn __iter__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let ids: Vec<&str> = self.inner.nodes.keys().map(String::as_str).collect();
+        let ids: Vec<&str> = self.inner.node_ids().collect();
         PyList::new(py, ids)?
             .into_any()
             .try_iter()
@@ -297,7 +298,7 @@ impl PySubgraph {
         let out = PyDict::new(py);
 
         let nodes = PyDict::new(py);
-        for (id, data) in &self.inner.nodes {
+        for (id, data) in self.inner.nodes() {
             nodes.set_item(
                 id,
                 PyNodeData {
@@ -309,8 +310,9 @@ impl PySubgraph {
         out.set_item("nodes", nodes)?;
 
         for (key, adj) in [
-            ("out_adj", &self.inner.out_adj),
-            ("in_adj", &self.inner.in_adj),
+            ("out_adj", Box::new(self.inner.out_adjacency())
+                as Box<dyn Iterator<Item = (&str, &[EdgeRef])>>),
+            ("in_adj", Box::new(self.inner.in_adjacency())),
         ] {
             let d = PyDict::new(py);
             for (id, edges) in adj {
@@ -476,7 +478,7 @@ impl PySubgraph {
     fn __repr__(&self) -> String {
         format!(
             "<macrame.Subgraph nodes={} edges={}>",
-            self.inner.nodes.len(),
+            self.inner.node_count(),
             self.inner.edge_count()
         )
     }

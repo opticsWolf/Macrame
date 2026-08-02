@@ -444,9 +444,8 @@ async fn write_back_annotations_routes_through_the_derivative_table() {
 
     let graph = db.load_subgraph("A", 2, T2, 1 << 20).await.unwrap();
     let values: std::collections::BTreeMap<String, String> = graph
-        .nodes
-        .keys()
-        .map(|id| (id.clone(), "0".into()))
+        .node_ids()
+        .map(|id| (id.to_string(), "0".into()))
         .collect();
 
     let before = log_len(&db).await;
@@ -455,7 +454,7 @@ async fn write_back_annotations_routes_through_the_derivative_table() {
         .await
         .unwrap();
 
-    assert_eq!(written, graph.nodes.len());
+    assert_eq!(written, graph.node_count());
     assert_eq!(
         count(&db, "SELECT COUNT(*) FROM analytics_annotations").await,
         written as i64

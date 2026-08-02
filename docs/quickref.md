@@ -292,29 +292,44 @@ impl TraversalBuilder {
     pub async fn execute(&self, conn: &libsql::Connection, ts: Option<String>) -> Result<MaterializedState>
 }
 
-pub struct Subgraph {
-    pub nodes: BTreeMap<String, NodeData>,
-    pub out_adj: BTreeMap<String, Vec<EdgeRef>>,
-    pub in_adj: BTreeMap<String, Vec<EdgeRef>>,
+// Fields are PRIVATE since 0.8.0 (B1, D-114). The representation — BTreeMap,
+// String keys, two adjacency maps — was never a promise anyone meant to make,
+// and interning the keys (D-087) is impossible while `EdgeRef::node` is a
+// public String. Accessors return borrowed views, so nothing costs an
+// allocation that field access did not.
+pub struct Subgraph { /* nodes, out_adj, in_adj */ }
+pub struct NodeData { /* title, content, embedding_model, valid_from, valid_to */ }
+pub struct EdgeRef  { /* node, edge_type, weight, valid_from, valid_to */ }
+
+impl NodeData {
+    pub fn new(title, content, valid_from, valid_to) -> Self
+    pub fn with_embedding_model(self, model: Option<String>) -> Self
+    pub fn title(&self) -> &str
+    pub fn content(&self) -> &str
+    pub fn embedding_model(&self) -> Option<&str>
+    pub fn valid_from(&self) -> &str
+    pub fn valid_to(&self) -> &str
 }
 
-pub struct NodeData {
-    pub title: String,
-    pub content: String,
-    pub embedding_model: Option<String>,
-    pub valid_from: String,
-    pub valid_to: String,
-}
-
-pub struct EdgeRef {
-    pub node: String,
-    pub edge_type: String,
-    pub weight: f64,
-    pub valid_from: String,
-    pub valid_to: String,
+impl EdgeRef {
+    pub fn new(node, edge_type, weight, valid_from, valid_to) -> Self
+    pub fn node(&self) -> &str          // the FAR end: target in out_edges, source in in_edges
+    pub fn edge_type(&self) -> &str
+    pub fn weight(&self) -> f64
+    pub fn valid_from(&self) -> &str
+    pub fn valid_to(&self) -> &str
 }
 
 impl Subgraph {
+    pub fn contains_node(&self, id: &str) -> bool
+    pub fn node(&self, id: &str) -> Option<&NodeData>
+    pub fn node_ids(&self) -> impl ExactSizeIterator<Item = &str>
+    pub fn node_count(&self) -> usize
+    pub fn nodes(&self) -> impl ExactSizeIterator<Item = (&str, &NodeData)>
+    pub fn out_adjacency(&self) -> impl Iterator<Item = (&str, &[EdgeRef])>
+    pub fn in_adjacency(&self) -> impl Iterator<Item = (&str, &[EdgeRef])>
+    pub fn insert_node(&mut self, id, data: NodeData) -> Option<NodeData>
+    pub fn add_edge(&mut self, source, target, edge: EdgeRef)   // maintains BOTH indices
     pub fn out_edges(&self, node: &str) -> &[EdgeRef]
     pub fn in_edges(&self, node: &str) -> &[EdgeRef]
     pub fn degree(&self, node: &str) -> usize

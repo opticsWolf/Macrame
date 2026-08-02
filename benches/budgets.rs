@@ -1012,7 +1012,7 @@ fn graph_analytics(c: &mut Criterion) {
     });
     eprintln!(
         "graph fixture: {} nodes, {} edges",
-        graph.nodes.len(),
+        graph.node_count(),
         graph.edge_count()
     );
 
