@@ -232,6 +232,8 @@ The injectable clock is the keystone of the entire suite. Every temporal test is
 
 ## §9 Performance Budgets
 
+**Edges per byte budget (0.8.0, [D-115](s13-decision-register.md#d-115)).** Interning `EdgeRef` cuts the per-edge cost from 342/378/454 bytes to **59/62/67** at 8/26/64-byte ids — **5.8×–6.8×**, measured on the real type by `examples/budget_density_diag.rs`, not derived from `size_of`. **Fixture: `star_of_stars`, `clustered`, `chain` and `dense_small` ([D-088](s13-decision-register.md#d-088))**, on which `estimated_bytes` falls 339,638 → 190,134, 2,168,375 → 432,791, 324,653 → 174,023 and 30,744,680 → 4,386,282. The spread is density: the same diagnostic shows edges are 80% of the budget with empty `content` and 5% at 20 KB of document text, so this is a claim about topology-heavy graphs and B3 is what addresses the other kind.
+
 All targets are measured on the reference hardware (Windows 11, NVMe SSD, 32 GB RAM, release build) under criterion, with cold-page-cache variants measured after PRAGMA shrinkmemory and OS cache flush. Trigger amplification is included: a single edge assertion produces three writes (the links row, the links_current upsert, the transaction_log entry).
 
 | Operation | Target | Mechanism |

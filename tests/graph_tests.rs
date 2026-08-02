@@ -3,7 +3,7 @@ mod harness;
 
 use harness::TestHarness;
 use macrame::graph::builder::{AttributeMode, TraversalBuilder};
-use macrame::graph::{dijkstra, k_core, louvain, modularity, scc, EdgeRef, Subgraph};
+use macrame::graph::{dijkstra, k_core, louvain, modularity, scc, Subgraph};
 use macrame::schema::migrations;
 use macrame::{Database, DbError};
 
@@ -27,14 +27,7 @@ fn graph_of(edges: &[(&str, &str, f64)]) -> Subgraph {
                 );
             }
         }
-        let fwd = EdgeRef::new(
-            t.to_string(),
-            "KNOWS".to_string(),
-            *w,
-            T0.to_string(),
-            OPEN.to_string(),
-        );
-        g.add_edge(s.to_string(), t.to_string(), fwd);
+        g.add_edge(s, t, "KNOWS", *w, T0, OPEN);
     }
     g
 }
@@ -752,4 +745,187 @@ async fn a_live_traversal_needs_no_attribute_mode() {
     assert_eq!(found.len(), 1);
 
     db.close().await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Node order does not depend on construction order (0.8.0, B2, D-063's gate)
+// ---------------------------------------------------------------------------
+//
+// **Pre-registered by D-063 before the change it guards, and landed before it.**
+// D-063 declined the interning rewrite in 0.5.6 and wrote down what the real
+// cost would be when it happened: *determinism stops being structural and
+// becomes procedural.*
+//
+// Today a `Subgraph` keys everything by `String` in a `BTreeMap`, so iteration
+// is in id order **because of the data structure** — nothing has to remember to
+// sort. Once ids are interned to `u32`, iteration is in *index* order, and the
+// indices are whatever the graph handed out as ids arrived. D-063 asked for a
+// test rather than a comment saying to sort.
+//
+// # The first version of this test was vacuous, and its own guard caught it
+//
+// It built the same graph in two databases with the edges **inserted in reverse
+// order**, on the assumption that row order follows insertion order. It does
+// not: the walk goes through `idx_lc_traversal_cover` (D-042 pins that plan),
+// so rows arrive in *index* order whatever order they were written in. Both
+// databases scanned identically, and the test would have passed against any
+// implementation — including the one it exists to catch.
+//
+// That is why the vacuity guard below is not decoration. A determinism test
+// that does not actually vary the thing it claims to vary is the worst kind of
+// green.
+//
+// # What varies here instead
+//
+// The **construction order of a hand-built graph**, which is a supported public
+// path (`insert_node` / `add_edge`, public since B1) and is exactly where
+// first-seen index assignment would bite. A graph built in descending id order
+// is compared against the same graph loaded from the database in ascending
+// order. Node order and every algorithm's answer must agree.
+//
+// # Why the failure would otherwise be silent
+//
+// A renumbering would not error. Louvain would return a *different valid
+// partition* — it breaks ties by lowest community index, so renumbering moves
+// the tie-break — and §8's property oracle would still pass, because that
+// oracle is an **upper bound on modularity** and cannot tell one valid answer
+// from another. The suite would stay green while the crate answered the same
+// question two ways.
+
+/// Two triangles joined by one edge: two communities of equal weight, so
+/// Louvain's answer depends on visit order. A shape with no ties would not
+/// exercise the thing being tested.
+const DETERMINISM_EDGES: &[(&str, &str, f64)] = &[
+    ("n1", "n2", 1.0),
+    ("n2", "n3", 1.0),
+    ("n3", "n1", 1.0),
+    ("n4", "n5", 1.0),
+    ("n5", "n6", 1.0),
+    ("n6", "n4", 1.0),
+    ("n3", "n4", 1.0),
+];
+
+/// Build the fixture by hand, offering nodes and edges in `order`.
+fn hand_built(order: impl Fn(&mut Vec<&'static str>)) -> (Subgraph, Vec<&'static str>) {
+    let mut ids: Vec<&str> = DETERMINISM_EDGES
+        .iter()
+        .flat_map(|(s, t, _)| [*s, *t])
+        .collect();
+    ids.sort();
+    ids.dedup();
+    order(&mut ids);
+
+    let mut g = Subgraph::default();
+    for id in &ids {
+        g.insert_node(
+            *id,
+            macrame::graph::NodeData::new(*id, String::new(), T0, OPEN),
+        );
+    }
+    let mut edges: Vec<&(&str, &str, f64)> = DETERMINISM_EDGES.iter().collect();
+    if ids.first() > ids.last() {
+        edges.reverse();
+    }
+    for (s, t, w) in edges {
+        g.add_edge(s, t, "KNOWS", *w, T0, OPEN);
+    }
+    (g, ids)
+}
+
+/// Adjacency as a sorted set, because edge order *within* a node legitimately
+/// differs between a walk and a hand build. What must not differ is the set of
+/// edges and the order of the **nodes**.
+fn adjacency(g: &Subgraph) -> Vec<(String, Vec<(String, String)>)> {
+    g.node_ids()
+        .map(|id| {
+            let mut out: Vec<(String, String)> = g
+                .out_edges(id)
+                .iter()
+                .map(|e| (e.node(g).to_string(), format!("{:?}", e.weight())))
+                .collect();
+            out.sort();
+            (id.to_string(), out)
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn node_order_does_not_depend_on_construction_order() {
+    let (ascending, asc_ids) = hand_built(|_| {});
+    let (descending, desc_ids) = hand_built(|ids| ids.reverse());
+
+    // **Vacuity guard.** If the two builds did not actually differ in the order
+    // ids were offered, this test varies nothing and passes against any
+    // implementation. An earlier version of it did exactly that.
+    assert_ne!(
+        asc_ids, desc_ids,
+        "both builds offered ids in the same order, so this test is not \
+         exercising construction-order independence at all"
+    );
+
+    // The property itself: index order is id order, not arrival order.
+    let a: Vec<&str> = ascending.node_ids().collect();
+    let d: Vec<&str> = descending.node_ids().collect();
+    assert_eq!(
+        a, d,
+        "node order followed the order ids were offered in — a BTreeMap gave \
+         id order for free and an interner has to be told"
+    );
+    let mut sorted = a.clone();
+    sorted.sort();
+    assert_eq!(a, sorted, "node order is not id order");
+
+    assert_eq!(adjacency(&ascending), adjacency(&descending));
+    assert_eq!(ascending.estimated_bytes(), descending.estimated_bytes());
+
+    // And the answers. Louvain is the one that moves silently.
+    assert_eq!(
+        louvain(&ascending),
+        louvain(&descending),
+        "Louvain returned a different partition for the same graph built in a \
+         different order — the exact failure D-063 pre-registered, and one the \
+         modularity oracle cannot see"
+    );
+    assert_eq!(dijkstra(&ascending, "n1"), dijkstra(&descending, "n1"));
+    assert_eq!(scc(&ascending), scc(&descending));
+    assert_eq!(k_core(&ascending, 2), k_core(&descending, 2));
+
+    // Finally, against the loader — the graph the database produces must agree
+    // with both hand-built ones, so the two paths cannot drift apart.
+    let harness = TestHarness::new();
+    let db = Database::open(&harness.db_path).await.unwrap();
+    let mut ids: Vec<&str> = DETERMINISM_EDGES
+        .iter()
+        .flat_map(|(s, t, _)| [*s, *t])
+        .collect();
+    ids.sort();
+    ids.dedup();
+    db.write_concepts(
+        ids.iter()
+            .map(|id| macrame::prelude::ConceptUpsert::new(*id, *id).valid_from(T0))
+            .collect(),
+    )
+    .await
+    .unwrap();
+    for (s, t, w) in DETERMINISM_EDGES {
+        db.assert_edge(
+            macrame::prelude::EdgeAssertion::new(*s, *t, "KNOWS")
+                .valid_from(T0)
+                .weight(*w),
+        )
+        .await
+        .unwrap();
+    }
+    // Not `OPEN`: the predicate is `valid_from <= ts AND ts < valid_to`, so
+    // querying *at* the open-interval sentinel matches nothing.
+    let loaded = db.load_subgraph("n1", 6, T0, 1 << 22).await.unwrap();
+    db.close().await.unwrap();
+
+    assert_eq!(loaded.node_count(), 6, "fixture did not load as expected");
+    assert_eq!(
+        loaded.node_ids().collect::<Vec<_>>(),
+        a,
+        "the loaded graph orders its nodes differently from a hand-built one"
+    );
+    assert_eq!(louvain(&loaded), louvain(&ascending));
 }

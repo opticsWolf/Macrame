@@ -144,37 +144,56 @@ impl PyNodeData {
 #[pyclass(name = "EdgeRef", module = "macrame", frozen, eq, skip_from_py_object)]
 #[derive(Clone, PartialEq)]
 pub(crate) struct PyEdgeRef {
-    inner: EdgeRef,
+    // Owned, not an `EdgeRef`. Since B2 (D-115) an `EdgeRef` is five integers
+    // indexing its `Subgraph`'s string pool, so it cannot be read without the
+    // graph and cannot outlive it. Python objects do both, so the strings are
+    // resolved once at the boundary — which is where a copy has to happen
+    // anyway, because a `#[pyclass]` cannot borrow from Rust-owned memory.
+    node: String,
+    edge_type: String,
+    weight: f64,
+    valid_from: String,
+    valid_to: String,
+}
+
+impl PyEdgeRef {
+    fn resolve(e: &EdgeRef, g: &Subgraph) -> Self {
+        Self {
+            node: e.node(g).to_string(),
+            edge_type: e.edge_type(g).to_string(),
+            weight: e.weight(),
+            valid_from: e.valid_from(g).to_string(),
+            valid_to: e.valid_to(g).to_string(),
+        }
+    }
 }
 
 #[pymethods]
 impl PyEdgeRef {
     #[getter]
     fn node(&self) -> &str {
-        self.inner.node()
+        &self.node
     }
     #[getter]
     fn edge_type(&self) -> &str {
-        self.inner.edge_type()
+        &self.edge_type
     }
     #[getter]
     fn weight(&self) -> f64 {
-        self.inner.weight()
+        self.weight
     }
     #[getter]
     fn valid_from<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        from_canonical(py, self.inner.valid_from())
+        from_canonical(py, &self.valid_from)
     }
     #[getter]
     fn valid_to<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        from_canonical(py, self.inner.valid_to())
+        from_canonical(py, &self.valid_to)
     }
     fn __repr__(&self) -> String {
         format!(
             "<macrame.EdgeRef node={:?} type={:?} weight={}>",
-            self.inner.node(),
-            self.inner.edge_type(),
-            self.inner.weight()
+            self.node, self.edge_type, self.weight
         )
     }
 }
@@ -201,7 +220,7 @@ impl PySubgraph {
         self.inner
             .out_edges(node)
             .iter()
-            .map(|e| PyEdgeRef { inner: e.clone() })
+            .map(|e| PyEdgeRef::resolve(e, &self.inner))
             .collect()
     }
 
@@ -210,7 +229,7 @@ impl PySubgraph {
         self.inner
             .in_edges(node)
             .iter()
-            .map(|e| PyEdgeRef { inner: e.clone() })
+            .map(|e| PyEdgeRef::resolve(e, &self.inner))
             .collect()
     }
 
@@ -318,7 +337,7 @@ impl PySubgraph {
             for (id, edges) in adj {
                 let refs: Vec<PyEdgeRef> = edges
                     .iter()
-                    .map(|e| PyEdgeRef { inner: e.clone() })
+                    .map(|e| PyEdgeRef::resolve(e, &self.inner))
                     .collect();
                 d.set_item(id, refs)?;
             }

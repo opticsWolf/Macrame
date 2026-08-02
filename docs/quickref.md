@@ -311,13 +311,17 @@ impl NodeData {
     pub fn valid_to(&self) -> &str
 }
 
+// INTERNED since 0.8.0 (B2, D-115): {u32,u32,f64,u32,u32}, size_of 24, no heap.
+// Every field but the weight indexes the Subgraph's string pool, so reading one
+// needs the graph. Measured win 5.8x-6.8x bytes/edge, not the 7.1x-9.5x the
+// plan projected from `2 * size_of` — the pool is not free (D-063 was right by
+// about 20%).
 impl EdgeRef {
-    pub fn new(node, edge_type, weight, valid_from, valid_to) -> Self
-    pub fn node(&self) -> &str          // the FAR end: target in out_edges, source in in_edges
-    pub fn edge_type(&self) -> &str
-    pub fn weight(&self) -> f64
-    pub fn valid_from(&self) -> &str
-    pub fn valid_to(&self) -> &str
+    pub fn node<'a>(&self, g: &'a Subgraph) -> &'a str   // FAR end: target in out_edges
+    pub fn edge_type<'a>(&self, g: &'a Subgraph) -> &'a str
+    pub fn weight(&self) -> f64                          // not interned; already 8 bytes
+    pub fn valid_from<'a>(&self, g: &'a Subgraph) -> &'a str
+    pub fn valid_to<'a>(&self, g: &'a Subgraph) -> &'a str
 }
 
 impl Subgraph {
@@ -329,7 +333,8 @@ impl Subgraph {
     pub fn out_adjacency(&self) -> impl Iterator<Item = (&str, &[EdgeRef])>
     pub fn in_adjacency(&self) -> impl Iterator<Item = (&str, &[EdgeRef])>
     pub fn insert_node(&mut self, id, data: NodeData) -> Option<NodeData>
-    pub fn add_edge(&mut self, source, target, edge: EdgeRef)   // maintains BOTH indices
+    pub fn add_edge(&mut self, source, target, edge_type, weight, valid_from, valid_to) -> usize
+        // maintains BOTH indices; returns the bytes added, so the budget check is O(1)
     pub fn out_edges(&self, node: &str) -> &[EdgeRef]
     pub fn in_edges(&self, node: &str) -> &[EdgeRef]
     pub fn degree(&self, node: &str) -> usize

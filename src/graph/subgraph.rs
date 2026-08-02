@@ -67,6 +67,8 @@ pub struct Subgraph {
     nodes: BTreeMap<String, NodeData>,
     out_adj: BTreeMap<String, Vec<EdgeRef>>,
     in_adj: BTreeMap<String, Vec<EdgeRef>>,
+    /// Every string an `EdgeRef` carries. See [`Interner`].
+    pool: Interner,
 }
 
 /// The attributes of one node, as of the instant the graph was loaded.
@@ -127,56 +129,170 @@ impl NodeData {
     }
 }
 
-/// One end of an edge in an adjacency list.
+/// The string pool an interned [`EdgeRef`] indexes into (0.8.0, B2, D-115).
 ///
-/// [`Self::node`] is the *other* end: the target in the outgoing index, the
-/// source in the incoming one. Fields are private for the reason given on
-/// [`Subgraph`]; this is the type interning changes.
-#[derive(Debug, Clone, PartialEq)]
+/// One pool for every string an edge carries — node ids, edge types and the two
+/// timestamps — because they dedupe against each other for free and the whole
+/// point is that the cost is per **distinct string** rather than per edge.
+///
+/// Indices are handed out first-seen. **Nothing observable depends on them**:
+/// node order comes from `nodes`, which is still a `BTreeMap` keyed by id, and
+/// adjacency order is the order edges were added, exactly as before. That is
+/// the deliberate answer to D-063's warning that "determinism stops being
+/// structural and becomes procedural" — it does not, because the node map was
+/// never what needed interning. `node_order_does_not_depend_on_construction_order`
+/// is the gate that holds it.
+#[derive(Debug, Clone, Default)]
+struct Interner {
+    strings: Vec<String>,
+    index: BTreeMap<String, u32>,
+    /// Running payload total, maintained on insert.
+    ///
+    /// **Not recomputed.** The first version of the loader called
+    /// `estimated_bytes()` before and after every edge to charge the marginal
+    /// pool cost, which is O(pool) per row and made loading quadratic — the
+    /// exact defect [D-047](../../docs/architecture/s13-decision-register.md)
+    /// diagnosed and fixed, re-introduced by the change that was supposed to
+    /// make loading *cheaper*. `loading_scales_linearly_in_the_number_of_edges`
+    /// caught it, which is what that test is for.
+    bytes: usize,
+}
+
+impl Interner {
+    /// Intern `s`, returning its index and **how many bytes that cost** — zero
+    /// when the string was already pooled.
+    ///
+    /// The caller needs the marginal figure to charge the byte budget as it
+    /// loads, and it has to be O(1) or the budget check is quadratic again.
+    fn intern(&mut self, s: &str) -> (u32, usize) {
+        if let Some(&i) = self.index.get(s) {
+            return (i, 0);
+        }
+        let i = u32::try_from(self.strings.len())
+            .expect("a subgraph cannot hold 2^32 distinct strings within any byte budget");
+        self.strings.push(s.to_string());
+        self.index.insert(s.to_string(), i);
+        let cost = Self::entry_bytes(s);
+        self.bytes += cost;
+        (i, cost)
+    }
+
+    /// Once in `strings`, once as the key of `index`, plus both containers'
+    /// per-entry overhead.
+    fn entry_bytes(s: &str) -> usize {
+        2 * s.len() + std::mem::size_of::<String>() + std::mem::size_of::<u32>()
+    }
+
+    fn get(&self, i: u32) -> &str {
+        &self.strings[i as usize]
+    }
+
+    /// Payload bytes held by the pool, counted the way [`Subgraph::node_bytes`]
+    /// counts: string bytes plus per-item overhead.
+    ///
+    /// **This is the arithmetic D-063 asked for.** Its objection to interning
+    /// was that an id table "stores every id a second time, partly cancelling
+    /// the memory win". It is counted here rather than argued about: the
+    /// duplication is per distinct string, the saving is per edge entry, and
+    /// `estimated_bytes()` reports the sum so a caller can see both.
+    fn estimated_bytes(&self) -> usize {
+        self.bytes
+    }
+}
+
+/// One end of an edge in an adjacency list — **interned** (0.8.0, B2, D-115).
+///
+/// Five fields, no heap payload, `size_of` 24 bytes against 104 bytes of struct
+/// plus around 250 of strings before. Every field but the weight is an index
+/// into its [`Subgraph`]'s pool, so reading one needs the graph:
+///
+/// ```ignore
+/// for e in graph.out_edges("a") {
+///     println!("{} {} {}", e.node(&graph), e.edge_type(&graph), e.weight());
+/// }
+/// ```
+///
+/// That is the visible cost of the change, and it is the reason B1 had to
+/// privatise these fields first: a public `node: String` cannot become a `u32`.
+/// The win is **reachability**, not speed ([D-073](../../docs/architecture/s13-decision-register.md)'s
+/// category): graphs that did not fit the byte budget start fitting.
+///
+/// # Invariants
+///
+/// An `EdgeRef` is tied to the specific [`Subgraph`] it was retrieved from.
+/// Querying it against a different one — via an accessor like [`Self::node`],
+/// or via derived `PartialEq` — is a **logic error** that will silently return
+/// incorrect data or report equality where none exists. Because the handle is
+/// `Copy` it can be stored in a struct that outlives the graph; it stays
+/// well-formed and becomes meaningless without its pool.
+///
+/// `PartialEq` is the sharp edge, and it is kept rather than removed: *within*
+/// one graph, index equality is exactly the comparison a caller wants, and it
+/// is cheaper and stricter than comparing five strings. Across two graphs it
+/// compares indices that mean different things — a wrong answer that needs no
+/// accessor call at all, so it sits outside the mental model of "querying".
+/// Before interning, `==` compared the strings and could not be wrong this way.
+///
+/// This logic error does not result in undefined behaviour — every index goes
+/// through bounds-checked slice indexing and there is no `unsafe` here — but
+/// the results are otherwise unspecified.
+///
+/// The handle is intentionally **not** lifetime-branded, which would make the
+/// invariant a compile error, because that propagates a generic parameter
+/// through every algorithm and every signature that mentions a `Subgraph`. See
+/// D-115 for the argument and for what to do if this is ever hit in practice.
+#[derive(Clone, Copy, PartialEq)]
 pub struct EdgeRef {
-    node: String,
-    edge_type: String,
+    node: u32,
+    edge_type: u32,
     weight: f64,
-    valid_from: String,
-    valid_to: String,
+    valid_from: u32,
+    valid_to: u32,
+}
+
+/// Written by hand so a failing `assert_eq!` cannot be mistaken for one about
+/// strings.
+///
+/// The derived form printed `EdgeRef { node: 3, edge_type: 1, .. }`, which
+/// reads as data and is not: those are pool indices, meaningless without the
+/// graph. The `#` is there to say so at a glance.
+impl std::fmt::Debug for EdgeRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "EdgeRef(node=#{}, type=#{}, w={}, from=#{}, to=#{})",
+            self.node, self.edge_type, self.weight, self.valid_from, self.valid_to
+        )
+    }
 }
 
 impl EdgeRef {
-    pub fn new(
-        node: impl Into<String>,
-        edge_type: impl Into<String>,
-        weight: f64,
-        valid_from: impl Into<String>,
-        valid_to: impl Into<String>,
-    ) -> Self {
-        Self {
-            node: node.into(),
-            edge_type: edge_type.into(),
-            weight,
-            valid_from: valid_from.into(),
-            valid_to: valid_to.into(),
-        }
+    /// The far end of the edge: the target in `out_edges`, the source in
+    /// `in_edges`.
+    ///
+    /// Takes the graph because the string lives in its pool. `graph` must be
+    /// the one this edge came from; passing another is a programming error and
+    /// will panic or answer nonsense, exactly as indexing the wrong slice would.
+    pub fn node<'a>(&self, graph: &'a Subgraph) -> &'a str {
+        graph.pool.get(self.node)
     }
 
-    /// The far end of the edge.
-    pub fn node(&self) -> &str {
-        &self.node
+    pub fn edge_type<'a>(&self, graph: &'a Subgraph) -> &'a str {
+        graph.pool.get(self.edge_type)
     }
 
-    pub fn edge_type(&self) -> &str {
-        &self.edge_type
-    }
-
+    /// The only field that is not interned, because an `f64` is already 8 bytes
+    /// and a pool of them would cost more than it saved.
     pub fn weight(&self) -> f64 {
         self.weight
     }
 
-    pub fn valid_from(&self) -> &str {
-        &self.valid_from
+    pub fn valid_from<'a>(&self, graph: &'a Subgraph) -> &'a str {
+        graph.pool.get(self.valid_from)
     }
 
-    pub fn valid_to(&self) -> &str {
-        &self.valid_to
+    pub fn valid_to<'a>(&self, graph: &'a Subgraph) -> &'a str {
+        graph.pool.get(self.valid_to)
     }
 }
 
@@ -298,6 +414,7 @@ impl Subgraph {
             nodes,
             out_adj,
             in_adj,
+            pool,
         } = self;
 
         for adj in [out_adj, in_adj] {
@@ -305,7 +422,7 @@ impl Subgraph {
                 if !nodes.contains_key(id) {
                     return false;
                 }
-                edges.retain(|e| nodes.contains_key(&e.node));
+                edges.retain(|e| nodes.contains_key(pool.get(e.node)));
                 !edges.is_empty()
             });
         }
@@ -320,7 +437,9 @@ impl Subgraph {
             .chain(self.in_adj.iter())
             .all(|(id, edges)| {
                 self.nodes.contains_key(id)
-                    && edges.iter().all(|e| self.nodes.contains_key(&e.node))
+                    && edges
+                        .iter()
+                        .all(|e| self.nodes.contains_key(self.pool.get(e.node)))
             })
     }
 
@@ -337,17 +456,40 @@ impl Subgraph {
     /// and every such call site was already doing the `back.node = source`
     /// dance itself. `edge.node` is expected to be `target`; the reverse entry
     /// is derived here.
+    /// Returns the bytes this edge added to [`Self::estimated_bytes`] — the two
+    /// fixed-size entries plus whatever strings were genuinely new. The loader
+    /// charges its budget with it, and it is O(1) by construction.
     pub fn add_edge(
         &mut self,
-        source: impl Into<String>,
-        target: impl Into<String>,
-        edge: EdgeRef,
-    ) {
-        let source = source.into();
-        let mut incoming = edge.clone();
-        incoming.node = source.clone();
-        self.out_adj.entry(source).or_default().push(edge);
-        self.in_adj.entry(target.into()).or_default().push(incoming);
+        source: &str,
+        target: &str,
+        edge_type: &str,
+        weight: f64,
+        valid_from: &str,
+        valid_to: &str,
+    ) -> usize {
+        let (src, b1) = self.pool.intern(source);
+        let (tgt, b2) = self.pool.intern(target);
+        let (ty, b3) = self.pool.intern(edge_type);
+        let (from, b4) = self.pool.intern(valid_from);
+        let (to, b5) = self.pool.intern(valid_to);
+        let pooled = b1 + b2 + b3 + b4 + b5;
+
+        self.out_adj.entry(source.to_string()).or_default().push(EdgeRef {
+            node: tgt,
+            edge_type: ty,
+            weight,
+            valid_from: from,
+            valid_to: to,
+        });
+        self.in_adj.entry(target.to_string()).or_default().push(EdgeRef {
+            node: src,
+            edge_type: ty,
+            weight,
+            valid_from: from,
+            valid_to: to,
+        });
+        2 * std::mem::size_of::<EdgeRef>() + pooled
     }
 
     /// Estimated payload bytes for one node, keyed by `id`.
@@ -372,12 +514,14 @@ impl Subgraph {
     ///
     /// An edge occupies two of these — one in `out_adj`, one in `in_adj` — so a
     /// caller accounting for a newly added edge counts it twice.
-    fn edge_bytes(e: &EdgeRef) -> usize {
-        e.node.len()
-            + e.edge_type.len()
-            + e.valid_from.len()
-            + e.valid_to.len()
-            + std::mem::size_of::<EdgeRef>()
+    /// **24 bytes, and nothing else** since B2 (D-115).
+    ///
+    /// Before interning this summed four string lengths as well, around 189
+    /// bytes for a ULID-keyed edge. The strings did not disappear — they moved
+    /// into the pool, where they are counted once per *distinct* value by
+    /// [`Interner::estimated_bytes`] rather than once per edge entry.
+    fn edge_bytes(_e: &EdgeRef) -> usize {
+        std::mem::size_of::<EdgeRef>()
     }
 
     /// Estimated heap footprint (D-007).
@@ -405,7 +549,7 @@ impl Subgraph {
             .flat_map(|v| v.iter())
             .map(Self::edge_bytes)
             .sum();
-        nodes + edges
+        nodes + edges + self.pool.estimated_bytes()
     }
 
     /// Write one derived result per node under `label` (§5.4, D-041).
@@ -643,34 +787,21 @@ ORDER BY l.source_id, l.target_id, l.edge_type
                 });
             }
 
-            let edge = EdgeRef {
-                node: target.clone(),
-                edge_type: row.get(2)?,
-                weight,
-                valid_from: row.get(4)?,
-                valid_to: row.get(5)?,
-            };
-            // Accounted before the move, and *not* simply doubled.
+            let edge_type: String = row.get(2)?;
+            let valid_from: String = row.get(4)?;
+            let valid_to: String = row.get(5)?;
+
+            // Accounted before the insert, and the arithmetic is far simpler
+            // than it was: an interned entry is a fixed 24 bytes whichever
+            // endpoint it names, so the two entries `add_edge` writes cost the
+            // same and there is no id-length asymmetry to get wrong.
             //
-            // `add_edge` stores this entry in `out_adj` and a clone in `in_adj`
-            // with `node` rewritten to the **source**, so the two differ by
-            // exactly the two id lengths — `edge_bytes` sums `e.node.len()`.
-            // `2 * edge_bytes(&edge)` counted the target twice and the source
-            // never, so the running total drifted from `estimated_bytes()` by
-            // `target.len() - source.len()` per edge, in whichever direction the
-            // ids happened to differ.
-            //
-            // A byte an edge, and it made the loader refuse a graph sized at its
-            // own `estimated_bytes()` — found by `a_filtered_load_fits_a_budget_
-            // the_unfiltered_one_exceeds`, and invisible to
-            // `load_subgraph_totals_agree_with_the_derivation` because that one
-            // asserts refusal at *half* the budget, where a one-byte-per-edge
-            // drift cannot show. The doc on `node_bytes` claims the loader's
-            // arithmetic and the caller's are the same; now they are.
-            let outgoing = Subgraph::edge_bytes(&edge);
-            let incoming = outgoing - target.len() + source.len();
-            bytes += outgoing + incoming;
-            graph.add_edge(source, target, edge);
+            // The strings have not vanished, they have moved into the pool, so
+            // what a *new* distinct string costs is charged here too. Only the
+            // ones actually new: `intern` dedupes, and charging every edge for
+            // its type and timestamps would re-introduce exactly the per-edge
+            // cost B2 removes.
+            bytes += graph.add_edge(&source, &target, &edge_type, weight, &valid_from, &valid_to);
 
             if bytes > byte_budget {
                 return Err(DbError::SubgraphTooLarge {
@@ -766,25 +897,15 @@ async fn hydrate(
 mod tests {
     use super::*;
 
-    fn edge(node: &str, weight: f64) -> EdgeRef {
-        EdgeRef {
-            node: node.to_string(),
-            edge_type: "KNOWS".to_string(),
-            weight,
-            valid_from: "2026-01-01T00:00:00.000000Z".to_string(),
-            valid_to: "9999-12-31T23:59:59.999999Z".to_string(),
-        }
-    }
-
     #[test]
     fn adding_an_edge_indexes_it_in_both_directions() {
         let mut g = Subgraph::default();
-        g.add_edge("A", "B", edge("B", 0.5));
+        g.add_edge("A", "B", "KNOWS", 0.5, "2026-01-01T00:00:00.000000Z", "9999-12-31T23:59:59.999999Z");
 
         assert_eq!(g.out_edges("A").len(), 1);
-        assert_eq!(g.out_edges("A")[0].node, "B");
+        assert_eq!(g.out_edges("A")[0].node(&g), "B");
         assert_eq!(g.in_edges("B").len(), 1);
-        assert_eq!(g.in_edges("B")[0].node, "A", "in_adj holds the source");
+        assert_eq!(g.in_edges("B")[0].node(&g), "A", "in_adj holds the source");
 
         // The undirected view has to agree with itself: total degree is twice
         // the edge weight total, which is the identity every undirected

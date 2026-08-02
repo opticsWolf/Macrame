@@ -25,18 +25,44 @@ use macrame::graph::{EdgeRef, NodeData, Subgraph};
 const TS: &str = "2026-01-01T00:00:00.000000Z";
 const OPEN: &str = "9999-12-31T23:59:59.999999Z";
 
-/// What one adjacency entry costs today, by the loader's own formula.
-fn edge_entry_bytes(id_len: usize, edge_type_len: usize) -> usize {
-    // `Subgraph::edge_bytes`: the four string payloads plus the struct.
-    id_len + edge_type_len + TS.len() + OPEN.len() + std::mem::size_of::<EdgeRef>()
+/// What one adjacency entry cost **before** interning (0.7.0), by the loader's
+/// own formula at the time: the four string payloads plus the struct.
+///
+/// Kept as arithmetic because the type it describes no longer exists. It is the
+/// baseline column, and the point of the table is the ratio to it.
+fn edge_entry_bytes_0_7_0(id_len: usize, edge_type_len: usize) -> usize {
+    const EDGE_REF_0_7_0: usize = 104; // {String, String, f64, String, String}
+    id_len + edge_type_len + TS.len() + OPEN.len() + EDGE_REF_0_7_0
 }
 
-/// What it would cost with ids and edge types interned to `u32` and timestamps
-/// carried as interned `u32` too.
+/// What one costs now — **measured on the real type**, not asserted.
 ///
-/// Not a guess about layout: `{u32, u32, f64, u32, u32}` is 24 bytes with the
-/// `f64`'s alignment, and there are no heap payloads left to add.
-const INTERNED_EDGE_ENTRY_BYTES: usize = 24;
+/// B2's exit gate is explicit that this table must be reproduced "on the real
+/// type, not on `size_of` arithmetic", so this builds an actual `Subgraph`,
+/// asks it for `estimated_bytes()`, and divides. The whole pool is included, so
+/// the id table D-063 warned would "partly cancel the memory win" is paid for
+/// in this number rather than argued away.
+fn measured_bytes_per_edge(id_len: usize, edges: usize) -> (usize, usize) {
+    let id = |i: usize| format!("{:0>width$}", i, width = id_len);
+    let mut g = Subgraph::default();
+    let nodes = edges / 20 + 2; // ~20 edges per node, a realistic density
+    for i in 0..nodes {
+        g.insert_node(id(i), NodeData::new("t", "", TS, OPEN));
+    }
+    let empty = g.estimated_bytes();
+    for e in 0..edges {
+        g.add_edge(
+            &id(e % nodes),
+            &id((e * 7 + 1) % nodes),
+            "LINKS",
+            1.0,
+            TS,
+            OPEN,
+        );
+    }
+    let full = g.estimated_bytes();
+    ((full - empty) / edges, full / edges)
+}
 
 fn main() {
     println!("Subgraph byte accounting, by the loader's own formula.\n");
@@ -57,18 +83,19 @@ fn main() {
 
     for id_len in [8usize, 26, 64] {
         // Two adjacency entries per edge (`out_adj` and `in_adj`).
-        let now = 2 * edge_entry_bytes(id_len, "LINKS".len());
-        let interned = 2 * INTERNED_EDGE_ENTRY_BYTES;
+        let now = 2 * edge_entry_bytes_0_7_0(id_len, "LINKS".len());
+        let (marginal, all_in) = measured_bytes_per_edge(id_len, 20_000);
         let mib = 1usize << 20;
         println!(
             "{:>10} {:>12} {:>13} {:>14} {:>12} {:>9.1}x",
             id_len,
             now,
-            interned,
+            all_in,
             mib / now,
-            mib / interned,
-            now as f64 / interned as f64
+            mib / all_in.max(1),
+            now as f64 / all_in.max(1) as f64
         );
+        let _ = marginal;
     }
 
     // ---- the part that decides it: where do the bytes actually go? ----
@@ -99,19 +126,12 @@ fn main() {
                 // until 0.8.0 and this loop built the pair by hand.
                 let source = format!("c{i:07}");
                 let target = format!("c{:07}", (i + k) % n);
-                let fwd = EdgeRef::new(
-                    target.clone(),
-                    "LINKS".to_string(),
-                    1.0,
-                    TS.to_string(),
-                    OPEN.to_string(),
-                );
-                g.add_edge(source, target, fwd);
+                g.add_edge(&source, &target, "LINKS", 1.0, TS, OPEN);
             }
         }
 
         let total = g.estimated_bytes();
-        let edge_bytes = 2 * n * 20 * edge_entry_bytes(8, 5);
+        let edge_bytes = 2 * n * 20 * std::mem::size_of::<EdgeRef>();
         let node_bytes = total.saturating_sub(edge_bytes);
         println!(
             "{:>14} {:>14} {:>14} {:>15.0}%",

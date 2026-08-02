@@ -418,10 +418,25 @@ def main() -> int:
 
         print(f"::warning::CRASH on attempt {attempt}/{args.attempts}: {outcome.detail}")
 
+    # **Deliberately not "this is more than R15 has needed".** That is what this
+    # message used to say, and it was measured false the first time it fired:
+    # six consecutive crashes on the quarantined step, and the binary that died
+    # -- integrity_property_tests -- then faulted 1 in 6 runs *in isolation*
+    # with exit 0xC0000005. At p ~ 0.6 a run of six has about a 5% chance, so a
+    # budget of six will produce this message roughly one run in twenty with
+    # nothing wrong. Telling the reader it must be real would train them to
+    # disbelieve it.
+    #
+    # So it says what to do instead, which is what .cargo/config.toml has always
+    # advised: a binary that fails alone is a real failure, one that only fails
+    # in the suite is almost certainly R15.
     print(
         f"::error::CRASH: {args.attempts} consecutive attempts died without a "
-        f"summary. Every one of them is R15's shape, but that is more than R15 "
-        f"has needed here -- see .cargo/config.toml and treat it as real."
+        f"summary, every one of them R15's shape. That is unlikely but not "
+        f"rare -- expect it in roughly 1 run in 20 on the quarantined step. "
+        f"Before treating it as real, run the named binary on its own a few "
+        f"times: alone it should be clean, and exit 0xC0000005 there is still "
+        f"R15. See .cargo/config.toml."
     )
     return 1
 

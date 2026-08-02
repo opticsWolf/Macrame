@@ -82,7 +82,7 @@ pub fn dijkstra(graph: &Subgraph, start: &str) -> BTreeMap<String, f64> {
         }
 
         for edge in graph.out_edges(&node) {
-            let next = edge.node();
+            let next = edge.node(graph);
             let new_dist = d + edge.weight();
 
             if new_dist < *dist.get(next).unwrap_or(&f64::INFINITY) {
@@ -134,7 +134,7 @@ where
         }
 
         for edge in graph.out_edges(&current) {
-            let neighbor = edge.node();
+            let neighbor = edge.node(graph);
             let tentative_g = current_g + edge.weight();
 
             if tentative_g < *g_score.get(neighbor).unwrap_or(&f64::INFINITY) {
@@ -204,8 +204,8 @@ pub fn scc(graph: &Subgraph) -> Vec<Vec<String>> {
             stack.push((curr.clone(), true));
 
             for edge in graph.out_edges(&curr) {
-                if !visited.contains(edge.node()) {
-                    stack.push((edge.node().to_string(), false));
+                if !visited.contains(edge.node(graph)) {
+                    stack.push((edge.node(graph).to_string(), false));
                 }
             }
         }
@@ -230,8 +230,8 @@ pub fn scc(graph: &Subgraph) -> Vec<Vec<String>> {
             comp.push(curr.clone());
 
             for edge in graph.in_edges(&curr) {
-                if !visited.contains(edge.node()) {
-                    stack.push(edge.node().to_string());
+                if !visited.contains(edge.node(graph)) {
+                    stack.push(edge.node(graph).to_string());
                 }
             }
         }
@@ -285,10 +285,10 @@ pub fn k_core(graph: &Subgraph, k: usize) -> BTreeSet<String> {
             // it panic turns the invariant into an assertion — an `in_adj` that
             // has drifted out of step with `out_adj` fails here loudly instead
             // of being absorbed into a plausible wrong core.
-            if let Some(d) = degree.get_mut(edge.node()) {
+            if let Some(d) = degree.get_mut(edge.node(graph)) {
                 *d -= 1;
-                if *d < k && !removed.contains(edge.node()) {
-                    queue.push_back(edge.node().to_string());
+                if *d < k && !removed.contains(edge.node(graph)) {
+                    queue.push_back(edge.node(graph).to_string());
                 }
             }
         }
@@ -324,7 +324,7 @@ pub fn modularity(graph: &Subgraph, communities: &BTreeMap<String, usize>) -> f6
         *total_deg.entry(c).or_insert(0.0) += graph.weighted_degree(node);
 
         for edge in graph.out_edges(node) {
-            if communities.get(edge.node()) == Some(&c) {
+            if communities.get(edge.node(graph)) == Some(&c) {
                 *internal.entry(c).or_insert(0.0) += edge.weight();
             }
         }
@@ -396,10 +396,10 @@ pub fn louvain(graph: &Subgraph) -> BTreeMap<String, usize> {
             // Weight from this node into each neighbouring community.
             let mut k_i_c: BTreeMap<usize, f64> = BTreeMap::new();
             for edge in graph.out_edges(node).iter().chain(graph.in_edges(node)) {
-                if edge.node() == node {
+                if edge.node(graph) == node {
                     continue; // a self-loop joins no community
                 }
-                *k_i_c.entry(comm[edge.node()]).or_insert(0.0) += edge.weight();
+                *k_i_c.entry(comm[edge.node(graph)]).or_insert(0.0) += edge.weight();
             }
 
             // dQ = k_i_in/m - (sigma_tot * k_i)/(2m^2), the standard reduced

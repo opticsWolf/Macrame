@@ -644,6 +644,48 @@ confused, because "the Python suite went red" means opposite things for B2 and B
 [D-088](architecture/s13-decision-register.md#d-088)); `s13` (D-113, superseding D-087);
 `quickref.md`.
 
+> **Delivered 2026-08-02** — [D-115](architecture/s13-decision-register.md#d-115), not D-113.
+> Suites **311** / **322** / **344**, clippy clean. `size_of::<EdgeRef>()` is **24**, measured.
+>
+> **The projected win was optimistic, and the exit gate is why we know.** It required the table
+> "on the real type, not on `size_of` arithmetic", and the two disagree:
+>
+> | id length | B/edge at 0.7.0 | projected | **measured, all-in** | projected | **measured** |
+> |---|---|---|---|---|---|
+> | 8 | 342 | 48 | **59** | 7.1× | **5.8×** |
+> | 26 (ULID) | 378 | 48 | **62** | 7.9× | **6.1×** |
+> | 64 | 454 | 48 | **67** | 9.5× | **6.8×** |
+>
+> 48 is `2 × size_of` and treats the pool as free. It is not. **[D-063](architecture/s13-decision-register.md#d-063)'s
+> objection — that an id table "partly cancels the memory win" — is right, and the amount is
+> about 20%.** The win survives comfortably; it is 5.8×–6.8×. On the four fixtures
+> `estimated_bytes` falls 339,638 → 190,134, 2,168,375 → 432,791, 324,653 → 174,023 and
+> 30,744,680 → **4,386,282 (7.0×)**, every structural column unchanged.
+>
+> **D-063's determinism warning does not land, and the gate was written first anyway.** Only
+> the *edges* are interned; `nodes` stays a `BTreeMap`, so iteration order is still structural
+> and pool indices are not observable. **The gate's first version was vacuous and its own
+> vacuity guard caught it** — it varied edge *insertion* order, but the walk goes through
+> `idx_lc_traversal_cover`, so rows arrive in index order regardless and both databases scanned
+> identically. It would have passed against any implementation. It now varies hand-built
+> construction order, where first-seen assignment would actually bite.
+>
+> **A quadratic loader was introduced and an existing test caught it.** Charging the marginal
+> pool cost by calling `estimated_bytes()` before and after each edge is O(pool) per row —
+> loading became O(E²), which is exactly the defect
+> [D-047](architecture/s13-decision-register.md#d-047) fixed, re-introduced by the change meant
+> to make loading cheaper. `loading_scales_linearly_in_the_number_of_edges` failed. `intern`
+> now returns its marginal cost and `add_edge` returns the total, so the check is O(1).
+>
+> **The exit gate's Python test passed in the strong form: the suite needed no edits at all**,
+> so B1 did privatise enough. `PyEdgeRef` now owns resolved strings rather than wrapping an
+> `EdgeRef` — a `#[pyclass]` outlives the graph and cannot borrow from its pool — but no
+> `#[pymethods]` signature moved.
+>
+> **Where interning stops helping, from the same diagnostic:** at 20 edges/node with 8-byte
+> ids, edges are 80% of the budget with empty `content` and **5%** at 20 KB of document text.
+> This is a win on topology-heavy graphs; the content-heavy case is B3's, not this one.
+
 ### B3 · `content` leaves the default load
 
 `load_subgraph_with` **always** hydrates `content` — its rustdoc says so (`subgraph.rs:360`) —

@@ -36,14 +36,7 @@ fn build(n: usize, edges: &[(usize, usize, f64)]) -> Subgraph {
         );
     }
     for &(s, t, w) in edges {
-        let fwd = EdgeRef::new(
-            node_id(t),
-            "KNOWS".to_string(),
-            w,
-            T0.to_string(),
-            OPEN.to_string(),
-        );
-        g.add_edge(node_id(s), node_id(t), fwd);
+        g.add_edge(&node_id(s), &node_id(t), "KNOWS", w, T0, OPEN);
     }
     g
 }
@@ -86,17 +79,17 @@ fn oracle_distances(g: &Subgraph, start: &str) -> BTreeMap<String, f64> {
         best: &mut BTreeMap<String, f64>,
     ) {
         for e in g.out_edges(at) {
-            if seen.contains(e.node()) {
+            if seen.contains(e.node(g)) {
                 continue;
             }
             let c = cost + e.weight();
-            let entry = best.entry(e.node().to_string()).or_insert(f64::INFINITY);
+            let entry = best.entry(e.node(g).to_string()).or_insert(f64::INFINITY);
             if c < *entry {
                 *entry = c;
             }
-            seen.insert(e.node().to_string());
-            walk(g, e.node(), c, seen, best);
-            seen.remove(e.node());
+            seen.insert(e.node(g).to_string());
+            walk(g, e.node(g), c, seen, best);
+            seen.remove(e.node(g));
         }
     }
 
@@ -118,7 +111,7 @@ fn oracle_scc(g: &Subgraph) -> Vec<Vec<String>> {
     for (i, id) in ids.iter().enumerate() {
         reach[i][i] = true;
         for e in g.out_edges(id) {
-            if let Some(&j) = idx.get(&e.node().to_string()) {
+            if let Some(&j) = idx.get(&e.node(g).to_string()) {
                 reach[i][j] = true;
             }
         }
@@ -168,7 +161,7 @@ fn oracle_k_core(g: &Subgraph, k: usize) -> BTreeSet<String> {
                 .out_edges(node)
                 .iter()
                 .chain(g.in_edges(node))
-                .filter(|e| alive.contains(e.node()))
+                .filter(|e| alive.contains(e.node(g)))
                 .count();
             if deg < k {
                 doomed.insert(node.clone());
@@ -276,7 +269,7 @@ proptest! {
                     for pair in path.windows(2) {
                         let step = g.out_edges(&pair[0])
                             .iter()
-                            .filter(|e| e.node() == pair[1])
+                            .filter(|e| e.node(&g) == pair[1].as_str())
                             .map(|e| e.weight())
                             .fold(f64::INFINITY, f64::min);
                         prop_assert!(step.is_finite(), "{} -> {} is not an edge", pair[0], pair[1]);

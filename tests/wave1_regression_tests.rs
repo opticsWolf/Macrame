@@ -1094,7 +1094,7 @@ async fn load_subgraph_with_filters_the_returned_edges_not_only_the_walk() {
     let types: Vec<&str> = graph
         .out_edges("hub")
         .iter()
-        .map(|e| e.edge_type())
+        .map(|e| e.edge_type(&graph))
         .collect();
     assert_eq!(
         types,
