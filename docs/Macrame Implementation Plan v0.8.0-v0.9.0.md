@@ -386,6 +386,55 @@ absence reads as a choice.
 
 **Documents.** `README.md` (platform claim now evidenced); `s6-s10` §8.
 
+> **Delivered 2026-08-02** — [D-112](architecture/s13-decision-register.md#d-112). `macos-latest`
+> in the Rust matrix; twenty action pins bumped across all four workflows.
+>
+> **The plan's "bump to `@v5`" was written against a stale view of the ecosystem, and the
+> correction is the substance of this item.** `actions/checkout` is at **v7**, not v5. More
+> importantly, Node 24 arrived at a **different major for each affected action** — and which
+> ones are affected was read out of each action's own `action.yml` rather than inferred from
+> the deprecation banner:
+>
+> | action | was | declares | bumped to | first `node24` major |
+> |---|---|---|---|---|
+> | `actions/checkout` | v4 | `node20` | **v5** | v5 (newest: v7) |
+> | `actions/setup-python` | v5 | `node20` | **v6** | v6 (newest: v7) |
+> | `actions/upload-artifact` | v4 | `node20` | **v6** | v6 (newest: v7) |
+> | `actions/download-artifact` | v4 | `node20` | **v7** | v7 (newest: v8) |
+> | `Swatinem/rust-cache` | v2 | `node24` | — | already fine |
+> | `PyO3/maturin-action` | v1 | `node24` | — | already fine |
+> | `pypa/gh-action-pypi-publish` | release/v1 | composite | — | no Node runtime |
+>
+> Reading the manifests is what kept three untouched pins from being bumped for nothing, and
+> it is why `setup-python` is in the table at all — **A1 introduced that dependency four hours
+> ago, at `@v5`, which is `node20`.** A1 added a deprecated action while fixing something else.
+>
+> **Bumped to the first `node24` major, not the newest**, and that is a decision rather than
+> laziness. The newest would additionally take an ESM migration, `download-artifact`'s new
+> hash-mismatch enforcement, `upload-artifact`'s direct-upload semantics and `checkout`'s
+> fork-PR blocking — none of which this repository uses, and **none of which can be tested
+> anywhere but on CI itself**. The stated problem is a deprecated runtime; these four solve it
+> exactly. The one skipped major with a real break was checked rather than waved past:
+> `download-artifact` v5 changed the output path for single-artifact downloads **by ID**, and
+> `wheels.yml` names no artifact — `path: dist` with `merge-multiple: true` — so it does not
+> apply.
+>
+> **macOS is four characters and one unknown.** The matrix gains `macos-latest`, so the README's
+> three-platform promise stops resting on the *binding's* CI. It also puts a number on
+> something never measured: every R15 figure in `.cargo/config.toml` and the risk row comes
+> from one Windows machine, and the fault not having been *seen* elsewhere is not the same as
+> it being absent. A1's classifier is what makes that legible — a macOS fault will report
+> `CRASH` and name its target rather than arriving as a smaller green.
+>
+> **`cargo-deny` / `cargo-audit` recorded as declined**, per this item's intent, in D-112's
+> Rejected list along with SHA-pinning: both are supply-chain *policy*, and neither belongs
+> smuggled in beside a runtime bump.
+>
+> **What cannot be verified from here.** All four workflows parse and every pin resolves, but
+> whether the Rust suite is green on `macos-latest` is discovered on the first push — it has
+> never run there. If it goes red, that is a finding, not a regression: A4 is the item that
+> makes the platform claim testable, and the first result is the first evidence either way.
+
 ### A5 · A decision that names a release must not outlive it
 
 **The tripwire this plan exists because of.** D-089 and D-087 both read *"Scheduled for

@@ -84,7 +84,7 @@ jobs:
             smoke: true
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: build wheel
         uses: PyO3/maturin-action@v1
@@ -124,7 +124,7 @@ jobs:
           print("ok:", macrame.__version__)
           PY
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: wheel-${{ matrix.name }}
           path: dist/*.whl
@@ -134,7 +134,7 @@ jobs:
     name: sdist
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: build sdist
         uses: PyO3/maturin-action@v1
@@ -154,7 +154,7 @@ jobs:
           python -m pip install --no-binary :all: dist/*.tar.gz
           python -c "import macrame; assert macrame.engine_linked(); print('sdist ok', macrame.__version__)"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: sdist
           path: dist/*.tar.gz
@@ -190,7 +190,7 @@ jobs:
       # naming this repository, this workflow file, and the `pypi` environment.
       id-token: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           path: dist
           merge-multiple: true

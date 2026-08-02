@@ -9,12 +9,38 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# Action versions, and why these particular majors (0.8.0, A4, D-112).
+#
+# `actions/checkout@v4`, `setup-python@v5`, `upload-artifact@v4` and
+# `download-artifact@v4` all declare `runs.using: node20` — verified by reading
+# each action's own `action.yml`, not inferred from the deprecation banner. Node
+# 20 is deprecated and force-migrated to Node 24, which annotated every job of
+# every run across all four workflow files.
+#
+# Each is bumped to the FIRST major that declares `node24`, which is a different
+# number for each of them: checkout v5, setup-python v6, upload-artifact v6,
+# download-artifact v7. Not to the newest (v7 / v7 / v7 / v8) — that would also
+# take an ESM migration, `download-artifact`'s new hash-mismatch enforcement,
+# `upload-artifact`'s direct-upload semantics and `checkout`'s fork-PR blocking,
+# none of which this repository needs and none of which can be tested anywhere
+# but on CI itself. The goal is to stop running a deprecated runtime, and that
+# is exactly what these four buy.
+#
+# `download-artifact` v5's one real breaking change — the output path for
+# single-artifact downloads **by ID** — does not apply here: `wheels.yml` names
+# no artifact and uses `merge-multiple: true` across all of them.
+#
+# Not bumped, because they are already fine: `Swatinem/rust-cache@v2` and
+# `PyO3/maturin-action@v1` both declare `node24` on their current major, and
+# `pypa/gh-action-pypi-publish@release/v1` is a composite action with no Node
+# runtime at all. `dtolnay/rust-toolchain` is a branch ref by design.
+
 jobs:
   lint:
     name: clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -56,7 +82,7 @@ jobs:
     name: MSRV (rust-version in Cargo.toml)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - id: msrv
         run: echo "v=$(grep -m1 '^rust-version' Cargo.toml | sed 's/.*= *//; s/\"//g')" >> "$GITHUB_OUTPUT"
       - uses: dtolnay/rust-toolchain@master
@@ -65,22 +91,35 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --all-features --all-targets
 
+  # `README.md` promises "Windows desktop, Linux, or macOS", and until 0.8.0 the
+  # only macOS evidence this project held arrived *through pyo3* — `python.yml`
+  # added `macos-latest` at P7, so the crate that is the actual product was
+  # tested on two of the three platforms it claims. That is a strange shape for
+  # a README claim to rest on, and the fix is four characters.
+  #
+  # It also buys a measurement worth having on its own: **the R15 rate on Apple
+  # silicon is unknown.** Every figure in `.cargo/config.toml` and in the R15
+  # risk row is from this Windows machine, and the fault has never been observed
+  # on a non-Windows runner — which is not the same as knowing it is absent.
+  # A1's classifier is what makes that observable rather than merely noisy: a
+  # macOS crash will now say `CRASH` and name its target instead of arriving as
+  # a smaller green.
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
       # For `scripts/run_rust_suite.py`. Pinned rather than relying on the
       # runner's default: `python` and `python3` are not the same name on both
       # images, and a gate that only exists on one OS is not a gate.
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -137,7 +176,7 @@ jobs:
     name: cargo publish --dry-run
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo publish --dry-run

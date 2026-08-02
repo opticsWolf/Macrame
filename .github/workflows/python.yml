@@ -56,7 +56,7 @@ jobs:
     name: clippy (binding crate)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -75,7 +75,7 @@ jobs:
       # No Rust toolchain needed and no extension built: `--strict` on a `.pyi`
       # is a pure text analysis. Measured clean at 0.7.0, so this is a gate that
       # passes rather than a backlog.
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
       - name: mypy (the stub, and the package that re-exports it)
@@ -107,8 +107,8 @@ jobs:
             python: "3.13"
 
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
       - uses: dtolnay/rust-toolchain@stable
@@ -148,12 +148,12 @@ jobs:
     name: one wheel, two interpreters
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         id: floor
         with:
           python-version: "3.10"
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         id: newest
         with:
           python-version: "3.13"
