@@ -720,6 +720,37 @@ the Rust boundary, and B7 carries `s14`, the stub and the README example.
 note by name: which field stopped being populated by default. In Python it **is** a break, and
 B7 says why that is the right shape.
 
+> **Delivered 2026-08-02** — [D-116](architecture/s13-decision-register.md#d-116). Suites
+> **312** / **323** / **344**, clippy clean.
+>
+> `content` is `Option<String>`, off by default; `TraversalBuilder::content(true)` asks for it;
+> `load_subgraph`, which has no builder, never fetches it. **The query selects `NULL` in place
+> of the column** rather than fetching and discarding — otherwise the I/O stays, which is most
+> of what this avoids.
+>
+> **The claim is settled by test rather than argued.**
+> `content_is_absent_by_default_and_no_algorithm_notices` loads one fixture both ways and
+> asserts all six algorithms return identical answers **and** that `estimated_bytes()` differs
+> by more than 2×. The second half is what stops the first passing vacuously on a fixture whose
+> content happened to be empty — the failure mode
+> [D-088](architecture/s13-decision-register.md#d-088) keeps producing, and the same one B2's
+> determinism gate walked into.
+>
+> **Measured split, from `budget_density_diag` at 20 edges/node and 8-byte ids:** edges are
+> **80%** of the budget with empty content, **30%** at 2 KB per concept, **5%** at 20 KB.
+> Against those components the default load now carries 238,802 bytes where it carried
+> 4,238,802 at 20 KB — **17.8×** — and 638,802 → 238,802 at 2 KB. The plan's table used a
+> different node count and read 97/76/25%; the shape of the claim is the same and these are the
+> numbers this tree produces.
+>
+> **One thing this item leaves broken, named rather than left to be found.** The binding's
+> getter had to change to compile (`str | None`), so **Python can no longer obtain content at
+> all** — `load_subgraph` grows the `content=` keyword in
+> [B7](#b7--the-binding-surface-the-stub-and-the-wheel). One Python test asserted content on a
+> default load and now asserts `is None`, with the gap written into it; the stub is corrected
+> for the same reason, since a knowingly-wrong stub is worse than an unfinished one. `s14`, the
+> README example and the keyword itself remain B7's.
+
 ### B4 · Schema v8, the last cheap rung
 
 Two changes, one rung, one snapshot invalidation.

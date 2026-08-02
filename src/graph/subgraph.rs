@@ -78,28 +78,49 @@ pub struct Subgraph {
 #[derive(Debug, Clone, PartialEq)]
 pub struct NodeData {
     title: String,
-    content: String,
+    /// **`None` means "not loaded", not "empty" (0.8.0, B3, D-116).**
+    ///
+    /// Document text is not loaded unless a caller asks. No algorithm reads it
+    /// — `dijkstra`, `astar`, `scc`, `k_core`, `louvain` and `modularity` touch
+    /// topology and weight only — and at realistic document sizes it is most of
+    /// the byte budget, so the default load spent the budget on bytes nothing
+    /// would look at.
+    ///
+    /// An `Option` rather than an empty `String` because a sentinel that is a
+    /// *valid value of the type* cannot be told apart from the real thing: a
+    /// concept with genuinely empty content and one whose content was not
+    /// requested are different facts, and they differ exactly when a caller is
+    /// deciding whether to go back to the database. Same refusal
+    /// [D-096](../../docs/architecture/s13-decision-register.md) made for the
+    /// open interval.
+    content: Option<String>,
     embedding_model: Option<String>,
     valid_from: String,
     valid_to: String,
 }
 
 impl NodeData {
-    /// A node with no embedding model. Use [`Self::with_embedding_model`] to
-    /// add one.
+    /// A node with no content and no embedding model — what the default load
+    /// produces. Use [`Self::with_content`] and [`Self::with_embedding_model`]
+    /// to add either.
     pub fn new(
         title: impl Into<String>,
-        content: impl Into<String>,
         valid_from: impl Into<String>,
         valid_to: impl Into<String>,
     ) -> Self {
         Self {
             title: title.into(),
-            content: content.into(),
+            content: None,
             embedding_model: None,
             valid_from: valid_from.into(),
             valid_to: valid_to.into(),
         }
+    }
+
+    #[must_use]
+    pub fn with_content(mut self, content: impl Into<String>) -> Self {
+        self.content = Some(content.into());
+        self
     }
 
     #[must_use]
@@ -112,8 +133,14 @@ impl NodeData {
         &self.title
     }
 
-    pub fn content(&self) -> &str {
-        &self.content
+    /// The document text, or `None` when it was not requested.
+    ///
+    /// **`None` is not an empty document.** See the field's own note: the
+    /// default load does not fetch content, so a caller that did not ask gets
+    /// `None` and can tell that apart from a concept whose content really is
+    /// `""`.
+    pub fn content(&self) -> Option<&str> {
+        self.content.as_deref()
     }
 
     pub fn embedding_model(&self) -> Option<&str> {
@@ -503,7 +530,7 @@ impl Subgraph {
     fn node_bytes(id: &str, d: &NodeData) -> usize {
         id.len()
             + d.title.len()
-            + d.content.len()
+            + d.content.as_ref().map_or(0, String::len)
             + d.embedding_model.as_ref().map_or(0, String::len)
             + d.valid_from.len()
             + d.valid_to.len()
@@ -823,7 +850,7 @@ ORDER BY l.source_id, l.target_id, l.edge_type
         ids.sort();
         ids.dedup();
 
-        hydrate(conn, &mut graph, &ids, bytes, byte_budget).await?;
+        hydrate(conn, &mut graph, &ids, bytes, byte_budget, traversal.content).await?;
         graph.drop_dangling_adjacency();
         Ok(graph)
     }
@@ -850,6 +877,7 @@ async fn hydrate(
     ids: &[String],
     bytes_so_far: usize,
     byte_budget: usize,
+    with_content: bool,
 ) -> Result<()> {
     let mut bytes = bytes_so_far;
 
@@ -873,7 +901,7 @@ async fn hydrate(
             let id: String = row.get(0)?;
             let data = NodeData {
                 title: row.get(1)?,
-                content: row.get(2)?,
+                content: if with_content { row.get(2).ok() } else { None },
                 embedding_model: row.get(3).ok(),
                 valid_from: row.get(4)?,
                 valid_to: row.get(5)?,

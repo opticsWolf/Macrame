@@ -302,10 +302,14 @@ pub struct NodeData { /* title, content, embedding_model, valid_from, valid_to *
 pub struct EdgeRef  { /* node, edge_type, weight, valid_from, valid_to */ }
 
 impl NodeData {
-    pub fn new(title, content, valid_from, valid_to) -> Self
+    pub fn new(title, valid_from, valid_to) -> Self      // content absent
+    pub fn with_content(self, content) -> Self
     pub fn with_embedding_model(self, model: Option<String>) -> Self
     pub fn title(&self) -> &str
-    pub fn content(&self) -> &str
+    // NOT loaded by default since 0.8.0 (B3, D-116). None means NOT LOADED,
+    // never empty — no algorithm reads content, and at 20 KB/concept it is 95%
+    // of the byte budget. Ask via `TraversalBuilder::content(true)`.
+    pub fn content(&self) -> Option<&str>
     pub fn embedding_model(&self) -> Option<&str>
     pub fn valid_from(&self) -> &str
     pub fn valid_to(&self) -> &str

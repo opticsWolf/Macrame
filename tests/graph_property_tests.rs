@@ -32,7 +32,7 @@ fn build(n: usize, edges: &[(usize, usize, f64)]) -> Subgraph {
     for i in 0..n {
         g.insert_node(
             node_id(i),
-            NodeData::new(node_id(i), String::new(), T0.to_string(), OPEN.to_string()),
+            NodeData::new(node_id(i), T0.to_string(), OPEN.to_string()),
         );
     }
     for &(s, t, w) in edges {

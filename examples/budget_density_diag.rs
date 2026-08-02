@@ -47,7 +47,7 @@ fn measured_bytes_per_edge(id_len: usize, edges: usize) -> (usize, usize) {
     let mut g = Subgraph::default();
     let nodes = edges / 20 + 2; // ~20 edges per node, a realistic density
     for i in 0..nodes {
-        g.insert_node(id(i), NodeData::new("t", "", TS, OPEN));
+        g.insert_node(id(i), NodeData::new("t", TS, OPEN));
     }
     let empty = g.estimated_bytes();
     for e in 0..edges {
@@ -115,7 +115,7 @@ fn main() {
         for i in 0..n {
             g.insert_node(
                 format!("c{i:07}"),
-                NodeData::new("A title".to_string(), "x".repeat(content), TS.to_string(), OPEN.to_string()),
+                NodeData::new("A title", TS, OPEN).with_content("x".repeat(content)),
             );
         }
         for i in 0..n {

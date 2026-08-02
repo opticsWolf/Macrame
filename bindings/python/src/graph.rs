@@ -116,7 +116,16 @@ impl PyNodeData {
         self.inner.title()
     }
     #[getter]
-    fn content(&self) -> &str {
+    /// `None` when the load did not request content (0.8.0, B3, D-116).
+    ///
+    /// **A break, and deliberately not `""`.** A sentinel that is a valid value
+    /// of the type cannot be told apart from the real thing, so a concept with
+    /// genuinely empty text and one whose text was not fetched would be
+    /// indistinguishable exactly when a caller is deciding whether to go back
+    /// to the database. The stub, `s14`, the README example and the Python
+    /// tests are B7's — this getter changes here only because the crate below
+    /// it did.
+    fn content(&self) -> Option<&str> {
         self.inner.content()
     }
     #[getter]

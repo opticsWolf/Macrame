@@ -224,9 +224,20 @@ def test_iteration_yields_node_ids_in_order(db):
 def test_node_returns_the_hydrated_concept(db):
     g = db.load_subgraph("a", 3, ROOMY)
     n = g.node("a")
-    assert (n.title, n.content) == ("A", "body of a")
+    assert n.title == "A"
     assert n.valid_from == dt.datetime(2026, 1, 1, tzinfo=UTC)
     assert n.valid_to is None  # the open sentinel, as None
+
+    # `content` is **not loaded by default** as of 0.8.0 (B3, D-116), and `None`
+    # means "not loaded" rather than "empty" — a sentinel that is a valid value
+    # of the type could not be told apart from a genuinely empty document.
+    #
+    # This asserted `n.content == "body of a"` until B3. There is currently **no
+    # way to request content through the binding**: `load_subgraph` grows a
+    # `content=` keyword in B7, which is where the stub, `s14` and the README
+    # example are updated too. Until then this is a real gap in the Python
+    # surface, and it is named here rather than left for someone to discover.
+    assert n.content is None
 
 
 def test_edge_intervals_render_as_datetimes_with_none_for_open(db):

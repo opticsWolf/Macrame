@@ -52,6 +52,19 @@ pub struct TraversalBuilder {
     /// mismatch with `AttributeMode::Current` could only ever be a `warn!`:
     /// nothing in the call had the information needed to raise an error.
     pub as_of: Option<String>,
+    /// Whether [`crate::Database::load_subgraph_with`] should fetch
+    /// `concepts.content` (0.8.0, B3, D-116).
+    ///
+    /// **Default `false`, which is a change in what a load returns.** No
+    /// algorithm reads document text, and at realistic document sizes it is
+    /// most of the byte budget, so the default was spending the budget on bytes
+    /// nothing would look at. A caller who needs it asks; one who does not gets
+    /// `NodeData::content() == None`, which is distinguishable from an empty
+    /// document.
+    ///
+    /// Ignored by [`crate::Database::load_subgraph`], which has no builder and
+    /// never loads content.
+    pub content: bool,
 }
 
 impl TraversalBuilder {
@@ -63,6 +76,7 @@ impl TraversalBuilder {
             min_weight: 0.0,
             attribute_mode: None,
             as_of: None,
+            content: false,
         }
     }
 
@@ -88,6 +102,16 @@ impl TraversalBuilder {
     /// see [`Self::as_of`].
     pub fn attribute_mode(mut self, mode: AttributeMode) -> Self {
         self.attribute_mode = Some(mode);
+        self
+    }
+
+    /// Fetch `concepts.content` into every hydrated node (0.8.0, B3, D-116).
+    ///
+    /// Off by default. Turning it on is what the byte budget is then spent on:
+    /// at 20 KB per concept, document text is the large majority of a loaded
+    /// graph, and none of the six algorithms reads it.
+    pub fn content(mut self, content: bool) -> Self {
+        self.content = content;
         self
     }
 

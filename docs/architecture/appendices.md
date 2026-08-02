@@ -158,6 +158,9 @@ let g = db.load_subgraph(root, max_hops, ts, byte_budget).await?;   // -> Subgra
 //   g.node_ids()    g.nodes()            g.out_edges(id) / g.in_edges(id)
 //   g.out_adjacency() / g.in_adjacency() g.insert_node(..) / g.add_edge(..)
 // NodeData and EdgeRef likewise: title(), content(), weight(), node(), ....
+// content() is Option<&str> and is NOT populated by default (0.8.0, D-116):
+// None means not loaded, never empty. Ask with TraversalBuilder::content(true)
+// and load_subgraph_with; load_subgraph never fetches it.
 let dist  = dijkstra(&g, start);                       // BTreeMap<String, f64>
 let path  = astar(&g, start, goal, heuristic);         // Option<(f64, Vec<String>)>
 let comps = scc(&g);                                   // Vec<Vec<String>>

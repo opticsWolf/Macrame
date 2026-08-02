@@ -18,10 +18,7 @@ fn graph_of(edges: &[(&str, &str, f64)]) -> Subgraph {
             if !g.contains_node(id) {
                 g.insert_node(
                     id.to_string(),
-                    macrame::graph::NodeData::new(
-                        id.to_string(),
-                        String::new(),
-                        T0.to_string(),
+                    macrame::graph::NodeData::new(id.to_string(), T0.to_string(),
                         OPEN.to_string(),
                     ),
                 );
@@ -481,7 +478,7 @@ fn louvain_on_an_edgeless_graph_is_all_singletons() {
     for id in ["A", "B"] {
         g.insert_node(
             id.to_string(),
-            macrame::graph::NodeData::new(id.to_string(), String::new(), T0.to_string(), OPEN.to_string()),
+            macrame::graph::NodeData::new(id.to_string(), T0.to_string(), OPEN.to_string()),
         );
     }
     let comms = louvain(&g);
@@ -819,7 +816,7 @@ fn hand_built(order: impl Fn(&mut Vec<&'static str>)) -> (Subgraph, Vec<&'static
     for id in &ids {
         g.insert_node(
             *id,
-            macrame::graph::NodeData::new(*id, String::new(), T0, OPEN),
+            macrame::graph::NodeData::new(*id, T0, OPEN),
         );
     }
     let mut edges: Vec<&(&str, &str, f64)> = DETERMINISM_EDGES.iter().collect();
@@ -928,4 +925,117 @@ async fn node_order_does_not_depend_on_construction_order() {
         "the loaded graph orders its nodes differently from a hand-built one"
     );
     assert_eq!(louvain(&loaded), louvain(&ascending));
+}
+
+// ---------------------------------------------------------------------------
+// Content is not loaded by default, and no algorithm misses it (0.8.0, B3, D-116)
+// ---------------------------------------------------------------------------
+//
+// B3's claim is that `concepts.content` is dead weight in a loaded `Subgraph`:
+// none of the six algorithms reads it, and at realistic document sizes it is
+// the large majority of the byte budget. That is the one thing here a test can
+// settle outright, so it does.
+//
+// The claim has two halves and both are asserted:
+//
+// * **the answers do not move** — every algorithm returns the same thing with
+//   content loaded and not loaded, on a graph whose concepts carry real text;
+// * **the budget does move** — `estimated_bytes()` is markedly smaller without
+//   it, which is the entire reason for the change.
+//
+// The second is what makes the first worth having. Without it the test would
+// pass trivially on a fixture whose content happened to be empty.
+
+/// A concept body big enough that its absence is unmistakable in the budget,
+/// and small enough that the fixture stays quick.
+const CONTENT: &str = "lorem ipsum dolor sit amet, consectetur adipiscing elit; ";
+
+async fn graph_with_content(harness: &TestHarness, want_content: bool) -> Subgraph {
+    let db = Database::open(&harness.db_path).await.unwrap();
+
+    let ids: Vec<String> = (0..24).map(|i| format!("c{i:04}")).collect();
+    db.write_concepts(
+        ids.iter()
+            .map(|id| {
+                macrame::prelude::ConceptUpsert::new(id.clone(), format!("title {id}"))
+                    .content(CONTENT.repeat(40)) // ~2.2 KB per concept
+                    .valid_from(T0)
+            })
+            .collect(),
+    )
+    .await
+    .unwrap();
+
+    for i in 0..ids.len() {
+        for step in [1usize, 5] {
+            let j = (i + step) % ids.len();
+            if i != j {
+                db.assert_edge(
+                    macrame::prelude::EdgeAssertion::new(&ids[i], &ids[j], "KNOWS")
+                        .valid_from(T0)
+                        .weight(1.0),
+                )
+                .await
+                .unwrap();
+            }
+        }
+    }
+
+    let traversal = TraversalBuilder::new("c0000")
+        .max_depth(6)
+        .content(want_content);
+    let g = db.load_subgraph_with(&traversal, T0, 1 << 24).await.unwrap();
+    db.close().await.unwrap();
+    g
+}
+
+#[tokio::test]
+async fn content_is_absent_by_default_and_no_algorithm_notices() {
+    let h1 = TestHarness::new();
+    let h2 = TestHarness::new();
+    let without = graph_with_content(&h1, false).await;
+    let with = graph_with_content(&h2, true).await;
+
+    // The two must be the same graph, or nothing below means anything.
+    assert_eq!(without.node_count(), with.node_count());
+    assert_eq!(without.edge_count(), with.edge_count());
+    assert!(without.node_count() > 1, "fixture did not load");
+
+    // **`None` is not `""`.** The distinction is the reason this is an `Option`
+    // at all: a caller that did not ask can tell that apart from a concept
+    // whose text really is empty.
+    for id in without.node_ids() {
+        assert_eq!(
+            without.node(id).unwrap().content(),
+            None,
+            "the default load fetched content for {id}"
+        );
+        assert!(
+            with.node(id).unwrap().content().is_some_and(|c| !c.is_empty()),
+            "the requesting load did not fetch content for {id}"
+        );
+    }
+
+    // **The budget moves**, which is what the change is for — and what stops
+    // the assertions above passing on an empty fixture.
+    assert!(
+        with.estimated_bytes() > without.estimated_bytes() * 2,
+        "content is supposed to dominate this fixture: {} bytes with, {} without",
+        with.estimated_bytes(),
+        without.estimated_bytes()
+    );
+
+    // **The answers do not move.** This is B3's actual claim.
+    assert_eq!(dijkstra(&without, "c0000"), dijkstra(&with, "c0000"));
+    assert_eq!(
+        macrame::graph::astar(&without, "c0000", "c0012", |_, _| 0.0),
+        macrame::graph::astar(&with, "c0000", "c0012", |_, _| 0.0)
+    );
+    assert_eq!(scc(&without), scc(&with));
+    assert_eq!(k_core(&without, 2), k_core(&with, 2));
+    assert_eq!(louvain(&without), louvain(&with));
+    assert_eq!(
+        modularity(&without, &louvain(&without)),
+        modularity(&with, &louvain(&with))
+    );
 }

@@ -234,7 +234,14 @@ class NodeData:
     @property
     def title(self) -> str: ...
     @property
-    def content(self) -> str: ...
+    def content(self) -> str | None:
+        """The document text, or `None` when the load did not fetch it.
+
+        Not loaded by default since 0.8.0 (B3, D-116). `None` means *not
+        loaded*, never *empty*. `load_subgraph` gains a `content=` keyword in
+        B7; until then there is no way to request it from Python.
+        """
+        ...
     @property
     def embedding_model(self) -> str | None: ...
     @property
