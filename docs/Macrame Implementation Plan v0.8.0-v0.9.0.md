@@ -209,6 +209,42 @@ indistinguishable from noise). *`continue-on-error`* (deletes the signal instead
 *Dropping the property binaries* (the only model-based checks of the doctrine invariants —
 [D-030](architecture/s13-decision-register.md#d-030) is why they exist).
 
+> **Delivered 2026-08-02** — `scripts/run_rust_suite.py`, both `ci.yml` loops replaced,
+> [D-110](architecture/s13-decision-register.md#d-110).
+>
+> Five outcomes, not four. `BUILD` was added because a compile failure produces an empty
+> target list, and an empty list satisfies every "all targets green" check vacuously — it
+> would have been classified `TEARDOWN`, which is a wrong and confidently-worded answer.
+> Classified first, before anything reads a section list.
+>
+> **The plan's Rejected list is overturned by the plan's own step 2, and this is the one
+> substantive change.** *Five retries* was rejected because more attempts mean more chances
+> to launder a real failure into a pass — true of a loop, false once `FAILED` returns on
+> attempt 1 and is never retried. With the objection gone, the arithmetic decides: against
+> the 9-in-15 measured for `doctrine_property_tests`, three attempts go red ≈22% of the time
+> and six ≈5%. **The quarantined step ships at six; the main suite stays at three.** Step 4's
+> "two loops with different retry counts is the defect restated" was right about the defect
+> and wrong about the fix — the defect was two *unclassified* loops, and one classifier with
+> a per-step budget is not the same thing. `tests_py/run_suite.py` stays at three and its
+> comment, which claimed to match `ci.yml`, now says which step it matches and why not the
+> other.
+>
+> **Both injections run, and the classifier is verified against a captured real run.**
+> `panic!` → `FAILED` on attempt 1, naming `injected_panic_must_be_reported_as_failed`, no
+> attempt 2. `std::process::abort()` → `CRASH`, retried, naming `bench_control_tests`. Six
+> further cases were classified offline against the real 27-target output, including a
+> summary deleted from the *middle* of the run to confirm alignment names the crashed target
+> and not its neighbour. Injections reverted; working tree clean apart from this work.
+>
+> **What the exit gate cannot say yet.** "`main` green" is not verifiable from here — it
+> needs a push and a CI run. Locally the suite is **305 passed across 27 targets, exit 0**.
+> `actions/setup-python@v5` was added to the `test` job: `python` and `python3` are not the
+> same name on both runner images, and a gate that exists on one OS is not a gate.
+>
+> Also updated: `docs/quickref.md` §8 gains the run instruction, because the reason to prefer
+> the script over `cargo test` is invisible from the command line — bare `cargo test` under
+> R15 returns a *smaller* green.
+
 ### A2 · Look through R15's upstream window
 
 `libsql` max-stable is **0.9.30, 19 March 2026**, unmoved since the fault was reported against

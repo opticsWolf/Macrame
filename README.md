@@ -195,7 +195,7 @@ All budgets measured on named reference hardware. Regression detection uses crit
 | Risk | Mitigation |
 |---|---|
 | **R15: Concurrent open → access violation** (libSQL 0.9.30) | One open per database; R15 reproduces transparently through Python |
-| **Property test binaries fault mid-suite** | `property-tests` feature gate; serialised runs |
+| **Property test binaries fault mid-suite** | `property-tests` feature gate; serialised runs; CI classifies each run rather than counting failures, and retries only a crash |
 | **Covering index wins over selective** | `EXPLAIN QUERY PLAN` assertions on every index-sensitive query |
 | **Snapshot chain divergence** | `verify_snapshot_chain()` reports but does not repair (snapshots are disposable) |
 

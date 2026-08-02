@@ -1,0 +1,291 @@
+"""Run the Rust suite so that an R15 crash cannot be read as a test failure.
+
+Not a test. Run it instead of bare ``cargo test`` wherever the answer gates
+something::
+
+    python scripts/run_rust_suite.py --features metrics
+    python scripts/run_rust_suite.py --features property-tests --attempts 6
+
+Exits 0 only when the suite genuinely passed, and otherwise says which of the
+distinguishable failures it was. Retries **only** the one that is noise.
+
+Why this exists
+---------------
+`.cargo/config.toml` records R15: an intermittent libSQL access violation
+(0xC0000005) on concurrent open. It does not raise, it kills the process.
+
+`ci.yml` used to answer this with ``for attempt in 1 2 3``, twice, which counts
+failures without reading them. Two things were wrong with that:
+
+1. **A count is not a diagnosis.** Three failures produce four lines of log --
+   attempt 1 failed, attempt 2 failed, attempt 3 failed, failed three times --
+   and nothing in them says whether libSQL died or a property found a real
+   defect. Re-running a genuine failure three times just takes longer to report
+   the same thing, and re-running it *until it passes* is how a flaky assertion
+   becomes permanent.
+2. **The budget was calibrated on the wrong step.** "R15 has always passed on
+   re-run" is true of the main suite, where ``RUST_TEST_THREADS = "1"`` applies.
+   The quarantined binaries are quarantined precisely because serialising does
+   not save them.
+
+`tests_py/run_suite.py` already solved this for Python under D-107. This is the
+same idea brought back to Rust, and the two files are deliberately shaped alike.
+They cannot share an implementation: pytest is one process with one summary,
+cargo is one process per target with one summary each, and D-107 is the decision
+that they therefore need different checks.
+
+How a crash is told apart from a failure
+----------------------------------------
+Measured on this repo (libsql 0.9.30, Windows, 26 test targets + doctests):
+
+* cargo announces each target on **stderr** -- ``Running tests\\foo.rs (...)``,
+  ``Running unittests src\\lib.rs (...)``, ``Doc-tests macrame``.
+* each target's own output goes to **stdout**, beginning ``running N tests`` and
+  ending ``test result: ok. N passed; ...``.
+
+The two streams cannot be interleaved after the fact, and they do not need to
+be. The load-bearing fact is that **a target killed mid-run has already printed
+its ``running N tests`` line**: libtest emits it before the first test, and the
+config file's own account of the hazard -- tests before the fault reported,
+tests behind it silent -- says the stream survives up to the fault. So a crash
+removes a target's *summary* without removing its *section*, sections stay in
+step with the announced targets positionally, and the crashed target can still
+be named.
+
+That is also exactly the hazard: with ``--no-fail-fast`` the missing summary
+makes the run come back with a **smaller pass count and zero failures**, which
+reads as green to anything summing passes. It was observed at 0.7.0 as
+"308 passed, 0 failed" with eight tests silently absent. Keying on the absence
+of a per-target result line is what `.cargo/config.toml` instructs anything
+gating on this suite to do, and is what this file does.
+
+``--no-fail-fast`` is not optional and is added here rather than asked for:
+without it, every target alphabetically behind a fault is skipped too, and the
+distinction this file exists to draw is destroyed before it can be read.
+"""
+
+from __future__ import annotations
+
+import argparse
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+
+# Announcements on stderr. `Doc-tests` is not a `Running` line and is easy to
+# drop; it is a target with a summary like any other and losing it would put
+# every later section one out of step.
+RUNNING = re.compile(r"^\s*Running (?:unittests )?(\S+)")
+DOCTESTS = re.compile(r"^\s*Doc-tests (\S+)")
+
+# Section boundaries on stdout.
+SECTION = re.compile(r"^running (\d+) tests?$")
+RESULT = re.compile(
+    r"^test result: (ok|FAILED)\. (\d+) passed; (\d+) failed; (\d+) ignored"
+)
+CASE_FAILED = re.compile(r"^test (\S+) \.\.\. FAILED")
+
+
+class Outcome:
+    """What a single attempt was. Only CRASH is retried."""
+
+    def __init__(self, kind: str, detail: str, annotations: list[str] | None = None):
+        self.kind = kind
+        self.detail = detail
+        self.annotations = annotations or []
+
+    @property
+    def passed(self) -> bool:
+        return self.kind == "PASSED"
+
+
+def targets_from(stderr: str) -> list[str]:
+    """Announced targets, in the order cargo ran them."""
+    names = []
+    for line in stderr.splitlines():
+        m = RUNNING.match(line)
+        if m:
+            names.append(Path(m.group(1)).stem)
+            continue
+        m = DOCTESTS.match(line)
+        if m:
+            names.append(f"doctests({m.group(1)})")
+    return names
+
+
+def sections_from(stdout: str) -> list[dict]:
+    """One entry per `running N tests` block, whether or not it finished."""
+    sections: list[dict] = []
+    for line in stdout.splitlines():
+        m = SECTION.match(line)
+        if m:
+            sections.append(
+                {"announced": int(m.group(1)), "result": None, "failed_cases": []}
+            )
+            continue
+        if not sections:
+            continue
+        current = sections[-1]
+        m = CASE_FAILED.match(line)
+        if m:
+            current["failed_cases"].append(m.group(1))
+            continue
+        m = RESULT.match(line)
+        if m:
+            current["result"] = {
+                "ok": m.group(1) == "ok",
+                "passed": int(m.group(2)),
+                "failed": int(m.group(3)),
+            }
+    return sections
+
+
+def classify(proc: subprocess.CompletedProcess) -> Outcome:
+    targets = targets_from(proc.stderr)
+    sections = sections_from(proc.stdout)
+
+    # 0. Nothing ran. A compile or link error, which is a real answer available
+    #    on attempt 1 -- not one of the four run outcomes, and given its own
+    #    name rather than squeezed into the nearest one. Classified before
+    #    anything else because every check below reads a section list that a
+    #    build failure leaves empty, and an empty list satisfies "all green"
+    #    vacuously.
+    if not targets:
+        return Outcome(
+            "BUILD",
+            f"cargo produced no test targets (exit {proc.returncode}). "
+            f"The suite did not run; this is a build failure.",
+        )
+
+    # 1. A target announced but with no section at all: it never reached its
+    #    first test. Distinct from a crash mid-run and not retried, because
+    #    nothing about it looks like R15.
+    if len(sections) < len(targets):
+        missing = targets[len(sections):] or ["(position not recoverable)"]
+        return Outcome(
+            "INCOMPLETE",
+            f"cargo announced {len(targets)} targets but only {len(sections)} "
+            f"started running. First unaccounted for: {missing[0]}",
+            [f"target {missing[0]} was announced but produced no test output"],
+        )
+
+    # 2. Genuine failures. Reported on attempt 1 with the test named, which is
+    #    the whole point of the exercise: `for attempt in 1 2 3` would have
+    #    spent two more full suite runs to print the same thing less clearly.
+    failing = [
+        (targets[i], s) for i, s in enumerate(sections)
+        if s["result"] and not s["result"]["ok"]
+    ]
+    if failing:
+        annotations = []
+        total = 0
+        for target, section in failing:
+            total += section["result"]["failed"]
+            for case in section["failed_cases"] or ["(name not printed)"]:
+                annotations.append(f"{target}: {case} FAILED")
+        return Outcome(
+            "FAILED",
+            f"{total} test(s) failed across {len(failing)} target(s). "
+            f"Not retried -- this is a result, not noise.",
+            annotations,
+        )
+
+    # 3. R15's signature: a section that started and never printed a summary.
+    #    The one outcome worth retrying, and the one that a pass-count sum
+    #    reports as a slightly smaller green.
+    crashed = [
+        (targets[i], s) for i, s in enumerate(sections) if s["result"] is None
+    ]
+    if crashed:
+        names = ", ".join(t for t, _ in crashed)
+        lost = sum(s["announced"] - len(s["failed_cases"]) for _, s in crashed)
+        return Outcome(
+            "CRASH",
+            f"{len(crashed)} target(s) started and printed no summary: {names}. "
+            f"Up to {lost} test(s) silently absent. This is R15's shape.",
+        )
+
+    # 4. Every target green, every summary present, and cargo still unhappy.
+    #    The inverse arrangement, and the one where reading only the exit code
+    #    is right by accident while reading only the summaries is wrong. Not
+    #    retried and not green: the tests are fine and the process is not.
+    if proc.returncode != 0:
+        return Outcome(
+            "TEARDOWN",
+            f"all {len(sections)} targets reported ok and cargo exited "
+            f"{proc.returncode}. Look at teardown, not at the assertions.",
+        )
+
+    total = sum(s["result"]["passed"] for s in sections)
+    return Outcome("PASSED", f"{total} passed across {len(sections)} targets")
+
+
+def run_once(cargo_args: list[str]) -> Outcome:
+    proc = subprocess.run(
+        ["cargo", "test", *cargo_args, "--no-fail-fast"],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+        errors="replace",
+    )
+    sys.stdout.write(proc.stdout)
+    sys.stderr.write(proc.stderr)
+    return classify(proc)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--features",
+        default="",
+        help="passed through to cargo test; empty means default features",
+    )
+    parser.add_argument(
+        "--attempts",
+        type=int,
+        default=3,
+        # Three for the main suite, matching what ci.yml has always claimed and
+        # what tests_py/run_suite.py uses. Raisable per step now that only a
+        # crash is ever retried: more attempts can no longer launder a real
+        # failure into a pass, which was the objection to raising it before.
+        help="how many times to retry a CRASH (nothing else is retried)",
+    )
+    # Anything unrecognised goes straight to cargo. This is what lets the
+    # injection checks in the exit gate run one target instead of rebuilding
+    # the world: `--test bench_control_tests`.
+    args, passthrough = parser.parse_known_args()
+
+    cargo_args = ["--features", args.features] if args.features else []
+    cargo_args += passthrough
+
+    for attempt in range(1, args.attempts + 1):
+        print(f"::group::cargo test{' ' + args.features if args.features else ''}, "
+              f"attempt {attempt}/{args.attempts}")
+        outcome = run_once(cargo_args)
+        print("::endgroup::")
+
+        if outcome.passed:
+            print(f"{outcome.kind}: {outcome.detail} (attempt {attempt}/{args.attempts})")
+            return 0
+
+        for annotation in outcome.annotations:
+            print(f"::error::{annotation}")
+
+        if outcome.kind != "CRASH":
+            print(f"::error::{outcome.kind}: {outcome.detail}")
+            return 1
+
+        print(f"::warning::CRASH on attempt {attempt}/{args.attempts}: {outcome.detail}")
+
+    print(
+        f"::error::CRASH: {args.attempts} consecutive attempts died without a "
+        f"summary. Every one of them is R15's shape, but that is more than R15 "
+        f"has needed here -- see .cargo/config.toml and treat it as real."
+    )
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

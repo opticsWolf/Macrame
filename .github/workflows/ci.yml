@@ -77,51 +77,57 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
+      # For `scripts/run_rust_suite.py`. Pinned rather than relying on the
+      # runner's default: `python` and `python3` are not the same name on both
+      # images, and a gate that only exists on one OS is not a gate.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
       # `.cargo/config.toml` sets RUST_TEST_THREADS = "1" for R15 and applies
       # here automatically. Read that file before changing anything below.
       #
       # R15 is an intermittent libSQL access violation (0xC0000005) triggered by
-      # concurrent database opens. It kills the process, so cargo reports
-      # "error: N targets failed" and the run goes red for a reason that has
-      # nothing to do with the change under test — measured at ~5/10 full-suite
-      # runs on Windows. A gate that fails half the time trains people to ignore
-      # red, which is this project's own stated position, so the run is retried
-      # rather than tolerated or ignored.
+      # concurrent database opens. It kills the process, so the affected target
+      # never prints its `test result:` line while every other target still
+      # prints its own — the run comes back with a SMALLER PASS COUNT AND ZERO
+      # FAILURES, which reads as green to anything summing passes, and red to
+      # cargo's exit code, for a reason that has nothing to do with the change
+      # under test.
       #
-      # Three attempts, not unlimited: R15 has always passed on re-run, so a
-      # genuine failure still goes red after three, and the attempt count is
-      # visible in the log rather than hidden by a `continue-on-error`.
+      # Both steps below used to be `for attempt in 1 2 3`, which counts
+      # failures without reading them: three failures produced four lines of log
+      # and none of them said whether libSQL died or a property found a real
+      # defect. `scripts/run_rust_suite.py` classifies instead — CRASH, FAILED,
+      # INCOMPLETE, TEARDOWN, BUILD — and retries only CRASH. A genuine failure
+      # is now reported on attempt 1 with the test named. D-107 did this for the
+      # Python suite; D-110 brings it back to Rust.
       - name: test (with R15 retry)
         shell: bash
-        run: |
-          for attempt in 1 2 3; do
-            echo "::group::cargo test, attempt $attempt"
-            if cargo test --features metrics --no-fail-fast; then
-              echo "::endgroup::"
-              echo "passed on attempt $attempt"
-              exit 0
-            fi
-            echo "::endgroup::"
-            echo "::warning::attempt $attempt failed; see R15 in .cargo/config.toml"
-          done
-          echo "::error::three consecutive test runs failed — this is not R15"
-          exit 1
+        run: python scripts/run_rust_suite.py --features metrics --attempts 3
 
       # The generated-history binaries are quarantined behind a feature (see
       # .cargo/config.toml): a property case opens a database of its own, which
       # is exactly R15's trigger, so they fault far more often than the rest.
       # Run as their own step so their noise cannot be mistaken for the suite's.
+      #
+      # Six attempts here, not three. The old budget was calibrated on the main
+      # suite — "R15 has always passed on re-run" is true where
+      # RUST_TEST_THREADS = "1" helps, and these targets are quarantined
+      # precisely because it does not: doctrine_property_tests alone measured
+      # 9 crashes in 15 runs at 0.7.0. Against p≈0.6 per attempt, three attempts
+      # go red about 22% of the time and six about 5% — which matches the 2-in-9
+      # observed on `main` in runs 30706318073 and 30706474231, both doc-only
+      # commits.
+      #
+      # Raising the budget was rejected while the loop existed, because more
+      # attempts also meant more chances to launder a real failure into a pass.
+      # The classifier removes that: a FAILED result returns on attempt 1 and is
+      # never retried, so the only thing six attempts buys is more tolerance for
+      # the one outcome that is known to be noise.
       - name: property tests (quarantined, R15-prone)
         shell: bash
-        run: |
-          for attempt in 1 2 3; do
-            if cargo test --features property-tests --no-fail-fast; then
-              exit 0
-            fi
-            echo "::warning::property attempt $attempt failed"
-          done
-          echo "::error::property tests failed three times"
-          exit 1
+        run: python scripts/run_rust_suite.py --features property-tests --attempts 6
 
   # A `cargo publish` failure after a tag is pushed is expensive: the tag is
   # already public and the version number is spent. This runs the same

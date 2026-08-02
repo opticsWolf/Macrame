@@ -46,10 +46,15 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 
-# Three, matching `ci.yml`'s Rust retry and for the same reason: R15 has always
-# passed on re-run, so a genuine failure still goes red after three, and the
-# attempt count stays visible in the log rather than being hidden by a
-# `continue-on-error`.
+# Three, matching the Rust main suite's budget in `scripts/run_rust_suite.py`.
+# R15 has always passed on re-run here, so a genuine failure still goes red
+# after three, and the attempt count stays visible in the log rather than being
+# hidden by a `continue-on-error`.
+#
+# Not matching the *quarantined* Rust step, which is at six (D-110): those
+# targets open a database per generated case and crash at a far higher rate.
+# The number is a property of how often the step faults, not a house style, and
+# this suite has never needed more than one retry.
 ATTEMPTS = 3
 
 SUMMARY = re.compile(r"(?:(\d+) failed[, ]+)?(\d+) passed(?:[, ]+(\d+) (?:error|errors))?")

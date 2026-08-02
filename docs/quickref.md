@@ -698,6 +698,8 @@ pub fn estimated_bulk_hold(edges: &[EdgeAssertion]) -> Duration  // ~34 ms / 500
 
 **Total**: 240+ tests (221+ plain + 19+ property). The suite is pinned by `tests/doc_sync_tests.rs` which fails the build when the public API diverges from this document.
 
+**How to run it so the answer means something** (D-110). Use `python scripts/run_rust_suite.py --features metrics`, not bare `cargo test`. Under R15 a crashed target prints no `test result:` line while every other target prints its own, so the run comes back with a *smaller pass count and zero failures* — green to anything summing passes. The script classifies each run as `CRASH`, `FAILED`, `INCOMPLETE`, `TEARDOWN` or `BUILD` and retries only `CRASH`; a genuine failure is named on attempt 1. Both CI steps go through it, at three attempts for the main suite and six for the quarantined property step, which faults far more often. Same shape as `tests_py/run_suite.py` (D-107), deliberately not the same implementation.
+
 ---
 
 ## 9. Decision Reference
