@@ -1039,3 +1039,110 @@ async fn content_is_absent_by_default_and_no_algorithm_notices() {
         modularity(&with, &louvain(&with))
     );
 }
+
+// ---------------------------------------------------------------------------
+// Why Louvain stays phase-one-only (0.8.0, B6, D-122)
+// ---------------------------------------------------------------------------
+
+/// **At the post-interning ceiling, maximising modularity harder moves *away*
+/// from the right answer.**
+///
+/// B6 asked whether `louvain`'s missing aggregation phase still deserves to be
+/// missing now that [D-115](../docs/architecture/s13-decision-register.md)'s
+/// interning raised what fits the byte budget by 5.8×–6.8×. The rustdoc's
+/// stated reason was graph size — *"the aggregation phase would matter on
+/// graphs far larger than the byte budget admits"* — and
+/// `examples/louvain_aggregation_probe.rs` measured that reason **false**:
+/// two-phase Louvain returns a different partition from 6,144 nodes upward,
+/// which is comfortably inside the budget.
+///
+/// It also measured what the difference *is*, which is the part that settles
+/// it. On `clustered` — cliques joined by a single bridge each — phase-one
+/// recovers the ground truth exactly at every size up to the ceiling, and
+/// two-phase scores higher Q by **merging whole cliques**: two per community at
+/// 512, four at 4,096. Never splitting, always merging. That is the modularity
+/// resolution limit, a property of the objective rather than of any algorithm.
+///
+/// This test pins the underlying fact without needing a two-phase
+/// implementation in the crate: **the merged partition scores better than the
+/// truth**. Anything that optimises Q more aggressively therefore has a reason
+/// to prefer it, so a Q comparison alone — which is what B6 specified as its
+/// gate — cannot decide the question. The scope limit survives on a better
+/// argument than the one it had.
+#[test]
+fn modularity_prefers_a_merged_partition_over_the_true_one_at_scale() {
+    use macrame::graph::NodeData;
+    use std::collections::BTreeMap;
+
+    const CLUSTER: usize = 12;
+    const COMMUNITIES: usize = 512;
+    const TS0: &str = "2026-01-01T00:00:00.000000Z";
+    const OPEN: &str = "9999-12-31T23:59:59.999999Z";
+
+    let id = |i: usize| format!("c{i:07}");
+
+    let mut g = Subgraph::default();
+    let mut truth: BTreeMap<String, usize> = BTreeMap::new();
+    // Every *pair* of adjacent cliques as one community — exactly what the
+    // probe measured two-phase Louvain converging to at this size.
+    let mut merged: BTreeMap<String, usize> = BTreeMap::new();
+
+    for i in 0..COMMUNITIES * CLUSTER {
+        g.insert_node(id(i), NodeData::new("N", TS0, OPEN));
+        truth.insert(id(i), i / CLUSTER);
+        merged.insert(id(i), i / (CLUSTER * 2));
+    }
+    for c in 0..COMMUNITIES {
+        let base = c * CLUSTER;
+        for i in 0..CLUSTER {
+            for j in 0..CLUSTER {
+                if i != j {
+                    g.add_edge(&id(base + i), &id(base + j), "KNOWS", 1.0, TS0, OPEN);
+                }
+            }
+        }
+        if c + 1 < COMMUNITIES {
+            g.add_edge(
+                &id(base + CLUSTER - 2),
+                &id(base + CLUSTER),
+                "KNOWS",
+                1.0,
+                TS0,
+                OPEN,
+            );
+        }
+    }
+
+    // The fixture is what it claims to be, or nothing below means anything.
+    assert_eq!(g.node_count(), COMMUNITIES * CLUSTER);
+
+    // **Phase-one is exactly right**, which is the thing aggregation would be
+    // replacing. Compared as a grouping, since community labels are arbitrary.
+    let answer = louvain(&g);
+    let mut induced: BTreeMap<usize, usize> = BTreeMap::new();
+    for (node, &t) in &truth {
+        let a = answer[node];
+        assert_eq!(
+            *induced.entry(a).or_insert(t),
+            t,
+            "phase-one put two different cliques in one community at {node}"
+        );
+    }
+    assert_eq!(
+        induced.len(),
+        COMMUNITIES,
+        "phase-one did not recover one community per clique"
+    );
+
+    // **And the objective prefers the wrong answer.** This is the resolution
+    // limit, and the reason a higher Q is not evidence of a better partition.
+    let q_truth = modularity(&g, &truth);
+    let q_merged = modularity(&g, &merged);
+    assert!(
+        q_merged > q_truth,
+        "the resolution limit did not bite at {COMMUNITIES} communities \
+         (truth {q_truth:.6}, merged {q_merged:.6}), so this test is not \
+         measuring what it claims and the size needs re-checking against \
+         examples/louvain_aggregation_probe.rs"
+    );
+}

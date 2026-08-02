@@ -373,7 +373,7 @@ impl Database {
 
 **`load_subgraph()`**: Walks `links_current` under the same bounded CTE shape as traversal, hydrates node attributes, returns a `Subgraph`. Enforces byte budget (`SubgraphTooLarge`) and negative/NaN weight refusal.
 
-**Algorithms**: Dijkstra, A*, SCC, k-core, Louvain — all operate on `Subgraph`. Deterministic via `BTreeMap`/`BTreeSet`; ties broken explicitly.
+**Algorithms**: Dijkstra, A*, SCC, k-core, Louvain — all operate on `Subgraph`. Deterministic via `BTreeMap`/`BTreeSet`; ties broken explicitly. **Louvain is local-moving only, by measurement** (D-122): two-phase diverges well inside the byte budget, but it does so by *merging* true communities — the modularity resolution limit — while local moving recovers the ground truth exactly. A higher Q is not a better partition here.
 
 ### 5.5 Temporal Queries
 

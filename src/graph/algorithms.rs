@@ -359,9 +359,34 @@ const LOUVAIN_MIN_GAIN: f64 = 1e-12;
 /// to whichever neighbouring community most increases modularity, repeatedly,
 /// until no move helps. It does *not* then aggregate each community into a
 /// single node and recurse, which is what the full method does to find coarser
-/// structure. For subgraph-sized analytics the local moving phase is the part
-/// that carries the signal; the aggregation phase would matter on graphs far
-/// larger than the byte budget admits.
+/// structure.
+///
+/// # Why the aggregation phase is absent, and it is not the reason given before
+///
+/// Through 0.7.0 this note said the aggregation phase *"would matter on graphs
+/// far larger than the byte budget admits"*. [D-115] raised what the budget
+/// admits by 5.8×–6.8×, so the claim was re-measured against the new ceiling —
+/// and it is **false**. `examples/louvain_aggregation_probe.rs` finds two-phase
+/// returning a different partition from 6,144 nodes upward, well inside the
+/// budget, with the gap widening as the graph grows.
+///
+/// What the difference *is* settles it. On `clustered` — cliques joined by one
+/// bridge each, where the right answer is known — phase-one recovers the ground
+/// truth **exactly** at every size up to the ceiling, and two-phase scores a
+/// higher Q by **merging whole cliques**: two per community at 512 cliques,
+/// four at 4,096, never splitting one. Its Q also exceeds the ground truth's.
+/// That is the modularity resolution limit (Fortunato & Barthélemy): on a large
+/// graph the objective prefers a partition coarser than the true one, so
+/// optimising it harder moves away from the answer rather than towards it.
+///
+/// So the aggregation phase is declined because at the sizes this crate serves
+/// it changes a correct answer into a merged one — not because it would make no
+/// difference. `modularity_prefers_a_merged_partition_over_the_true_one_at_scale`
+/// pins the fact underneath that without needing a two-phase implementation
+/// here: the merged partition outscores the truth, so a Q comparison cannot be
+/// the criterion.
+///
+/// [D-115]: ../../docs/architecture/s13-decision-register.md
 pub fn louvain(graph: &Subgraph) -> BTreeMap<String, usize> {
     let m = graph.total_weight();
 

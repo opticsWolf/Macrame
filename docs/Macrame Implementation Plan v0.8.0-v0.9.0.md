@@ -1048,6 +1048,47 @@ process.
 **Documents.** `s5-modules.md` §5.4; `s6-s10` §8 (the oracle's direction, if aggregation lands)
 and §9; `s13` (D-122); `quickref.md`.
 
+> **DELIVERED 2026-08-02 — the question is closed and aggregation is NOT taken.**
+> [D-122](architecture/s13-decision-register.md#d-122).
+>
+> **This item's own gate would have given the wrong answer, and that is the finding.** B6 says
+> *take aggregation only if Q differs materially*. Q differs materially and the difference grows
+> with size — **+0.00181 at 6,144 nodes, +0.00417 at 24,576, +0.00491 at the 49,152-node
+> ceiling** — so read literally the gate says ship. Shipping would have replaced an exactly
+> correct answer with a wrong one.
+>
+> `examples/louvain_aggregation_probe.rs` reports what ΔQ cannot. On `clustered`, whose ground
+> truth is one community per clique, **local moving recovers the truth exactly at every size**,
+> and two-phase earns its higher Q by **merging whole cliques** — two per community at 512
+> cliques, four at 4,096, never splitting one — scoring *above the ground truth itself*. That is
+> the modularity resolution limit: past a certain size the objective prefers a partition coarser
+> than the true one. **A Q comparison cannot be the criterion for a change whose entire effect is
+> to optimise Q harder.**
+>
+> **The rustdoc's stated reason is measured false and was replaced, not patched.** It said the
+> aggregation phase *"would matter on graphs far larger than the byte budget admits"*. Two-phase
+> diverges at 6,144 nodes; the ceiling is 4,096 cliques / 49,152 nodes / 544,767 edges at
+> **35.6 MiB, 68 B/edge** under the benches' 64 MiB budget. The scope limit stands for the
+> opposite reason to the one recorded: not *it would change nothing*, but *it would change
+> something, and the change is wrong*.
+>
+> **Two controls**, because the arms are confoundable. The probe's local-moving step is a
+> transcription of `louvain`, so control 1 asserts at every size that it induces the same
+> grouping the crate's `louvain` does — without it, ΔQ could be the reimplementation. Control 2
+> is the fixture's known ground truth, which is what makes "merged" distinguishable from "found".
+>
+> **Closed as a test, not as a probe nobody re-runs** — [D-063](architecture/s13-decision-register.md#d-063)
+> calls an unmeasured open question the worst of the three states.
+> `modularity_prefers_a_merged_partition_over_the_true_one_at_scale` needs no two-phase code in
+> the crate: it asserts `louvain` is exact on 512 cliques **and** that the merged partition
+> outscores the truth, which is the fact the decision rests on.
+>
+> **What would reopen it:** a fixture with genuine hierarchy. `clustered` is a chain of uniform
+> cliques and cannot exhibit coarse structure that is real rather than an artifact of Q. If one
+> is added, the criterion should be agreement with ground truth, not ΔQ.
+>
+> Neither `louvain` nor any algorithm changed. Suites **321** / — / **345**, clippy clean.
+
 ### B7 · The binding surface, the stub, and the wheel
 
 **The item that closes the gap between "the crate changed" and "the wheel is correct".** B1–B6
@@ -1266,7 +1307,7 @@ NOW      A1  gate classifier ........... main is red; nothing below is measurabl
          B3  content out of default .... ┘
          B4  schema v8 ................. DELIVERED (v7 -> v8, D-117/118/119/120)
          B5  reconstruct below floor ... DELIVERED (D-121; no marker needed)
-         B6  Louvain aggregation ....... gated on B2 — skip and close if Q agrees
+         B6  Louvain aggregation ....... CLOSED, not taken (D-122; Q was the wrong gate)
          B7  binding + stub + wheel .... LAST: needs B2, B3, B5 settled
          A3  doc truth pass ............ README rows before the tag
          A4  macOS row, checkout@v5
@@ -1341,13 +1382,13 @@ they have not been done.
 | **D-119** | D-116 | `concepts` gains `rowid_pk` and the FTS index its third trigger, taken pre-1.0 under [D-036](architecture/s13-decision-register.md#d-036)'s deadline. **Completes [D-084](architecture/s13-decision-register.md#d-084) and corrects its migration shape** (B4b) |
 | **D-120** | — | **Unprojected, and produced by B4's own exit gate.** `VACUUM` renumbers a sparse implicit rowid **only for a table with no index at all**, so [D-071](architecture/s13-decision-register.md#d-071)'s hazard was never live and this plan's "makes the hazard real" is wrong. Does not change the rung; changes why it is right |
 | **D-121** | D-118 | A `reconstruct` below the log floor on a never-archived ledger is the empty state, not a corruption — and the hot-side marker is **not** needed to get there, because `seq_id` already answers it (B5) |
+| **D-122** | D-119 | Louvain's aggregation phase **closed, not taken** — and the Q criterion this plan specified is what the measurement refuted: ΔQ is positive and growing, but it is the resolution limit merging true communities, not structure found (B6) |
 
 **Still projected**, and the numbers below are now estimates a second time, so they are written as
 *next free* rather than as claims:
 
 | | recorded as | |
 |---|---|---|
-| **D-122** | D-119 | Louvain's aggregation phase, taken or closed on a Q comparison at the post-interning ceiling (B6) |
 | **D-123** | D-123 | Absent `content` crosses to Python as `None`, not `""` — the same refusal of a valid-value sentinel that [D-096](architecture/s13-decision-register.md#d-096) made for open intervals; the stub stays hand-written and the interning is confirmed invisible at the boundary (B7) |
 | **D-124** | D-117 | **Erasure is refused on doctrine, not deferred**; the alternative is pseudonymous ids with identifying content held by the application. **Supersedes [D-022](architecture/s13-decision-register.md#d-022)'s open framing** ([§2](#2-doctrine-position-erasure-is-refused-archival-is-sanctioned)) |
 | **D-125** | D-120 | Concept archival: archivability is reachability, not expiry; the delete guard becomes marker-gated (C1, C2) |
