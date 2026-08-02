@@ -98,12 +98,33 @@ impl PyMaterializedState {
         self.inner.edges.iter().map(|e| edge_to_py(py, e)).collect()
     }
 
+    /// Whether nothing had been recorded yet at [`timestamp`] (0.8.0, D-121).
+    ///
+    /// An empty state has two meanings and only the caller knows which one
+    /// matters: *everything had been retired by then* is a fact about the data,
+    /// *the ledger had not started* is a fact about the question. Both arrive as
+    /// `concepts == {}` and `edges == []`.
+    ///
+    /// This is the half of B5 that is visible from Python. The other half is
+    /// that asking it no longer raises `ReplayCorruptError` — which it did, on
+    /// any database with at least one write, naming a `*_archive.db` the caller
+    /// had never created.
+    #[getter]
+    fn predates_recorded_history(&self) -> bool {
+        self.inner.predates_recorded_history
+    }
+
     fn __repr__(&self) -> String {
         format!(
-            "<macrame.MaterializedState at={} concepts={} edges={}>",
+            "<macrame.MaterializedState at={} concepts={} edges={}{}>",
             self.inner.timestamp,
             self.inner.concepts.len(),
-            self.inner.edges.len()
+            self.inner.edges.len(),
+            if self.inner.predates_recorded_history {
+                " predates_recorded_history"
+            } else {
+                ""
+            }
         )
     }
 }

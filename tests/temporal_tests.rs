@@ -5,8 +5,10 @@ mod harness;
 /// canonical stamp does; the point is that it is not the cutoff (Wave 4.5).
 const ARCHIVED_AT: &str = "2026-07-30T12:00:00.000000Z";
 
+/// A canonical `valid_from` for fixtures that write through the public API.
+const CTS: &str = "2026-01-01T00:00:00.000000Z";
+
 use harness::TestHarness;
-use macrame::error::DbError;
 use macrame::graph::AttributeMode;
 use macrame::integrity::audit_current;
 use macrame::schema::migrations;
@@ -143,6 +145,7 @@ fn test_snapshot_save_load_roundtrip() {
             "2026-01-01T00:00:00.000000Z".to_string(),
             "9999-12-31T23:59:59.999999Z".to_string(),
         )],
+        predates_recorded_history: false,
     };
 
     let path = save_snapshot(&snapshots_dir, &state).unwrap();
@@ -254,40 +257,170 @@ async fn test_archive_moves_closed_intervals_and_leaves_no_drift() {
     .expect("second archive session should succeed (cold DB detached)");
 }
 
+/// **A missing archive is still an error — when there was an archive** (B5,
+/// D-121).
+///
+/// This test used to build a database that had *never been archived*, hand it a
+/// path to a file that had never existed, and require an error. It passed, and
+/// what it was pinning was the defect: on a young ledger, asking about a time
+/// before the first write reported [`DbError::ReplayCorrupt`] — the class
+/// meaning *the ledger is damaged* — and named a file the caller had never
+/// created. That case now answers with the empty state
+/// ([`reconstructing_below_the_log_floor_is_not_a_corruption`]).
+///
+/// The half worth keeping is the other one, and it needs a fixture that earns
+/// it: rows really were moved to cold, and the cold file really is gone. Then
+/// the delta is unreachable, "nothing was believed yet" would be an invention,
+/// and raising is the only honest answer.
 #[tokio::test]
-async fn test_cold_db_reconstruct_missing_archive_error() {
+async fn a_missing_archive_is_an_error_when_rows_were_actually_archived() {
+    use macrame::prelude::*;
+
     let harness = TestHarness::new();
-    let db = libsql::Builder::new_local(&harness.db_path)
+    let db = macrame::Database::open(&harness.db_path).await.unwrap();
+
+    // Supersede a concept so there is something archivable: the newest row per
+    // entity never moves, so a single write would archive nothing at all.
+    for title in ["first", "second", "third"] {
+        db.upsert_concept(ConceptUpsert::new("c1", title).valid_from(CTS))
+            .await
+            .unwrap();
+    }
+    let report = db.archive("2030-01-01T00:00:00.000000Z").await.unwrap();
+    assert!(
+        report.log_entries_archived >= 2,
+        "the fixture needs log rows to have actually moved: {report:?}"
+    );
+    db.close().await.unwrap();
+
+    // Now take the cold file away, which is the situation R14 is about.
+    let archive_path = harness.db_path.with_file_name("kb_archive.db");
+    let archive_path = if archive_path.exists() {
+        archive_path
+    } else {
+        // The handle derives the name; find it rather than assume it.
+        std::fs::read_dir(harness.temp_dir.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .find(|p| p.to_string_lossy().contains("archive"))
+            .expect("archive() must have created a cold file")
+    };
+    std::fs::remove_file(&archive_path).unwrap();
+
+    let conn = libsql::Builder::new_local(&harness.db_path)
         .build()
         .await
+        .unwrap()
+        .connect()
         .unwrap();
-    let conn = db.connect().unwrap();
     migrations::run(&conn).await.unwrap();
 
-    // Insert entry with recorded_at = 2026-05-01
-    conn.execute(
-        "INSERT INTO concepts (id, title, valid_from, recorded_at) VALUES ('c1', 'Node 1', '2026-05-01T00:00:00.000000Z', '2026-05-01T00:00:00.000000Z')",
-        (),
-    )
-    .await
-    .unwrap();
-
-    // Target a ts older than recorded_at (pre-horizon) with a missing archive file
-    let missing_path = Path::new("non_existent_archive.db");
     let res = reconstruct(
         &conn,
         "2020-01-01T00:00:00.000000Z",
-        Some(missing_path),
+        Some(&archive_path),
         None,
     )
     .await;
 
-    assert!(res.is_err());
-    if let Err(DbError::ReplayCorrupt { reason, .. }) = res {
-        assert!(reason.contains("does not exist"));
-    } else {
-        panic!("Expected ReplayCorrupt error for missing archive file");
+    match res {
+        Err(DbError::ReplayCorrupt { reason, .. }) => {
+            assert!(
+                reason.contains("does not exist"),
+                "the error should name the missing file: {reason}"
+            );
+        }
+        other => panic!("expected ReplayCorrupt for a missing archive, got {other:?}"),
     }
+}
+
+/// **Below the log floor is not a corruption** (B5, D-121).
+///
+/// Reproduced against 0.7.0 as published: an empty database answered
+/// `reconstruct("2020-01-01…")` with the empty state, and the *same question*
+/// after a single write raised `ReplayCorruptError` naming a `kb_archive.db`
+/// nobody had created. Asking what was believed before your data existed is
+/// ordinary, and "nothing yet" is the ordinary answer.
+///
+/// **The boundary is transaction time, not valid time**, which is what makes
+/// this worse than a pre-genesis curiosity. `recorded_at` is crate-stamped at
+/// write, so on a database written today every `ts` before today was below the
+/// floor — including one a caller would reasonably think was well inside the
+/// data's own lifetime. The `valid_from` here is deliberately far in the past to
+/// pin that: the concept claims to be valid from 2026-01-01, and a
+/// reconstruction at 2026-02-01 still predates the *record* of it.
+///
+/// Both halves of the flag are asserted. An empty answer is not self-describing
+/// — everything retired and nothing recorded yet look identical in the concepts
+/// and edges — so `predates_recorded_history` has to be checked true here and
+/// **false** on a fold that really did have rows, or it is decoration.
+#[tokio::test]
+async fn reconstructing_below_the_log_floor_is_not_a_corruption() {
+    use macrame::prelude::*;
+
+    let harness = TestHarness::new();
+    let db = macrame::Database::open(&harness.db_path).await.unwrap();
+
+    // Before any write, this already worked. Asserted so the test states the
+    // transition rather than only its second half.
+    let before_any_data = db.reconstruct("2020-01-01T00:00:00.000000Z").await.unwrap();
+    assert!(before_any_data.concepts.is_empty());
+    assert!(before_any_data.predates_recorded_history);
+
+    db.upsert_concept(ConceptUpsert::new("c0", "Title").valid_from(CTS))
+        .await
+        .unwrap();
+    db.upsert_concept(ConceptUpsert::new("c1", "Other").valid_from(CTS))
+        .await
+        .unwrap();
+    db.assert_edge(EdgeAssertion::new("c0", "c1", "KNOWS").valid_from(CTS))
+        .await
+        .unwrap();
+
+    // The row from the reproduction table that used to raise.
+    let after = db.reconstruct("2020-01-01T00:00:00.000000Z").await.unwrap();
+    assert!(
+        after.concepts.is_empty() && after.edges.is_empty(),
+        "nothing had been recorded by 2020"
+    );
+    assert!(
+        after.predates_recorded_history,
+        "the caller cannot otherwise tell this from a fully retired ledger"
+    );
+
+    // Transaction time is the axis: `CTS` is the *valid_from*, and a moment
+    // after it is still before anything was recorded.
+    let inside_valid_time = db.reconstruct("2026-02-01T00:00:00.000000Z").await.unwrap();
+    assert!(
+        inside_valid_time.predates_recorded_history,
+        "the floor is MIN(recorded_at), not MIN(valid_from)"
+    );
+
+    // And the flag is false when there was history to fold, or it says nothing.
+    let now = db.reconstruct(&max_recorded_at(&db).await).await.unwrap();
+    assert_eq!(now.concepts.len(), 2, "the ordinary fold still works");
+    assert!(
+        !now.predates_recorded_history,
+        "a fold with rows in it must not claim the ledger had not started"
+    );
+
+    db.close().await.unwrap();
+}
+
+/// The newest `recorded_at` in the hot log, for tests that need a `ts` the fold
+/// actually covers.
+async fn max_recorded_at(db: &macrame::Database) -> String {
+    db.read_conn()
+        .query("SELECT MAX(recorded_at) FROM transaction_log", ())
+        .await
+        .unwrap()
+        .next()
+        .await
+        .unwrap()
+        .unwrap()
+        .get(0)
+        .unwrap()
 }
 
 // ---------------------------------------------------------------------------

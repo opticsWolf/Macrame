@@ -135,7 +135,7 @@ fields back to the application, which is where §2.2's answer already puts the w
 
 **Recorded as refused, not deferred.** [D-022](architecture/s13-decision-register.md#d-022) and
 Appendix C currently read as *not yet*, which is how an obligation with no trigger survives
-indefinitely. [D-117](#6-decision-entries-this-plan-creates) replaces that with a refusal and a
+indefinitely. [D-124](#6-decision-entries-this-plan-creates) replaces that with a refusal and a
 pointer to the alternative.
 
 ### 2.3 Concept archival is the sanctioned exit, and traceability answers its open question
@@ -159,7 +159,7 @@ protect. Therefore:
 > session, with the horizon updated.
 
 That is derived rather than chosen, and it closes the question rather than deferring it
-([D-121](#6-decision-entries-this-plan-creates)).
+([D-126](#6-decision-entries-this-plan-creates)).
 
 ---
 
@@ -959,6 +959,63 @@ edge recorded for the crate" — mark it closed); `s13` (D-118).
 **Behaviour change without a compile break** — release note by name: which error class stopped
 being raised.
 
+> **DELIVERED 2026-08-02.** [D-121](architecture/s13-decision-register.md#d-121) — not D-118,
+> which B4 took. The reproduction table's second row now answers as the first does, verified
+> through the binding.
+>
+> **The reproduction understated the defect and the third case is the one that matters.** The
+> floor is `MIN(recorded_at)` — *transaction* time, crate-stamped at write — so on a database
+> written today **every** `ts` before today was below it. A concept asserted
+> `valid_from = 2026-01-01` and written on 2026-08-02 made `reconstruct("2026-06-01")` report a
+> damaged ledger. That is not a pre-genesis curiosity, and `reconstructing_below_the_log_floor_is_not_a_corruption`
+> pins the axis explicitly so the distinction cannot quietly be lost again.
+>
+> **The rejected alternative was not needed, and the reason is a better outcome than the plan
+> expected.** This section defers a hot-side marker to 0.9.0 as the only way to tell *never
+> archived* from *archive missing*. It is not: `transaction_log.seq_id` is `AUTOINCREMENT`, a
+> rollback leaves no gap ([D-049](architecture/s13-decision-register.md#d-049), measured), and
+> only an archive session may delete from the table — so `MIN(seq_id) = 1 AND COUNT(*) = MAX(seq_id)`
+> holds **iff** nothing was ever removed. Exact in both directions, no marker, no rung, no schema
+> change. **0.9.0 should now take the marker only if it wants the richer error *message*
+> (*"archived on 2026-06-01; pass the archive path"*), not to make this decision correct.**
+>
+> `hot_log_is_complete` becomes `hot_log_reach` returning `Covers` / `PredatesRecordedHistory` /
+> `NeedsArchive`. The `bool` was the defect's shape: two answers for three cases, so the missing
+> one got attached to whichever neighbour was closest.
+>
+> **One existing test was pinning the defect.** `test_cold_db_reconstruct_missing_archive_error`
+> built a *never-archived* database, handed it a path that had never existed, and required an
+> error — so it went red on the fix, correctly. Replaced by
+> `a_missing_archive_is_an_error_when_rows_were_actually_archived`, which supersedes a concept,
+> archives, checks rows really moved, and *then* deletes the cold file. The Python test carrying
+> the same assertion, and the `s14` §14.9 paragraph explaining why the binding declined to
+> smooth it over, are both rewritten in place.
+>
+> **Every gate asserts the flag false somewhere**, or a `reconstruct` that always returned
+> nothing would satisfy all of them. Verified by injection: restoring the old branch fails the
+> unit gate and the property gate and leaves the missing-archive gate green — which is the
+> correct pattern, since that one guards the half that did not change.
+>
+> `MaterializedState::predates_recorded_history` is `#[serde(default)]`, but that is not what
+> makes it safe: [D-119](architecture/s13-decision-register.md#d-119)'s `SCHEMA_VERSION` bump had
+> already refused every snapshot written before this release. The two items landing together is
+> what made an additive field free.
+>
+> Suites **320** (`metrics`) / **345** Python, clippy clean, doc gates green.
+>
+> **The `property-tests` gate is red, and it is not B5's.** Three consecutive full-gate runs died
+> 6/6 on `doctrine_property_tests`. Measured 8 runs each on one machine in one session: **5/8 at
+> `dc0ca83` (B4 complete, B5 stashed), 6/8 with B5's new property at 16 cases, 5/8 with that
+> property skipped**, against **1/8 for `integrity_property_tests`**. So it is specific to that
+> binary, it predates B5 on committed code, and B5's property is worth about one run in eight —
+> its count was cut from 16 to 8 regardless, since it had been chosen without the measurement the
+> file's own note demands. Recorded in [R15](architecture/s11-s12-milestones-and-risks.md#r15) as
+> open, with the cause **not** guessed at. Raising the budget again would be the laundering
+> [D-110](architecture/s13-decision-register.md#d-110) exists to prevent. The Python getter and the
+> `.pyi` entry landed here rather than waiting for [B7](#b7--the-binding-surface-the-stub-and-the-wheel),
+> because the defect was reported through the binding and a fix that cannot be checked there is
+> not checked. B7 still owns the version bumps and the stub sweep.
+
 ### B6 · Louvain's aggregation phase — *conditional, gated on B2*
 
 **Louvain is fully implemented and deliberately phase-one-only.** It performs local moving —
@@ -989,7 +1046,7 @@ index by `BTreeMap` scan order; anything reintroducing a `HashMap` gives a diffe
 process.
 
 **Documents.** `s5-modules.md` §5.4; `s6-s10` §8 (the oracle's direction, if aggregation lands)
-and §9; `s13` (D-119); `quickref.md`.
+and §9; `s13` (D-122); `quickref.md`.
 
 ### B7 · The binding surface, the stub, and the wheel
 
@@ -1143,7 +1200,7 @@ alternative makes the transaction-time axis lie about when the concept was learn
 of "traceable through the bitemporal ledger" and it is the whole point of the release.
 
 **Documents.** `s5-modules.md` §5.7; `appendices.md` Appendix C and the glossary (rehydration is
-a new term); `s13` (D-121); `s14` if the binding exposes it.
+a new term); `s13` (D-126); `s14` if the binding exposes it.
 
 ### C4 · Measure rehydration, and decide the hot-side marker
 
@@ -1208,7 +1265,7 @@ NOW      A1  gate classifier ........... main is red; nothing below is measurabl
          B2  intern behind them ........ ├ Subgraph moves once, in this order
          B3  content out of default .... ┘
          B4  schema v8 ................. DELIVERED (v7 -> v8, D-117/118/119/120)
-         B5  reconstruct below floor ... independent
+         B5  reconstruct below floor ... DELIVERED (D-121; no marker needed)
          B6  Louvain aggregation ....... gated on B2 — skip and close if Q agrees
          B7  binding + stub + wheel .... LAST: needs B2, B3, B5 settled
          A3  doc truth pass ............ README rows before the tag
@@ -1238,7 +1295,7 @@ they have not been done.
 | B2 | `subgraph.rs`, `graph.rs` internals, `budget_density_diag.rs` | — | no (after B1) |
 | B3 | `subgraph.rs`, loader, `to_dict()` | — | behaviour |
 | B4 | `migrations.rs` (+`Step`), `ddl.rs`, 4 callers, `index_plan_tests.rs` | **v7 → v8** — delivered | no |
-| B5 | `replay.rs`, `temporal_tests.rs` | — | behaviour |
+| B5 | `replay.rs`, `temporal_tests.rs`, `temporal.rs` (binding), `_macrame.pyi` | — | behaviour — delivered |
 | B6 | `algorithms.rs` | — | no |
 | B7 | `bindings/python/src/{graph,database,temporal}.rs`, `_macrame.pyi`, `tests_py/`, 3 manifests, `s14` | — | **yes — Python, one getter** |
 | C1–C4 | `archive.rs`, `replay.rs`, `ddl.rs` (triggers only) | **none** | no |
@@ -1260,24 +1317,43 @@ they have not been done.
 
 ## 6. Decision entries this plan creates
 
-| | |
-|---|---|
-| **D-110** | The Rust suite is gated by a classifier, not a retry count; [D-107](architecture/s13-decision-register.md#d-107)'s four outcomes apply to Rust, and the budget was calibrated on the wrong step (A1) |
-| **D-111** | R15 against the libSQL 0.10 pre-release: the measurement, either way (A2) |
-| **D-112** | A decision entry naming a release is a claim with a deadline, and deadlines get tripwires (A5) |
-| **D-113** | `Subgraph`'s fields are private and its keys interned; **supersedes [D-087](architecture/s13-decision-register.md#d-087)**, corrects its blast-radius estimate, carries [D-063](architecture/s13-decision-register.md#d-063)'s pre-registered two-orderings test (B1, B2) |
-| **D-114** | `content` is not loaded by default; `Subgraph` serves the algorithms first (B3) |
-| **D-118** | Schema v8 drops the two indices with no reader; the `NoReader` category becomes empty rather than known-bad, and the win is measured at −7.9% off `assert_edge`. **Completes [D-089](architecture/s13-decision-register.md#d-089)** (B4a). *Recorded as D-115 in this plan; B2 took that number first.* |
-| **D-119** | `concepts` gains `rowid_pk` and the FTS index its third trigger, taken pre-1.0 under [D-036](architecture/s13-decision-register.md#d-036)'s deadline. **Completes [D-084](architecture/s13-decision-register.md#d-084) and corrects its migration shape** — a rung rebuilding a table with inbound foreign keys needs FK enforcement suspended *around* the transaction, measured four ways (B4b). *Recorded as D-116 in this plan; B3 took that number first.* |
-| **D-120** | Unplanned, and produced by B4's own exit gate: `VACUUM` renumbers a sparse implicit rowid **only for a table with no index at all**, so [D-071](architecture/s13-decision-register.md#d-071)'s hazard was never live and this plan's "makes the hazard real" is wrong. Does not change the rung; changes why it is right |
-| **D-117** | **Erasure is refused on doctrine, not deferred**; the alternative is pseudonymous ids with identifying content held by the application. **Supersedes [D-022](architecture/s13-decision-register.md#d-022)'s open framing** ([§2](#2-doctrine-position-erasure-is-refused-archival-is-sanctioned)) |
-| **D-118** | A `reconstruct` below the log floor on a never-archived ledger is the empty state, not a corruption; the hot-side marker is designed and deferred to C4 (B5) |
-| **D-119** | Louvain's aggregation phase, taken or closed on a Q comparison at the post-interning ceiling (B6) |
-| **D-120** | Concept archival: archivability is reachability, not expiry; the delete guard becomes marker-gated (C1, C2) |
-| **D-121** | Rehydration is a physical move back and mints no transaction-time facts — **derived from the traceability requirement**, closing Appendix C's open Doctrine III question (C3) |
-| **D-122** | The hot-side archive marker, taken or refused with C4's measurement |
-| **D-123** | Absent `content` crosses to Python as `None`, not `""` — the same refusal of a valid-value sentinel that [D-096](architecture/s13-decision-register.md#d-096) made for open intervals; the stub stays hand-written and the interning is confirmed invisible at the boundary (B7) |
-| **D-124** | Archival is drivable from Python: `rehydrate` is exposed, and the traceability equality is asserted **through the binding** as well as in the crate, because a boundary that silently loses a doctrine property is the failure [§14.7](architecture/s14-python-bindings.md#147-r15-through-the-boundary) measured rather than assumed (C5) |
+> **The projected numbers drifted, and this table is corrected in place rather than reprinted
+> from the plan's guess.** Two causes, both worth naming. One item was projected as a single
+> entry and needed two (B1 and B2 are separate decisions about separate things). And B4's exit
+> gate produced an entry nobody planned — [D-120](architecture/s13-decision-register.md#d-120),
+> a measurement that says one of this plan's own premises is false. Everything after that shifts.
+> The **Recorded as** column keeps the projection visible, since a plan that quietly renumbers
+> itself is a plan whose predictions cannot be scored.
+
+**Landed.**
+
+| | recorded as | |
+|---|---|---|
+| **D-110** | D-110 | The Rust suite is gated by a classifier, not a retry count; [D-107](architecture/s13-decision-register.md#d-107)'s four outcomes apply to Rust, and the budget was calibrated on the wrong step (A1) |
+| **D-111** | D-111 | R15 against the libSQL 0.10 pre-release: the measurement, either way (A2) |
+| **D-112** | — | macOS joins the Rust matrix; the Node 20 actions go to their **first** `node24` major, not the newest (A4). Unprojected: A4 was scoped as maintenance |
+| **D-113** | D-112 | A decision entry naming a release is a claim with a deadline, and deadlines get tripwires (A5) |
+| **D-114** | D-113 | `Subgraph`, `NodeData` and `EdgeRef` have private fields and a public accessor surface; **supersedes [D-087](architecture/s13-decision-register.md#d-087)** and corrects its blast-radius estimate (B1) |
+| **D-115** | D-113 | `EdgeRef` is interned to 24 bytes; the win is **5.8×–6.8×**, not the 7.1×–9.5× projected, and [D-063](architecture/s13-decision-register.md#d-063)'s objection is right by ~20% (B2). *Projected as half of one entry with B1* |
+| **D-116** | D-114 | `content` is not loaded by default; `None` means *not loaded*, never *empty* (B3) |
+| **D-117** | — | The ladder gains a rung kind: `suspends_foreign_keys`, with `foreign_key_check` inside the transaction (B4 step 1). Projected as part of B4b; landed separately and first |
+| **D-118** | D-115 | Schema v8 drops the two indices with no reader; the unread set becomes **empty** rather than known-bad, measured at −7.9% off `assert_edge`. **Completes [D-089](architecture/s13-decision-register.md#d-089)** (B4a) |
+| **D-119** | D-116 | `concepts` gains `rowid_pk` and the FTS index its third trigger, taken pre-1.0 under [D-036](architecture/s13-decision-register.md#d-036)'s deadline. **Completes [D-084](architecture/s13-decision-register.md#d-084) and corrects its migration shape** (B4b) |
+| **D-120** | — | **Unprojected, and produced by B4's own exit gate.** `VACUUM` renumbers a sparse implicit rowid **only for a table with no index at all**, so [D-071](architecture/s13-decision-register.md#d-071)'s hazard was never live and this plan's "makes the hazard real" is wrong. Does not change the rung; changes why it is right |
+| **D-121** | D-118 | A `reconstruct` below the log floor on a never-archived ledger is the empty state, not a corruption — and the hot-side marker is **not** needed to get there, because `seq_id` already answers it (B5) |
+
+**Still projected**, and the numbers below are now estimates a second time, so they are written as
+*next free* rather than as claims:
+
+| | recorded as | |
+|---|---|---|
+| **D-122** | D-119 | Louvain's aggregation phase, taken or closed on a Q comparison at the post-interning ceiling (B6) |
+| **D-123** | D-123 | Absent `content` crosses to Python as `None`, not `""` — the same refusal of a valid-value sentinel that [D-096](architecture/s13-decision-register.md#d-096) made for open intervals; the stub stays hand-written and the interning is confirmed invisible at the boundary (B7) |
+| **D-124** | D-117 | **Erasure is refused on doctrine, not deferred**; the alternative is pseudonymous ids with identifying content held by the application. **Supersedes [D-022](architecture/s13-decision-register.md#d-022)'s open framing** ([§2](#2-doctrine-position-erasure-is-refused-archival-is-sanctioned)) |
+| **D-125** | D-120 | Concept archival: archivability is reachability, not expiry; the delete guard becomes marker-gated (C1, C2) |
+| **D-126** | D-121 | Rehydration is a physical move back and mints no transaction-time facts — **derived from the traceability requirement**, closing Appendix C's open Doctrine III question (C3) |
+| **D-127** | D-122 | The hot-side archive marker, taken or refused with C4's measurement. **[D-121](architecture/s13-decision-register.md#d-121) removed its load-bearing justification**: it is now wanted for a better error *message*, not for a correct decision |
+| **D-128** | D-124 | Archival is drivable from Python: `rehydrate` is exposed, and the traceability equality is asserted **through the binding** as well as in the crate, because a boundary that silently loses a doctrine property is the failure [§14.7](architecture/s14-python-bindings.md#147-r15-through-the-boundary) measured rather than assumed (C5) |
 
 ---
 

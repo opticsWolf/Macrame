@@ -172,6 +172,7 @@ fn empty_state(seq_anchor: i64) -> MaterializedState {
         timestamp: "2026-01-01T00:00:00.000000Z".to_string(),
         concepts: Default::default(),
         edges: Vec::new(),
+        predates_recorded_history: false,
     }
 }
 
@@ -1155,6 +1156,7 @@ fn state_on_day(seq: i64, day: u64) -> MaterializedState {
         timestamp: macrame::util::timestamp::format(at),
         concepts: Default::default(),
         edges: Vec::new(),
+        predates_recorded_history: false,
     }
 }
 

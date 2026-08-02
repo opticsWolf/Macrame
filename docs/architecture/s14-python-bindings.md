@@ -406,13 +406,18 @@ record and the corrections each phase made to it.
 - ~~`astar`'s heuristic~~ — resolved in P4.7 by not releasing the GIL for that one method
   ([D-104](s13-decision-register.md#d-104)). The proposed fallback, a fixed heuristic set
   instead of a callable, was not needed.
-- **A rough edge in the crate, found through the binding**: `reconstruct` at an instant
-  older than anything on hand sends the fold to cold storage, so on a ledger that has
-  never been archived it raises `ReplayCorrupt` naming an archive file the caller never
-  made. Asking about a date before your data existed is not strange, and the message
-  describes an implementation detail. Left as-is rather than smoothed over here —
-  translating it into an empty state would mean claiming a *real* missing archive is also
-  nothing to worry about — and recorded for the crate.
+- ~~**A rough edge in the crate, found through the binding**~~ — **closed in 0.8.0**
+  ([D-121](s13-decision-register.md#d-121)). `reconstruct` at an instant older than
+  anything on hand sent the fold to cold storage, so on a ledger that had never been
+  archived it raised `ReplayCorrupt` naming an archive file the caller never made. The
+  objection recorded here against smoothing it over in the binding — *translating it into
+  an empty state would mean claiming a real missing archive is also nothing to worry
+  about* — was correct, and it was a reason to answer the question rather than to keep the
+  behaviour. `transaction_log.seq_id` is `AUTOINCREMENT` and only an archive session may
+  delete from the table, so a log whose ids are exactly `1..MAX` has provably never been
+  archived from. *Before recorded history* and *the cold file is gone* are now different
+  states, and only the second raises. `MaterializedState` gains
+  `predates_recorded_history` so an empty answer says which kind of empty it is.
 
 ---
 

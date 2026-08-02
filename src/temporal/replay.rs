@@ -12,6 +12,27 @@ pub struct MaterializedState {
     pub timestamp: String,
     pub concepts: HashMap<String, NodeAttributes>,
     pub edges: Vec<(String, String, String, String, String)>,
+    /// **Nothing had been recorded yet at `timestamp`** (0.8.0, B5, D-121).
+    ///
+    /// An empty state has two meanings and a caller can act differently on
+    /// them. *Everything was retired by then* is a fact about the data;
+    /// *the ledger had not started* is a fact about the question. Both come
+    /// back as zero concepts and zero edges, so the difference has to be
+    /// carried rather than inferred.
+    ///
+    /// Set only when the log was verified **intact** — see
+    /// [`hot_log_reach`]. If rows had been archived away, `ts` below the hot
+    /// floor is not "before history", it is "the history is in the other file",
+    /// and that path raises instead of answering.
+    ///
+    /// `#[serde(default)]` so the field is additive: a snapshot written without
+    /// it deserialises with `false`, which is the right answer for any state
+    /// that had rows to fold. Old snapshots cannot actually reach this code —
+    /// the container carries `SCHEMA_VERSION` and v8 refused every v7 file
+    /// (D-043) — but the tolerance costs nothing and the next field to arrive
+    /// may not land in a release that bumps the schema.
+    #[serde(default)]
+    pub predates_recorded_history: bool,
 }
 
 impl MaterializedState {
@@ -22,6 +43,7 @@ impl MaterializedState {
             timestamp: ts.to_string(),
             concepts: HashMap::new(),
             edges: Vec::new(),
+            predates_recorded_history: false,
         }
     }
 }
@@ -203,13 +225,25 @@ pub async fn reconstruct(
     archive_path: Option<&Path>,
     snapshots_dir: Option<&Path>,
 ) -> Result<MaterializedState> {
-    if hot_log_is_complete(conn, ts, archive_path).await? {
-        if let Some(base) = snapshot_anchor(snapshots_dir, ts) {
-            let anchor = base.seq_anchor;
-            let delta = fold_delta(conn, ANCHORED_HOT_FOLD, libsql::params![ts, anchor]).await?;
-            return Ok(delta.apply_to(base, ts));
+    match hot_log_reach(conn, ts, archive_path).await? {
+        HotLogReach::Covers => {
+            if let Some(base) = snapshot_anchor(snapshots_dir, ts) {
+                let anchor = base.seq_anchor;
+                let delta = fold_delta(conn, ANCHORED_HOT_FOLD, libsql::params![ts, anchor]).await?;
+                return Ok(delta.apply_to(base, ts));
+            }
+            return fold(conn, ts, HOT_FOLD).await;
         }
-        return fold(conn, ts, HOT_FOLD).await;
+        HotLogReach::PredatesRecordedHistory => {
+            // Nothing had been recorded by `ts`, and nothing has been removed
+            // from the log, so there is no history anywhere to go looking for.
+            // The empty state is the answer, flagged so a caller can tell it
+            // from a state that is empty because everything was retired.
+            let mut state = MaterializedState::empty(ts);
+            state.predates_recorded_history = true;
+            return Ok(state);
+        }
+        HotLogReach::NeedsArchive => {}
     }
 
     // The delta lives in the cold archive database.
@@ -481,6 +515,25 @@ fn snapshot_anchor(snapshots_dir: Option<&Path>, ts: &str) -> Option<Materialize
     None
 }
 
+/// Where the answer for `ts` lives.
+///
+/// Three cases, not two (0.8.0, B5, D-121). This used to be a `bool`, and the
+/// missing third case is the whole of B5: *below the log's floor* was folded in
+/// with *the delta is elsewhere*, so a question about a time before the ledger
+/// started came back as [`DbError::ReplayCorrupt`] — the class meaning the
+/// ledger is damaged — naming an archive file the caller had never created.
+enum HotLogReach {
+    /// The hot log holds everything needed at `ts`. Fold it.
+    Covers,
+    /// Nothing had been recorded by `ts`, and nothing has ever been removed
+    /// from the log, so no other file could hold it either. The empty state is
+    /// the correct answer, not a failure to find one.
+    PredatesRecordedHistory,
+    /// The delta is in the cold archive. If it cannot be reached, that is an
+    /// error and stays one.
+    NeedsArchive,
+}
+
 /// Whether the hot log alone can answer for `ts` — a *completeness* test.
 ///
 /// **This replaces a reach test that was not one (0.5.5).** The previous version
@@ -509,11 +562,11 @@ fn snapshot_anchor(snapshots_dir: Option<&Path>, ts: &str) -> Option<Materialize
 /// nothing has been removed, so the hot log is the whole log — and it is kept,
 /// because it is also what distinguishes "before recorded history" from "the
 /// cold file is missing" (D-026).
-async fn hot_log_is_complete(
+async fn hot_log_reach(
     conn: &libsql::Connection,
     ts: &str,
     archive_path: Option<&Path>,
-) -> Result<bool> {
+) -> Result<HotLogReach> {
     let row = conn
         .query(
             "SELECT MIN(recorded_at), MAX(recorded_at) FROM transaction_log",
@@ -534,15 +587,89 @@ async fn hot_log_is_complete(
         // covers nothing. It cannot arise from `archive()` itself — the newest
         // row per entity always stays — but answering "covered" here would make
         // such a file reconstruct to the empty state with no error at all.
-        return Ok(max_recorded_at.is_some_and(|max_ts| max_ts.as_str() <= ts));
+        return Ok(match max_recorded_at {
+            Some(max_ts) if max_ts.as_str() <= ts => HotLogReach::Covers,
+            _ => HotLogReach::NeedsArchive,
+        });
     }
 
-    Ok(match min_recorded_at {
-        Some(min_ts) => min_ts.as_str() <= ts,
-        // No archive and no log: a genuinely empty database, which the empty
-        // state answers correctly.
-        None => true,
-    })
+    match min_recorded_at {
+        Some(min_ts) if min_ts.as_str() <= ts => Ok(HotLogReach::Covers),
+        // No log at all: a genuinely empty database, and the empty state has
+        // always been the answer here.
+        None => Ok(HotLogReach::PredatesRecordedHistory),
+        // `ts` is below the hot log's floor, and there is no archive file to
+        // consult. Which of the two meanings that has is decided by whether
+        // anything was ever removed from the log — see `hot_log_is_intact`.
+        Some(_) => Ok(if hot_log_is_intact(conn).await? {
+            HotLogReach::PredatesRecordedHistory
+        } else {
+            HotLogReach::NeedsArchive
+        }),
+    }
+}
+
+/// Was any row ever removed from `transaction_log`? — answered exactly, from
+/// the hot file alone (0.8.0, B5, D-121).
+///
+/// # Why this question needs answering at all
+///
+/// With `ts` below the hot log's floor and no archive file present, the state
+/// on disk is consistent with two very different histories: **nothing was ever
+/// archived**, in which case the hot log is the whole log and the answer to
+/// *what was believed at `ts`* is "nothing yet"; or **rows were archived and
+/// the cold file is gone**, in which case the answer is unknowable and saying
+/// "nothing" would be inventing one. Before this, the two were conflated and
+/// both raised — which made an ordinary question about a young database report
+/// the ledger as damaged.
+///
+/// # Why `seq_id` settles it, with no marker and no schema change
+///
+/// `transaction_log.seq_id` is `INTEGER PRIMARY KEY AUTOINCREMENT`, so values
+/// are allocated 1, 2, 3, … and **never reused**. A rolled-back transaction
+/// leaves no gap — `sqlite_sequence` rolls back with it, which
+/// [D-049](../../docs/architecture/s13-decision-register.md) established by
+/// measurement after assuming the opposite. So the only thing that can perturb
+/// the sequence is deletion, and `trg_txlog_guard_delete` confines deletion to
+/// an archive session.
+///
+/// Therefore: if nothing was removed, the ids are exactly `1..=MAX` and
+/// `COUNT(*) == MAX(seq_id)` with `MIN(seq_id) == 1`. And conversely — this is
+/// the half that makes it a proof rather than a heuristic — those two equalities
+/// force the set of `COUNT` distinct ids inside `[1, MAX]` to be all of it, so
+/// nothing is missing. The test is exact in both directions, not merely
+/// suggestive.
+///
+/// **It does not depend on the archive removing a contiguous block**, which it
+/// does not: `archive()` removes *superseded* rows scattered through the
+/// sequence. Scattered removal leaves interior gaps, which fails the count
+/// equality; removal from the front raises `MIN` above 1. Removal from the end
+/// cannot happen, because the newest row per entity is never archivable.
+///
+/// # What it deliberately does not claim
+///
+/// Nothing about *when* the archiving happened or *what* went, which is what
+/// the rejected hot-side marker would have carried. It answers one bit, and one
+/// bit is what the branch above needs.
+async fn hot_log_is_intact(conn: &libsql::Connection) -> Result<bool> {
+    let row = conn
+        .query(
+            "SELECT COUNT(*), MIN(seq_id), MAX(seq_id) FROM transaction_log",
+            (),
+        )
+        .await?
+        .next()
+        .await?;
+    let Some(row) = row else {
+        return Ok(true);
+    };
+    let count: i64 = row.get(0).unwrap_or(0);
+    if count == 0 {
+        return Ok(true);
+    }
+    let min: i64 = row.get(1).unwrap_or(0);
+    let max: i64 = row.get(2).unwrap_or(0);
+    Ok(min == 1 && count == max)
 }
 
 /// Run one fold query from nothing — the unanchored path.
@@ -715,6 +842,9 @@ impl Delta {
             timestamp: ts.to_string(),
             concepts,
             edges,
+            // A delta was applied, so there was history to fold. `reconstruct`
+            // sets the flag on the one path that never gets here.
+            predates_recorded_history: false,
         }
     }
 }

@@ -118,6 +118,9 @@ state.seq_anchor;   // i64
 state.timestamp;    // String
 state.concepts;     // HashMap<String, NodeAttributes>
 state.edges;        // Vec<(source, target, edge_type, valid_from, valid_to)>
+state.predates_recorded_history;  // bool -- nothing had been recorded yet at `ts`
+                                  // (0.8.0, D-121). An empty state is empty for two
+                                  // different reasons and this says which.
 
 // Snapshot n composes onto snapshot n-1 and nothing ever folds the whole log,
 // so an error at any link is copied forward and every read agrees with it.

@@ -330,6 +330,15 @@ class MaterializedState:
     def concepts(self) -> dict[str, NodeAttributes]: ...
     @property
     def edges(self) -> list[Edge]: ...
+    @property
+    def predates_recorded_history(self) -> bool:
+        """Whether nothing had been recorded yet at ``timestamp``.
+
+        An empty state means either that everything had been retired by then or
+        that the ledger had not started; both arrive as ``concepts == {}`` and
+        ``edges == []``, so the difference is carried here rather than inferred.
+        """
+
     def __repr__(self) -> str: ...
 
 class ArchiveReport:

@@ -61,23 +61,40 @@ def test_reconstructed_edges_carry_datetimes_and_none_for_open(db):
     assert valid_to is None
 
 
-def test_reconstruct_before_anything_was_recorded_raises_about_cold_storage(db):
-    """Not an empty state — and the error names a file the caller never made.
+def test_reconstruct_before_anything_was_recorded_is_an_empty_state(db):
+    """The empty state, and it says why it is empty (0.8.0, B5, D-121).
 
-    An instant older than the oldest thing on hand sends the fold to cold
-    storage, and on a ledger that has never been archived there is no cold file,
-    so this is ``ReplayCorruptError: … archive database file … does not exist``.
+    Through 0.7.0 this raised ``ReplayCorruptError: … archive database file …
+    does not exist``, naming a file the caller had never made — the binding
+    derives ``*_archive.db`` from the database path. This test asserted that,
+    and recorded it as a rough edge the binding declined to paper over, on the
+    stated ground that *translating this into an empty state would mean claiming
+    a real missing archive is also nothing to worry about.*
 
-    It is the crate's behaviour rather than the binding's, and it is asserted
-    here rather than smoothed over, because a Python caller asking about a date
-    before their data existed is not doing anything strange and the message
-    tells them about an implementation detail instead. Recorded as a rough edge
-    for the crate; the binding does not paper over it, since translating this
-    into an empty state would mean claiming a *real* missing archive is also
-    nothing to worry about.
+    That objection was right, and it turned out not to be a reason to keep the
+    behaviour — it was a reason to answer the question it was really asking.
+    ``transaction_log.seq_id`` is ``AUTOINCREMENT`` and only an archive session
+    may delete from the table, so a log whose ids are exactly ``1..MAX`` has
+    provably never been archived from, and *before recorded history* and *the
+    cold file is gone* stop being the same state on disk. The second still
+    raises; see ``a_missing_archive_is_an_error_when_rows_were_actually_archived``
+    in the Rust suite.
     """
-    with pytest.raises(macrame.ReplayCorruptError, match="does not exist"):
-        db.reconstruct("2025-01-01T00:00:00.000000Z")
+    state = db.reconstruct("2025-01-01T00:00:00.000000Z")
+    assert state.concepts == {}
+    assert state.edges == []
+    assert state.predates_recorded_history
+
+
+def test_an_empty_state_says_which_kind_of_empty_it_is(db):
+    """The flag is the whole point, so both of its values are asserted.
+
+    ``concepts == {}`` is not self-describing: a ledger that had not started and
+    one whose contents were all retired look identical. A flag that is only ever
+    checked true would be decoration.
+    """
+    assert db.reconstruct("2025-01-01T00:00:00.000000Z").predates_recorded_history
+    assert not db.reconstruct(now()).predates_recorded_history
 
 
 def test_reconstruct_accepts_a_string_or_a_datetime(db):

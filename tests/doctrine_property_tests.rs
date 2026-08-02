@@ -681,6 +681,103 @@ async fn stampless_log(conn: &libsql::Connection) -> Vec<String> {
 }
 
 proptest! {
+    // Eight, matching the measured precedent of the block at the foot of this
+    // file rather than the 24 above — and measured here too, because the note
+    // on `RT` says anyone raising a count should re-measure rather than assume
+    // the headroom is there, and this property was written at 16 without doing
+    // so.
+    //
+    // Running this binary alone, 8 runs each: **6/8 faults with this property at
+    // 16 cases, 5/8 with it skipped entirely**, against 1/8 for
+    // `integrity_property_tests` on the same machine in the same session. So
+    // this property is worth about one run in eight and is *not* what put the
+    // binary where it is — see the note in the delivery record. Eight cases is
+    // the conservative reading of a measurement that did not exonerate the
+    // count so much as find a larger problem behind it.
+    #![proptest_config(ProptestConfig { cases: 8, ..ProptestConfig::default() })]
+
+    /// **Below the log floor, the answer is empty — for every `t`, after every
+    /// history** (0.8.0, B5, [D-121]).
+    ///
+    /// B5's defect was reproduced at one instant, and one instant is the wrong
+    /// shape for the claim. *There is no `t` before the ledger started at which
+    /// `reconstruct` reports a corruption* is universally quantified, and a
+    /// history that happens to make it hold is not evidence about the histories
+    /// that do not.
+    ///
+    /// Two generated dimensions, and both matter. The **history** varies what is
+    /// in the log — retirements included, so a state that is empty because
+    /// everything was retired is reachable and can be told apart from one that
+    /// is empty because nothing had happened yet. The **instant** varies where
+    /// below the floor the question lands, from a year before to one microsecond
+    /// before, because the boundary is where an off-by-one would live.
+    ///
+    /// Never archived, on purpose: this is the case the old code could not
+    /// distinguish from *the cold file is missing*, and
+    /// `a_missing_archive_is_an_error_when_rows_were_actually_archived` holds
+    /// the other side.
+    #[test]
+    fn nothing_below_the_log_floor_is_ever_a_corruption(
+        history in prop::collection::vec(op_strategy(), 1..10),
+        offset_micros in 1i64..31_536_000_000_000i64,
+    ) {
+        block_on(async {
+            let harness = TestHarness::new();
+            let db = open_db(&harness).await;
+            for op in &history {
+                step(&db, *op).await;
+            }
+
+            // The floor is a *transaction*-time stamp, so it is whatever the
+            // clock said during the run and cannot be written as a literal.
+            let floor: String = db.read_conn()
+                .query("SELECT MIN(recorded_at) FROM transaction_log", ())
+                .await.unwrap().next().await.unwrap().unwrap().get(0).unwrap();
+            let floor_st = macrame::util::timestamp::parse(&floor).unwrap();
+            let below_st = floor_st
+                .checked_sub(std::time::Duration::from_micros(offset_micros as u64))
+                .expect("2026 minus at most a year is representable");
+            let below = macrame::util::timestamp::format(below_st);
+            // The generated instant really is below the floor. Cheap, and it is
+            // what stops a rounding change turning this into a test of the
+            // ordinary fold.
+            prop_assert!(
+                below.as_str() < floor.as_str(),
+                "fixture is not below the floor: {below} vs {floor}"
+            );
+
+            let state = db.reconstruct(&below).await;
+            prop_assert!(
+                state.is_ok(),
+                "reconstruct({below}) below the floor {floor} reported a failure \
+                 on a ledger that was never archived: {:?}",
+                state.as_ref().err()
+            );
+            let state = state.unwrap();
+
+            prop_assert!(state.concepts.is_empty(), "concepts at {below}: {:?}", state.concepts);
+            prop_assert!(state.edges.is_empty(), "edges at {below}: {:?}", state.edges);
+            prop_assert!(
+                state.predates_recorded_history,
+                "the empty answer at {below} did not say why it was empty"
+            );
+
+            // The companion claim, or the one above is satisfied by a
+            // `reconstruct` that always returns nothing: at the floor itself the
+            // fold runs, and it must not claim the ledger had not started.
+            let at_floor = db.reconstruct(&floor).await.unwrap();
+            prop_assert!(
+                !at_floor.predates_recorded_history,
+                "the floor is inside recorded history, not below it"
+            );
+
+            shut_down(db).await;
+            Ok(())
+        })?;
+    }
+}
+
+proptest! {
     // A third of the cases of the suite above, and the number is measured
     // rather than chosen. R15 makes *database churn* the scarce resource, and
     // these two properties are the most expensive in the crate per case: the
