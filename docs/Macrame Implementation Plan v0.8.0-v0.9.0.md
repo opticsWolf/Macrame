@@ -459,6 +459,49 @@ green once B1–B4 land and their entries carry successors. Verified by injectio
 
 **Documents.** `s13` (D-112); `s6-s10` §8.
 
+> **Delivered 2026-08-02** — [D-113](architecture/s13-decision-register.md#d-113), not D-112:
+> A4 took that number. `no_decision_still_awaits_a_release_that_has_shipped` plus two guard
+> tests in `tests/doc_sync_tests.rs`.
+>
+> **Red first, and it named exactly the two.** On the unmodified register: `D-087` and `D-089`,
+> nothing else, with the guard tests green beside it. Then both injection arms against the real
+> register — a fabricated `Scheduled for 0.6.0` entry fails; the same entry with
+> `DELIVERED in 0.6.0` passes; injection reverted.
+>
+> **Three corrections the test forced on its own design, and they are the substance of this item.**
+>
+> *A per-entry marker disarms the tripwire permanently.* The plan specified a bare `— DELIVERED`.
+> But an entry that missed 0.7.0 and now names 0.8.0 carries **two** claims, and one unqualified
+> marker settles both — the mechanism built to catch a missed release would have waved through
+> the next one. Markers are keyed to the version they close: `DELIVERED in 0.8.0`,
+> `RESCHEDULED from 0.7.0`. Each entry now comes due again at each boundary by itself.
+>
+> *The original sentences must not be reworded — [Doctrine III](architecture/s0-s3-foundations.md#doctrine-iii)
+> applied to this file.* The easy way to green the test was to edit *"Scheduled for 0.7.0"* out of
+> D-087 and D-089. That is rewriting an assertion in place. This register is a ledger of belief and
+> the doctrine governing `links` governs it too: **superseded, never overwritten.** Both sentences
+> stand exactly as written; a later sentence in each entry records that the release passed without
+> them. Greening the test by destroying the evidence it was ever wrong was the worst available
+> outcome and the easiest one.
+>
+> *The test fired on D-113 itself*, which quotes *"Scheduled for 0.7.0"* to explain the failure.
+> A register that records its own history will keep quoting the schedules it records, so this is a
+> class: a phrase immediately preceded by a quotation mark is a citation, not a commitment. The
+> rule is deliberately dumb, per [D-088](architecture/s13-decision-register.md#d-088) — no
+> deciding *which* quotations are citations. The gap is stated in the source rather than hidden.
+>
+> **The exit gate said "green once B1–B4 land". It is green now, and that is the stronger
+> outcome.** Leaving `main` red on purpose is what [D-110](architecture/s13-decision-register.md#d-110)
+> had just finished fixing, and red-on-purpose is indistinguishable from red-by-accident to
+> anyone who did not write it. Neither decision shipped, so neither carries `DELIVERED`: both
+> record that they missed 0.7.0 and name **0.8.0** (B2, B4). That is true, and **it arms the
+> tripwire for the next boundary** — when B7 bumps `CARGO_PKG_VERSION` to 0.8.0, both come due
+> again and the build stops unless the work landed and the marker is written.
+>
+> Rescheduling D-089 turned up a second error beside it: that entry and `README.md` both
+> described the two unread indices as *added in v8*. They are in the **v7 baseline**, in
+> `ddl::CREATE_INDICES`. Corrected in both — the same error A3 found from the other end.
+
 ---
 
 ## Track B — 0.8.0, the break taken once

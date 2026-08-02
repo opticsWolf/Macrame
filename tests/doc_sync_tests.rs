@@ -224,11 +224,34 @@ fn every_public_database_method_appears_in_appendix_a() {
 
 const REGISTER: &str = include_str!("../docs/architecture/s13-decision-register.md");
 
-/// The marker an entry carries once the release it named has shipped.
+/// How an entry closes out a release it named. **The marker must name that
+/// release**, and both halves of that are load-bearing.
 ///
-/// All caps and one word, so ordinary prose cannot produce it. Write it inside
-/// the entry, naming the release: `**DELIVERED in 0.8.0**`.
-const DELIVERED: &str = "DELIVERED";
+/// *All caps*, so ordinary prose cannot produce it by accident.
+///
+/// *Naming the release* is what keeps the tripwire armed. A bare `DELIVERED`
+/// anywhere in the entry would settle it forever -- including the **next**
+/// release the entry goes on to name, which is the very failure being guarded.
+/// Keyed to a version, closing out 0.7.0 says nothing about 0.8.0, and the
+/// entry comes due again at the next boundary by itself.
+///
+/// Two closures, because there are two honest outcomes and only one is delivery:
+///
+/// * `DELIVERED in 0.8.0` -- it shipped in the release it named.
+/// * `RESCHEDULED from 0.7.0` -- that release came and went without it, and the
+///   entry says what happens now.
+///
+/// **The original sentence stays as written.** It was true when it was made,
+/// and Doctrine III governs this register as much as it governs `links`: a
+/// belief is superseded by a later one, never rewritten in place. Rewording
+/// "Scheduled for 0.7.0" out of existence would make the test green by
+/// destroying the evidence that it was ever wrong.
+fn closure_markers(version: &str) -> [String; 2] {
+    [
+        format!("DELIVERED in {version}"),
+        format!("RESCHEDULED from {version}"),
+    ]
+}
 
 /// The phrases that make a sentence a *schedule* rather than a description.
 const SCHEDULING: &[&str] = &[
@@ -312,6 +335,33 @@ fn entry_body(text: &str, offset: usize) -> &str {
     &text[start..end]
 }
 
+/// Is the phrase at `at` being **quoted** rather than asserted?
+///
+/// Found by the test firing on itself. [D-113](../docs/architecture/s13-decision-register.md)
+/// explains the failure by quoting it — *"Scheduled for 0.7.0"* — and was
+/// reported as a decision overdue for a release it has no stake in. That is a
+/// class, not an instance: a register that records its own history will go on
+/// quoting the schedules it is recording, and every such quotation would be a
+/// false positive.
+///
+/// The rule is narrow on purpose. A quotation mark **immediately** before the
+/// phrase, and nothing cleverer: an entry that quotes a schedule is citing
+/// somebody else's, while an entry that makes one writes it as prose. Both real
+/// claims in this register — D-087 and D-089 — are preceded by a space, and
+/// neither is exempted.
+///
+/// The gap this leaves, said rather than hidden: a genuine schedule written as
+/// the first words inside quotation marks is missed. No entry has ever been
+/// written that way, and the alternative — deciding *which* quotations are
+/// citations — is the kind of cleverness [D-088](../docs/architecture/s13-decision-register.md)
+/// warns produces a test nobody trusts.
+fn is_quoted(text: &str, at: usize) -> bool {
+    matches!(
+        text[..at].chars().last(),
+        Some('"') | Some('\'') | Some('\u{201c}') | Some('\u{2018}')
+    )
+}
+
 /// Every scheduling claim that names an actual version.
 fn scheduling_claims(text: &str) -> Vec<Claim> {
     let lower = text.to_lowercase();
@@ -319,6 +369,9 @@ fn scheduling_claims(text: &str) -> Vec<Claim> {
         .iter()
         .flat_map(|phrase| {
             lower.match_indices(phrase).filter_map(move |(at, _)| {
+                if is_quoted(text, at) {
+                    return None;
+                }
                 version_at(&text[at + phrase.len()..]).map(|version| Claim {
                     entry: entry_containing(text, at),
                     phrase: (*phrase).to_string(),
@@ -345,9 +398,13 @@ fn no_decision_still_awaits_a_release_that_has_shipped() {
     let overdue: Vec<String> = scheduling_claims(REGISTER)
         .into_iter()
         .filter(|c| semver(&c.version).is_some_and(|v| v <= current))
-        // The marker is looked for across the whole entry, not near the phrase,
-        // so one marker settles an entry that names its release more than once.
-        .filter(|c| !entry_body(REGISTER, c.at).contains(DELIVERED))
+        // Searched across the whole entry rather than beside the phrase, so one
+        // marker settles an entry naming the same release twice -- but keyed to
+        // the version, so it settles that release and no other.
+        .filter(|c| {
+            let body = entry_body(REGISTER, c.at);
+            !closure_markers(&c.version).iter().any(|m| body.contains(m))
+        })
         .map(|c| format!("{}: \"{} {}\"", c.entry, c.phrase, c.version))
         .collect();
 
@@ -394,6 +451,10 @@ fn the_schedule_pattern_reads_versions_and_not_prose() {
         "`rowid_pk` on `concepts` is deferred to the release that implements erasure",
         "deferred to 2 releases later",
         "Scheduled for the next cycle.",
+        // A quoted schedule is a citation, not a commitment. D-113 quotes the
+        // very sentence it exists to catch, and the first run of this test
+        // reported D-113 as overdue for a release it has no stake in.
+        "D-087 and D-089 both read *\"Scheduled for 0.7.0\"*, and nothing went red.",
     ] {
         assert!(
             scheduling_claims(text).is_empty(),
@@ -406,16 +467,32 @@ fn the_schedule_pattern_reads_versions_and_not_prose() {
 /// arms are asserted rather than only the one that currently holds.
 #[test]
 fn the_delivery_marker_is_what_settles_an_overdue_entry() {
-    let overdue = "<a id=\"d-999\"></a>D-999 — a thing. Scheduled for 0.1.0.\n";
-    let settled = "<a id=\"d-999\"></a>D-999 — a thing. Scheduled for 0.1.0. **DELIVERED in 0.2.0.**\n";
+    let settled = |text: &str, version: &str| {
+        let claim = &scheduling_claims(text)[0];
+        let body = entry_body(text, claim.at);
+        closure_markers(version).iter().any(|m| body.contains(m))
+    };
 
-    let claim = &scheduling_claims(overdue)[0];
-    assert_eq!(claim.entry, "D-999");
-    assert!(!entry_body(overdue, claim.at).contains(DELIVERED));
+    let bare = "<a id=\"d-999\"></a>D-999 - a thing. Scheduled for 0.1.0.\n";
+    assert_eq!(scheduling_claims(bare)[0].entry, "D-999");
+    assert!(!settled(bare, "0.1.0"), "an unmarked entry is overdue");
 
-    let claim = &scheduling_claims(settled)[0];
+    let shipped = "<a id=\"d-999\"></a>D-999 - a thing. Scheduled for 0.1.0. \
+                   Prose in between. **DELIVERED in 0.1.0.**\n";
     assert!(
-        entry_body(settled, claim.at).contains(DELIVERED),
+        settled(shipped, "0.1.0"),
         "the marker must be found anywhere in the entry, not only beside the phrase"
+    );
+
+    let missed = "<a id=\"d-999\"></a>D-999 - a thing. Scheduled for 0.1.0. \
+                  **RESCHEDULED from 0.1.0** to 0.2.0.\n";
+    assert!(settled(missed, "0.1.0"), "a missed release is closed out too");
+
+    // The property that keeps the tripwire armed: closing 0.1.0 must say
+    // nothing about 0.2.0. Without it one marker would silence an entry
+    // forever, and the next missed release would pass exactly as 0.7.0 did.
+    assert!(
+        !settled(missed, "0.2.0"),
+        "a marker naming one release must not settle a claim on another"
     );
 }
