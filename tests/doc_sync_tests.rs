@@ -179,3 +179,243 @@ fn every_public_database_method_appears_in_appendix_a() {
          belong in the public surface."
     );
 }
+
+// ---------------------------------------------------------------------------
+// A decision that names a release must not outlive it (0.8.0, A5, D-113)
+// ---------------------------------------------------------------------------
+//
+// The failure this catches has already happened, twice, and is the reason the
+// 0.8.0 plan exists. D-087 and D-089 both read "Scheduled for 0.7.0". 0.7.0
+// shipped as the Python bindings release with neither of them in it, and
+// **nothing anywhere went red** — a scheduled decision is prose, and prose is
+// not executed. `doc_link_tests` was satisfied throughout, because it checks
+// that anchors resolve and both entries' anchors resolved perfectly.
+//
+// So the register is read as data: an entry that names a version it is waiting
+// for must either be waiting for one still in the future, or say plainly that
+// it arrived.
+//
+// # Why the pattern is narrow, deliberately
+//
+// D-088 is the precedent, and `every_performance_decision_names_its_fixture`
+// learned it the hard way: a tripwire over prose that fires on prose gets
+// disabled, and a disabled tripwire is worse than none, because its name goes
+// on suggesting coverage. Two narrowings follow.
+//
+// **A version must look like a version.** The phrase alone is not enough. This
+// register says "deferred until something measures it" (D-047) and "deferred to
+// the release that implements erasure" (D-084). Both are honest deferrals with
+// no date to miss, and a check that fired on them would be instructing a
+// maintainer to invent a release number in order to go green.
+//
+// **The delivery marker is a token that cannot arise by accident.** All-caps
+// `DELIVERED`. Matching "delivered" case-insensitively would be satisfied by
+// any entry that happens to discuss delivery, which is most of them — the check
+// would then pass by coincidence rather than by intent, which is precisely the
+// defect D-030 found in `audit_current()`, where a query that reduced to a
+// constant zero certified every corruption as clean.
+//
+// # What this does not cover, said plainly so the gap is not read as coverage
+//
+// Only `s13-decision-register.md`. Scheduling language in a README row, a plan
+// document or a source comment is not scanned. The register is where decisions
+// are *authoritative*; widening the scan is a larger change than this tripwire,
+// not a free one.
+
+const REGISTER: &str = include_str!("../docs/architecture/s13-decision-register.md");
+
+/// The marker an entry carries once the release it named has shipped.
+///
+/// All caps and one word, so ordinary prose cannot produce it. Write it inside
+/// the entry, naming the release: `**DELIVERED in 0.8.0**`.
+const DELIVERED: &str = "DELIVERED";
+
+/// The phrases that make a sentence a *schedule* rather than a description.
+const SCHEDULING: &[&str] = &[
+    "scheduled for",
+    "scheduled in",
+    "deferred to",
+    "deferred until",
+    "revisit at",
+    "revisited at",
+    "revisit in",
+];
+
+/// A scheduling claim found in the register.
+struct Claim {
+    /// The decision that made it, e.g. `D-087`.
+    entry: String,
+    phrase: String,
+    version: String,
+    /// Byte offset of the phrase, used to locate the entry it sits in.
+    at: usize,
+}
+
+/// `(major, minor, patch)` for ordering. `0.8` reads as `0.8.0`.
+fn semver(text: &str) -> Option<(u32, u32, u32)> {
+    let mut parts = text.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch = match parts.next() {
+        Some(p) => p.parse().ok()?,
+        None => 0,
+    };
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((major, minor, patch))
+}
+
+/// A version-looking token at the start of `rest`, tolerating the leading
+/// backtick and `v` the register actually uses.
+///
+/// At least `major.minor` is required, so "deferred to 2 releases later" and a
+/// stray full stop are not versions.
+fn version_at(rest: &str) -> Option<String> {
+    let rest = rest.trim_start();
+    let rest = rest.strip_prefix('`').unwrap_or(rest);
+    let rest = rest.strip_prefix('v').unwrap_or(rest);
+    let token: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
+    let token = token.trim_end_matches('.').to_string();
+    if token.contains('.') && semver(&token).is_some() {
+        Some(token)
+    } else {
+        None
+    }
+}
+
+/// The id of the decision entry whose anchor most recently precedes `offset`.
+fn entry_containing(text: &str, offset: usize) -> String {
+    match text[..offset].rmatch_indices("<a id=\"d-").next() {
+        Some((i, m)) => {
+            let id: String = text[i + m.len()..].chars().take_while(|c| *c != '"').collect();
+            format!("D-{id}")
+        }
+        None => "(no enclosing decision entry)".to_string(),
+    }
+}
+
+/// The whole entry containing `offset`: its anchor through to the next one.
+fn entry_body(text: &str, offset: usize) -> &str {
+    let start = text[..offset]
+        .rmatch_indices("<a id=\"d-")
+        .next()
+        .map(|(i, _)| i)
+        .unwrap_or(0);
+    let end = text[start + 1..]
+        .find("<a id=\"d-")
+        .map(|i| start + 1 + i)
+        .unwrap_or(text.len());
+    &text[start..end]
+}
+
+/// Every scheduling claim that names an actual version.
+fn scheduling_claims(text: &str) -> Vec<Claim> {
+    let lower = text.to_lowercase();
+    let mut found: Vec<Claim> = SCHEDULING
+        .iter()
+        .flat_map(|phrase| {
+            lower.match_indices(phrase).filter_map(move |(at, _)| {
+                version_at(&text[at + phrase.len()..]).map(|version| Claim {
+                    entry: entry_containing(text, at),
+                    phrase: (*phrase).to_string(),
+                    version,
+                    at,
+                })
+            })
+        })
+        .collect();
+    found.sort_by_key(|c| c.at);
+    found
+}
+
+/// A decision that named a release at or below this one must say it arrived.
+///
+/// **The tripwire the 0.8.0 plan was written around.** Not a style check: the
+/// two entries it was built for had been wrong for a whole release while the
+/// suite stayed green.
+#[test]
+fn no_decision_still_awaits_a_release_that_has_shipped() {
+    let current =
+        semver(env!("CARGO_PKG_VERSION")).expect("CARGO_PKG_VERSION is not a semver triple");
+
+    let overdue: Vec<String> = scheduling_claims(REGISTER)
+        .into_iter()
+        .filter(|c| semver(&c.version).is_some_and(|v| v <= current))
+        // The marker is looked for across the whole entry, not near the phrase,
+        // so one marker settles an entry that names its release more than once.
+        .filter(|c| !entry_body(REGISTER, c.at).contains(DELIVERED))
+        .map(|c| format!("{}: \"{} {}\"", c.entry, c.phrase, c.version))
+        .collect();
+
+    assert!(
+        overdue.is_empty(),
+        "current version is {}, and these decisions are still waiting for a \
+         release that has already shipped:\n  {}\n\n\
+         This is exactly how D-087 and D-089 sat wrong through the whole of \
+         0.7.0 with a green suite. Do one of two things, and not a third:\n\
+         \x20 - it shipped:     write `DELIVERED in <that version>` into the entry;\n\
+         \x20 - it did not ship: write `RESCHEDULED from <that version>`, and say \
+         which release it waits for now.\n\
+         Leave the original sentence exactly as it stands. It was true when it was \
+         written, and a deferral that leaves no trace is the failure this test \
+         exists to catch.",
+        env!("CARGO_PKG_VERSION"),
+        overdue.join("\n  "),
+    );
+}
+
+/// The pattern reads versions and not prose, in both directions.
+///
+/// Pinned because both halves are how this class of test dies: too wide and it
+/// gets disabled (D-088), too narrow and it is decoration.
+#[test]
+fn the_schedule_pattern_reads_versions_and_not_prose() {
+    for text in [
+        "Scheduled for 0.7.0 alongside the other schema work.",
+        "scheduled for `0.9.0` with the API break named.",
+        "Deferred to 1.0 because the surface freezes there.",
+        "revisit at v0.8.0 once the measurement exists.",
+    ] {
+        assert_eq!(
+            scheduling_claims(text).len(),
+            1,
+            "should have found a scheduling claim in: {text}"
+        );
+    }
+
+    // Real sentences from this register, and two near misses. Not firing on
+    // these is what keeps the test alive to be useful.
+    for text in [
+        "the integer-index rewrite of `Subgraph` is deferred until something measures it",
+        "`rowid_pk` on `concepts` is deferred to the release that implements erasure",
+        "deferred to 2 releases later",
+        "Scheduled for the next cycle.",
+    ] {
+        assert!(
+            scheduling_claims(text).is_empty(),
+            "should not have fired on prose: {text}"
+        );
+    }
+}
+
+/// The delivery marker is what distinguishes shipped from overdue, so both
+/// arms are asserted rather than only the one that currently holds.
+#[test]
+fn the_delivery_marker_is_what_settles_an_overdue_entry() {
+    let overdue = "<a id=\"d-999\"></a>D-999 — a thing. Scheduled for 0.1.0.\n";
+    let settled = "<a id=\"d-999\"></a>D-999 — a thing. Scheduled for 0.1.0. **DELIVERED in 0.2.0.**\n";
+
+    let claim = &scheduling_claims(overdue)[0];
+    assert_eq!(claim.entry, "D-999");
+    assert!(!entry_body(overdue, claim.at).contains(DELIVERED));
+
+    let claim = &scheduling_claims(settled)[0];
+    assert!(
+        entry_body(settled, claim.at).contains(DELIVERED),
+        "the marker must be found anywhere in the entry, not only beside the phrase"
+    );
+}
