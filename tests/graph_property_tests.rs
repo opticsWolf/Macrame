@@ -15,7 +15,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use macrame::graph::{
-    astar, dijkstra, k_core, louvain, modularity, scc, EdgeRef, NodeData, Subgraph,
+    astar, dijkstra, k_core, louvain, modularity, scc, NodeData, Subgraph,
 };
 use proptest::prelude::*;
 

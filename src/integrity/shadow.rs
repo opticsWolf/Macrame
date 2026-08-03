@@ -86,7 +86,7 @@ pub(crate) const SOURCES_PER_CHUNK: usize = 256;
 pub enum ShadowStep {
     /// Drop any orphan shadow, create a fresh one from the declared DDL.
     Begin,
-    /// Project the next [`SOURCES_PER_CHUNK`] sources into the shadow.
+    /// Project the next `SOURCES_PER_CHUNK` sources into the shadow.
     Fill { after: Option<String> },
     /// Catch up on writes since `build_start`, then swap. One transaction.
     ///

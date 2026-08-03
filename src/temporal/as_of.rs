@@ -54,7 +54,8 @@ fn placeholders(first: usize, count: usize) -> String {
 /// Hydrate attributes for a list of node IDs based on the specified AttributeMode (§5.2).
 ///
 /// **Retirement is uniform across the three readers as of Wave 1 (defect AB).**
-/// The rule is the one `AttributeMode::Current` and [`crate::reconstruct`]
+/// The rule is the one `AttributeMode::Current` and
+/// [`crate::temporal::reconstruct`]
 /// already followed and `AtTime` did not: *a concept retired as of the instant
 /// being asked about is not returned*. Retirement is the application axis (§4.1)
 /// and a temporal read shows what was visible, so the three modes now disagree

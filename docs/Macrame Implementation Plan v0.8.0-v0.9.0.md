@@ -909,6 +909,21 @@ extended to a **sparse** `rowid_pk`.
 > becomes a release blocker.
 >
 > Suites **321** / **332** / **344**, clippy clean, doc gates green.
+>
+> **What the rung COSTS was still unmeasured when this note was written, and is now
+> ([D-125](architecture/s13-decision-register.md#d-125), 2026-08-03).** Every test above runs on
+> four concepts, so none of them says anything about a rung that rewrites a ledger table under
+> the write lock. `examples/v8_migration_scale_probe.rs`, four scales to 200k concepts / 600k
+> links / 800k log rows (733 MiB): **~10–13 µs per concept — 2.7 s at 200k — peak disk 1.09× the
+> starting file, settling to 1.00× after a checkpoint, and `foreign_key_check` at 13–17% of the
+> rung.** The 1.09× is the number worth carrying: the reflex estimate for a copy-and-swap is 2×,
+> which is right about the *table* and wrong about the *file*, because `concepts` is a small
+> share of a database whose bulk is `links` and the log. `foreign_key_check` is flagged as the
+> one part that scales with the whole database rather than with `concepts`. The v6 → v7 `links`
+> rung's own `roughly 2× links` is **still an estimate** and is now labelled as one rather than
+> borrowing authority from its measured neighbour. The pinned v7 fixture moved from
+> `migration_tests.rs` to `tests/common/v7_schema.rs` so correctness and cost read the same pin —
+> [D-124](architecture/s13-decision-register.md#d-124) applied the day it was written.
 
 **Documents.** `s4-schema.md` §4.1 (the `concepts` DDL), §4.2, §4.5, §4.6 (the third trigger
 arrives — rewrite the "no delete trigger, by consequence rather than by choice" paragraph),
@@ -1003,15 +1018,20 @@ being raised.
 >
 > Suites **320** (`metrics`) / **345** Python, clippy clean, doc gates green.
 >
-> **The `property-tests` gate is red, and it is not B5's.** Three consecutive full-gate runs died
-> 6/6 on `doctrine_property_tests`. Measured 8 runs each on one machine in one session: **5/8 at
-> `dc0ca83` (B4 complete, B5 stashed), 6/8 with B5's new property at 16 cases, 5/8 with that
-> property skipped**, against **1/8 for `integrity_property_tests`**. So it is specific to that
-> binary, it predates B5 on committed code, and B5's property is worth about one run in eight —
-> its count was cut from 16 to 8 regardless, since it had been chosen without the measurement the
-> file's own note demands. Recorded in [R15](architecture/s11-s12-milestones-and-risks.md#r15) as
-> open, with the cause **not** guessed at. Raising the budget again would be the laundering
-> [D-110](architecture/s13-decision-register.md#d-110) exists to prevent. The Python getter and the
+> ~~**The `property-tests` gate is red, and it is not B5's.**~~ **Retracted 2026-08-03 —
+> the gate was never red and there was no regression. See
+> [D-124](architecture/s13-decision-register.md#d-124).** This note reported three full-gate runs
+> dying 6/6 and read 5/8 for `doctrine_property_tests` against 1/8 for `integrity_property_tests`
+> as a regression on committed code. It was wrong in three ways: the baseline it compared against
+> was a `~3/25` comment stale since 0.5.4 that no other file believed; CI was green on all five
+> 0.8.0 commits on all three platforms, so what was red was one developer machine; and eight runs
+> cannot resolve the comparison regardless — re-measured at n = 20 interleaved, the same executable
+> gave 75% and then 45%, and the doctrine binary built at `v0.7.0` faults at the same rate as
+> HEAD's. What survives is B5's own decision: its property's count was cut from 16 to 8 because it
+> had been chosen without the measurement the file's own note demands, and 8 is retained because
+> nothing argues for raising it. Raising the *retry* budget would still be the laundering
+> [D-110](architecture/s13-decision-register.md#d-110) exists to prevent, and nothing here asks for
+> it. The Python getter and the
 > `.pyi` entry landed here rather than waiting for [B7](#b7--the-binding-surface-the-stub-and-the-wheel),
 > because the defect was reported through the binding and a fix that cannot be checked there is
 > not checked. B7 still owns the version bumps and the stub sweep.
@@ -1215,12 +1235,16 @@ argument for the opaque handle is that there is one.
 > verbatim** from a clean directory — `{'entanglement': 1.0, 'quantum': 0.0}` — which is the
 > check that caught a broken example in 0.7.0.
 >
-> **Not verified here:** `python.yml`'s `abi3` job, which builds on 3.10 and runs the suite on
-> 3.13. That is CI's, and it has not run against this tree.
+> ~~**Not verified here:** `python.yml`'s `abi3` job…~~ **Since verified.** B7 was committed as
+> `55b7844` and CI run `30770381302` is green, `python.yml` included, on Windows, macOS and Ubuntu.
 >
-> **Still open and not B7's:** the `property-tests` gate is red on committed code
-> ([R15](architecture/s11-s12-milestones-and-risks.md#r15)). 0.8.0 should not be tagged until
-> that is understood.
+> ~~**Still open and not B7's:** the `property-tests` gate is red on committed code.~~
+> **Retracted 2026-08-03 ([D-124](architecture/s13-decision-register.md#d-124)): it was not red,
+> and 0.8.0 is not blocked on it.** The gate passed on all five 0.8.0 commits including this one;
+> the redness was local to one Windows machine, and the "regression" was measured against a stale
+> baseline with a sample too small to resolve it. R15 is unchanged, still carried, and still
+> effectively Windows-only — 46 s on macOS and 58 s on Ubuntu against 4 m 30 s on Windows in that
+> same run.
 
 ---
 

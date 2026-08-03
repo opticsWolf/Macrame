@@ -55,10 +55,42 @@ jobs:
       # as a global RUSTFLAGS it also applies to the `cargo publish --dry-run`
       # verification build, where a warning from a dependency's build would fail
       # a packaging check that has nothing to do with warnings.
+      #
+      # **`property-tests` is in the feature list, and was not until 0.8.0.**
+      # `--all-targets` only reaches targets that the selected features compile,
+      # so the three quarantined generated-history binaries — which are gated
+      # behind `property-tests` — were never linted by this gate at all. That
+      # was found by accident in 0.8.0 (D-124), and what it was hiding was an
+      # unused import in `graph_property_tests` that had survived every green
+      # run. Linting a binary costs nothing here whether or not it is *run*
+      # under a feature gate, so the two lists have no reason to differ.
       - name: clippy
-        run: cargo clippy --all-targets --features metrics
+        run: cargo clippy --all-targets --features "metrics property-tests"
         env:
           RUSTFLAGS: -D warnings
+
+      # Rustdoc has its own warning set that `cargo clippy` never sees —
+      # unresolved intra-doc links, public docs linking to private items,
+      # unclosed HTML tags — and nothing in this workflow built the docs, so
+      # they accumulated silently: 18 of them by 0.8.0, every one pre-existing
+      # and none noticed at the commit that introduced it. A broken
+      # `[`Foo::bar`]` renders as literal brackets on docs.rs, which is a
+      # published defect in the crate's own documentation.
+      #
+      # `RUSTDOCFLAGS` rather than `RUSTFLAGS`, and scoped to this step for the
+      # same reason clippy's is (see above): as a workflow-level env it would
+      # also apply to the `cargo publish --dry-run` job, where a doc warning
+      # from a dependency would fail a packaging check for something the
+      # release does not control.
+      #
+      # `--no-deps` so only this crate's docs are built and only this crate's
+      # warnings can fail the gate. `--features metrics` matches what the test
+      # job documents; `property-tests` adds no library items, so unlike clippy
+      # there is nothing extra for it to reach here.
+      - name: rustdoc (no broken links)
+        run: cargo doc --no-deps --features metrics
+        env:
+          RUSTDOCFLAGS: -D warnings
 
       # **Report-only, deliberately.** This repo has never been rustfmt-clean —
       # 246 diffs at 0.6.0, essentially all in tests and benches — so a blocking

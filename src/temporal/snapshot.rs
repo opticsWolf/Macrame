@@ -240,7 +240,7 @@ const RETAIN_DAYS: i64 = 30;
 
 const MICROS_PER_DAY: u64 = 86_400_000_000;
 
-/// Retention: the newest [`RETAIN`], **plus one per day for [`RETAIN_DAYS`]**
+/// Retention: the newest `RETAIN`, **plus one per day for `RETAIN_DAYS`**
 /// (§5.5, D-054).
 ///
 /// **Why the daily tier exists, and why it did not matter until now.** Through
@@ -256,10 +256,10 @@ const MICROS_PER_DAY: u64 = 86_400_000_000;
 /// itself. A lexicographic sort over names is only `seq_id` order while every
 /// name is the same width, and "delete the oldest" reading from a mis-sorted
 /// list deletes the wrong files — quietly, and preferentially the newest ones.
-/// Parsing removes the dependency on [`SEQ_WIDTH`] entirely.
+/// Parsing removes the dependency on `SEQ_WIDTH` entirely.
 ///
 /// A snapshot whose header carries no readable instant survives only under the
-/// newest-[`RETAIN`] rule. That is deliberate: it is a file this build would
+/// newest-`RETAIN` rule. That is deliberate: it is a file this build would
 /// refuse to *load* anyway, so keeping it for its date would be keeping it for a
 /// date nothing will ever use.
 pub fn cleanup_expired_snapshots(snapshots_dir: &Path) -> Result<usize> {

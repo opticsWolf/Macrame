@@ -21,7 +21,7 @@ pub struct MaterializedState {
     /// carried rather than inferred.
     ///
     /// Set only when the log was verified **intact** — see
-    /// [`hot_log_reach`]. If rows had been archived away, `ts` below the hot
+    /// `hot_log_reach`. If rows had been archived away, `ts` below the hot
     /// floor is not "before history", it is "the history is in the other file",
     /// and that path raises instead of answering.
     ///
@@ -217,7 +217,7 @@ pub(crate) async fn detach_stale_cold(conn: &libsql::Connection) {
 /// mode `archive()` carries a note about, and the two now share a shape.
 /// Snapshot composition (§5.5, D-049) applies when `snapshots_dir` holds a
 /// snapshot at or before `ts` and no archive database exists — see
-/// [`snapshot_anchor`] for why archiving disables it. Otherwise the fold runs
+/// `snapshot_anchor` for why archiving disables it. Otherwise the fold runs
 /// from genesis, which is correct and costs what the whole log costs.
 pub async fn reconstruct(
     conn: &libsql::Connection,

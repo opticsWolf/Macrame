@@ -1,7 +1,10 @@
 #[path = "common/harness.rs"]
 mod harness;
+#[path = "common/v7_schema.rs"]
+mod v7_schema;
 
 use harness::TestHarness;
+use v7_schema::seeded_v7;
 use macrame::error::DbError;
 use macrame::schema::ddl;
 use macrame::schema::migrations::{self, SCHEMA_VERSION};
@@ -461,122 +464,12 @@ async fn a_v6_database_climbs_to_v7_and_gains_the_weight_check() {
 // The v7 → v8 rung (B4, D-118, D-119)
 // ---------------------------------------------------------------------------
 
-/// The v7 shape of `concepts`, and the two FTS triggers that went with it.
-///
-/// Hand-written, and the module's own warning applies: a copy of an old schema
-/// is a second description that can drift. It is written out anyway because the
-/// alternative is worse. The v6 fixture could be built by re-issuing today's
-/// baseline and *removing* one CHECK, so the copy was nearly the real thing.
-/// v8 changes `concepts`'s primary key and re-keys the FTS index onto a column
-/// that did not exist, so there is no subtractive route: a fixture assembled
-/// from `ddl::` constants would be a v8 database wearing a v7 stamp, and the
-/// rung would be tested against a table that already had its change.
-const CONCEPTS_V7: &str = r#"
-CREATE TABLE concepts (
-    id               TEXT PRIMARY KEY,
-    title            TEXT NOT NULL,
-    content          TEXT NOT NULL DEFAULT '',
-    embedding_model  TEXT,
-    valid_from       TEXT NOT NULL,
-    valid_to         TEXT NOT NULL DEFAULT '9999-12-31T23:59:59.999999Z',
-    recorded_at      TEXT NOT NULL,
-    retired          INTEGER NOT NULL DEFAULT 0,
-    CHECK (valid_from GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z' AND valid_to GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z' AND recorded_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z' AND 1)
-)
-"#;
-
-const CONCEPTS_FTS_V7: &str = r#"
-CREATE VIRTUAL TABLE concepts_fts USING fts5(
-    title, content, content='concepts', content_rowid='rowid'
-)
-"#;
-
-const FTS_TRIGGERS_V7: &[&str] = &[
-    r#"
-    CREATE TRIGGER trg_concepts_fts_insert AFTER INSERT ON concepts
-    BEGIN
-        INSERT INTO concepts_fts (rowid, title, content)
-        VALUES (NEW.rowid, NEW.title, NEW.content);
-    END;
-    "#,
-    r#"
-    CREATE TRIGGER trg_concepts_fts_update AFTER UPDATE ON concepts
-    BEGIN
-        INSERT INTO concepts_fts (concepts_fts, rowid, title, content)
-        VALUES ('delete', OLD.rowid, OLD.title, OLD.content);
-        INSERT INTO concepts_fts (rowid, title, content)
-        VALUES (NEW.rowid, NEW.title, NEW.content);
-    END;
-    "#,
-];
-
-/// The two indices v8 drops, as v7 declared them.
-const UNREAD_INDICES_V7: &[&str] = &[
-    "CREATE INDEX idx_annotations_label ON analytics_annotations (label)",
-    "CREATE INDEX idx_lc_tgt_active ON links_current (target_id, valid_to)",
-];
-
-/// Build a genuine v7 database, seeded, and stamp it v7.
-///
-/// `links` rows are **not** optional garnish. The probe's finding is that the
-/// naive rebuild fails on `concepts`'s *inbound* foreign keys, and a `concepts`
-/// with nothing pointing at it exercises none of that: the rung would pass with
-/// the suspension removed. So every fixture here carries links, and
-/// [`the_v8_rung_needs_the_suspension_and_links_rows_prove_it`] pins that the
-/// links are what make it true.
-async fn seeded_v7(conn: &libsql::Connection, concepts: &[&str]) {
-    // Everything except `concepts` and its FTS index is byte-identical between
-    // v7 and v8, so those parts come from the crate's DDL rather than a copy.
-    conn.execute(CONCEPTS_V7, ()).await.unwrap();
-    conn.execute(ddl::CREATE_LINKS_TABLE, ()).await.unwrap();
-    conn.execute(ddl::CREATE_LINKS_CURRENT_TABLE, ())
-        .await
-        .unwrap();
-    conn.execute(ddl::CREATE_TRANSACTION_LOG_TABLE, ())
-        .await
-        .unwrap();
-    conn.execute(ddl::CREATE_ANALYTICS_ANNOTATIONS_TABLE, ())
-        .await
-        .unwrap();
-    conn.execute(CONCEPTS_FTS_V7, ()).await.unwrap();
-
-    for index_ddl in ddl::CREATE_INDICES.iter().chain(UNREAD_INDICES_V7) {
-        conn.execute(index_ddl, ()).await.unwrap();
-    }
-    // v8's triggers name `rowid_pk`, which this table does not have, so the two
-    // FTS ones come from the v7 copy and the delete trigger does not exist yet.
-    for trigger_ddl in ddl::CREATE_TRIGGERS {
-        if trigger_ddl.contains("trg_concepts_fts_") {
-            continue;
-        }
-        conn.execute(trigger_ddl, ()).await.unwrap();
-    }
-    for trigger_ddl in FTS_TRIGGERS_V7 {
-        conn.execute(trigger_ddl, ()).await.unwrap();
-    }
-
-    for id in concepts {
-        conn.execute(
-            "INSERT INTO concepts (id, title, content, valid_from, recorded_at) \
-             VALUES (?1, 'N', 'findable body text', ?2, ?2)",
-            libsql::params![*id, TS],
-        )
-        .await
-        .unwrap();
-    }
-    for pair in concepts.windows(2) {
-        conn.execute(
-            "INSERT INTO links (source_id, target_id, edge_type, valid_from, valid_to, \
-             weight, properties, recorded_at) \
-             VALUES (?1, ?2, 'KNOWS', ?3, '9999-12-31T23:59:59.999999Z', 1.0, '{}', ?3)",
-            libsql::params![pair[0], pair[1], TS],
-        )
-        .await
-        .unwrap();
-    }
-
-    conn.execute("PRAGMA user_version = 7", ()).await.unwrap();
-}
+// The v7 shape of `concepts`, its FTS index, the triggers that went with it,
+// and `seeded_v7` used to live here. They moved to
+// `tests/common/v7_schema.rs` in 0.8.0 so that
+// `examples/v8_migration_scale_probe.rs` could measure what the rung COSTS
+// against the same pinned fixture this file checks it is CORRECT against,
+// rather than against a second copy that would drift (D-124).
 
 async fn count(conn: &libsql::Connection, sql: &str) -> i64 {
     conn.query(sql, ())

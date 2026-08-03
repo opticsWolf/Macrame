@@ -1,6 +1,6 @@
 use crate::error::{DbError, Result};
 
-/// Codec for converting between Vec<f32> and libSQL F32_BLOB byte vectors with dimension validation (§4.1).
+/// Codec for converting between `Vec<f32>` and libSQL F32_BLOB byte vectors with dimension validation (§4.1).
 pub struct EmbeddingCodec;
 
 impl EmbeddingCodec {
@@ -20,7 +20,7 @@ impl EmbeddingCodec {
         Ok(bytes)
     }
 
-    /// Decode an F32_BLOB byte vector back into Vec<f32>.
+    /// Decode an F32_BLOB byte vector back into `Vec<f32>`.
     pub fn decode(bytes: &[u8]) -> Result<Vec<f32>> {
         if !bytes.len().is_multiple_of(4) {
             return Err(DbError::ReplayCorrupt {

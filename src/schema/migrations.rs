@@ -461,6 +461,15 @@ CREATE TABLE links_v7 (
 /// work or an additive table; this one is not, and a caller upgrading a large
 /// database should expect it to take a while and to need the space.
 ///
+/// **That 2× is an estimate and is still unmeasured**, flagged here in 0.8.0
+/// when the *concepts* rung below it was measured properly
+/// ([D-125](../../docs/architecture/s13-decision-register.md)). Do not read
+/// across from that measurement: the concepts rung peaks at 1.09× the whole
+/// file precisely because `concepts` is a small share of it, and this rung
+/// rebuilds the share that is large. If anyone needs the real number,
+/// `examples/v8_migration_scale_probe.rs` is the shape to copy — it needs a v6
+/// fixture instead of a v7 one.
+///
 /// It is taken **pre-1.0 on purpose**. D-032 makes this a baseline re-issue
 /// today, which is cheap; after 1.0 the compat contract (D-036) freezes the
 /// ledger tables and the same change becomes an unmigration.
@@ -635,6 +644,32 @@ const CONCEPTS_TRIGGERS_V7: &[&str] = &[
 /// redundant; it is what makes the rung correct on a file whose rowids are not
 /// dense, and it means the migration preserves row identity rather than merely
 /// preserving row order.
+///
+/// # What it costs, measured (0.8.0, [D-125])
+///
+/// This rung rewrites a ledger table on somebody's data while holding the write
+/// lock, so the operator's two questions are how long they are down and how much
+/// free disk they need first. Both are measured rather than estimated —
+/// `cargo run --release --example v8_migration_scale_probe`, four scales up to
+/// 200k concepts / 600k links / 800k log rows (a 733 MiB file):
+///
+/// * **Time is linear at ~10–13 µs per concept**, 2.7 s at 200k. It scales with
+///   `concepts`, not with the file.
+/// * **Peak disk is 1.09× the starting file**, flat across every scale, and it
+///   **settles back to 1.00×** after a checkpoint. So the rung wants ~10%
+///   headroom transiently and keeps none of it. The intuition that a
+///   copy-and-swap needs 2× is right about the *table* and wrong about the
+///   *file*, because `concepts` is a small share of a database whose bulk is
+///   `links` and `transaction_log`.
+/// * **[`suspends_foreign_keys`]'s `PRAGMA foreign_key_check` is 13–17% of the
+///   rung**, a stable share. It is a whole-database scan, so unlike the rest of
+///   the rung it grows with `links` and the log rather than with `concepts` —
+///   on a database with an unusually large ledger relative to its concepts it
+///   will dominate.
+///
+/// The `links` rung above still carries an *estimated* 2×, which this
+/// measurement does not transfer to: that one rebuilds the big table, and the
+/// ratio that makes this rung cheap is exactly what makes that one expensive.
 async fn add_concepts_rowid_pk(conn: &libsql::Connection) -> Result<()> {
     // (a) The two indices with no reader (D-089, completed by D-118).
     conn.execute("DROP INDEX IF EXISTS idx_annotations_label", ())

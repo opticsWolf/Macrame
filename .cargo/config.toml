@@ -93,6 +93,44 @@
 # whole of that measurement -- P4-P6 touched only the binding crate, tests_py
 # and docs -- so the variable is load, not code.
 #
+# Re-measured again at 0.8.0, and THIS FILE IS THE ONLY PLACE THE RATE LIVES.
+# The figure had been copied into tests/doctrine_property_tests.rs and
+# Cargo.toml, both of which still said `~3/25` (12%) from 0.5.4 while this file
+# said 60% and ci.yml had already sized its six-attempt budget on 60%. In 0.8.0
+# the stale copy was read as the baseline, the real rate was read as a
+# regression against it, and the release was briefly reported as blocked on a
+# defect that does not exist. Both copies now point here instead.
+#
+# The measurement, because the earlier ones were too small to support what was
+# concluded from them. Binaries run directly (so RUST_TEST_THREADS must be set
+# by hand -- `[env]` does not apply outside cargo), arms INTERLEAVED round-robin
+# because load moves this number, n = 20 per arm:
+#
+#     doctrine built at v0.7.0                     9/20   45%
+#     doctrine built at 55b7844 (0.8.0)           15/20   75%   <- exp. 1
+#     doctrine built at 55b7844 (0.8.0)            9/20   45%   <- exp. 2, SAME binary
+#     doctrine at 0.8.0, v0.7.0's property set    15/20   75%
+#     integrity_property_tests (control)         4/20, 2/20
+#
+# **Read the third row before the second.** The same executable produced 75% and
+# 45% in two consecutive experiments, and the arm with a property REMOVED scored
+# above the arm with it -- impossible as a real effect. So the noise band on this
+# instrument is about 30 points at n = 20, every published comparison here at
+# n <= 20 is uninformative about arm differences, and there is no 0.8.0
+# regression: the binary built at v0.7.0 faults at the same rate as HEAD's.
+#
+# Untested candidate, recorded so it is not re-hypothesised from scratch: this
+# binary drives everything through `Builder::new_multi_thread()`, and three
+# connections per `Database::open` can overlap on different workers even with
+# libtest serialised -- which is the concurrency this file notes it could not
+# locate. A current-thread build scored 10/20 against 15/20 for multi-thread at
+# n = 20. That is inside the noise band above and settles nothing; resolving it
+# needs n in the hundreds.
+#
+# And the fault is effectively Windows-only in practice. CI run 30770381302, the
+# quarantined step: 46 s on macOS, 58 s on Ubuntu -- single attempts -- against
+# 4 m 30 s on Windows.
+#
 # It also produced a textbook demonstration of the reporting hazard. With
 # --no-fail-fast the run came back **308 passed, 0 failed** and exit 101: eight
 # tests silently absent, and nothing in the pass/fail line saying so. See

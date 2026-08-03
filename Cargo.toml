@@ -102,9 +102,13 @@ default = []
 # the R15 mitigation — the first half is `RUST_TEST_THREADS = "1"` in
 # .cargo/config.toml, which alone takes the rest of the suite to 0 bad runs in
 # 30. These do not follow it there: a property case needs its own database, and
-# `doctrine_property_tests` still faults ~3/25 serialised. A suite that fails
-# for reasons unrelated to the code under test trains people to ignore red, so
-# the residue is quarantined rather than tolerated.
+# `doctrine_property_tests` still faults often enough serialised to be unusable
+# as a gate on Windows. The rate is recorded in one place only, .cargo/config.toml
+# — this comment carried a stale `~3/25` from 0.5.4 long after that file had
+# moved on, and in 0.8.0 the gap between the two was briefly misread as a
+# regression. A suite that fails for reasons unrelated to the code under test
+# trains people to ignore red, so the residue is quarantined rather than
+# tolerated.
 #
 # Quarantined, not silenced. These are the tests that found D-035, they run as
 # their own step, and `.proptest-regressions` replays every failure ever found

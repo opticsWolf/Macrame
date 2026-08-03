@@ -60,9 +60,23 @@ const SENTINEL: &str = "9999-12-31T23:59:59.999999Z";
 /// 0/6 for the same 200 inside one runtime — hence the shared runtime here.
 ///
 /// Serialising libtest (`RUST_TEST_THREADS = "1"`, .cargo/config.toml) takes
-/// the rest of the suite to 0/30. It does not save this binary, which still
-/// faults ~3/25, because every generated case needs a database of its own —
-/// which is why the whole binary sits behind the `property-tests` feature.
+/// the rest of the suite to 0/30. It does not save this binary, because every
+/// generated case needs a database of its own — which is why the whole binary
+/// sits behind the `property-tests` feature.
+///
+/// **This binary faults at roughly 50% per run on Windows, and that is the
+/// expected rate, not a regression.** Do not put a number here: the rate lives
+/// in `.cargo/config.toml` and the retry budget calibrated on it lives in
+/// `ci.yml`, and this comment carried a stale `~3/25` from 0.5.4 for three
+/// releases after both of those had moved to ~60%. In 0.8.0 that stale figure
+/// was read as a *baseline*, the measured rate was read as a regression against
+/// it, and a release was briefly reported as blocked on a defect that did not
+/// exist. A number duplicated into a third place is a number that will disagree
+/// with the other two.
+///
+/// R15 is also effectively Windows-only in practice: on CI run 30770381302 the
+/// quarantined step took 46 s on macOS and 58 s on Ubuntu — single attempts —
+/// against 4 m 30 s on Windows.
 ///
 /// An application holds one runtime and one database for its lifetime and is
 /// not exposed. A property-test harness is the only thing that churns either,
@@ -687,13 +701,21 @@ proptest! {
     // the headroom is there, and this property was written at 16 without doing
     // so.
     //
-    // Running this binary alone, 8 runs each: **6/8 faults with this property at
-    // 16 cases, 5/8 with it skipped entirely**, against 1/8 for
-    // `integrity_property_tests` on the same machine in the same session. So
-    // this property is worth about one run in eight and is *not* what put the
-    // binary where it is — see the note in the delivery record. Eight cases is
-    // the conservative reading of a measurement that did not exonerate the
-    // count so much as find a larger problem behind it.
+    // Eight is retained on a re-measurement that overturned the reasoning
+    // originally recorded here. That reasoning was "6/8 faults with this
+    // property at 16 cases, 5/8 with it skipped", read as this property costing
+    // about one run in eight. **Eight runs cannot support a comparison that
+    // fine.** Re-measured at n = 20 per arm with the arms interleaved, this
+    // binary produced 75% and then 45% on two consecutive runs of the *same
+    // executable*, and an arm with this property removed scored *above* the arm
+    // with it — which is impossible as a real effect and is what the noise band
+    // looks like. Resolving a difference this size needs n in the hundreds.
+    //
+    // So the count stays at 8 because nothing argues for raising it, not
+    // because 16 was measured to be worse. The claim that survives is the
+    // negative one, and it is now better supported than it was: this property
+    // is not what puts the binary where it is, because the binary built at
+    // v0.7.0 — which does not contain it — faults at the same rate.
     #![proptest_config(ProptestConfig { cases: 8, ..ProptestConfig::default() })]
 
     /// **Below the log floor, the answer is empty — for every `t`, after every

@@ -27,8 +27,9 @@
 //! node final. The schema does not enforce it (`weight REAL NOT NULL`, no
 //! CHECK), so a negative weight is storable today and would yield a silently
 //! wrong shortest path. Both functions therefore bound their own work and
-//! [`Subgraph::load`] refuses to build a graph containing one, so the failure is
-//! loud at the boundary rather than quiet in the result.
+//! [`Database::load_subgraph`](crate::Database::load_subgraph) refuses to build
+//! a graph containing one, so the failure is loud at the boundary rather than
+//! quiet in the result.
 
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque};

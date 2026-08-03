@@ -24,8 +24,9 @@ const NO_EDGES: &[EdgeRef] = &[];
 /// # Closure
 ///
 /// **Every id appearing in `out_adj` or `in_adj` — as a key or as an
-/// [`EdgeRef::node`] — is a key of `nodes`.** [`Subgraph::drop_dangling_adjacency`]
-/// establishes it and [`Subgraph::is_closed`] checks it; every algorithm in
+/// [`EdgeRef::node`] — is a key of `nodes`.** `drop_dangling_adjacency` — private,
+/// and named here because it is the sole establisher — establishes it and
+/// [`Subgraph::is_closed`] checks it; every algorithm in
 /// [`super::algorithms`] is written assuming it and none of them re-checks.
 ///
 /// It did not hold before Wave 1 (defect Z), and the way it failed is the reason
@@ -631,7 +632,8 @@ impl Database {
     /// [`Self::load_subgraph_with`] for the filtered form, which this delegates
     /// to.
     ///
-    /// `min_weight` is `NEG_INFINITY` rather than [`TraversalBuilder`]'s default
+    /// `min_weight` is `NEG_INFINITY` rather than
+    /// [`TraversalBuilder`](super::TraversalBuilder)'s default
     /// of `0.0`, and the difference is load-bearing. A floor of `0.0` silently
     /// drops negative-weight edges — which is precisely the input
     /// [`DbError::NegativeEdgeWeight`] exists to *report*, since Dijkstra and A*
@@ -661,7 +663,8 @@ impl Database {
         .await
     }
 
-    /// Load the topology a [`TraversalBuilder`] describes, as a [`Subgraph`]
+    /// Load the topology a [`TraversalBuilder`](super::TraversalBuilder)
+    /// describes, as a [`Subgraph`]
     /// (§5.4, D-073).
     ///
     /// `load_subgraph` took neither `edge_types` nor `min_weight` while
@@ -691,7 +694,8 @@ impl Database {
     ///
     /// # `min_weight` and the negative-weight guard
     ///
-    /// [`TraversalBuilder`] defaults `min_weight` to `0.0`, so a **default
+    /// [`TraversalBuilder`](super::TraversalBuilder) defaults `min_weight` to
+    /// `0.0`, so a **default
     /// builder passed here filters negative-weight edges out** rather than
     /// letting them reach [`DbError::NegativeEdgeWeight`]. That is a real
     /// difference from [`Self::load_subgraph`], which passes `NEG_INFINITY`.

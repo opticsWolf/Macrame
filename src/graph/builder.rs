@@ -129,8 +129,9 @@ impl TraversalBuilder {
     /// at first run.
     ///
     /// So: with `as_of` set and no [`Self::attribute_mode`] call,
-    /// [`Self::execute`] returns [`DbError::AttributeModeUnstated`] rather than
-    /// guessing. Both answers stay available and neither is silent:
+    /// [`Self::execute`] returns
+    /// [`DbError::AttributeModeUnstated`](crate::DbError::AttributeModeUnstated)
+    /// rather than guessing. Both answers stay available and neither is silent:
     ///
     /// ```no_run
     /// # use macrame::graph::{AttributeMode, TraversalBuilder};
@@ -271,7 +272,8 @@ WITH RECURSIVE walk(node_id, depth) AS (
     /// Node ids reachable under this traversal, in id order (§5.2).
     ///
     /// Reads at [`Self::as_of`] when set, else at `now_ts`. No attribute mode is
-    /// involved, so this never returns [`DbError::AttributeModeUnstated`]:
+    /// involved, so this never returns
+    /// [`DbError::AttributeModeUnstated`](crate::DbError::AttributeModeUnstated):
     /// topology at an instant is unambiguous, and it is only the *pairing* with
     /// live attributes that needed a decision.
     pub async fn execute_ids(
@@ -317,9 +319,10 @@ WITH RECURSIVE walk(node_id, depth) AS (
     ///
     /// # Errors
     ///
-    /// [`DbError::AttributeModeUnstated`] when [`Self::as_of`] is set and
-    /// [`Self::attribute_mode`] is not — see `as_of` for why that combination is
-    /// a question rather than a default (T3.2, D-085).
+    /// [`DbError::AttributeModeUnstated`](crate::DbError::AttributeModeUnstated)
+    /// when [`Self::as_of`] is set and [`Self::attribute_mode`] is not — see
+    /// `as_of` for why that combination is a question rather than a default
+    /// (T3.2, D-085).
     ///
     /// `now_ts` is the caller's present. A traversal with `as_of` set reads
     /// topology at that instant instead; `now_ts` is still what an
