@@ -1,6 +1,6 @@
 # Macrame — Architecture Quick Reference
 
-**v0.7.0 · A Bitemporal Graph Ledger on libSQL**
+**v0.9.0 · A Bitemporal Graph Ledger on libSQL**
 
 ---
 
@@ -169,6 +169,8 @@ Every temporal column is exactly 27 characters: `YYYY-MM-DDTHH:MM:SS.ffffffZ`
 | v6 | Overlapping closed intervals refused in actor |
 | v7 | `CHECK (weight >= 0.0 AND weight < 9e999 AND typeof(weight) = 'real')` |
 | v8 | `concepts.rowid_pk INTEGER PRIMARY KEY` + `id TEXT NOT NULL UNIQUE`; `concepts_fts` re-keyed to `content_rowid='rowid_pk'`; `trg_concepts_fts_delete` installed **inert**; `idx_annotations_label` and `idx_lc_tgt_active` dropped. Sets `suspends_foreign_keys` — the only rung that does (D-117, D-118, D-119) |
+| v9 | `trg_concepts_guard_delete` becomes conditional on the archive-session marker, which is what lets a concept leave the hot table at all — and makes v8's inert FTS delete trigger fire. Trigger-only; no table touched (D-129) |
+| v10 | `trg_concepts_log_insert` becomes conditional on the same marker, so a rehydration mints no transaction-time facts. Trigger-only. Required because the fold resolves by `seq_id`, not `recorded_at` (D-131) |
 
 ---
 
@@ -689,19 +691,23 @@ pub fn estimated_bulk_hold(edges: &[EdgeAssertion]) -> Duration  // ~34 ms / 500
 
 | Operation | Budget | Measured | Notes |
 |---|---|---|---|
-| Single assertion | ≤ 5 ms | — | Empty db; degrades on high-degree nodes without index |
+| Single assertion | ≤ 5 ms | 258 µs | **Not met at high out-degree** (D-059): the single-open guard scans the source's whole out-degree, so it is O(degree), not O(1) |
 | Chunk commit, edges 90 rows | ≤ 3 ms | ~2.39 ms | Fully amplified (triggers included) |
 | Chunk commit, concepts 70 rows | ≤ 3 ms | ~2.35 ms | |
 | Chunk commit, annotations 600 rows | ≤ 3 ms | ~2.36 ms | |
 | Chunk commit, embeddings 30 rows | ≤ 3 ms | ~2.06 ms | |
-| Three-hop traversal | ≤ 10 ms | 2.1 ms | On `star_of_stars` fixture |
+| Three-hop traversal | ≤ 10 ms | 1.66 ms | On `star_of_stars` fixture |
 | `audit_current` | ≤ 200 ms | 13.8 ms | |
-| Vector top-10 | ≤ 20 ms | 294 µs | |
-| Hybrid top-10 | ≤ 50 ms | 2.0 ms | |
-| Full fold (reconstruct) | ≤ 100 ms | 21 ms | |
-| Composition | ≤ 100 ms | 3.4 ms | Snapshot + delta fold |
+| Vector top-10 | ≤ 20 ms | 246 µs | |
+| Hybrid top-10 | ≤ 50 ms | 1.77 ms | |
+| Full fold (reconstruct) | ≤ 100 ms | 16.9 ms | |
+| Composition | ≤ 100 ms | 2.18 ms | Snapshot + delta fold |
 | Archive (100K closed intervals) | ≤ 30 s | ~26.8 ms for 2K | One session; windowed trades total for latency |
+| Rehydrate, 1 concept | ≤ 5 ms | 3.71 ms | ATTACH + one `BEGIN IMMEDIATE` + commit (D-132) |
+| Rehydrate, per concept after the first | ≤ 300 µs | ~74 µs | The rate the archive row above implies, applied in reverse. **Linear to n=1,000 only** — 114 µs at n=10,000, and FTS5 index maintenance is why |
 | Rebuild (10M edges) | ~50 s | — | Chunked: 7.6× less hold, 2.3× cheaper total |
+
+**Re-measured at 0.8.0 (D-127) and extended at 0.9.0 (D-132); this table carried the 0.7.0 figures until 2026-08-07.** The read-path rows above moved 12–36% faster when three 0.8.0 items changed how a `Subgraph` is represented and what a load carries, and two controls say that is the code rather than the machine — D-090's fixed `control/select_1` unchanged, and an untouched chunk-commit path unchanged.
 
 **Measurement caveat**: Absolute timings are hardware-dependent. All budgets measured on named reference hardware. Criterion baselines detect regression; machine against itself. **Budgets are measured, not CI gates** (D-055): absolute durations on arbitrary hardware are the wrong shape for a CI check — regression detection compares a machine against itself.
 
@@ -764,7 +770,7 @@ pub fn estimated_bulk_hold(edges: &[EdgeAssertion]) -> Duration  // ~34 ms / 500
 | **`OverlappingInterval` boxed (168 bytes)** | D-075 | Only variant that is boxed; keeps `DbError` under `clippy::result_large_err` threshold |
 | **NaN is not a schema gap** | D-078 | `weight REAL NOT NULL` rejects NaN; listing it as a gap claimed the schema was silent where it is strict |
 | **`weight >= 0.0` via `CHECK`** | D-083 | Schema v7 closes the third §4.7 invariant; negative and text weights refused at engine level |
-| **Deferred: `rowid_pk` (D-084)** | D-084 | Deferred to erasure release — triggers on concept archival, which is itself deferred |
+| ~~**Deferred: `rowid_pk` (D-084)**~~ | D-084 → **D-119** | **Both halves landed.** `rowid_pk` shipped on the `v7 → v8` rung in 0.8.0, *ahead* of its stated trigger, because D-036 forbids a primary-key change after 1.0; concept archival — the trigger — shipped in 0.9.0 (D-128…D-132) |
 | **Deferred: `Subgraph` interning (D-087)** | D-087 | Deferred to 0.7.0 — cost/benefit assessed post-baseline, `hydrate`'s N+1 buries it |
 
 ---
@@ -799,7 +805,7 @@ A synchronous Python binding built on pyo3 0.29 and maturin, delivered as a whee
 |---|---|---|
 | ~~**`rowid_pk` on `concepts`**~~ | D-084 → **D-119** | **Delivered in 0.8.0**, ahead of its trigger: D-036 forbids a primary-key change after 1.0, so waiting for the release that needed it would have waited past the last release allowed to make it |
 | ~~**`Subgraph` key interning**~~ | D-087 → **D-115** | **Delivered in 0.8.0** — 24-byte `EdgeRef` against a per-graph pool, measured 5.8×–6.8× rather than the projected 7.1×–9.5× |
-| **Concept archival** | D-022, Appendix C | Deferred — rehydration cost and identity semantics need their own decision |
+| ~~**Concept archival**~~ | D-022 → **D-128**…**D-132** | **Delivered in 0.9.0, and both stated triggers were answered rather than waived.** *Identity semantics*: rehydration is a physical move back, so a concept reacquires its old identity — derived from Doctrine III, not chosen, and it needed schema v10 because the fold resolves by `seq_id`. *Rehydration cost*: 3.71 ms fixed, ~74 µs per concept, linear to n=1,000 (D-132) |
 | **Automatic writer restart** | D-015, Appendix C | Deferred — containment errors support it; operational experience will decide |
 | **Crate-level write cancellation** | D-028, Appendix C | Deferred — application-layer `CancellationToken` checked before `send` |
 | **Graph-neural-network features** | Appendix C | Deferred — belongs to the application layer, not the ledger |
@@ -810,4 +816,4 @@ A synchronous Python binding built on pyo3 0.29 and maturin, delivered as a whee
 
 ---
 
-*Last updated: 2026-07-31 · v0.7.0 · Synced against architecture (s4–s14, appendices A–C) · Pinned by `tests/doc_sync_tests.rs`*
+*Last updated: 2026-08-07 · v0.9.0 · Synced against architecture (s4–s14, appendices A–C) · Pinned by `tests/doc_sync_tests.rs`*

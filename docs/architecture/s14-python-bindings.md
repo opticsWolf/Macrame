@@ -341,10 +341,11 @@ re-running until green is how a flaky assertion becomes permanent.
 <a id="148-testing"></a>
 ### 14.8 Testing topology
 
-**The Python suite tests the binding, not the ledger.** The ledger has **26 Rust test
-binaries and 296 tests** by default, and 30 / 325 with `--all-features` — the four
-quarantined property binaries of [R15](s11-s12-milestones-and-risks.md#12-risks)
-make up the difference. Re-asserting bitemporal semantics through Python would be a
+**The Python suite tests the binding, not the ledger.** The ledger has **27 Rust test
+binaries and 330 tests** by default, 339 with `metrics`, and **362 with `--all-features`**
+(measured 2026-08-07) — the difference being one `metrics` binary and the **three**
+quarantined property binaries of [R15](s11-s12-milestones-and-risks.md#12-risks),
+which carry 7 + 9 + 7 = 23 tests between them and are run as their own step. Re-asserting bitemporal semantics through Python would be a
 second, weaker copy free to drift. What is genuinely new at this boundary, and therefore what is
 covered:
 

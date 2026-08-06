@@ -122,9 +122,11 @@ Every design decision derives from these invariants:
 | v5 | Overlap guard index |
 | v6 | Overlapping closed intervals refused in actor |
 | v7 | `CHECK (weight >= 0.0)` on `links.weight` |
-| v8 | `concepts.rowid_pk`, the third FTS trigger, and the two unread indices dropped — **current** |
+| v8 | `concepts.rowid_pk`, the third FTS trigger, and the two unread indices dropped |
+| v9 | `trg_concepts_guard_delete` becomes conditional on an archive session, so concepts can be archived (D-129) |
+| v10 | `trg_concepts_log_insert` becomes conditional on the same marker, so rehydration mints no transaction-time facts (D-131) — **current** |
 
-v8 is the last rung before the 1.0 freeze that could take it: `rowid_pk INTEGER PRIMARY KEY` costs `id` the primary key, and D-036 forbids a primary-key change after 1.0 (D-119). It also drops `idx_annotations_label` and `idx_lc_tgt_active`, which shipped in the v7 baseline with no query that seeks on them — measured at −7.9% off `assert_edge` (D-089, D-118).
+v8 is the last rung that could change a *primary key* before the 1.0 freeze: `rowid_pk INTEGER PRIMARY KEY` costs `id` the primary key, and D-036 forbids a primary-key change after 1.0 (D-119). It also drops `idx_annotations_label` and `idx_lc_tgt_active`, which shipped in the v7 baseline with no query that seeks on them — measured at −7.9% off `assert_edge` (D-089, D-118).
 
 ---
 
@@ -137,7 +139,7 @@ v8 is the last rung before the 1.0 freeze that could take it: `rowid_pk INTEGER 
 | Runtime | tokio async, single process |
 | Engine | libSQL 0.9.30 (MIT, unmodified) |
 | Schema version | 10 |
-| Test suite | 330 Rust · 339 with `metrics` · +7 `property-tests` (**run as its own step** — see below) · 353 Python — all green (measured 2026-08-07) |
+| Test suite | 330 Rust · 339 with `metrics` · 362 with `--all-features` · 353 Python — all green (measured 2026-08-07). The three `property-tests` binaries (23 tests) are **run as their own step** — see below |
 | Dependencies | tokio, serde, bincode, zstd, thiserror, tracing, ulid |
 
 ### Module Map
@@ -233,7 +235,7 @@ criterion baselines, machine against itself. See [§9 of the architecture docs](
 ## Documentation
 
 - [Architecture specification](docs/architecture/README.md) — normative surfaces: §4 (schema) and Appendix A (API)
-- [Architecture Quick Reference](docs/quickref.md) — v0.8.0 reference: API, schema, decisions, performance
+- [Architecture Quick Reference](docs/quickref.md) — v0.9.0 reference: API, schema, decisions, performance
 - [Python bindings](docs/architecture/s14-python-bindings.md) — §14: async→sync boundary, error tree, stubs
 - [Decision register](docs/architecture/s13-decision-register.md) — D-001…D-109 with rationale
 

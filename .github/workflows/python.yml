@@ -1,7 +1,7 @@
 name: Python
 
 # The Python side of the project: the binding crate compiles, the extension
-# builds and installs the way a user installs it, and the 344-test suite passes
+# builds and installs the way a user installs it, and the 353-test suite passes
 # on every platform this repository claims to support.
 #
 # ## Why this does not call `ci.yml` first
