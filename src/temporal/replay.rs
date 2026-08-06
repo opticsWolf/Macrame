@@ -246,15 +246,34 @@ pub async fn reconstruct(
         HotLogReach::NeedsArchive => {}
     }
 
-    // The delta lives in the cold archive database.
-    let archive = archive_path.ok_or_else(|| DbError::ReplayCorrupt {
-        seq: 0,
-        reason: format!("state at {ts} predates the hot log and no archive path was given"),
-    })?;
+    // The delta lives in the cold archive database. Both ways of failing to
+    // reach it carry `archive_hint`, which is the message the rejected hot-side
+    // marker was wanted for — see that function for why no marker is needed.
+    //
+    // **Computed inside the error arms, not before them.** `NeedsArchive` is the
+    // ordinary path to a cold fold and usually succeeds; an eager hint would put
+    // an extra query on it for a string almost every caller discards. An
+    // injection probe caught this — `a_failed_cold_reconstruct_still_detaches`
+    // reached the hint on a run that raised nothing from here.
+    let archive = match archive_path {
+        Some(p) => p,
+        None => {
+            return Err(DbError::ReplayCorrupt {
+                seq: 0,
+                reason: format!(
+                    "state at {ts} predates the hot log and no archive path was given; {}",
+                    archive_hint(conn).await
+                ),
+            })
+        }
+    };
     if !archive.exists() {
         return Err(DbError::ReplayCorrupt {
             seq: 0,
-            reason: format!("archive database file {archive:?} does not exist"),
+            reason: format!(
+                "archive database file {archive:?} does not exist; {}",
+                archive_hint(conn).await
+            ),
         });
     }
 
@@ -607,6 +626,90 @@ async fn hot_log_reach(
             HotLogReach::NeedsArchive
         }),
     }
+}
+
+/// What the caller needs to know when the cold delta cannot be reached —
+/// **assembled from the hot file alone** (0.9.0, C4).
+///
+/// # This is the message the hot-side marker was wanted for
+///
+/// [D-121](../../docs/architecture/s13-decision-register.md) rejected a hot-side
+/// marker recording *archived at* and *horizon*, then left the door open: 0.9.0
+/// was to adopt it "only if it wants the richer message". C4 asked for the
+/// message and found the marker cannot supply it, because the proposed message —
+/// *"this database was archived on X; pass the archive path"* — is **weaker**
+/// than what the hot log already carries:
+///
+/// * *how many rows went* is `MAX(seq_id) - COUNT(*)`, exact for the reason
+///   [`hot_log_is_intact`] gives;
+/// * *how far back the hot file still reaches* is `MIN(seq_id)` and its
+///   `recorded_at` — which is the fact that actually tells a caller whether the
+///   archive is worth fetching, and which a marker's archive **timestamp** does
+///   not give them;
+/// * *that archiving happened at all* is the one bit [`hot_log_is_intact`]
+///   already answers.
+///
+/// The only datum a marker would add is the wall-clock instant of the last
+/// archive run, and no branch and no caller needs it. So the marker is refused
+/// outright rather than deferred again: under
+/// [D-036](../../docs/architecture/s13-decision-register.md) a hot-table addition
+/// lands pre-1.0 or not at all, and a table whose whole content is a timestamp
+/// used in one error string is not worth a rung.
+///
+/// # There is no "nothing was archived" case, and that was settled by injection
+///
+/// This first carried a branch for `removed == 0`, on the reasoning that the
+/// `NeedsArchive` arm is reachable without any archiving. That reasoning was
+/// **wrong about where the cost lands and right about the branch**, and only a
+/// probe told the two apart: replacing the branch body with a panic showed it
+/// firing from `a_failed_cold_reconstruct_still_detaches`, a test that raises
+/// nothing from here — because the hint was being computed *before* the two
+/// arms that use it, on every cold fold. Made lazy, the probe went quiet across
+/// all 27 targets.
+///
+/// So the branch was dead at the use sites: both arms require
+/// [`hot_log_is_intact`] to have returned false, or an archive file to have
+/// existed when `hot_log_reach` looked and to have gone by the time this did.
+/// Rows really were removed in every case that gets here, and the message may
+/// say so without qualification. Deleted rather than kept as a defensive
+/// fallback, for the reason `delete_guarded` records about
+/// `classify_archive_violation`: unreachable code that looks reasonable is
+/// harder to remove later than now.
+///
+/// Best-effort by construction: this runs on the error path, where a second
+/// failure must not replace the diagnosis with its own. A query that does not
+/// answer yields a hint that says so, and the caller still gets the error it came
+/// for.
+async fn archive_hint(conn: &libsql::Connection) -> String {
+    // `COUNT(*)` always returns a row, so `None` here means the query itself
+    // failed and there is nothing to say beyond that.
+    let row = match conn
+        .query(
+            "SELECT COUNT(*), MIN(seq_id), MAX(seq_id), MIN(recorded_at) FROM transaction_log",
+            (),
+        )
+        .await
+    {
+        Ok(mut rows) => rows.next().await.ok().flatten(),
+        Err(_) => None,
+    };
+
+    let Some(row) = row else {
+        return "the hot log could not be inspected for an archive horizon".into();
+    };
+    let count: i64 = row.get(0).unwrap_or(0);
+    if count == 0 {
+        return "the hot log is empty".into();
+    }
+    let min: i64 = row.get(1).unwrap_or(0);
+    let max: i64 = row.get(2).unwrap_or(0);
+    let floor: String = row.get(3).unwrap_or_default();
+    let removed = max - count;
+
+    format!(
+        "{removed} log rows have been archived out of this database; the hot log \
+         now begins at seq_id {min} ({floor})"
+    )
 }
 
 /// Was any row ever removed from `transaction_log`? — answered exactly, from

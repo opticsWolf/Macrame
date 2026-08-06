@@ -56,6 +56,11 @@ use macrame::temporal::{hydrate_attributes, reconstruct, save_snapshot};
 
 const TS: &str = "2026-01-01T00:00:00.000000Z";
 const OPEN: &str = "9999-12-31T23:59:59.999999Z";
+/// A closed valid interval, well before [`FUTURE`].
+const CLOSED: &str = "2026-06-01T00:00:00.000000Z";
+/// An archive cutoff past every timestamp any fixture here writes — including
+/// `recorded_at`, which is crate-stamped at write and so is always *now*.
+const FUTURE: &str = "2099-01-01T00:00:00.000000Z";
 
 fn scale() -> usize {
     std::env::var("MACRAME_BENCH_SCALE")
@@ -1192,6 +1197,183 @@ fn archive_cost(c: &mut Criterion) {
     group.finish();
 }
 
+/// A concept that [`macrame::temporal::archivable_concepts`] will admit: retired,
+/// its valid interval closed before the cutoff, and — the clause that does the
+/// real work here — named by no edge in `links` (C1, D-128).
+///
+/// The `r` prefix keeps these disjoint from `concept()`'s `c` ids, so a fixture
+/// can carry a seeded graph *and* a set of archivable concepts without the graph
+/// accidentally making one of them reachable.
+fn detached_concept(i: usize) -> ConceptUpsert {
+    ConceptUpsert::new(format!("r{i:07}"), format!("Detached {i}"))
+        .content(format!("body text for detached concept number {i}"))
+        .valid_from(TS)
+        .valid_to(CLOSED)
+        .retired(true)
+}
+
+async fn seed_detached_concepts(db: &Database, n: usize) {
+    for chunk in (0..n).collect::<Vec<_>>().chunks(2_000) {
+        db.write_concepts(chunk.iter().map(|i| detached_concept(*i)).collect())
+            .await
+            .unwrap();
+    }
+}
+
+fn detached_ids(n: usize) -> Vec<String> {
+    (0..n).map(|i| format!("r{i:07}")).collect()
+}
+
+/// Build a fixture holding `n` cold concepts, ready to be rehydrated.
+async fn archived(n: usize, shape: Option<fixtures::Shape>, nodes: usize) -> Fixture {
+    let fx = fixture().await;
+    if let Some(shape) = shape {
+        fixtures::seed(&fx.db, shape, nodes).await;
+    }
+    seed_detached_concepts(&fx.db, n).await;
+    let report = fx.db.archive(FUTURE).await.unwrap();
+    assert_eq!(
+        report.concepts_archived, n,
+        "the fixture did not archive every detached concept, so the rehydration \
+         below would measure a shorter list than it names"
+    );
+    fx
+}
+
+async fn rehydrate_all(fx: &Fixture, n: usize) {
+    let ids = detached_ids(n);
+    let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+    let report = fx.db.rehydrate(&refs).await.unwrap();
+    assert_eq!(
+        report.concepts_rehydrated, n,
+        "the rehydration moved fewer concepts than the fixture archived"
+    );
+}
+
+/// `rehydrate()` — the cost Appendix C named as one of the two reasons archival
+/// was deferred, and which C3 shipped without a number (C4).
+///
+/// **Swept over `n` rather than measured once**, for [D-058](../docs/architecture/s13-decision-register.md)'s
+/// reason: `archive()` is set-based and pays one statement per table however much
+/// it moves, while `rehydrate()` is a **per-id loop** — a `SELECT` from `cold`, a
+/// rowid-collision `COUNT`, an `INSERT` and a `DELETE` for every concept named.
+/// A single figure at one `n` cannot tell a fixed transaction cost from a
+/// per-concept one, and it is the per-concept slope that decides whether a large
+/// rehydration needs the windowing `archive_windowed` has.
+fn rehydrate_cost(c: &mut Criterion) {
+    let rt = runtime();
+
+    let mut group = controlled_group(c, "rehydrate");
+    group.sample_size(10);
+
+    for n in [1usize, 10, 100, 1_000, 10_000] {
+        let n = n * scale();
+        group.bench_with_input(BenchmarkId::new("rehydrate", n), &n, |b, &n| {
+            b.iter_batched(
+                || rt.block_on(archived(n, None, 0)),
+                |fx| rt.block_on(rehydrate_all(&fx, n)),
+                BatchSize::PerIteration,
+            )
+        });
+    }
+
+    // **The trigger-free control, and the reason it is here.** The sweep above
+    // is linear to n=1,000 and departs above it, and the only unsuppressed
+    // trigger on a rehydration insert is `trg_concepts_fts_insert` — the log
+    // trigger is marker-gated (v10, D-131) and there is nothing else. Dropping
+    // it isolates FTS5 index maintenance from the row movement, which is exactly
+    // how D-056 established that triggers were ~92% of the chunk-commit cost.
+    // Attributing the departure without this arm would be a guess with a number
+    // next to it.
+    //
+    // Two points, not one: whether the *departure* is the triggers is a question
+    // about the trigger-free path's own slope, and a single trigger-free figure
+    // answers how much they cost without answering that.
+    for n in [1_000usize, 10_000] {
+        let n = n * scale();
+        group.bench_with_input(BenchmarkId::new("rehydrate_no_fts", n), &n, |b, &n| {
+            b.iter_batched(
+                || {
+                    rt.block_on(async {
+                        let fx = archived(n, None, 0).await;
+                        fx.db
+                            .raw()
+                            .connect()
+                            .unwrap()
+                            .execute("DROP TRIGGER trg_concepts_fts_insert", ())
+                            .await
+                            .unwrap();
+                        fx
+                    })
+                },
+                |fx| rt.block_on(rehydrate_all(&fx, n)),
+                BatchSize::PerIteration,
+            )
+        });
+    }
+
+    // **The other half of the round trip, on the identical fixture and in the
+    // same session.** `control/select_1` normalises against the machine; this
+    // normalises against the *operation*. Rehydration's absolute number means
+    // little without it, because "80 µs per concept" is only expensive or cheap
+    // relative to what moving the same concept the other way costs — and the two
+    // directions are written differently on purpose: one `INSERT … SELECT` per
+    // table going out, a loop going back.
+    let n = 1_000 * scale();
+    group.bench_with_input(BenchmarkId::new("archive_detached", n), &n, |b, &n| {
+        b.iter_batched(
+            || {
+                rt.block_on(async {
+                    let fx = fixture().await;
+                    seed_detached_concepts(&fx.db, n).await;
+                    fx
+                })
+            },
+            |fx| {
+                let report = rt.block_on(fx.db.archive(FUTURE)).unwrap();
+                assert_eq!(report.concepts_archived, n);
+            },
+            BatchSize::PerIteration,
+        )
+    });
+
+    group.finish();
+}
+
+/// The same rehydration on all four shapes, at a fixed count (C4, T4.1).
+///
+/// **The expected answer is "no difference", and that is why it is measured.**
+/// An archivable concept is one no edge names ([D-128](../docs/architecture/s13-decision-register.md)),
+/// so the graph's topology cannot reach the rows being moved — the matrix's usual
+/// axis is severed by the predicate itself. What the surrounding graph *can*
+/// still do is make the hot `concepts` table larger, which is the one channel by
+/// which shape could move this number. Asserting the independence would be
+/// [D-088](../docs/architecture/s13-decision-register.md)'s error in reverse: a
+/// figure from one shape presented as a property of the operation. This measures
+/// it instead.
+fn rehydrate_matrix(c: &mut Criterion) {
+    use fixtures::ALL_SHAPES;
+
+    let rt = runtime();
+    let nodes = 600 * scale();
+    let n = 100 * scale();
+
+    let mut group = controlled_group(c, "rehydrate_matrix");
+    group.sample_size(10);
+
+    for &shape in ALL_SHAPES {
+        group.bench_with_input(BenchmarkId::new("rehydrate_100", shape.name()), &n, |b, &n| {
+            b.iter_batched(
+                || rt.block_on(archived(n, Some(shape), nodes)),
+                |fx| rt.block_on(rehydrate_all(&fx, n)),
+                BatchSize::PerIteration,
+            )
+        });
+    }
+
+    group.finish();
+}
+
 /// **AF: `corpus_size` runs `COUNT(*)` over the whole model table per query.**
 ///
 /// D-007's argument is that strategy choice should be arithmetic rather than a
@@ -1418,6 +1600,9 @@ criterion_group!(
     hydrate_scaling,
     overlap_guard,
     archive_cost,
+    // C4.
+    rehydrate_cost,
+    rehydrate_matrix,
     filtered_vector,
     chunk_index_cost,
     // T4.1.

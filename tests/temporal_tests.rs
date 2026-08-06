@@ -829,3 +829,173 @@ async fn a_failed_archive_session_leaves_the_hot_database_untouched_and_the_guar
         );
     }
 }
+
+/// **The unreachable-archive error carries what the hot-side marker was wanted
+/// for** (C4).
+///
+/// [D-121] refused a hot-side marker recording *archived at* and *horizon*, and
+/// left 0.9.0 to adopt it "only if it wants the richer message". This is the
+/// richer message, built from the hot log alone — so the marker is refused
+/// outright rather than deferred a second time.
+///
+/// **The numbers are cross-checked against `ArchiveReport`, not merely present.**
+/// A hint that always said "0 log rows have been archived" would satisfy any test
+/// that only looked for the sentence, and its failure mode is *always says
+/// something reassuring* — the shape [D-030]'s always-zero audit and §8's
+/// conjunction rule both exist to catch. So the count in the message must equal
+/// what the archive reported moving, and the horizon must equal the horizon the
+/// archive recorded. Those are two independent computations of the same fact:
+/// the archive counted rows as it moved them, and the message derives the count
+/// from `MAX(seq_id) - COUNT(*)` on what survived.
+#[tokio::test]
+async fn the_unreachable_archive_error_says_how_much_went_and_how_far_back_the_log_reaches() {
+    use macrame::prelude::*;
+
+    let harness = TestHarness::new();
+    let db = macrame::Database::open(&harness.db_path).await.unwrap();
+
+    for title in ["first", "second", "third", "fourth"] {
+        db.upsert_concept(ConceptUpsert::new("c1", title).valid_from(CTS))
+            .await
+            .unwrap();
+    }
+    let report = db.archive("2030-01-01T00:00:00.000000Z").await.unwrap();
+    assert!(
+        report.log_entries_archived >= 2,
+        "the fixture needs log rows to have actually moved: {report:?}"
+    );
+    let horizon = report.horizon.expect("an archive that moved rows has a horizon");
+    db.close().await.unwrap();
+
+    let archive_path = std::fs::read_dir(harness.temp_dir.path())
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| p.to_string_lossy().contains("archive"))
+        .expect("archive() must have created a cold file");
+    std::fs::remove_file(&archive_path).unwrap();
+
+    let conn = libsql::Builder::new_local(&harness.db_path)
+        .build()
+        .await
+        .unwrap()
+        .connect()
+        .unwrap();
+    migrations::run(&conn).await.unwrap();
+
+    let res = reconstruct(
+        &conn,
+        "2020-01-01T00:00:00.000000Z",
+        Some(&archive_path),
+        None,
+    )
+    .await;
+
+    let Err(DbError::ReplayCorrupt { reason, .. }) = res else {
+        panic!("expected ReplayCorrupt for a missing archive, got {res:?}");
+    };
+
+    assert!(
+        reason.contains(&format!("{} log rows have been archived", report.log_entries_archived)),
+        "the hint's count disagrees with what the archive reported moving \
+         ({}): {reason}",
+        report.log_entries_archived
+    );
+    assert!(
+        reason.contains(&format!("begins at seq_id {horizon}")),
+        "the hint should name the horizon the archive recorded ({horizon}): {reason}"
+    );
+}
+
+/// **Rehydration does not change what the hint says, and that is the fact a
+/// hot-side marker would have had to get right too** (C4).
+///
+/// The question that decides whether an archive record can be trusted after a
+/// round trip is whether rehydration invalidates it. It does not, and the reason
+/// is structural rather than lucky: rehydration moves **concept rows** and never
+/// log rows ([D-131]), so `MAX(seq_id) - COUNT(*)` and `MIN(seq_id)` are
+/// untouched by it. A marker recording *archived at* and *horizon* would have
+/// stayed accurate for the same reason — which is precisely why it earns no
+/// rung: it would be paying a schema change for a fact the log already keeps
+/// correct for free.
+///
+/// Asserted against the *same* fixture before and after the round trip, so a
+/// hint that had quietly become a constant would still have to match a number
+/// derived from `ArchiveReport`.
+#[tokio::test]
+async fn a_rehydration_leaves_the_archive_hint_saying_exactly_what_it_said_before() {
+    use macrame::prelude::*;
+
+    let harness = TestHarness::new();
+    let db = macrame::Database::open(&harness.db_path).await.unwrap();
+
+    // An archivable concept: retired, its valid interval closed before the
+    // cutoff, and named by no edge (D-128). Superseded first, so the log has
+    // rows to archive as well as the row itself.
+    for title in ["first", "second"] {
+        db.upsert_concept(ConceptUpsert::new("c1", title).valid_from(CTS))
+            .await
+            .unwrap();
+    }
+    db.upsert_concept(
+        ConceptUpsert::new("c1", "last")
+            .valid_from(CTS)
+            .valid_to("2027-01-01T00:00:00.000000Z")
+            .retired(true),
+    )
+    .await
+    .unwrap();
+
+    let report = db.archive("2030-01-01T00:00:00.000000Z").await.unwrap();
+    assert_eq!(
+        report.concepts_archived, 1,
+        "the fixture needs the concept itself to have gone cold: {report:?}"
+    );
+    assert!(report.log_entries_archived >= 2, "{report:?}");
+    let horizon = report.horizon.expect("an archive that moved rows has a horizon");
+
+    let rehydrated = db.rehydrate(&["c1"]).await.unwrap();
+    assert_eq!(rehydrated.concepts_rehydrated, 1);
+    db.close().await.unwrap();
+
+    let archive_path = std::fs::read_dir(harness.temp_dir.path())
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| p.to_string_lossy().contains("archive"))
+        .expect("archive() must have created a cold file");
+    std::fs::remove_file(&archive_path).unwrap();
+
+    let conn = libsql::Builder::new_local(&harness.db_path)
+        .build()
+        .await
+        .unwrap()
+        .connect()
+        .unwrap();
+    migrations::run(&conn).await.unwrap();
+
+    let res = reconstruct(
+        &conn,
+        "2020-01-01T00:00:00.000000Z",
+        Some(&archive_path),
+        None,
+    )
+    .await;
+
+    let Err(DbError::ReplayCorrupt { reason, .. }) = res else {
+        panic!("expected ReplayCorrupt for a missing archive, got {res:?}");
+    };
+    assert!(
+        reason.contains(&format!(
+            "{} log rows have been archived",
+            report.log_entries_archived
+        )),
+        "the round trip changed the archived-row count the hint reports \
+         (expected {}): {reason}",
+        report.log_entries_archived
+    );
+    assert!(
+        reason.contains(&format!("begins at seq_id {horizon}")),
+        "the round trip moved the horizon the hint reports (expected {horizon}): {reason}"
+    );
+}

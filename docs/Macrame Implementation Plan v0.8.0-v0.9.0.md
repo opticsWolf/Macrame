@@ -1415,10 +1415,44 @@ on X; pass the archive path"* instead of returning empty. 0.8.0 declined it as a
 addition, so under [D-036](architecture/s13-decision-register.md#d-036) it must land pre-1.0 or
 not at all.
 
-**Documents.** `s6-s10` §9 (a new budget row, with its fixture named); `s13` (D-131 if the marker
-lands, or an amendment to [D-121](architecture/s13-decision-register.md#d-121) if it does not —
-that is the entry which deferred the marker, and the stale "D-118" written here was the index-drop
-entry, corrected 2026-08-06).
+**Documents.** `s6-s10` §9 (a new budget row, with its fixture named); `s13` (~~D-131 if the marker
+lands, or an amendment to [D-121](architecture/s13-decision-register.md#d-121) if it does not~~ —
+**both, and the number is D-132; corrected 2026-08-06.** The either/or was wrong in two ways: D-131
+went to C3, and the amendment is not an alternative to an entry but a consequence of one — D-121
+left the door open in its own text, so closing it has to be visible *there*, struck in place, as
+well as argued in full where the new facts live. That is the same shape as
+[D-119](architecture/s13-decision-register.md#d-119)'s correction. The stale "D-118" written here
+was the index-drop entry, corrected 2026-08-06).
+
+> **Delivered 2026-08-06 ([D-132](architecture/s13-decision-register.md#d-132)).** One entry, and it
+> is a **refusal** rather than the deferral this item allowed for. The marker's whole value was the
+> richer error message, and the message turned out to be free: `MAX(seq_id) - COUNT(*)` says how many
+> rows went and `MIN(seq_id)` says how far back what remains reaches, which are the two facts a caller
+> facing an unreachable cold file needs — and the marker would have carried neither, only the archive
+> timestamp, which answers nothing. `archive_hint` in `temporal/replay.rs` assembles them and both
+> unreachable-archive errors carry it, so the message is shipped rather than promised. Refused rather
+> than deferred because [D-036](architecture/s13-decision-register.md#d-036) makes those the same
+> sentence, and only one of them is honest about it.
+>
+> **The measurement is in [§9](architecture/s6-s10-flows-to-dependencies.md#9-performance-budgets):**
+> 3.71 ms fixed, ~74 µs per concept, and a departure from linearity above n=1,000 that the trigger-free
+> control attributes to FTS5 index maintenance — 53% of the cost at n=10,000, against a row-movement
+> path that stays linear to within 1%. The fixture matrix moves it by 5.8%, which is noise, and is
+> measured anyway because the predicate severs the matrix's axis and an unmeasured "no difference" is
+> still a claim ([D-088](architecture/s13-decision-register.md#d-088)).
+>
+> **This item's own Documents line said "a new budget row"; there are two, and neither is the measured
+> number.** ≤ 300 µs per concept is the rate the existing `Archive, 100K closed intervals ≤ 30 s` row
+> already implies, applied to the reverse direction — [D-055](architecture/s13-decision-register.md#d-055)
+> is why a budget is not written to match the reading that prompted it.
+>
+> **Two things the probe found.** `archive_hint` was being computed eagerly on every cold fold, for a
+> string almost every caller discards; a panic in its never-archived branch fired from a test that
+> raises nothing from that code, which is how the eager call was caught. Made lazy, the branch proved
+> dead at both use sites and was deleted. Separately, and **not fixed here**: a file that exists at the
+> archive path but is not a cold database still reports `no such table: cold.transaction_log`, a raw
+> engine message where [D-069](architecture/s13-decision-register.md#d-069) wants the caller told the
+> file is not an archive. Pre-existing, on a different path, and recorded rather than folded in.
 
 ### C5 · The binding catches up with archival
 
@@ -1555,6 +1589,7 @@ they have not been done.
 | **D-129** | D-133 | **Corrective.** Schema v9: the concepts delete guard becomes marker-gated, and `verify` starts checking the delete guards' **bodies** rather than only their names — the second half of the hole [D-126](architecture/s13-decision-register.md#d-126) found (C2 step 2) |
 | **D-131** | D-130 | Rehydration is a physical move back and mints no transaction-time facts — and the `v9 → v10` rung that makes it so, because the fold's tie-break is `seq_id` and not `recorded_at`. **One entry: the rung is the mechanism, not a correction** (C3) |
 | **D-130** | — | **Architectural, and unprojected.** What crosses the archive boundary: the concept row moves column for column with its `content`; `analytics_annotations` and `embeddings_*` are disposed of. Also records that **C2's step 4 was a no-op** — `reconstruct` folds the log and never reads `concepts` (C2 steps 1, 3–5) |
+| **D-132** | D-131 | Rehydration measured, and the hot-side marker **refused outright rather than deferred**: the richer message it was wanted for is strictly weaker than what the hot log already carries, so `archive_hint` ships it with no rung. Also the superlinearity above n=1,000 and its cause (C4) |
 
 **Still projected**, and the numbers below are estimates a third time, so they are written as *next free* rather than as claims:
 
@@ -1580,7 +1615,6 @@ they have not been done.
 | | projected as | |
 |---|---|---|
 | **D-129** | D-117 | **Erasure is refused on doctrine, not deferred**; the alternative is pseudonymous ids with identifying content held by the application. **Supersedes [D-022](architecture/s13-decision-register.md#d-022)'s open framing** ([§2](#2-doctrine-position-erasure-is-refused-archival-is-sanctioned)) |
-| **D-131** | D-122 | The hot-side archive marker, taken or refused with C4's measurement. **[D-121](architecture/s13-decision-register.md#d-121) removed its load-bearing justification**: it is now wanted for a better error *message*, not for a correct decision |
 | **D-132** | D-128 | Archival is drivable from Python: `rehydrate` is exposed, and the traceability equality is asserted **through the binding** as well as in the crate, because a boundary that silently loses a doctrine property is the failure [§14.7](architecture/s14-python-bindings.md#147-r15-through-the-boundary) measured rather than assumed (C5) |
 ## 7. Risks
 
