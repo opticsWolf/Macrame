@@ -502,6 +502,188 @@ async fn archive_concepts(
     Ok(deleted)
 }
 
+/// Outcome of one rehydration (0.9.0, C3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RehydrateReport {
+    /// Concepts moved back into the hot table.
+    pub concepts_rehydrated: usize,
+    /// Of those, how many could **not** keep their original `rowid_pk` because
+    /// something else had claimed it while they were cold, and were reassigned
+    /// with the FTS index re-pointed to match.
+    ///
+    /// Reported rather than hidden because it is the one way a rehydrated
+    /// concept differs from the row that was archived, and a caller comparing
+    /// rowids across the boundary should be able to see that it happened.
+    pub rowids_reassigned: usize,
+}
+
+/// Move concepts back from the cold file into the hot tables (§2.3, C3).
+///
+/// # Rehydration is a move back, not a write
+///
+/// It mints no transaction-time facts and is invisible to both clocks. The
+/// concept's log entries were never removed, so the ledger already says
+/// everything true about it; writing a fresh `'I'` would assert the concept was
+/// *learned* at rehydration time, and — because the fold takes the highest
+/// `seq_id` per entity — would additionally outrank any later `'U'` that retired
+/// it. See [`crate::schema::ddl::CREATE_CONCEPTS_LOG_INSERT`], which is
+/// marker-gated at v10 for exactly this reason. The whole operation therefore
+/// runs inside a declared archive session, which is what suppresses the trigger.
+///
+/// # `rowid_pk`: reinstate, or reassign and re-point the index
+///
+/// The common case has no collision — the rowid was freed by archival and
+/// nothing has claimed it since — and reinstating is the clean move-back with no
+/// side effects at all. When something *has* taken it, the fallback is a fresh
+/// `rowid_pk` plus an FTS correction: `concepts_fts` is external-content keyed
+/// on `rowid_pk` ([D-119]), so a reassignment without re-pointing leaves the
+/// index describing the wrong row, silently. Both exits are taken here rather
+/// than one being assumed, and [`RehydrateReport::rowids_reassigned`] reports
+/// which was used.
+pub async fn rehydrate(
+    conn: &libsql::Connection,
+    ids: &[&str],
+    archive_path: &Path,
+) -> Result<RehydrateReport> {
+    if ids.is_empty() {
+        return Ok(RehydrateReport {
+            concepts_rehydrated: 0,
+            rowids_reassigned: 0,
+        });
+    }
+
+    crate::temporal::replay::detach_stale_cold(conn).await;
+    conn.execute(
+        "ATTACH DATABASE ?1 AS cold",
+        libsql::params![archive_path.to_string_lossy().as_ref()],
+    )
+    .await?;
+
+    let result = rehydrate_session(conn, ids).await;
+
+    if let Err(e) = conn.execute("DETACH DATABASE cold", ()).await {
+        tracing::warn!("rehydrate: failed to DETACH cold database: {e}");
+    }
+    result
+}
+
+async fn rehydrate_session(conn: &libsql::Connection, ids: &[&str]) -> Result<RehydrateReport> {
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .await?;
+
+    // The session opens for the same reason the archive's does, plus one more:
+    // it is what stops `trg_concepts_log_insert` from firing (v10).
+    tx.execute(&format!("CREATE TABLE {ARCHIVE_SESSION_MARKER} (x)"), ())
+        .await?;
+
+    let mut rehydrated = 0usize;
+    let mut reassigned = 0usize;
+
+    for id in ids {
+        let Some(row) = tx
+            .query(
+                "SELECT rowid_pk, id, title, content, embedding_model, \
+                 valid_from, valid_to, recorded_at, retired \
+                 FROM cold.concepts WHERE id = ?1",
+                libsql::params![*id],
+            )
+            .await?
+            .next()
+            .await?
+        else {
+            continue;
+        };
+
+        let old_rowid: i64 = row.get(0)?;
+        let title: String = row.get(2)?;
+        let content: String = row.get(3)?;
+        let model: Option<String> = row.get(4)?;
+        let valid_from: String = row.get(5)?;
+        let valid_to: String = row.get(6)?;
+        let recorded_at: String = row.get(7)?;
+        let retired: i64 = row.get(8)?;
+
+        let taken: i64 = tx
+            .query(
+                "SELECT COUNT(*) FROM concepts WHERE rowid_pk = ?1",
+                libsql::params![old_rowid],
+            )
+            .await?
+            .next()
+            .await?
+            .expect("COUNT(*) always returns a row")
+            .get(0)?;
+
+        if taken == 0 {
+            // The clean move back: same row, same rowid, no side effects.
+            tx.execute(
+                "INSERT INTO concepts (rowid_pk, id, title, content, embedding_model, \
+                 valid_from, valid_to, recorded_at, retired) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                libsql::params![
+                    old_rowid,
+                    *id,
+                    title.clone(),
+                    content.clone(),
+                    model,
+                    valid_from,
+                    valid_to,
+                    recorded_at,
+                    retired
+                ],
+            )
+            .await?;
+        } else {
+            // Something claimed the rowid while this concept was cold. Take a
+            // fresh one, then correct the index: `concepts_fts` is
+            // external-content keyed on `rowid_pk`, and its insert trigger will
+            // have written an entry at the *new* rowid — what has to be undone
+            // is the stale entry still sitting at the old one, which the archive
+            // could not remove because the row it described had already gone.
+            tx.execute(
+                "INSERT INTO concepts (id, title, content, embedding_model, \
+                 valid_from, valid_to, recorded_at, retired) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                libsql::params![
+                    *id,
+                    title.clone(),
+                    content.clone(),
+                    model,
+                    valid_from,
+                    valid_to,
+                    recorded_at,
+                    retired
+                ],
+            )
+            .await?;
+            tx.execute(
+                "INSERT INTO concepts_fts (concepts_fts, rowid, title, content) \
+                 VALUES ('delete', ?1, ?2, ?3)",
+                libsql::params![old_rowid, title, content],
+            )
+            .await?;
+            reassigned += 1;
+        }
+
+        tx.execute(
+            "DELETE FROM cold.concepts WHERE id = ?1",
+            libsql::params![*id],
+        )
+        .await?;
+        rehydrated += 1;
+    }
+
+    tx.execute(&format!("DROP TABLE {ARCHIVE_SESSION_MARKER}"), ())
+        .await?;
+    tx.commit().await?;
+
+    Ok(RehydrateReport {
+        concepts_rehydrated: rehydrated,
+        rowids_reassigned: reassigned,
+    })
+}
+
 /// Run one of the archive's `DELETE`s, naming the table if a guard refuses it.
 ///
 /// **This is what closes defect AC, and the shape of the fix is the point.**

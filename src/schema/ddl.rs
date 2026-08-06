@@ -129,6 +129,53 @@ pub const ABORT_DELETE_GUARD: &str = abort_delete_guard!();
 /// duration, so no other connection can reach the guard at all.
 pub const ARCHIVE_SESSION_MARKER: &str = "macrame_archive_session";
 
+/// The concepts insert log trigger, **marker-gated since v10** (0.9.0, C3).
+///
+/// # Why an archive session must not log a concept insert
+///
+/// Rehydration is a physical move back and mints no transaction-time facts
+/// (§2.3): the concept returns to the hot table, the log entries describing it
+/// were never removed, and nothing about what was believed — or when — has
+/// changed. An unconditional `AFTER INSERT` makes that impossible to honour,
+/// because the move *is* an insert.
+///
+/// **And the damage is worse than a spurious row, which is what forced the
+/// rung.** The rehydrated row carries its **original** `recorded_at`, but the
+/// log row it would write gets a **new** `seq_id` at the end of the log. The
+/// fold partitions by `(table_name, entity_id)` and takes
+/// `ROW_NUMBER() OVER (… ORDER BY seq_id DESC) = 1` — last writer wins by
+/// *sequence*, not by timestamp. So the rehydration `'I'` would outrank the
+/// later `'U'` that retired the concept, and every `reconstruct` after the
+/// original creation time would return it **un-retired**. Rehydration would
+/// resurrect a belief the ledger had superseded, silently and retroactively,
+/// which is precisely what [Doctrine III] forbids.
+///
+/// Only the *insert* trigger is gated. `trg_concepts_log_update` stays
+/// unconditional because nothing inside a session updates a concept — archival
+/// deletes and rehydration inserts — so gating it would suppress nothing and
+/// widen the hole for no reason.
+pub const CREATE_CONCEPTS_LOG_INSERT: &str = concat!(
+    r#"
+    CREATE TRIGGER IF NOT EXISTS trg_concepts_log_insert
+    AFTER INSERT ON concepts
+    WHEN NOT EXISTS (
+        SELECT 1 FROM sqlite_master
+        WHERE type = 'table' AND name = '"#,
+    "macrame_archive_session",
+    r#"'
+    )
+    BEGIN
+        INSERT INTO transaction_log (table_name, entity_id, operation, payload, recorded_at)
+        VALUES ('concepts', NEW.id, 'I',
+                json_object('v', 2, 'title', NEW.title, 'content', NEW.content,
+                            'valid_from', NEW.valid_from, 'valid_to', NEW.valid_to,
+                            'retired', NEW.retired,
+                            'embedding_model', NEW.embedding_model),
+                NEW.recorded_at);
+    END;
+    "#
+);
+
 /// The concepts delete guard, **marker-gated since v9** (0.9.0, C2, D-126).
 ///
 /// A `pub const` rather than an anonymous entry in [`CREATE_TRIGGERS`] because
@@ -563,19 +610,7 @@ pub const CREATE_TRIGGERS: &[&str] = &[
     // predates the field". v1 is still accepted and folds with the field absent,
     // which is what makes this safe without a migration rung — see the note on
     // [`CREATE_TRIGGERS`].
-    r#"
-    CREATE TRIGGER IF NOT EXISTS trg_concepts_log_insert
-    AFTER INSERT ON concepts
-    BEGIN
-        INSERT INTO transaction_log (table_name, entity_id, operation, payload, recorded_at)
-        VALUES ('concepts', NEW.id, 'I',
-                json_object('v', 2, 'title', NEW.title, 'content', NEW.content,
-                            'valid_from', NEW.valid_from, 'valid_to', NEW.valid_to,
-                            'retired', NEW.retired,
-                            'embedding_model', NEW.embedding_model),
-                NEW.recorded_at);
-    END;
-    "#,
+    CREATE_CONCEPTS_LOG_INSERT,
     r#"
     CREATE TRIGGER IF NOT EXISTS trg_concepts_log_update
     AFTER UPDATE ON concepts

@@ -352,7 +352,7 @@ async fn a_v5_database_climbs_to_v6_and_gains_the_open_interval_index() {
 #[test]
 fn a_version_bump_must_bring_its_own_rung_test() {
     assert_eq!(
-        SCHEMA_VERSION, 9,
+        SCHEMA_VERSION, 10,
         "SCHEMA_VERSION moved. Add a test for the new rung — one that starts \
          from a database at the previous version and asserts what the rung is \
          *for*, not merely that `run` reached the top."
@@ -1106,7 +1106,7 @@ async fn guard_sql(conn: &libsql::Connection) -> String {
 }
 
 #[tokio::test]
-async fn a_v8_database_climbs_to_v9_and_the_concepts_guard_becomes_conditional() {
+async fn a_v8_database_climbs_past_v9_and_the_concepts_guard_becomes_conditional() {
     let harness = TestHarness::new();
     let conn = connect(&harness).await;
     migrations::run(&conn).await.unwrap();
@@ -1120,7 +1120,7 @@ async fn a_v8_database_climbs_to_v9_and_the_concepts_guard_becomes_conditional()
 
     migrations::run(&conn).await.unwrap();
 
-    assert_eq!(user_version(&conn).await, 9);
+    assert_eq!(user_version(&conn).await, SCHEMA_VERSION);
     let sql = guard_sql(&conn).await;
     assert!(
         sql.contains(ddl::ARCHIVE_SESSION_MARKER),
@@ -1195,14 +1195,14 @@ async fn a_v9_stamp_over_an_ungated_guard_is_refused() {
 /// is genuinely functional: an ad-hoc delete is refused, and the same delete
 /// inside a declared session is not.
 #[tokio::test]
-async fn a_v7_database_climbs_all_the_way_to_v9_with_a_working_guard() {
+async fn a_v7_database_climbs_all_the_way_to_the_top_with_a_working_guard() {
     let harness = TestHarness::new();
     let conn = connect(&harness).await;
     seeded_v7(&conn, &["c1", "c2"]).await;
     conn.execute("PRAGMA user_version = 7", ()).await.unwrap();
 
     migrations::run(&conn).await.unwrap();
-    assert_eq!(user_version(&conn).await, 9);
+    assert_eq!(user_version(&conn).await, SCHEMA_VERSION);
 
     let res = conn.execute("DELETE FROM concepts WHERE id = 'c1'", ()).await;
     assert!(res.is_err(), "an ad-hoc concept delete must still be refused");
@@ -1228,4 +1228,130 @@ async fn a_v7_database_climbs_all_the_way_to_v9_with_a_working_guard() {
     conn.execute(&format!("DROP TABLE {}", ddl::ARCHIVE_SESSION_MARKER), ())
         .await
         .unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// v9 → v10 — the concepts insert log trigger becomes marker-gated (C3)
+// ---------------------------------------------------------------------------
+
+/// The v9 body, reproduced rather than imported, for the reason
+/// [`CONCEPTS_GUARD_V8`] gives.
+const CONCEPTS_LOG_INSERT_V9_FIXTURE: &str = "
+    CREATE TRIGGER trg_concepts_log_insert
+    AFTER INSERT ON concepts
+    BEGIN
+        INSERT INTO transaction_log (table_name, entity_id, operation, payload, recorded_at)
+        VALUES ('concepts', NEW.id, 'I',
+                json_object('v', 2, 'title', NEW.title, 'content', NEW.content,
+                            'valid_from', NEW.valid_from, 'valid_to', NEW.valid_to,
+                            'retired', NEW.retired,
+                            'embedding_model', NEW.embedding_model),
+                NEW.recorded_at);
+    END;
+";
+
+async fn log_insert_sql(conn: &libsql::Connection) -> String {
+    conn.query(
+        "SELECT sql FROM sqlite_master WHERE type = 'trigger' \
+         AND name = 'trg_concepts_log_insert'",
+        (),
+    )
+    .await
+    .unwrap()
+    .next()
+    .await
+    .unwrap()
+    .expect("the concepts insert log trigger should exist")
+    .get(0)
+    .unwrap()
+}
+
+#[tokio::test]
+async fn a_v9_database_climbs_to_v10_and_the_insert_log_becomes_marker_gated() {
+    let harness = TestHarness::new();
+    let conn = connect(&harness).await;
+    migrations::run(&conn).await.unwrap();
+
+    conn.execute("DROP TRIGGER trg_concepts_log_insert", ())
+        .await
+        .unwrap();
+    conn.execute(CONCEPTS_LOG_INSERT_V9_FIXTURE, ())
+        .await
+        .unwrap();
+    conn.execute("PRAGMA user_version = 9", ()).await.unwrap();
+
+    assert!(
+        !log_insert_sql(&conn).await.contains(ddl::ARCHIVE_SESSION_MARKER),
+        "the fixture did not start from the v9 trigger"
+    );
+
+    migrations::run(&conn).await.unwrap();
+
+    assert_eq!(user_version(&conn).await, SCHEMA_VERSION);
+    assert!(
+        log_insert_sql(&conn).await.contains(ddl::ARCHIVE_SESSION_MARKER),
+        "the insert log trigger is not marker-gated after the rung"
+    );
+}
+
+/// **What the rung is *for*, asserted as behaviour rather than as DDL text.**
+///
+/// Outside a session a concept insert logs, as it always has. Inside one it does
+/// not — which is what makes rehydration a physical move rather than a write,
+/// and what stops a rehydrated concept from outranking its own retirement in the
+/// fold (C3).
+#[tokio::test]
+async fn an_insert_inside_a_session_writes_no_log_row_and_outside_one_still_does() {
+    let harness = TestHarness::new();
+    let conn = connect(&harness).await;
+    migrations::run(&conn).await.unwrap();
+
+    let log_rows = |conn: libsql::Connection| async move {
+        conn.query("SELECT COUNT(*) FROM transaction_log", ())
+            .await
+            .unwrap()
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<i64>(0)
+            .unwrap()
+    };
+
+    conn.execute(
+        "INSERT INTO concepts (id, title, valid_from, recorded_at) \
+         VALUES ('outside', 'T', ?1, ?1)",
+        libsql::params![TS],
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        log_rows(conn.clone()).await,
+        1,
+        "an ordinary concept insert must still be logged"
+    );
+
+    conn.execute(
+        &format!("CREATE TABLE {} (x)", ddl::ARCHIVE_SESSION_MARKER),
+        (),
+    )
+    .await
+    .unwrap();
+    conn.execute(
+        "INSERT INTO concepts (id, title, valid_from, recorded_at) \
+         VALUES ('inside', 'T', ?1, ?1)",
+        libsql::params![TS],
+    )
+    .await
+    .unwrap();
+    conn.execute(&format!("DROP TABLE {}", ddl::ARCHIVE_SESSION_MARKER), ())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        log_rows(conn.clone()).await,
+        1,
+        "an insert inside an archive session wrote a transaction_log row; \
+         rehydration is a move back and mints no transaction-time facts"
+    );
 }

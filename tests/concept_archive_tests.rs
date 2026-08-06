@@ -393,3 +393,251 @@ async fn vacuum_after_an_archive_leaves_the_sparse_numbering_and_the_index_alone
 
     db.close().await.unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// C3 — rehydration is a move back, not a write
+// ---------------------------------------------------------------------------
+
+/// Archive `gone`, then bring it back.
+async fn archived_then_rehydrated(db: &Database) -> macrame::temporal::RehydrateReport {
+    db.archive(CUTOFF).await.unwrap();
+    db.rehydrate(&["gone"]).await.unwrap()
+}
+
+/// **The ledger half of the exit gate**: `reconstruct(t)` spanning both
+/// operations is bit-identical to the never-archived control.
+///
+/// This is the *necessary* half and deliberately not the whole gate. The fold
+/// reads `transaction_log` and never touches `concepts` (D-130), so it would
+/// pass even if rehydration wrote the row back with every column garbled — see
+/// `a_rehydrated_concept_is_usable` for the half that would notice.
+#[tokio::test]
+async fn reconstruct_is_bit_identical_across_archive_and_rehydrate() {
+    let control = TestHarness::new();
+    let control_db = seeded(&control).await;
+    let expected = control_db.reconstruct(ARCHIVED_AT).await.unwrap();
+    control_db.close().await.unwrap();
+
+    let harness = TestHarness::new();
+    let db = seeded(&harness).await;
+    let report = archived_then_rehydrated(&db).await;
+    assert_eq!(report.concepts_rehydrated, 1);
+
+    let actual = db.reconstruct(ARCHIVED_AT).await.unwrap();
+    assert_eq!(
+        expected.concepts, actual.concepts,
+        "the round trip changed what the ledger says was believed"
+    );
+    assert_eq!(expected.edges, actual.edges);
+
+    db.close().await.unwrap();
+}
+
+/// **The database half of the exit gate**: the rehydrated concept is *usable*.
+///
+/// Four independent readers, because the fold cannot see any of them: the write
+/// path, the search index, the graph loader, and the archivability predicate.
+/// A rehydration that put the row back with the wrong columns, or left the FTS
+/// index pointing elsewhere, passes the ledger test and fails here.
+#[tokio::test]
+async fn a_rehydrated_concept_is_usable() {
+    let harness = TestHarness::new();
+    let db = seeded(&harness).await;
+    archived_then_rehydrated(&db).await;
+
+    // 1. The row is back **column for column**, which is the assertion that
+    //    catches a rehydration writing garbled data — the thing `reconstruct`
+    //    structurally cannot see.
+    //
+    //    This runs **first**, and the ordering is load-bearing. Written after the
+    //    `upsert_concept` below it passed vacuously: the upsert rewrites the very
+    //    columns it verifies, so the check was confirming the write path rather
+    //    than the rehydration. That is §8's conjunction warning in miniature — an
+    //    assertion that cannot fail is not evidence, whatever it reads.
+    //
+    //    The graph loader is deliberately *not* one of these readers, and the
+    //    reason is structural rather than incidental: `load_subgraph` filters
+    //    `retired = 0`, and an archivable concept is retired by definition
+    //    (D-128), so a traversal can never see an archived or rehydrated concept
+    //    either before or after the round trip. Asserting it could would be
+    //    asserting a bug.
+    {
+        let row = db
+            .read_conn()
+            .query(
+                "SELECT title, content, valid_from, valid_to, recorded_at, retired                  FROM concepts WHERE id = 'gone'",
+                (),
+            )
+            .await
+            .unwrap()
+            .next()
+            .await
+            .unwrap()
+            .expect("the rehydrated concept is not in the hot table");
+        assert_eq!(row.get::<String>(0).unwrap(), "Title");
+        assert_eq!(row.get::<String>(1).unwrap(), "searchable body of gone");
+        assert_eq!(row.get::<String>(2).unwrap(), T0);
+        assert_eq!(row.get::<String>(3).unwrap(), T1);
+        assert_eq!(row.get::<i64>(5).unwrap(), 1, "retired did not survive");
+    }
+
+    // 2. The search index finds it, which is the assertion that would fail if
+    //    the FTS mapping had been left pointing at the freed rowid.
+    assert_eq!(
+        count(
+            &db,
+            "SELECT COUNT(*) FROM concepts_fts WHERE concepts_fts MATCH 'gone'"
+        )
+        .await,
+        1,
+        "the rehydrated concept is not in the search index"
+    );
+
+    // 3. The write path accepts it — the row is really there, with a usable key,
+    //    and `trg_concepts_monotonic_ra` is satisfied by the restored stamp.
+    db.upsert_concept(
+        ConceptUpsert::new("gone", "Title After Rehydration")
+            .content("searchable body of gone")
+            .valid_from(T0)
+            .valid_to(T1)
+            .retired(true),
+    )
+    .await
+    .unwrap();
+
+    // 4. It is out of the cold file, so a second rehydration is a no-op.
+    //
+    //    **Not** "it is no longer archivable", which was the assertion first
+    //    written here and which is false — for a reason worth keeping.
+    //    Archivability is a pure function of the concept's own columns and its
+    //    edges (D-128), and rehydration restores every one of them verbatim; so a
+    //    concept that was archivable before the round trip is archivable
+    //    immediately after it, and it should be. The predicate says *eligible*,
+    //    never *due*. What rehydration changes is which side of the boundary the
+    //    row is on, and that is what this asserts.
+    let again = db.rehydrate(&["gone"]).await.unwrap();
+    assert_eq!(
+        again.concepts_rehydrated, 0,
+        "the concept is still in cold.concepts after being rehydrated"
+    );
+
+    db.close().await.unwrap();
+}
+
+/// **Rehydration mints no transaction-time facts, and this is what forced the
+/// `v9 -> v10` rung** (C3).
+///
+/// The rehydrated row carries its *original* `recorded_at`, but a log row
+/// written for it would take a **new** `seq_id` at the end of the log — and the
+/// fold takes the highest `seq_id` per entity, not the latest timestamp. So an
+/// unsuppressed insert trigger would put an `'I'` above the `'U'` that retired
+/// the concept, and every `reconstruct` after the concept's creation would
+/// return it **alive**.
+///
+/// Asserted two ways: the log gains no rows, and the concept stays retired.
+#[tokio::test]
+async fn rehydration_writes_no_log_rows_and_cannot_resurrect_a_retirement() {
+    let harness = TestHarness::new();
+    let db = seeded(&harness).await;
+
+    let before = count(&db, "SELECT COUNT(*) FROM transaction_log").await;
+    archived_then_rehydrated(&db).await;
+    let after = count(&db, "SELECT COUNT(*) FROM transaction_log").await;
+
+    assert_eq!(
+        before, after,
+        "rehydration wrote transaction_log rows; it is a physical move and mints \
+         no transaction-time facts"
+    );
+
+    let state = db.reconstruct(ARCHIVED_AT).await.unwrap();
+    assert!(
+        !state.concepts.contains_key("gone"),
+        "the rehydrated concept came back un-retired — a new 'I' outranked its \
+         own retirement in the fold, which is what the v10 rung prevents"
+    );
+
+    db.close().await.unwrap();
+}
+
+/// The collision exit: something took the rowid while the concept was cold.
+///
+/// Rare, and the fallback has to be exercised deliberately because the common
+/// path never reaches it. The concept comes back with a fresh `rowid_pk`, the
+/// report says so, and — the part that would otherwise fail silently — the FTS
+/// index describes the new row rather than the one that stole the old rowid.
+#[tokio::test]
+async fn a_claimed_rowid_forces_a_reassignment_and_the_index_follows() {
+    let harness = TestHarness::new();
+    let db = seeded(&harness).await;
+
+    let old_rowid: i64 = db
+        .read_conn()
+        .query("SELECT rowid_pk FROM concepts WHERE id = 'gone'", ())
+        .await
+        .unwrap()
+        .next()
+        .await
+        .unwrap()
+        .unwrap()
+        .get(0)
+        .unwrap();
+
+    db.archive(CUTOFF).await.unwrap();
+
+    // Claim the freed rowid through `raw()`: there is no supported way to choose
+    // one, and there should not be — the point is whether rehydration copes.
+    db.raw()
+        .connect()
+        .unwrap()
+        .execute(
+            "INSERT INTO concepts (rowid_pk, id, title, content, valid_from, \
+             valid_to, recorded_at) VALUES (?1, 'squatter', 'Squatter', \
+             'searchable body of squatter', ?2, ?3, ?2)",
+            libsql::params![old_rowid, T0, OPEN],
+        )
+        .await
+        .unwrap();
+
+    let report = db.rehydrate(&["gone"]).await.unwrap();
+    assert_eq!(report.concepts_rehydrated, 1);
+    assert_eq!(
+        report.rowids_reassigned, 1,
+        "the collision path was not taken, so this test proves nothing"
+    );
+
+    let rowids: Vec<i64> = {
+        let mut rows = db
+            .read_conn()
+            .query(
+                "SELECT rowid_pk FROM concepts WHERE id IN ('gone', 'squatter') \
+                 ORDER BY id",
+                (),
+            )
+            .await
+            .unwrap();
+        let mut v = Vec::new();
+        while let Some(r) = rows.next().await.unwrap() {
+            v.push(r.get(0).unwrap());
+        }
+        v
+    };
+    assert_eq!(rowids.len(), 2);
+    assert_ne!(rowids[0], rowids[1], "both concepts hold the same rowid_pk");
+
+    // The index describes each of them exactly once — the assertion that fails
+    // if the stale entry at the old rowid was left in place.
+    for term in ["gone", "squatter"] {
+        assert_eq!(
+            count(
+                &db,
+                &format!("SELECT COUNT(*) FROM concepts_fts WHERE concepts_fts MATCH '{term}'")
+            )
+            .await,
+            1,
+            "the search index does not describe {term} exactly once"
+        );
+    }
+
+    db.close().await.unwrap();
+}

@@ -6,7 +6,7 @@ use crate::error::{classify, DbError, Result, WriteOp};
 use crate::graph::edge::EdgeAssertion;
 use crate::integrity::{rebuild_current, RebuildReport};
 use crate::schema::migrations;
-use crate::temporal::archive::{archive, ArchiveReport};
+use crate::temporal::archive::{archive, rehydrate, ArchiveReport, RehydrateReport};
 use crate::temporal::interval::Interval;
 use crate::temporal::snapshot::{self, SnapshotCadence};
 use crate::util::clock::{Clock, SystemClock};
@@ -420,6 +420,16 @@ pub enum LowPriCommand {
         cutoff: String,
         archive_path: PathBuf,
         responder: oneshot::Sender<Result<ArchiveReport>>,
+    },
+    /// Move named concepts back out of the cold file (0.9.0, C3).
+    ///
+    /// Low priority for the same reason `Archive` is: it is bulk physical
+    /// movement with no latency bound, and it holds the write lock for its whole
+    /// transaction.
+    Rehydrate {
+        ids: Vec<String>,
+        archive_path: PathBuf,
+        responder: oneshot::Sender<Result<RehydrateReport>>,
     },
     /// Reconstruct the FTS index from `concepts` (§5.9, D-036, D-051).
     ///
@@ -1342,6 +1352,29 @@ impl Database {
         .await
     }
 
+    /// Move the named concepts back from the cold database into the hot tables
+    /// (§2.3, C3).
+    ///
+    /// Rehydration is a **physical move back, not a write**: it mints no
+    /// transaction-time facts and is invisible to both clocks. An id that is not
+    /// in the cold file is skipped rather than being an error — the caller
+    /// generally has a list from a cold-side query, and a partially-stale list is
+    /// the normal case rather than a mistake. The report says how many actually
+    /// moved.
+    ///
+    /// See [`RehydrateReport::rowids_reassigned`] for the one way a rehydrated
+    /// row can differ from the row that was archived.
+    pub async fn rehydrate(&self, ids: &[&str]) -> Result<RehydrateReport> {
+        let ids: Vec<String> = ids.iter().map(|s| (*s).to_string()).collect();
+        let archive_path = self.archive_path.clone();
+        self.low(|responder| LowPriCommand::Rehydrate {
+            ids,
+            archive_path,
+            responder,
+        })
+        .await
+    }
+
     /// Archive up to `cutoff` as a sequence of sessions, each covering at most
     /// `window` of **transaction** time (T1.1, D-080).
     ///
@@ -2025,6 +2058,10 @@ impl LowPriCommand {
             LowPriCommand::UpsertEmbeddingChunk { .. } => K::UpsertEmbeddingChunk,
             LowPriCommand::BulkImportChunk { .. } => K::BulkImportChunk,
             LowPriCommand::Archive { .. } => K::Archive,
+            // No counter of its own: rehydration is the archive path run
+            // backwards and shares its budget, and a `CommandKind` variant is a
+            // public enum addition (D-036 periphery, but still a break).
+            LowPriCommand::Rehydrate { .. } => K::Archive,
             LowPriCommand::RebuildFts { .. } => K::RebuildFts,
             LowPriCommand::ShadowRebuild { .. } => K::ShadowRebuild,
         }
@@ -2086,6 +2123,21 @@ impl LowPriCommand {
                 // Before the answer, so a shadow rebuild that reads the epoch on
                 // its next turn cannot miss an archive that has already deleted
                 // rows out from under it (T1.2).
+                if res.is_ok() {
+                    turn.archive_committed();
+                }
+                turn.answer(responder, res);
+            }
+            LowPriCommand::Rehydrate {
+                ids,
+                archive_path,
+                responder,
+            } => {
+                let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+                let res = rehydrate(conn, &refs, &archive_path).await;
+                // Same reason as `Archive`: rehydration moves rows into `links`'
+                // parent table, so a shadow rebuild in flight must see the epoch
+                // move before the caller is answered (T1.2).
                 if res.is_ok() {
                     turn.archive_committed();
                 }

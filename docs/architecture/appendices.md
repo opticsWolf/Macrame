@@ -207,6 +207,17 @@ let report = db.archive(cutoff).await?;                // ArchiveReport { links_
 let reports: Vec<ArchiveReport> =
     db.archive_windowed(cutoff, Duration::from_secs(86_400)).await?;
 
+// The move back (0.9.0, C3). Rehydration mints no transaction-time facts and is
+// invisible to both clocks: it runs inside a declared archive session, which is
+// what suppresses the concept insert log trigger (marker-gated at schema v10).
+// Ids not in the cold file are skipped rather than being an error.
+let back: RehydrateReport = db.rehydrate(&["c1", "c2"]).await?;
+back.concepts_rehydrated;   // usize
+back.rowids_reassigned;     // usize -- how many could not keep their original
+                            //   rowid_pk because something claimed it while they
+                            //   were cold. Those get a fresh one and the FTS
+                            //   content_rowid mapping is corrected to match.
+
 // Which concepts an archive at `cutoff` would be entitled to move (0.9.0,
 // D-128, C1). A free function, like `reconstruct`'s: it takes a connection
 // rather than the handle, and it is read-only -- nothing archives concepts yet.

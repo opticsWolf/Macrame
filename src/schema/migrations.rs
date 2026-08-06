@@ -13,7 +13,7 @@ use crate::schema::ddl::*;
 /// guarantee D-029 buys would be void on it while `user_version` insisted all
 /// was well. Reserving 1 as a value this build refuses by name is what makes
 /// "no legacy support" an enforced property instead of a README sentence.
-pub const SCHEMA_VERSION: u32 = 9;
+pub const SCHEMA_VERSION: u32 = 10;
 
 type StepFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
 
@@ -125,6 +125,15 @@ const STEPS: &[Step] = &[
         // refuted.
         suspends_foreign_keys: true,
         apply: |conn| Box::pin(add_concepts_rowid_pk(conn)),
+    },
+    Step {
+        from: 9,
+        to: 10,
+        name: "concepts-log-insert-marker-gated",
+        // Same shape as the rung below and for the same reason: one trigger
+        // replaced, no table touched.
+        suspends_foreign_keys: false,
+        apply: |conn| Box::pin(gate_concepts_log_insert_on_marker(conn)),
     },
     Step {
         from: 8,
@@ -753,9 +762,46 @@ async fn add_concepts_rowid_pk(conn: &libsql::Connection) -> Result<()> {
     conn.execute("DROP TRIGGER IF EXISTS trg_concepts_guard_delete", ())
         .await?;
     conn.execute(CONCEPTS_GUARD_DELETE_V8, ()).await?;
+    conn.execute("DROP TRIGGER IF EXISTS trg_concepts_log_insert", ())
+        .await?;
+    conn.execute(CONCEPTS_LOG_INSERT_V9, ()).await?;
 
     conn.execute(REBUILD_CONCEPTS_FTS, ()).await?;
 
+    Ok(())
+}
+
+/// `trg_concepts_log_insert` **as v9 had it**: unconditional (0.9.0, C3).
+///
+/// Pinned for the same reason as [`CONCEPTS_GUARD_DELETE_V8`], and the reason
+/// bites harder here: [`add_concepts_rowid_pk`] restores triggers from
+/// [`CREATE_TRIGGERS`], so without this the v7 → v8 rung would install the v10
+/// body — a database the ladder calls v8 whose concept inserts stop logging
+/// inside a session, three versions before that behaviour was decided.
+const CONCEPTS_LOG_INSERT_V9: &str = r#"
+    CREATE TRIGGER IF NOT EXISTS trg_concepts_log_insert
+    AFTER INSERT ON concepts
+    BEGIN
+        INSERT INTO transaction_log (table_name, entity_id, operation, payload, recorded_at)
+        VALUES ('concepts', NEW.id, 'I',
+                json_object('v', 2, 'title', NEW.title, 'content', NEW.content,
+                            'valid_from', NEW.valid_from, 'valid_to', NEW.valid_to,
+                            'retired', NEW.retired,
+                            'embedding_model', NEW.embedding_model),
+                NEW.recorded_at);
+    END;
+"#;
+
+/// v9 → v10: the concepts insert log trigger becomes marker-gated (C3).
+///
+/// Two statements, like the rung below, and necessary for a reason that is not
+/// tidiness. See [`CREATE_CONCEPTS_LOG_INSERT`]: an unlogged insert is what makes
+/// rehydration a *move* rather than a write, and without it a rehydrated concept
+/// outranks its own retirement in the fold and comes back alive.
+async fn gate_concepts_log_insert_on_marker(conn: &libsql::Connection) -> Result<()> {
+    conn.execute("DROP TRIGGER IF EXISTS trg_concepts_log_insert", ())
+        .await?;
+    conn.execute(CREATE_CONCEPTS_LOG_INSERT, ()).await?;
     Ok(())
 }
 
