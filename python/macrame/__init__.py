@@ -70,6 +70,7 @@ from ._macrame import (
     RRF_K,
     Annotation,
     ArchiveReport,
+    RehydrateReport,
     ArchiveViolationError,
     ArchiveWindowError,
     AttributeMode,
@@ -146,6 +147,7 @@ __all__ = [
     # temporal (P4.3)
     "MaterializedState",
     "ArchiveReport",
+    "RehydrateReport",
     "ChainCheck",
     "CHAIN_CHECK_SAMPLE_LIMIT",
     # vector (P4.4)

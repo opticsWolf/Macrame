@@ -35,7 +35,7 @@ Macrame stores concepts linked by typed, weighted relationships — where both c
 
 ```toml
 [dependencies]
-macrame-db = "0.8"
+macrame-db = "0.9"
 ```
 
 ```rust
@@ -136,8 +136,8 @@ v8 is the last rung before the 1.0 freeze that could take it: `rowid_pk INTEGER 
 | MSRV | **1.88** (verified, not declared) |
 | Runtime | tokio async, single process |
 | Engine | libSQL 0.9.30 (MIT, unmodified) |
-| Schema version | 8 |
-| Test suite | 296 Rust · 305 with `metrics` · 316 with `property-tests` · 344 Python — all green (measured 2026-08-02) |
+| Schema version | 10 |
+| Test suite | 330 Rust · 339 with `metrics` · +7 `property-tests` (**run as its own step** — see below) · 353 Python — all green (measured 2026-08-07) |
 | Dependencies | tokio, serde, bincode, zstd, thiserror, tracing, ulid |
 
 ### Module Map
@@ -146,7 +146,7 @@ v8 is the last rung before the 1.0 freeze that could take it: `rowid_pk INTEGER 
 |---|---|
 | `schema` | DDL, triggers, migrations |
 | `graph` | CTE compilation, subgraph loading, vector filters |
-| `temporal` | `as_of()`, `reconstruct()`, snapshots, archive |
+| `temporal` | `as_of()`, `reconstruct()`, snapshots, archive, rehydrate |
 | `vector` | Model registration, embedding upsert, DiskANN search, hybrid RRF |
 | `integrity` | Audit, atomic rebuild, chunked shadow-swap rebuild |
 | `connection` | `Database` handle, Write Actor, priority channels |
@@ -154,7 +154,7 @@ v8 is the last rung before the 1.0 freeze that could take it: `rowid_pk INTEGER 
 
 ---
 
-## Python Bindings (v0.8.0)
+## Python Bindings (v0.9.0)
 
 | Detail | Value |
 |---|---|
@@ -217,7 +217,7 @@ criterion baselines, machine against itself. See [§9 of the architecture docs](
 
 | Risk | Mitigation |
 |---|---|
-| **R15: Concurrent open → access violation** (libSQL 0.9.30) | One open per database; R15 reproduces transparently through Python |
+| **R15: Concurrent open → access violation** (libSQL 0.9.30) | One open per database; R15 reproduces transparently through Python. **`--features property-tests` is run as its own step**, not folded into the suite: `integrity_property_tests` needs a database per case, and inside the full run it faults often enough that the classifier's three retries are routinely exhausted. Alone it is ~50/50 and green when it completes — measured 2026-08-07, and it is the engine rather than the tests |
 | **Property test binaries fault mid-suite** | `property-tests` feature gate; serialised runs; CI classifies each run rather than counting failures, and retries only a crash |
 | **Covering index wins over selective** | `EXPLAIN QUERY PLAN` assertions on every index-sensitive query |
 | **Snapshot chain divergence** | `verify_snapshot_chain()` reports but does not repair (snapshots are disposable) |

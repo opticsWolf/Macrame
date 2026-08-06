@@ -640,6 +640,41 @@ impl PyDatabase {
         Ok(temporal::PyArchiveReport { inner })
     }
 
+    /// Bring named concepts back out of cold storage (0.9.0, C3, D-131).
+    ///
+    /// The counterpart of `archive`, and a **physical move back**: it mints no
+    /// transaction-time facts, so `reconstruct` at any instant answers exactly as
+    /// it did before the concept was archived and exactly as it does after. A
+    /// concept reacquires its old identity rather than arriving as a new
+    /// assertion, because the alternative would make the ledger say it was
+    /// *learned* at rehydration time.
+    ///
+    /// Ids absent from the cold file are **skipped, not refused**. The list a
+    /// caller has usually came from an earlier cold-side query and being
+    /// partially stale is the normal case; `RehydrateReport.concepts_rehydrated`
+    /// is how many actually moved.
+    ///
+    /// # Latency
+    ///
+    /// A write, so it queues through the actor like any other and waits out any
+    /// transaction in flight (§5.1.8) — a channel wait in Rust, which
+    /// `busy_timeout` does not bound. The operation itself costs about 3.7 ms
+    /// plus 74 µs per concept, rising above a thousand concepts in one call
+    /// because the search index dominates there (§9, D-132). It is one
+    /// transaction with no window boundaries, deliberately: a rehydration cannot
+    /// half-happen.
+    fn rehydrate(
+        &self,
+        py: Python<'_>,
+        ids: Vec<String>,
+    ) -> PyResult<temporal::PyRehydrateReport> {
+        let inner = self.with_db(py, move |db| {
+            let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+            runtime().block_on(db.rehydrate(&refs)).map_err(to_py)
+        })?;
+        Ok(temporal::PyRehydrateReport { inner })
+    }
+
     /// Archive up to `cutoff` in windows, returning one report per session
     /// (D-080).
     ///

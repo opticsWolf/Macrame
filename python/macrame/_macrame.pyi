@@ -360,6 +360,36 @@ class ArchiveReport:
     def horizon(self) -> int | None: ...
     def __repr__(self) -> str: ...
 
+class RehydrateReport:
+    """What one rehydration moved back out of cold storage (0.9.0, D-131).
+
+    A class rather than a tuple despite having two fields, because it is the
+    counterpart of `ArchiveReport` — the pair is the unit a caller thinks in —
+    and because two bare ``int``s where one is *work done* and the other is
+    *something unusual happened* is an invitation to read ``[0]`` and mean
+    ``[1]``.
+    """
+
+    @property
+    def concepts_rehydrated(self) -> int:
+        """How many concepts actually moved.
+
+        Ids absent from the cold file are skipped rather than raising, so this
+        may be smaller than the list passed in.
+        """
+
+    @property
+    def rowids_reassigned(self) -> int:
+        """Of those, how many could not reclaim their original ``rowid_pk``.
+
+        Normally zero. Non-zero means something took the row's old identifier
+        while it was cold, so it came back with a fresh one and the search index
+        was re-pointed to match — the only respect in which a rehydrated row
+        differs from the row that was archived.
+        """
+
+    def __repr__(self) -> str: ...
+
 class ChainCheck:
     """Whether snapshot composition agrees with a fold from genesis (D-092).
 
@@ -631,6 +661,18 @@ class Database:
 
         `window` is a `timedelta` or seconds. A window that would not terminate —
         non-positive, non-finite — is **refused, not clamped**.
+        """
+
+    def rehydrate(self, ids: list[str]) -> RehydrateReport:
+        """Bring named concepts back out of cold storage (0.9.0, D-131).
+
+        A physical move back, not a re-assertion: it mints no transaction-time
+        facts, so `reconstruct` at any instant answers the same before archival,
+        while archived, and after rehydration. Ids not in the cold file are
+        skipped rather than refused.
+
+        A write, so it queues through the actor and waits out any transaction in
+        flight — a channel wait `busy_timeout` does not bound.
         """
 
     def verify_snapshot_chain(self, ts: Timestamp) -> ChainCheck: ...

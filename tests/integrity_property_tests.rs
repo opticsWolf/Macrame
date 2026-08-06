@@ -727,12 +727,31 @@ proptest! {
     /// `links_current` re-derivation ever wrote back into `links`, this is what
     /// would say so.
     ///
-    /// The stronger half of C1's exit gate — *every archived concept is
-    /// unreferenced* — cannot be asserted until C2 archives one. What is
-    /// assertable now is its precondition: nothing the predicate admits after a
-    /// real session is referenced by a surviving hot link.
+    /// **Restated for C2, which is what this docstring said would happen and
+    /// then went unnoticed for three items.** The paragraph below used to end
+    /// *"the stronger half — every archived concept is unreferenced — cannot be
+    /// asserted until C2 archives one"*, and once C2 did, the property as
+    /// written became **false**: `archive()` moves archivable concepts out of
+    /// the hot table, so a concept that was archivable before a session is
+    /// legitimately absent from `archivable_concepts` after it. It was absent
+    /// because it had gone cold, which is success, and the test called it a
+    /// withdrawal.
+    ///
+    /// The claim that survives is the one the union makes: **a concept leaves
+    /// the archivable set only by being archived.** `before ⊆ after ∪ cold`
+    /// keeps the original monotonicity — link archival cannot withdraw anything
+    /// — while admitting the one legitimate way out. And the stronger half is
+    /// now assertable and asserted: nothing in `cold.concepts` is referenced by
+    /// a surviving hot link.
+    ///
+    /// **How it went unnoticed is worth more than the fix.** This test is behind
+    /// the `property-tests` feature, and C2, C3 and C4 each ran their gate on
+    /// the default feature set — 27 targets, green every time, with this one not
+    /// among them. A feature-gated target is not covered by "the suite passes"
+    /// unless the suite is run with the feature, and three consecutive items
+    /// reported green against a gate that was not running.
     #[test]
-    fn archiving_links_only_enlarges_the_archivable_set(
+    fn a_concept_leaves_the_archivable_set_only_by_being_archived(
         history in prop::collection::vec(archive_assert_strategy(), 0..12),
         specs in prop::array::uniform4(concept_strategy()),
         cutoff in 0..TS.len(),
@@ -754,19 +773,40 @@ proptest! {
                 macrame::temporal::archivable_concepts(&conn, TS[cutoff]).await.unwrap()
                     .into_iter().collect();
 
+            // What went cold in this session. Read by ATTACH rather than by
+            // opening the file a second time: a second open of a second database
+            // in one process is R15's exact shape, and a property test runs it
+            // hundreds of times.
+            conn.execute(
+                "ATTACH DATABASE ?1 AS cold",
+                libsql::params![cold.to_string_lossy().as_ref()],
+            ).await.unwrap();
+            let archived: BTreeSet<String> = {
+                let mut rows = conn.query("SELECT id FROM cold.concepts", ()).await.unwrap();
+                let mut out = BTreeSet::new();
+                while let Some(r) = rows.next().await.unwrap() {
+                    out.insert(r.get::<String>(0).unwrap());
+                }
+                out
+            };
+            conn.execute("DETACH DATABASE cold", ()).await.unwrap();
+
+            let accounted: BTreeSet<String> = after.union(&archived).cloned().collect();
             prop_assert!(
-                before.is_subset(&after),
-                "archiving links withdrew a concept from the archivable set\n\
-                 cutoff: {}\nbefore: {:?}\nafter: {:?}",
-                TS[cutoff], before, after
+                before.is_subset(&accounted),
+                "a concept left the archivable set without being archived\n\
+                 cutoff: {}\nbefore: {:?}\nafter: {:?}\narchived: {:?}",
+                TS[cutoff], before, after, archived
             );
 
-            // The precondition C2 will rely on: nothing admitted is still pointed at.
+            // The stronger half, assertable now that C2 archives concepts:
+            // nothing that went cold — and nothing the predicate still admits —
+            // is referenced by a surviving hot link.
             let surviving = read_rows(&conn, "links").await;
-            for id in &after {
+            for id in accounted.iter() {
                 prop_assert!(
                     !surviving.iter().any(|l| l.source_id == *id || l.target_id == *id),
-                    "predicate admitted {} while a hot link still references it\nlinks: {:#?}",
+                    "{} is archivable or archived while a hot link still references it\nlinks: {:#?}",
                     id, surviving
                 );
             }

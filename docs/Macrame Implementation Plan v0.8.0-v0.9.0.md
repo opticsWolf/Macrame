@@ -1489,6 +1489,46 @@ but Python cannot drive would make the wheel a second-class door onto the same l
 the error tree gains a branch; `python/macrame/_macrame.pyi`; `appendices.md` Appendix A;
 `s13` (D-132); `README.md` Python section; `quickref.md` §10.
 
+> **Delivered 2026-08-07 ([D-133](architecture/s13-decision-register.md#d-133)).** `ArchiveReport.concepts_archived`,
+> `db.rehydrate(ids)` and `RehydrateReport` cross; version `0.9.0` in all four places; the wheel
+> rebuilt and reinstalled **before** either gate was read. 353 Python tests, `mypy --strict` clean,
+> `test_stubs.py` verified by injection — removing `rehydrate` from the stub fails it by name.
+>
+> **Step 1 was already done** (C2 shipped the getter and the stub property), and **step 4 was a
+> no-op**: C1–C3 added no `DbError` variant, so the exhaustive `match` [D-099](architecture/s13-decision-register.md#d-099)
+> put in `errors.rs` had nothing to catch. Recorded rather than passed over, because *no error work
+> was needed* and *the error work was forgotten* look identical from a green build.
+>
+> **Half of step 3 does not cross, and the reason is structural rather than an omission.**
+> `reconstruct` bit-identical crosses cleanly, against a second database seeded identically and never
+> archived. The live-table half largely does not: `keyword_search` and `load_subgraph` both filter
+> `retired = 0`, and an archivable concept is retired by definition, so neither can see the concept on
+> *either* side of the round trip — C3's `load_subgraph` discovery, met again from Python through a
+> different reader, which makes it a property of the predicate rather than of one API. Python has no
+> raw SQL by design, so the FTS half stays in the Rust suite. What the Python test asserts instead
+> tests more than presence: archiving the same concept a **second** time succeeds only if the row is
+> back in the hot table with the column values the predicate reads, and a second rehydration moving
+> nothing is what says it is hot rather than still cold.
+>
+> **This item's exit gate found that three previous items' gates were reporting on a smaller suite
+> than they sounded like.** `archiving_links_only_enlarges_the_archivable_set` sits behind the
+> `property-tests` feature; C2, C3 and C4 each ran the classifier on the default feature set and
+> called it green. The property had been **false since C2** — `archive()` began moving archivable
+> concepts out of the hot table, so a concept archivable before a session is legitimately absent
+> afterwards, and the test called that a withdrawal. Restated as `before ⊆ after ∪ cold` and renamed
+> `a_concept_leaves_the_archivable_set_only_by_being_archived`, which keeps the monotonicity and
+> gains the half C1 recorded as *"cannot be asserted until C2 archives one"* — a docstring that named
+> its own revision and was never revisited, because nothing was watching. **An exit gate that does
+> not name its feature set has not said what it ran.**
+>
+> **And the feature set is now known not to complete here.** Under `--features "metrics property-tests"`
+> the classifier exhausted its three retries on nine consecutive attempts, every one R15's shape.
+> Run alone the binary is ~50/50 and green when it finishes — measured against a stashed baseline at
+> the same rate, so C5's added `ATTACH` is not the cause. It is `integrity_property_tests` needing a
+> database per case, contending with 27 other targets. Recorded in `README.md` beside R15, and it is
+> why this release's counts are `330 · 339 with metrics · +7 property-tests run separately` rather
+> than one number.
+
 ---
 
 ## 5. Sequencing and dependencies
@@ -1590,6 +1630,7 @@ they have not been done.
 | **D-131** | D-130 | Rehydration is a physical move back and mints no transaction-time facts — and the `v9 → v10` rung that makes it so, because the fold's tie-break is `seq_id` and not `recorded_at`. **One entry: the rung is the mechanism, not a correction** (C3) |
 | **D-130** | — | **Architectural, and unprojected.** What crosses the archive boundary: the concept row moves column for column with its `content`; `analytics_annotations` and `embeddings_*` are disposed of. Also records that **C2's step 4 was a no-op** — `reconstruct` folds the log and never reads `concepts` (C2 steps 1, 3–5) |
 | **D-132** | D-131 | Rehydration measured, and the hot-side marker **refused outright rather than deferred**: the richer message it was wanted for is strictly weaker than what the hot log already carries, so `archive_hint` ships it with no rung. Also the superlinearity above n=1,000 and its cause (C4) |
+| **D-133** | D-128 | Archival is drivable from Python: `rehydrate` is exposed, and the traceability equality is asserted **through the binding** as well as in the crate, because a boundary that silently loses a doctrine property is the failure [§14.7](architecture/s14-python-bindings.md#147-r15-through-the-boundary) measured rather than assumed. Also: step 4 was a no-op; half of C3's gate does not cross, because every Python reader of a concept filters `retired = 0`; and the exit gate found `property-tests` had been red since C2 while three items reported green (C5) |
 
 **Still projected**, and the numbers below are estimates a third time, so they are written as *next free* rather than as claims:
 
@@ -1615,7 +1656,6 @@ they have not been done.
 | | projected as | |
 |---|---|---|
 | **D-129** | D-117 | **Erasure is refused on doctrine, not deferred**; the alternative is pseudonymous ids with identifying content held by the application. **Supersedes [D-022](architecture/s13-decision-register.md#d-022)'s open framing** ([§2](#2-doctrine-position-erasure-is-refused-archival-is-sanctioned)) |
-| **D-132** | D-128 | Archival is drivable from Python: `rehydrate` is exposed, and the traceability equality is asserted **through the binding** as well as in the crate, because a boundary that silently loses a doctrine property is the failure [§14.7](architecture/s14-python-bindings.md#147-r15-through-the-boundary) measured rather than assumed (C5) |
 ## 7. Risks
 
 | Risk | Likelihood | Impact | Mitigation |

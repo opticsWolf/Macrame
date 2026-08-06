@@ -222,7 +222,157 @@ def test_temporal_calls_on_a_closed_handle_raise(db_path):
         lambda: handle.query_as_of_edges(),
         lambda: handle.archive(T1),
         lambda: handle.archive_windowed(T1, 86_400),
+        lambda: handle.rehydrate(["anything"]),
         lambda: handle.verify_snapshot_chain(stamp),
     ):
         with pytest.raises(macrame.MacrameClosedError):
             call()
+
+
+# --------------------------------------------------------------------------
+# rehydrate, and the doctrine claim through the boundary (0.9.0, C5)
+# --------------------------------------------------------------------------
+
+# Past every timestamp the crate stamps, `recorded_at` included — a cutoff in
+# the past archives nothing, because transaction time is stamped at write.
+FUTURE = "2099-01-01T00:00:00.000000Z"
+
+
+def _seed_archivable(handle):
+    """One concept that will go cold, one that will not.
+
+    ``cold`` is superseded first so the log has rows to archive as well as the
+    row itself, then closed and retired so it satisfies the archivability
+    predicate; ``keep`` stays open and stays hot. No edges anywhere, because a
+    concept named by any surviving link is not archivable at all (D-128).
+    """
+    handle.write_concepts(
+        [
+            macrame.ConceptUpsert("keep", "Keep", valid_from=T0, content="stays hot"),
+            macrame.ConceptUpsert("cold", "Cold v1", valid_from=T0, content="first"),
+        ]
+    )
+    handle.write_concepts(
+        [
+            macrame.ConceptUpsert(
+                "cold",
+                "Cold v2",
+                valid_from=T0,
+                valid_to=T1,
+                retired=True,
+                content="second",
+            )
+        ]
+    )
+    return handle
+
+
+@pytest.fixture
+def archivable_db(db_path):
+    with macrame.Database.open(db_path, snapshot_every_entries=None) as handle:
+        yield _seed_archivable(handle)
+
+
+def test_the_archive_report_carries_concepts_through_the_boundary(archivable_db):
+    """C1/C2's new field is Python-visible and is not always zero.
+
+    ``concepts_archived >= 0`` would pass against a binding that never read the
+    field at all, which is the shape of failure a count getter has.
+    """
+    report = archivable_db.archive(FUTURE)
+    assert report.concepts_archived == 1
+    assert "concepts=1" in repr(report)
+
+
+def test_rehydrate_returns_a_report_that_reads_as_python(archivable_db):
+    archivable_db.archive(FUTURE)
+    report = archivable_db.rehydrate(["cold"])
+    assert isinstance(report, macrame.RehydrateReport)
+    assert report.concepts_rehydrated == 1
+    # The clean exit: nothing claimed the freed rowid, so nothing was reassigned.
+    assert report.rowids_reassigned == 0
+    assert "Some(" not in repr(report)
+    assert "concepts=1" in repr(report)
+
+
+def test_rehydrating_an_id_that_is_not_cold_is_skipped_not_refused(archivable_db):
+    """The caller's list comes from a cold-side query; staleness is normal.
+
+    Asserted with a real id and an invented one together, so a binding that
+    raised on the unknown one — or quietly counted it — fails either way.
+    """
+    archivable_db.archive(FUTURE)
+    report = archivable_db.rehydrate(["cold", "never-existed", "keep"])
+    assert report.concepts_rehydrated == 1
+
+
+def test_archive_then_rehydrate_leaves_reconstruct_bit_identical(db_path, tmp_path):
+    """**The release's whole point, asserted from Python** (C3's gate, C5 step 3).
+
+    Not duplication of the Rust test. That one proves the ledger is traceable
+    across the round trip; this one proves the *boundary* does not lose the
+    property — the same argument §14.7 makes about R15 reaching through rather
+    than being absorbed. A binding that rendered `content` from a stale cache,
+    or dropped a field on the way out, would pass every test above and fail
+    here.
+
+    The control is a second database seeded identically and never archived, so
+    the comparison is against what the answer should have been rather than
+    against an earlier reading of the same handle.
+    """
+    control_path = tmp_path / "control.db"
+    with macrame.Database.open(control_path, snapshot_every_entries=None) as control:
+        expected = _seed_archivable(control).reconstruct(now())
+        expected_concepts = dict(expected.concepts)
+        expected_edges = list(expected.edges)
+
+    with macrame.Database.open(db_path, snapshot_every_entries=None) as handle:
+        _seed_archivable(handle)
+        assert handle.archive(FUTURE).concepts_archived == 1
+        assert handle.rehydrate(["cold"]).concepts_rehydrated == 1
+
+        actual = handle.reconstruct(now())
+        assert dict(actual.concepts) == expected_concepts
+        assert list(actual.edges) == expected_edges
+        # And the round trip did not resurrect the retirement: `cold` was
+        # retired before it was archived and must still be absent from the fold.
+        assert "cold" not in actual.concepts
+        assert "keep" in actual.concepts
+
+
+def test_a_rehydrated_concept_is_back_in_the_hot_table_not_merely_in_the_ledger(
+    archivable_db,
+):
+    """The half `reconstruct` cannot see (D-130), asserted from Python too.
+
+    The fold reads `transaction_log` and never touches the `concepts` table, so
+    the equality test above would pass even if rehydration put the row back with
+    every column garbled. The Rust gate is two tests for that reason and so is
+    this one.
+
+    **The reader is the archivability predicate, reached through `archive`**, and
+    that is the correction this test needed. The obvious readers are not
+    available: `keyword_search` and `load_subgraph` both filter `retired = 0`,
+    and an archivable concept is retired by definition (D-128), so neither can
+    see an archived *or* a rehydrated concept from either side of the round trip
+    — the same discovery C3 made about `load_subgraph` in the crate. Python has
+    no raw SQL, so the FTS index half is simply not assertable across this
+    boundary and the Rust suite keeps it.
+
+    What is left is better than a consolation. Archiving again succeeds only if
+    the row is genuinely in the hot table *with the column values the predicate
+    reads* — `retired`, `valid_to`, `recorded_at` — so it tests the columns
+    rather than merely the row's presence. And a second rehydration moving
+    nothing is what says the concept is hot rather than still cold: archivability
+    itself would not say so, because the predicate is a pure function of the
+    concept's own columns and answers the same on both sides of the boundary.
+    """
+    assert archivable_db.archive(FUTURE).concepts_archived == 1
+    assert archivable_db.rehydrate(["cold"]).concepts_rehydrated == 1
+
+    # It is hot now, so there is nothing cold left to bring back.
+    assert archivable_db.rehydrate(["cold"]).concepts_rehydrated == 0
+
+    # And it is hot *with its columns intact*, which is what lets the predicate
+    # admit it a second time.
+    assert archivable_db.archive(FUTURE).concepts_archived == 1

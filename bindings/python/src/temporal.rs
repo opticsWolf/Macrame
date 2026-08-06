@@ -24,11 +24,23 @@
 //! `diverged()`, that is the one most callers want. A tuple cannot carry any of
 //! that, and a positional index into eleven fields is how a caller compares the
 //! two anchors by accident.
+//!
+//! # `RehydrateReport` is a class with two fields, which this rule does not reach
+//!
+//! By field count it should be a tuple, and it is not, for two reasons the count
+//! cannot see. It is the **counterpart of `ArchiveReport`**, and a caller who
+//! reads `report.concepts_archived` going out and `report[0]` coming back has to
+//! learn which direction returns which shape — the pair is the unit a caller
+//! thinks in, so the pair is what should look alike. And `rowids_reassigned` is
+//! precisely the field a positional index gets wrong: two `int`s in a tuple,
+//! where one is *work done* and the other is *something unusual happened*, is an
+//! invitation to read `[0]` and mean `[1]`. The rule above is about arity as a
+//! proxy for "is there anything here to get wrong"; here there is, at arity two.
 
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
 
-use macrame::temporal::{ArchiveReport, ChainCheck, MaterializedState};
+use macrame::temporal::{ArchiveReport, ChainCheck, MaterializedState, RehydrateReport};
 
 use crate::graph::PyNodeAttributes;
 use crate::timestamps::from_canonical;
@@ -173,6 +185,46 @@ impl PyArchiveReport {
     }
 }
 
+/// What one rehydration moved back out of cold storage (0.9.0, C3, D-131).
+///
+/// **`rowids_reassigned` is exposed rather than kept internal**, and it is the
+/// only field here that is not a plain count of work done. A rehydrated concept
+/// normally reclaims the `rowid_pk` it had before it went cold; when something
+/// else has taken that value in the meantime it gets a fresh one and the search
+/// index is re-pointed to match. That is the one respect in which the row coming
+/// back differs from the row that left, so a caller holding rowids across the
+/// boundary — the only kind of caller for whom it matters — can see that it
+/// happened rather than discovering it through a stale join.
+#[pyclass(name = "RehydrateReport", module = "macrame", frozen)]
+pub(crate) struct PyRehydrateReport {
+    pub(crate) inner: RehydrateReport,
+}
+
+#[pymethods]
+impl PyRehydrateReport {
+    /// Concepts moved back into the hot tables.
+    ///
+    /// Ids not present in the cold file are skipped rather than raising, so this
+    /// can be smaller than the list passed in — the caller's list usually comes
+    /// from an earlier cold-side query and being partially stale is the normal
+    /// case, not an error.
+    #[getter]
+    fn concepts_rehydrated(&self) -> usize {
+        self.inner.concepts_rehydrated
+    }
+    /// Of those, how many could not keep their original `rowid_pk`.
+    #[getter]
+    fn rowids_reassigned(&self) -> usize {
+        self.inner.rowids_reassigned
+    }
+    fn __repr__(&self) -> String {
+        format!(
+            "<macrame.RehydrateReport concepts={} rowids_reassigned={}>",
+            self.inner.concepts_rehydrated, self.inner.rowids_reassigned
+        )
+    }
+}
+
 /// Whether snapshot composition agrees with a fold from genesis (D-092).
 ///
 /// Snapshot *n* composes onto snapshot *n-1* and nothing ever folds the whole
@@ -265,6 +317,7 @@ impl PyChainCheck {
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyMaterializedState>()?;
     m.add_class::<PyArchiveReport>()?;
+    m.add_class::<PyRehydrateReport>()?;
     m.add_class::<PyChainCheck>()?;
     // The cap on each disagreement list, so a caller can tell a full list from a
     // truncated one without hard-coding 32.
