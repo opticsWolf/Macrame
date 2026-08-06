@@ -1375,7 +1375,33 @@ alternative makes the transaction-time axis lie about when the concept was learn
 of "traceable through the bitemporal ledger" and it is the whole point of the release.
 
 **Documents.** `s5-modules.md` §5.7; `appendices.md` Appendix C and the glossary (rehydration is
-a new term); `s13` (D-130); `s14` if the binding exposes it.
+a new term); `s13` ([D-131](architecture/s13-decision-register.md#d-131) — **one entry, not two**: the
+`v9 → v10` rung is not correcting a defect, it *is* the mechanism that makes rehydration a move,
+and split apart neither half would make sense); `s14` if the binding exposes it.
+
+> **Delivered 2026-08-06 ([D-131](architecture/s13-decision-register.md#d-131)).**
+> `Database::rehydrate(&[…])` ships, and this item cost a schema rung the plan did not project.
+>
+> **`trg_concepts_log_insert` had to become marker-gated, and the reason is a fold detail.**
+> Putting a concept back is an *insert*, so an unconditional `AFTER INSERT` makes "this is a move,
+> not a write" unimplementable. Worse than a spurious row: the fold takes
+> `ROW_NUMBER() OVER (… ORDER BY seq_id DESC) = 1`, so precedence is by **sequence, not
+> timestamp**. A rehydrated row carries its original `recorded_at` but its log row would take a
+> new `seq_id` — outranking the later `'U'` that retired the concept, and returning it **alive**
+> at every `ts` after its creation. Had the fold resolved by timestamp, no rung would have been
+> needed.
+>
+> **`rowid_pk` has both exits, not just the hazard.** Reinstate when free; otherwise a fresh
+> rowid and the stale `concepts_fts` entry deleted at the old one.
+>
+> **The exit gate became two tests.** `reconstruct` bit-identical is necessary and *not*
+> sufficient — the fold never reads `concepts` ([D-130](architecture/s13-decision-register.md#d-130)),
+> so it passes even against a row written back garbled. The second test is against the live
+> tables. Three of its assertions were wrong before they were right, and the register entry keeps
+> all three: `load_subgraph` cannot see a retired concept and so cannot be a reader;
+> *"archivable_concepts no longer lists it"* is false, because the predicate says **eligible**
+> and never **due**; and the column check passed vacuously until it was moved ahead of the
+> `upsert_concept` that had been rewriting the columns it verified.
 
 ### C4 · Measure rehydration, and decide the hot-side marker
 
@@ -1527,6 +1553,7 @@ they have not been done.
 |---|---|---|
 | **D-128** | D-129 | Concept archivability is **reachability**, not expiry, and it reads **both** clocks; the two derived-row foreign keys are deliberately not clauses. Landed as C1 alone rather than jointly with C2, and took the number the erasure entry below had been projected for (C1) |
 | **D-129** | D-133 | **Corrective.** Schema v9: the concepts delete guard becomes marker-gated, and `verify` starts checking the delete guards' **bodies** rather than only their names — the second half of the hole [D-126](architecture/s13-decision-register.md#d-126) found (C2 step 2) |
+| **D-131** | D-130 | Rehydration is a physical move back and mints no transaction-time facts — and the `v9 → v10` rung that makes it so, because the fold's tie-break is `seq_id` and not `recorded_at`. **One entry: the rung is the mechanism, not a correction** (C3) |
 | **D-130** | — | **Architectural, and unprojected.** What crosses the archive boundary: the concept row moves column for column with its `content`; `analytics_annotations` and `embeddings_*` are disposed of. Also records that **C2's step 4 was a no-op** — `reconstruct` folds the log and never reads `concepts` (C2 steps 1, 3–5) |
 
 **Still projected**, and the numbers below are estimates a third time, so they are written as *next free* rather than as claims:
@@ -1553,7 +1580,6 @@ they have not been done.
 | | projected as | |
 |---|---|---|
 | **D-129** | D-117 | **Erasure is refused on doctrine, not deferred**; the alternative is pseudonymous ids with identifying content held by the application. **Supersedes [D-022](architecture/s13-decision-register.md#d-022)'s open framing** ([§2](#2-doctrine-position-erasure-is-refused-archival-is-sanctioned)) |
-| **D-130** | D-121 | Rehydration is a physical move back and mints no transaction-time facts — **derived from the traceability requirement**, closing Appendix C's open Doctrine III question (C3) |
 | **D-131** | D-122 | The hot-side archive marker, taken or refused with C4's measurement. **[D-121](architecture/s13-decision-register.md#d-121) removed its load-bearing justification**: it is now wanted for a better error *message*, not for a correct decision |
 | **D-132** | D-128 | Archival is drivable from Python: `rehydrate` is exposed, and the traceability equality is asserted **through the binding** as well as in the crate, because a boundary that silently loses a doctrine property is the failure [§14.7](architecture/s14-python-bindings.md#147-r15-through-the-boundary) measured rather than assumed (C5) |
 ## 7. Risks

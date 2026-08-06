@@ -259,7 +259,17 @@ CREATE TABLE transaction_log (
 **The trigger set (restored 0.5.4, from `schema::ddl` — see the note below).**
 
 ```sql
+-- v10 (C3, D-131): marker-gated. An insert inside a declared archive session is
+-- rehydration -- a physical move back -- and must mint no transaction-time fact.
+-- The gate is not tidiness: the fold resolves by seq_id, not recorded_at, so a
+-- log row written here would take a NEW seq_id while carrying the concept's
+-- ORIGINAL recorded_at, outrank the later 'U' that retired it, and resurrect a
+-- superseded belief at every ts after the concept's creation.
 CREATE TRIGGER trg_concepts_log_insert AFTER INSERT ON concepts
+WHEN NOT EXISTS (
+    SELECT 1 FROM sqlite_master
+    WHERE type = 'table' AND name = 'macrame_archive_session'
+)
 BEGIN
     INSERT INTO transaction_log (table_name, entity_id, operation, payload, recorded_at)
     VALUES ('concepts', NEW.id, 'I',
@@ -269,6 +279,9 @@ BEGIN
             NEW.recorded_at);
 END;
 
+-- Deliberately NOT gated: nothing inside a session updates a concept -- archival
+-- deletes, rehydration inserts -- so gating it would suppress nothing and
+-- disarm a log guard for longer (D-131).
 CREATE TRIGGER trg_concepts_log_update AFTER UPDATE ON concepts
 BEGIN
     INSERT INTO transaction_log (table_name, entity_id, operation, payload, recorded_at)
