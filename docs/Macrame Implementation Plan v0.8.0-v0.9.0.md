@@ -8,8 +8,10 @@ registries, plus direct reproduction or measurement of every claim below — inc
 specifies for its own migration** and established the one that works.
 
 **Two releases, one theme.** 0.8.0 spends the last cheap API break and the last cheap schema
-rung this project will get. 0.9.0 builds concept archival on top of them, needing no migration
-at all. Erasure is refused rather than deferred, and [§2](#2-doctrine-position-erasure-is-refused-archival-is-sanctioned)
+rung this project will get. 0.9.0 builds concept archival on top of them, ~~needing no migration
+at all~~ **needing one cheap trigger-only rung after all — corrected 2026-08-06, see
+[§1](#1-the-two-releases-at-a-glance) and [D-126](architecture/s13-decision-register.md#d-126)**.
+Erasure is refused rather than deferred, and [§2](#2-doctrine-position-erasure-is-refused-archival-is-sanctioned)
 says why.
 
 ---
@@ -88,12 +90,29 @@ so they are named explicitly in each item's **Documents** list instead.
 |---|---|---|
 | Theme | the last cheap break, the last cheap rung | concept archival |
 | API break | **yes**, Rust only ([B1](#b1--subgraph-nodedata-edgeref-fields-private-accessors-public--the-break)) | no |
-| Schema rung | **v7 → v8** ([B4](#b4--schema-v8-the-last-cheap-rung)) | **none** |
+| Schema rung | **v7 → v8** ([B4](#b4--schema-v8-the-last-cheap-rung)) | ~~**none**~~ **v8 → v9** — corrected 2026-08-06, see below ([D-126](architecture/s13-decision-register.md#d-126)) |
 | Python API | **one narrow break** — `NodeData.content` becomes `str \| None` ([B7](#b7--the-binding-surface-the-stub-and-the-wheel)). The interning is invisible: [D-101](architecture/s13-decision-register.md#d-101) pre-paid for it | additive ([C5](#c5--the-binding-catches-up-with-archival)) |
 | Doctrine | erasure refused, recorded ([§2](#2-doctrine-position-erasure-is-refused-archival-is-sanctioned)) | Doctrine V's archive path extended to concepts |
 
 Track A lands on `main` continuously and ships *in* 0.8.0 — it simply does not wait for it.
 A1 must land now because `main` is red today.
+
+> **The "none" in the schema-rung column was wrong, and the pre-tag re-check [§7](#7-risks)
+> asked for is what found it** ([D-126](architecture/s13-decision-register.md#d-126),
+> 2026-08-06). B4 shipped [C2](#c2--the-delete-guard-becomes-conditional)'s steps 1 and 3 but not
+> step 2: `trg_concepts_guard_delete` is still *unconditional* in v8 while `trg_links_guard_delete`
+> is already marker-gated, and two measured facts make correcting it a rung rather than a baseline
+> re-issue — `CREATE TRIGGER IF NOT EXISTS` on an existing name keeps the **old body**, and
+> `verify()` compares `type, name` and never trigger bodies, so a stale guard passes verification
+> in silence. **The correction is smaller than the [§7](#7-risks) row feared** — a `DROP TRIGGER` +
+> `CREATE TRIGGER`, no table rebuild, no data movement — but it is not nothing, and it is the
+> reason the next release is **0.9.0 and not 0.8.5**. Under Cargo's 0.x caret rule
+> `macrame-db = "0.8"` accepts any `0.8.z` on a routine `cargo update`, and a v9 database is
+> hard-refused by 0.8.0 code (`migrations::run`: *"will not operate on a schema it does not
+> know"*). A dependency update must not be able to migrate a user's database irreversibly, so the
+> rung takes the minor bump that makes the upgrade a deliberate manifest edit. The two "last cheap
+> X" claims in the preamble stand for the **API break**; the "no migration at all" half does not,
+> and is struck there.
 
 ---
 
@@ -135,7 +154,7 @@ fields back to the application, which is where §2.2's answer already puts the w
 
 **Recorded as refused, not deferred.** [D-022](architecture/s13-decision-register.md#d-022) and
 Appendix C currently read as *not yet*, which is how an obligation with no trigger survives
-indefinitely. [D-124](#6-decision-entries-this-plan-creates) replaces that with a refusal and a
+indefinitely. [D-128](#6-decision-entries-this-plan-creates) replaces that with a refusal and a
 pointer to the alternative.
 
 ### 2.3 Concept archival is the sanctioned exit, and traceability answers its open question
@@ -159,7 +178,7 @@ protect. Therefore:
 > session, with the horizon updated.
 
 That is derived rather than chosen, and it closes the question rather than deferring it
-([D-126](#6-decision-entries-this-plan-creates)).
+([D-130](#6-decision-entries-this-plan-creates)).
 
 ---
 
@@ -1272,7 +1291,7 @@ The model-based shape `integrity_property_tests` uses, not a fixture —
 [D-030](architecture/s13-decision-register.md#d-030) is why.
 
 **Documents.** `s4-schema.md` §4.1; `s5-modules.md` §5.7; `appendices.md` Appendix C (the design
-moves from "deferred" to "delivered"); `s13` (D-120).
+moves from "deferred" to "delivered"); `s13` (D-129).
 
 ### C2 · `cold.concepts`, and the guard becomes conditional
 
@@ -1305,9 +1324,11 @@ to pin *conditional*, with an ad-hoc delete outside a session still refused.
 test. A cold-roundtrip test: archive concepts, `reconstruct` across the boundary, compare against
 the pre-archive answer.
 
-**Documents.** `s4-schema.md` §4.1 and §4.6 (the third trigger becomes live); `s5-modules.md`
-§5.7; `s0-s3` if Doctrine V's commentary needs the concept case named; `s13` (D-120);
-`s11-s12` R3 (log growth) — its mitigation now covers concepts.
+**Documents.** `s4-schema.md` §4.1 and §4.6 (the third trigger becomes live) **and §4.7 — the
+ladder gains the `v8 → v9` row, which is not optional here**; `s5-modules.md`
+§5.7; `s0-s3` if Doctrine V's commentary needs the concept case named; `s13` (D-129);
+`s11-s12` R3 (log growth) — its mitigation now covers concepts. **`README.md` and the release
+note carry the migration**, because a rung is the one change a user cannot undo.
 
 ### C3 · Rehydration is a move back, not a write
 
@@ -1321,7 +1342,7 @@ alternative makes the transaction-time axis lie about when the concept was learn
 of "traceable through the bitemporal ledger" and it is the whole point of the release.
 
 **Documents.** `s5-modules.md` §5.7; `appendices.md` Appendix C and the glossary (rehydration is
-a new term); `s13` (D-126); `s14` if the binding exposes it.
+a new term); `s13` (D-130); `s14` if the binding exposes it.
 
 ### C4 · Measure rehydration, and decide the hot-side marker
 
@@ -1335,8 +1356,10 @@ on X; pass the archive path"* instead of returning empty. 0.8.0 declined it as a
 addition, so under [D-036](architecture/s13-decision-register.md#d-036) it must land pre-1.0 or
 not at all.
 
-**Documents.** `s6-s10` §9 (a new budget row, with its fixture named); `s13` (D-122 if the marker
-lands, or an amendment to D-118 if it does not).
+**Documents.** `s6-s10` §9 (a new budget row, with its fixture named); `s13` (D-131 if the marker
+lands, or an amendment to [D-121](architecture/s13-decision-register.md#d-121) if it does not —
+that is the entry which deferred the marker, and the stale "D-118" written here was the index-drop
+entry, corrected 2026-08-06).
 
 ### C5 · The binding catches up with archival
 
@@ -1371,7 +1394,7 @@ but Python cannot drive would make the wheel a second-class door onto the same l
 
 **Documents.** `s14` §14.9 (status), §14.11 (temporal — `ArchiveReport`, `rehydrate`), §14.3 if
 the error tree gains a branch; `python/macrame/_macrame.pyi`; `appendices.md` Appendix A;
-`s13` (D-124); `README.md` Python section; `quickref.md` §10.
+`s13` (D-132); `README.md` Python section; `quickref.md` §10.
 
 ---
 
@@ -1468,13 +1491,26 @@ they have not been done.
 **Still projected**, and the numbers below are now estimates a second time, so they are written as
 *next free* rather than as claims:
 
+> **Renumbered 2026-08-06, and the reason is the hazard this table was already warning about.**
+> These five were projected as D-124 … D-128. **All five of those numbers have since been taken
+> by real entries** — [D-124](architecture/s13-decision-register.md#d-124) (the R15 retraction),
+> [D-125](architecture/s13-decision-register.md#d-125) (the v7 → v8 rung measured),
+> [D-126](architecture/s13-decision-register.md#d-126) (0.9.0 needs a rung),
+> [D-127](architecture/s13-decision-register.md#d-127) (the §9 budgets re-measured) — none of
+> which this plan projected, because three of the four were produced by exit gates rather than by
+> items. So the projections below move to **D-128 … D-132**, and the register is the authority the
+> moment an entry is written. A projected number is a **guess about ordering**, never a
+> reservation: it is cited as `#6-decision-entries-this-plan-creates` (this table) while it is a
+> guess, and only as `s13-decision-register.md#d-1NN` once it exists. Where this plan's prose
+> cited a projected number, that citation moved with the row.
+
 | | recorded as | |
 |---|---|---|
-| **D-124** | D-117 | **Erasure is refused on doctrine, not deferred**; the alternative is pseudonymous ids with identifying content held by the application. **Supersedes [D-022](architecture/s13-decision-register.md#d-022)'s open framing** ([§2](#2-doctrine-position-erasure-is-refused-archival-is-sanctioned)) |
-| **D-125** | D-120 | Concept archival: archivability is reachability, not expiry; the delete guard becomes marker-gated (C1, C2) |
-| **D-126** | D-121 | Rehydration is a physical move back and mints no transaction-time facts — **derived from the traceability requirement**, closing Appendix C's open Doctrine III question (C3) |
-| **D-127** | D-122 | The hot-side archive marker, taken or refused with C4's measurement. **[D-121](architecture/s13-decision-register.md#d-121) removed its load-bearing justification**: it is now wanted for a better error *message*, not for a correct decision |
-| **D-128** | D-124 | Archival is drivable from Python: `rehydrate` is exposed, and the traceability equality is asserted **through the binding** as well as in the crate, because a boundary that silently loses a doctrine property is the failure [§14.7](architecture/s14-python-bindings.md#147-r15-through-the-boundary) measured rather than assumed (C5) |
+| **D-128** | D-117 | **Erasure is refused on doctrine, not deferred**; the alternative is pseudonymous ids with identifying content held by the application. **Supersedes [D-022](architecture/s13-decision-register.md#d-022)'s open framing** ([§2](#2-doctrine-position-erasure-is-refused-archival-is-sanctioned)) |
+| **D-129** | D-120 | Concept archival: archivability is reachability, not expiry; the delete guard becomes marker-gated (C1, C2). **Now also carries the v8 → v9 rung** ([D-126](architecture/s13-decision-register.md#d-126)) |
+| **D-130** | D-121 | Rehydration is a physical move back and mints no transaction-time facts — **derived from the traceability requirement**, closing Appendix C's open Doctrine III question (C3) |
+| **D-131** | D-122 | The hot-side archive marker, taken or refused with C4's measurement. **[D-121](architecture/s13-decision-register.md#d-121) removed its load-bearing justification**: it is now wanted for a better error *message*, not for a correct decision |
+| **D-132** | D-128 | Archival is drivable from Python: `rehydrate` is exposed, and the traceability equality is asserted **through the binding** as well as in the crate, because a boundary that silently loses a doctrine property is the failure [§14.7](architecture/s14-python-bindings.md#147-r15-through-the-boundary) measured rather than assumed (C5) |
 
 ---
 

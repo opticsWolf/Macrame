@@ -647,8 +647,17 @@ pub const CREATE_TRIGGERS: &[&str] = &[
     // so the statement never reaches `AFTER DELETE`. It is here because 0.9.0's
     // archive session is what makes the guard conditional, and the moment that
     // lands the index would go silently stale without this. Installing the
-    // capability in the rung that is already rebuilding the table costs nothing
-    // and means 0.9.0 needs no migration of its own.
+    // capability in the rung that is already rebuilding the table costs nothing.
+    //
+    // It does **not** mean 0.9.0 needs no migration of its own — that claim was
+    // written here and it is wrong (D-126, corrected 0.8.0 pre-tag). This trigger
+    // is C2's step 3; step 2 is making `trg_concepts_guard_delete` conditional,
+    // and that is a `v8 → v9` rung, because `CREATE TRIGGER IF NOT EXISTS` on an
+    // existing name keeps the **old body** and `verify()` compares names only, so
+    // a re-issued baseline would leave the unconditional guard in place and pass.
+    // Deliberately not fixed here: the archive-session marker exists during
+    // *links* archival too, so a conditional concepts guard shipped in 0.8.0
+    // would leave concepts deletable during those sessions.
     //
     // `the_fts_delete_trigger_is_installed_and_inert` (wave1_regression_tests)
     // pins both halves rather than assuming either.

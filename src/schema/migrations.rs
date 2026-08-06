@@ -611,8 +611,14 @@ const CONCEPTS_TRIGGERS_V7: &[&str] = &[
 /// showed the hazard unreachable today only because the delete guard is
 /// unconditional, so rowids are dense and the renumbering is the identity map.
 /// 0.9.0's archival makes them sparse. This installs the fix while the fix is
-/// still free, and installs `trg_concepts_fts_delete` in the same rung so 0.9.0
-/// needs no migration of its own.
+/// still free, and installs `trg_concepts_fts_delete` in the same rung.
+///
+/// **What it does not buy, corrected in place.** This paragraph read "*so 0.9.0
+/// needs no migration of its own*". That is wrong (D-126). The rung ships C2's
+/// steps 1 and 3; step 2 — `trg_concepts_guard_delete` becoming marker-gated —
+/// still needs a `v8 → v9` rung of its own, since re-issuing the baseline keeps
+/// the old trigger body and `verify` would not notice. It is cheap (a `DROP
+/// TRIGGER` and a `CREATE`, no table rebuild) but it is not nothing.
 ///
 /// # Why it needs `suspends_foreign_keys`, and what still checks the result
 ///

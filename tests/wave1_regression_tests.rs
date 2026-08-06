@@ -1483,8 +1483,11 @@ async fn vacuum_preserves_a_sparse_rowid_pk() {
 /// **`trg_concepts_fts_delete` is installed, and cannot fire** (v8, D-119, §4.6).
 ///
 /// Both halves, because either alone is misleading. That it exists is what
-/// 0.9.0 needs and what makes this rung the last one before 1.0; that it cannot
-/// fire is why installing it in 0.8.0 changes nothing observable.
+/// 0.9.0 needs and what makes this the last *table-rebuild* rung before 1.0;
+/// that it cannot fire is why installing it in 0.8.0 changes nothing observable.
+///
+/// Not the last rung outright — 0.9.0 still needs a trigger-only `v8 → v9` for
+/// the guard (D-126). This comment said "the last one" and that was too strong.
 ///
 /// The inertness is not a property of the trigger — it is `trg_concepts_guard_delete`,
 /// a `BEFORE DELETE` that always aborts, so the statement never reaches
