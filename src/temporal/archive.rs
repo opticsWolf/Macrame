@@ -96,6 +96,91 @@ const LOG_ARCHIVABLE: &str = r#"
     )
 "#;
 
+/// A concept is archivable when it is `retired`, both its clocks are behind the
+/// cutoff, **and no surviving row of hot `links` mentions it in either
+/// direction** (C1, D-128).
+///
+/// # Why reachability, and not a closed interval
+///
+/// A link assertion has a closed interval, so [`LINKS_ARCHIVABLE`] can ask
+/// whether the interval ended. A concept is an *entity*, and has no closed
+/// state: `retired = 1` says belief in it stopped, which is not the same claim
+/// as "nothing points at it any more". The two `links` foreign keys are what
+/// make that difference matter — archiving a concept physically removes its row,
+/// and a surviving hot link naming it would leave the key unsatisfiable.
+/// `ON DELETE CASCADE` is not the way out, because the rows it would cascade
+/// onto are ledger rows.
+///
+/// So concept archival is **strictly downstream of link archival**: a concept
+/// becomes eligible only once every edge mentioning it has itself gone cold.
+/// Inside a session this predicate is therefore evaluated *after* the `links`
+/// delete and never before it, and the same question asked before and after one
+/// session legitimately gives two different answers. That is a property of the
+/// predicate, not a race.
+///
+/// # The other two foreign keys, and why they are not clauses here
+///
+/// `concepts` also has inbound keys from `analytics_annotations` and from every
+/// registered `embeddings_*` table ([`crate::schema::migrations`] lists all
+/// four). Neither appears above, and the distinction is the point: those hold
+/// **derived** rows. Doctrine VII makes an embedding an artifact of a model
+/// applied to content, and an annotation is the output of an algorithm that read
+/// `concepts` in the first place. A derived row is removed and recomputed; a
+/// ledger row is neither. Making archivability wait on a recomputable artifact
+/// would answer "not yet" forever for any concept that had ever been embedded.
+///
+/// # Both clocks, because one of them is not enough
+///
+/// The specification for this predicate named `valid_to` alone.
+/// `recorded_at < :cutoff` is here as well, mirroring [`LINKS_ARCHIVABLE`]:
+/// a concept retired with its `valid_to` behind the cutoff but *recorded* at or
+/// after it is a fact the session is not meant to touch yet, and archiving it
+/// would send the concept cold while the log entries describing it stayed hot.
+/// That is the same two-clock mismatch the `links_current` compensation carried
+/// until Wave 4.5 (see [`archive_session`]), reached from the other side.
+/// Doctrine II: two clocks, never mixed.
+///
+/// The open sentinel needs no clause of its own — `9999-12-31T23:59:59.999999Z`
+/// sorts above every canonical stamp (D-029), so a concept whose validity is
+/// still open fails `valid_to < :cutoff` for any cutoff a caller can pass.
+const CONCEPTS_ARCHIVABLE: &str = r#"
+    retired = 1
+    AND recorded_at < :cutoff
+    AND valid_to    < :cutoff
+    AND NOT EXISTS (
+        SELECT 1 FROM links
+        WHERE links.source_id = concepts.id
+           OR links.target_id = concepts.id
+    )
+"#;
+
+/// The ids of every concept that `CONCEPTS_ARCHIVABLE` admits at `cutoff`, in
+/// `id` order.
+///
+/// **Read-only, and deliberately available before anything can act on it.**
+/// Concept archival is the one operation in this crate a caller cannot undo
+/// without a cold file to hand, so the predicate that decides it is observable
+/// on its own rather than only as a count in a report after the fact.
+///
+/// The answer is a function of the hot state *now*. Archiving links first will
+/// generally enlarge it — that is the downstream relationship
+/// `CONCEPTS_ARCHIVABLE` describes, not an inconsistency — so a caller
+/// planning a session should ask after the link archive, not before it.
+pub async fn archivable_concepts(conn: &libsql::Connection, cutoff: &str) -> Result<Vec<String>> {
+    let mut rows = conn
+        .query(
+            &format!("SELECT id FROM concepts WHERE {CONCEPTS_ARCHIVABLE} ORDER BY id"),
+            libsql::named_params! {":cutoff": cutoff},
+        )
+        .await?;
+
+    let mut ids = Vec::new();
+    while let Some(row) = rows.next().await? {
+        ids.push(row.get::<String>(0)?);
+    }
+    Ok(ids)
+}
+
 /// Move closed edge intervals and superseded log rows older than `cutoff` into
 /// the cold database at `archive_path` (§5.7, D-012, D-022).
 ///

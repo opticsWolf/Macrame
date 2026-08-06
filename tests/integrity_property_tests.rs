@@ -238,6 +238,91 @@ fn assert_strategy() -> impl Strategy<Value = Assert> {
         )
 }
 
+/// The concepts C1's properties seed. Four ids doing three different jobs, and
+/// **every one of the three was forced by an injection the property failed to
+/// catch without it** — the shape of this constant is a record of that.
+///
+/// * `c0`, `c1` — `NODES`. Sources and targets, as everywhere else in this file.
+/// * `c2` — a **target-only** concept: [`archive_assert_strategy`] may point an
+///   edge at it but never from it. Without this, "appears as a source" and
+///   "appears at all" coincide over enough cases, and narrowing
+///   `CONCEPTS_ARCHIVABLE`'s reachability check to `source_id` alone changes no
+///   answer. With it, that injection fails.
+/// * `c3` — **never referenced by any generated edge**, so it is archivable
+///   whenever its own three clauses say so, on every case rather than by luck.
+///
+/// The first attempt seeded only `NODES`, and a history of up to twelve edges
+/// over two nodes references both in nearly every case: `NOT EXISTS` was false
+/// for both, the archivable set was empty on both sides, and three of five
+/// injections passed. Adding `c2` fixed two of them. Dropping `retired = 1`
+/// still survived, because `c2` is unreferenced only when no edge happens to
+/// pick it — around one case in ten — which 32 cases cannot rely on. `c3`
+/// removes the luck: the row-level clauses are under test in every case.
+///
+/// **The general shape is worth more than the fix.** A property test over a
+/// conjunction is only as strong as its ability to reach each clause
+/// *independently*, and a generator drawing every id from one domain
+/// systematically prevents that. The predicate was correct throughout; what was
+/// wrong was the evidence for it.
+const ARCHIVE_NODES: [&str; 4] = ["c0", "c1", "c2", "c3"];
+
+/// Index into [`ARCHIVE_NODES`] of the first concept no generated edge may name.
+const UNREFERENCED: usize = 3;
+
+/// A concept as generated (C1). `retired` and the two clocks are the three
+/// things `CONCEPTS_ARCHIVABLE` reads off the row itself; the fourth clause —
+/// reachability — is a function of `links`, and so is decided by `history`.
+#[derive(Debug, Clone, Copy)]
+struct ConceptSpec {
+    retired: bool,
+    /// `None` is the open sentinel.
+    valid_to: Option<usize>,
+    recorded_at: usize,
+}
+
+/// Edges for C1's properties, over three of the four [`ARCHIVE_NODES`]:
+/// `c0`/`c1` may be either endpoint, `c2` may only be a **target**, and `c3` may
+/// be neither. The reasoning for each is on `ARCHIVE_NODES`.
+fn archive_assert_strategy() -> impl Strategy<Value = Assert> {
+    (
+        0..NODES.len(),   // sources: c0, c1
+        0..UNREFERENCED,  // targets: c0, c1, c2 — never c3
+        0..TYPES.len(),
+        0..3usize,
+        prop::option::of(2..5usize),
+        0..WEIGHTS.len(),
+        0..TS.len(),
+    )
+        .prop_map(
+            |(src, tgt, etype, valid_from, valid_to, weight, recorded_at)| Assert {
+                src,
+                tgt,
+                etype,
+                valid_from,
+                valid_to,
+                weight,
+                recorded_at,
+            },
+        )
+}
+
+/// `valid_to` ranges over the whole of `TS` rather than the closed tail, so the
+/// generator produces concepts whose validity closed *after* the cutoff as well
+/// as before it. A predicate that ignored `valid_to` would still pass a
+/// generator that only ever proposed archivable rows.
+fn concept_strategy() -> impl Strategy<Value = ConceptSpec> {
+    (
+        any::<bool>(),
+        prop::option::of(0..TS.len()),
+        0..TS.len(),
+    )
+        .prop_map(|(retired, valid_to, recorded_at)| ConceptSpec {
+            retired,
+            valid_to,
+            recorded_at,
+        })
+}
+
 /// Deliberate damage to the derivative table. `audit_current` exists to notice
 /// these; the property is that it notices *exactly* them.
 #[derive(Debug, Clone, Copy)]
@@ -287,6 +372,71 @@ async fn fresh(harness: &TestHarness) -> (libsql::Database, libsql::Connection) 
     (db, conn)
 }
 
+/// [`fresh`], but with the two concepts carrying generated `retired` and clock
+/// values instead of the defaults (C1).
+///
+/// Separate from `fresh` rather than a parameter on it, because every property
+/// above this one depends on the concepts being unremarkable — they exist only
+/// to satisfy the `links` foreign key — and threading a generator through them
+/// would widen their search space for no gain.
+async fn fresh_with_concepts(
+    harness: &TestHarness,
+    specs: &[ConceptSpec; ARCHIVE_NODES.len()],
+) -> (libsql::Database, libsql::Connection) {
+    let db = libsql::Builder::new_local(&harness.db_path)
+        .build()
+        .await
+        .unwrap();
+    let conn = db.connect().unwrap();
+    migrations::run(&conn).await.unwrap();
+    for (id, spec) in ARCHIVE_NODES.iter().zip(specs) {
+        conn.execute(
+            "INSERT INTO concepts (id, title, valid_from, valid_to, recorded_at, retired) \
+             VALUES (?1, 'N', ?2, ?3, ?4, ?5)",
+            libsql::params![
+                *id,
+                TS[0],
+                spec.valid_to.map_or(SENTINEL, |i| TS[i]),
+                TS[spec.recorded_at],
+                i64::from(spec.retired),
+            ],
+        )
+        .await
+        .unwrap();
+    }
+    (db, conn)
+}
+
+/// The archivability predicate, computed in Rust from the state the database
+/// actually holds.
+///
+/// This is the oracle, and it is written as four independent tests against the
+/// row rather than as anything resembling the SQL — the same discipline
+/// [`projection`] follows, for the same reason: two implementations that share
+/// reasoning cannot disagree, and a predicate that cannot disagree with its
+/// oracle is not being checked by it.
+///
+/// `links` is passed in as it stands in the hot table, not as the generated
+/// history, because the generator is free to propose inserts the schema
+/// refuses — reachability is a claim about the rows that exist.
+fn archivable_model(
+    specs: &[ConceptSpec; ARCHIVE_NODES.len()],
+    links: &[Row],
+    cutoff: &str,
+) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for (id, spec) in ARCHIVE_NODES.iter().zip(specs) {
+        let valid_to = spec.valid_to.map_or(SENTINEL, |i| TS[i]);
+        let referenced = links
+            .iter()
+            .any(|l| l.source_id == *id || l.target_id == *id);
+        if spec.retired && TS[spec.recorded_at] < cutoff && valid_to < cutoff && !referenced {
+            out.insert((*id).to_string());
+        }
+    }
+    out
+}
+
 /// Apply a generated history. Insert failures are *expected and skipped*: the
 /// generator is free to propose a second open interval (blocked by
 /// `trg_links_single_open`) or a duplicate primary key. Those are the schema
@@ -300,6 +450,32 @@ async fn apply(conn: &libsql::Connection, history: &[Assert]) {
                 libsql::params![
                     NODES[a.src],
                     NODES[a.tgt],
+                    TYPES[a.etype],
+                    TS[a.valid_from],
+                    a.valid_to.map_or(SENTINEL, |i| TS[i]),
+                    WEIGHTS[a.weight],
+                    TS[a.recorded_at],
+                ],
+            )
+            .await;
+    }
+}
+
+/// [`apply`], resolving endpoint indices against [`ARCHIVE_NODES`] rather than
+/// `NODES`, so a generated edge can name the third concept.
+///
+/// `ARCHIVE_NODES` starts with `NODES`, so index `0` and `1` mean the same
+/// concept in both — only index `2` is new, and only [`archive_assert_strategy`]
+/// ever produces it.
+async fn apply_over_archive_nodes(conn: &libsql::Connection, history: &[Assert]) {
+    for a in history {
+        let _ = conn
+            .execute(
+                "INSERT INTO links (source_id, target_id, edge_type, valid_from, valid_to, \
+                 weight, properties, recorded_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, '{}', ?7)",
+                libsql::params![
+                    ARCHIVE_NODES[a.src],
+                    ARCHIVE_NODES[a.tgt],
                     TYPES[a.etype],
                     TS[a.valid_from],
                     a.valid_to.map_or(SENTINEL, |i| TS[i]),
@@ -489,6 +665,111 @@ proptest! {
                 "archive left drift behind\ncutoff: {}\nlinks: {:#?}\ncurrent: {:#?}",
                 TS[cutoff], links, current
             );
+            Ok(())
+        })?;
+    }
+
+    /// **The archivability predicate agrees with its model, exactly** (C1,
+    /// D-128).
+    ///
+    /// `CONCEPTS_ARCHIVABLE` is four conjoined clauses, three read off the
+    /// concept row and one a `NOT EXISTS` over `links` in both directions. Every
+    /// one of them is a way to be wrong in a direction no seeded test would
+    /// notice: dropping `retired` archives live concepts, dropping either clock
+    /// archives too early, and — the one that matters — getting the `NOT EXISTS`
+    /// backwards or checking only `source_id` produces a predicate that says
+    /// *yes* for a concept a surviving hot link still points at. That is an
+    /// unsatisfiable foreign key at the moment C2 acts on it, and it is exactly
+    /// the shape a fixture built from an intuition about archival would miss.
+    ///
+    /// Set equality in both directions, not a count: a predicate that admits one
+    /// wrong concept and rejects one right one has the correct cardinality.
+    #[test]
+    fn the_archivability_predicate_matches_its_model(
+        history in prop::collection::vec(archive_assert_strategy(), 0..12),
+        specs in prop::array::uniform4(concept_strategy()),
+        cutoff in 0..TS.len(),
+    ) {
+        block_on(async {
+            let harness = TestHarness::new();
+            let (_db, conn) = fresh_with_concepts(&harness, &specs).await;
+            apply_over_archive_nodes(&conn, &history).await;
+
+            let links = read_rows(&conn, "links").await;
+            let expected = archivable_model(&specs, &links, TS[cutoff]);
+            let actual: BTreeSet<String> = macrame::temporal::archivable_concepts(&conn, TS[cutoff])
+                .await
+                .unwrap()
+                .into_iter()
+                .collect();
+
+            prop_assert_eq!(
+                &actual, &expected,
+                "predicate disagreed with the model\ncutoff: {}\nspecs: {:#?}\nlinks: {:#?}",
+                TS[cutoff], specs, links
+            );
+            Ok(())
+        })?;
+    }
+
+    /// **Archiving links can only enlarge the archivable set, never shrink it**
+    /// (C1, D-128).
+    ///
+    /// This is the downstream relationship stated as something executable.
+    /// `archive()` removes rows from hot `links` and never adds any, so the
+    /// `NOT EXISTS` clause can only go from false to true — which is the whole
+    /// argument for evaluating the predicate *after* the link delete inside a
+    /// session rather than before it.
+    ///
+    /// It is worth a property rather than a comment because the monotonicity is
+    /// a joint claim about two predicates written independently: if
+    /// `LINKS_ARCHIVABLE` ever deleted a row it should not, or `archive()`'s
+    /// `links_current` re-derivation ever wrote back into `links`, this is what
+    /// would say so.
+    ///
+    /// The stronger half of C1's exit gate — *every archived concept is
+    /// unreferenced* — cannot be asserted until C2 archives one. What is
+    /// assertable now is its precondition: nothing the predicate admits after a
+    /// real session is referenced by a surviving hot link.
+    #[test]
+    fn archiving_links_only_enlarges_the_archivable_set(
+        history in prop::collection::vec(archive_assert_strategy(), 0..12),
+        specs in prop::array::uniform4(concept_strategy()),
+        cutoff in 0..TS.len(),
+    ) {
+        block_on(async {
+            let harness = TestHarness::new();
+            let (_db, conn) = fresh_with_concepts(&harness, &specs).await;
+            apply_over_archive_nodes(&conn, &history).await;
+            prop_assume!(audit_count(&conn).await == 0);
+
+            let before: BTreeSet<String> =
+                macrame::temporal::archivable_concepts(&conn, TS[cutoff]).await.unwrap()
+                    .into_iter().collect();
+
+            let cold = harness.temp_dir.path().join("cold.db");
+            macrame::temporal::archive(&conn, TS[cutoff], ARCHIVED_AT, &cold).await.unwrap();
+
+            let after: BTreeSet<String> =
+                macrame::temporal::archivable_concepts(&conn, TS[cutoff]).await.unwrap()
+                    .into_iter().collect();
+
+            prop_assert!(
+                before.is_subset(&after),
+                "archiving links withdrew a concept from the archivable set\n\
+                 cutoff: {}\nbefore: {:?}\nafter: {:?}",
+                TS[cutoff], before, after
+            );
+
+            // The precondition C2 will rely on: nothing admitted is still pointed at.
+            let surviving = read_rows(&conn, "links").await;
+            for id in &after {
+                prop_assert!(
+                    !surviving.iter().any(|l| l.source_id == *id || l.target_id == *id),
+                    "predicate admitted {} while a hot link still references it\nlinks: {:#?}",
+                    id, surviving
+                );
+            }
             Ok(())
         })?;
     }

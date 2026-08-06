@@ -1291,7 +1291,38 @@ The model-based shape `integrity_property_tests` uses, not a fixture —
 [D-030](architecture/s13-decision-register.md#d-030) is why.
 
 **Documents.** `s4-schema.md` §4.1; `s5-modules.md` §5.7; `appendices.md` Appendix C (the design
-moves from "deferred" to "delivered"); `s13` (D-129).
+moves from "deferred" to "delivered"); `s13` (D-128 — **recorded as D-128, not the D-129 this plan
+projected**; see [§6](#6-decision-entries-this-plan-creates)).
+
+> **Delivered 2026-08-06 ([D-128](architecture/s13-decision-register.md#d-128)).**
+> `CONCEPTS_ARCHIVABLE` and `temporal::archivable_concepts(conn, cutoff)` ship in
+> [`archive.rs`](../src/temporal/archive.rs); nothing is archived yet, which is C2.
+>
+> **The predicate gained a clause this item did not specify.** It reads `recorded_at < :cutoff`
+> as well as `valid_to`, mirroring `LINKS_ARCHIVABLE`. A concept retired with its `valid_to`
+> behind the cutoff but *recorded* at or after it would otherwise go cold while the log entries
+> describing it stayed hot — the same two-clock mismatch the `links_current` compensation carried
+> until Wave 4.5, reached from the other side.
+>
+> **And it did *not* gain the two clauses the FK argument seems to demand.** `concepts` has four
+> inbound foreign keys, not two: `analytics_annotations` and every `embeddings_*` table reference
+> it as well. Neither blocks archivability, because both hold derived rows —
+> [Doctrine VII](architecture/s0-s3-foundations.md#doctrine-vii) makes an embedding an artifact of
+> a model applied to content. Blocking on a recomputable artifact would answer *"not yet"* forever
+> for any concept that had ever been embedded. C2 disposes of them instead.
+>
+> **The exit gate passed before it could fail, and that is the item's real finding.** The property
+> was written in the model-based shape this item asks for, and it was green on the first run. Five
+> injected defects were then put through it and **it caught two**. The cause was the generator, not
+> the predicate: with both link endpoints drawn from the same two-concept domain, every concept is
+> referenced in nearly every case, `NOT EXISTS` is false throughout, and the three row-level
+> clauses are never evaluated. It took **four** concepts — two ordinary, one that can only be a
+> link *target*, one no generated edge may name at all — before all five injections fail, at 32
+> cases and again at 512. A conjunction can only be tested clause by clause if the generator can
+> reach each clause independently. The predicate was correct the whole time; the evidence for it
+> was not, and this is the third gate this cycle that could not tell *nothing ran* from
+> *everything passed* ([D-124](architecture/s13-decision-register.md#d-124),
+> [D-127](architecture/s13-decision-register.md#d-127)).
 
 ### C2 · `cold.concepts`, and the guard becomes conditional
 
@@ -1326,7 +1357,8 @@ the pre-archive answer.
 
 **Documents.** `s4-schema.md` §4.1 and §4.6 (the third trigger becomes live) **and §4.7 — the
 ladder gains the `v8 → v9` row, which is not optional here**; `s5-modules.md`
-§5.7; `s0-s3` if Doctrine V's commentary needs the concept case named; `s13` (D-129);
+§5.7; `s0-s3` if Doctrine V's commentary needs the concept case named; `s13` (next free — see
+[§6](#6-decision-entries-this-plan-creates); **not** D-128, which C1 took);
 `s11-s12` R3 (log growth) — its mitigation now covers concepts. **`README.md` and the release
 note carry the migration**, because a rung is the one change a user cannot undo.
 
@@ -1488,8 +1520,13 @@ they have not been done.
 | **D-122** | D-119 | Louvain's aggregation phase **closed, not taken** — and the Q criterion this plan specified is what the measurement refuted: ΔQ is positive and growing, but it is the resolution limit merging true communities, not structure found (B6) |
 | **D-123** | D-123 | Absent `content` crosses to Python as `None`, not `""`, and `load_subgraph` gains the `content=` keyword that makes the default overridable; the stub stays hand-written and the interning is **confirmed** invisible at the boundary — the one entry this plan projected exactly, number included (B7) |
 
-**Still projected**, and the numbers below are now estimates a second time, so they are written as
-*next free* rather than as claims:
+**Recorded so far**, with the number this plan projected for each alongside it:
+
+| | projected as | |
+|---|---|---|
+| **D-128** | D-129 | Concept archivability is **reachability**, not expiry, and it reads **both** clocks; the two derived-row foreign keys are deliberately not clauses. Landed as C1 alone rather than jointly with C2, and took the number the erasure entry below had been projected for (C1) |
+
+**Still projected**, and the numbers below are estimates a third time, so they are written as *next free* rather than as claims:
 
 > **Renumbered 2026-08-06, and the reason is the hazard this table was already warning about.**
 > These five were projected as D-124 … D-128. **All five of those numbers have since been taken
@@ -1503,17 +1540,20 @@ they have not been done.
 > reservation: it is cited as `#6-decision-entries-this-plan-creates` (this table) while it is a
 > guess, and only as `s13-decision-register.md#d-1NN` once it exists. Where this plan's prose
 > cited a projected number, that citation moved with the row.
+>
+> **And it happened again immediately, which is the point.** C1 landed before the erasure entry
+> was written, so it took **D-128** — the number projected here for erasure — and the joint
+> C1/C2 row split in two. The table above records what was written; the table below is still a
+> guess, and will be wrong again in the same way. That is not a defect in the plan: it is what
+> "the register is the authority the moment an entry is written" means in practice.
 
-| | recorded as | |
+| | projected as | |
 |---|---|---|
-| **D-128** | D-117 | **Erasure is refused on doctrine, not deferred**; the alternative is pseudonymous ids with identifying content held by the application. **Supersedes [D-022](architecture/s13-decision-register.md#d-022)'s open framing** ([§2](#2-doctrine-position-erasure-is-refused-archival-is-sanctioned)) |
-| **D-129** | D-120 | Concept archival: archivability is reachability, not expiry; the delete guard becomes marker-gated (C1, C2). **Now also carries the v8 → v9 rung** ([D-126](architecture/s13-decision-register.md#d-126)) |
+| **D-129** | D-117 | **Erasure is refused on doctrine, not deferred**; the alternative is pseudonymous ids with identifying content held by the application. **Supersedes [D-022](architecture/s13-decision-register.md#d-022)'s open framing** ([§2](#2-doctrine-position-erasure-is-refused-archival-is-sanctioned)) |
 | **D-130** | D-121 | Rehydration is a physical move back and mints no transaction-time facts — **derived from the traceability requirement**, closing Appendix C's open Doctrine III question (C3) |
 | **D-131** | D-122 | The hot-side archive marker, taken or refused with C4's measurement. **[D-121](architecture/s13-decision-register.md#d-121) removed its load-bearing justification**: it is now wanted for a better error *message*, not for a correct decision |
+| **D-133** | D-129 | C2's half of the old joint entry, now on its own: the concepts delete guard becomes marker-gated, and that is the `v8 → v9` rung [D-126](architecture/s13-decision-register.md#d-126) settled (C2) |
 | **D-132** | D-128 | Archival is drivable from Python: `rehydrate` is exposed, and the traceability equality is asserted **through the binding** as well as in the crate, because a boundary that silently loses a doctrine property is the failure [§14.7](architecture/s14-python-bindings.md#147-r15-through-the-boundary) measured rather than assumed (C5) |
-
----
-
 ## 7. Risks
 
 | Risk | Likelihood | Impact | Mitigation |
