@@ -1281,6 +1281,15 @@ moves from "deferred" to "delivered"); `s13` (D-120).
 2. `trg_concepts_guard_delete` becomes marker-gated, matching `trg_links_guard_delete` and
    `trg_txlog_guard_delete` exactly: `WHEN NOT EXISTS (SELECT 1 FROM sqlite_master WHERE type =
    'table' AND name = 'macrame_archive_session')`. **One trigger, the existing pattern.**
+   **This needs a `v8 → v9` rung, and that is settled rather than open**
+   ([D-126](architecture/s13-decision-register.md#d-126)): re-issuing the baseline does *not*
+   update an existing database, because `CREATE TRIGGER IF NOT EXISTS` keeps the old body, and
+   `verify()` would not notice because it checks trigger *names* only. The rung is
+   `DROP TRIGGER trg_concepts_guard_delete` then the new `CREATE` — no table rebuild, no data
+   movement, and `suspends_foreign_keys` is **not** wanted. Cheap, but it is not nothing, and the
+   exit gate must include a genuine v8 fixture whose guard is asserted *conditional* afterwards —
+   the same trap `a_v7_database_climbs_to_v8_and_gains_rowid_pk` exists to avoid, since a fixture
+   built from today's `ddl::` constants would already have the change.
 3. `trg_concepts_fts_delete` (installed inert by B4) now fires, keeping the search index correct
    as concepts leave.
 4. `reconstruct` folds cold concepts by the same last-writer-wins `seq_id` rule already used for
@@ -1481,7 +1490,7 @@ they have not been done.
 | The id table cancels the memory win | Low | Medium | Per-node cost against per-edge saving; measured by `estimated_bytes()` rather than argued |
 | B3 surprises a caller reading `content` | Medium | Low | `Option<String>`, so absence cannot be mistaken for emptiness; named in the release note |
 | A1's classifier masks a real property failure | Low | High | Verified by injection in both directions before it is trusted |
-| 0.9.0 needs a rung after all | Low | **High** — forfeits the shared rebuild | B4 installed `rowid_pk` *and* the inert delete trigger, which is the full set C2 needs, and `the_fts_delete_trigger_is_installed_and_inert` pins both. Still re-check before tagging 0.8.0 |
+| 0.9.0 needs a rung after all | ~~Low~~ **Certain** | ~~**High** — forfeits the shared rebuild~~ Low | **Re-checked before tagging 0.8.0, as this row asked, and the answer is that it DOES** ([D-126](architecture/s13-decision-register.md#d-126)). B4 installed `rowid_pk` and the inert FTS delete trigger — C2 steps 1 and 3 — but **not** step 2: `trg_concepts_guard_delete` is still *unconditional* in v8 ([`ddl.rs`](../../src/schema/ddl.rs)) while `trg_links_guard_delete` is already marker-gated. Two measured facts make that a rung and not a baseline re-issue: `CREATE TRIGGER IF NOT EXISTS` on an existing name **keeps the old body** (verified — `sqlite_master` still held the unconditional guard after the conditional one was re-issued), and `verify()` compares `type, name` and **never trigger bodies**, so the stale guard passes migration verification silently. A 0.8.0 database opened by 0.9.0 code would refuse concept archival at the trigger. **Impact is lower than this row assumed**, though: the rung is a `DROP TRIGGER` + `CREATE TRIGGER`, no table rebuild and no data movement, so there is no "shared rebuild" to forfeit. Deliberately **not** folded into v8 — the marker table exists during *links* archive sessions, so a conditional concepts guard shipped in 0.8.0 would leave concepts deletable during them, weakening [Doctrine V](architecture/s0-s3-foundations.md#doctrine-v) for a whole release to save a cheap rung |
 | **B7/C5 skipped** — everything before them is green when they start | **Medium** | High — a wheel whose stub describes the previous release | `test_stubs.py` goes red on the first surface change and stays red; it is the only signal, so it is in the per-release definition of done rather than only in the item |
 | The suite is read against a stale wheel | Medium | Medium | Rebuild-and-reinstall is a named step in B7/C5 and a per-release gate. This was missed once in 0.7.0 |
 | A new `DbError` variant reaches Python untyped | Low | Medium | Cannot happen silently — the exhaustive `match` in `errors.rs` fails to compile `macrame-py` ([D-099](architecture/s13-decision-register.md#d-099)). The stub still has to follow by hand |

@@ -179,17 +179,37 @@ v8 is the last rung before the 1.0 freeze that could take it: `rowid_pk INTEGER 
 
 ## Performance (measured, not gated)
 
-| Operation | Budget | Measured |
-|---|---|---|
-| Single assertion | ≤ 5 ms | **not met at high out-degree** — O(out-degree), not O(1) (D-059) |
-| Chunk commit (edges, 90 rows) | ≤ 3 ms | ~2.39 ms |
-| Three-hop traversal | ≤ 10 ms | 2.1 ms |
-| Vector top-10 | ≤ 20 ms | 294 µs |
-| Hybrid top-10 | ≤ 50 ms | 2.0 ms |
-| Full fold (reconstruct) | ≤ 100 ms | 21 ms |
-| Composition (snapshot + delta) | ≤ 100 ms | 3.4 ms |
+Re-measured at 0.8.0, because [B2](docs/architecture/s13-decision-register.md#d-115) changed how a
+`Subgraph` is represented, [B3](docs/architecture/s13-decision-register.md#d-116) changed what a
+load carries, and [B4](docs/architecture/s13-decision-register.md#d-118) dropped an index — three
+reasons a table of 0.7.0 numbers would have been describing a different crate.
 
-All budgets measured on named reference hardware. Regression detection uses criterion baselines — machine against itself. See [§9 of the architecture docs](docs/architecture/s6-s10-flows-to-dependencies.md#9-performance-budgets) for full table.
+| Operation | Budget | 0.7.0 | 0.8.0 |
+|---|---|---|---|
+| Single assertion | ≤ 5 ms | — | 258 µs, and **still O(out-degree), not O(1)** (D-059) |
+| Chunk commit (edges, 90 rows) | ≤ 3 ms | 2.39 ms | 2.40 ms |
+| Three-hop traversal | ≤ 10 ms | 2.1 ms | **1.66 ms** |
+| Vector top-10 | ≤ 20 ms | 294 µs | **246 µs** |
+| Hybrid top-10 | ≤ 50 ms | 2.0 ms | **1.77 ms** |
+| Full fold (reconstruct) | ≤ 100 ms | 21 ms | **16.9 ms** |
+| Composition (snapshot + delta) | ≤ 100 ms | 3.4 ms | **2.18 ms** |
+
+**Two controls, or the read-path numbers would mean nothing.** A uniform improvement across
+unrelated paths is what a faster *machine* looks like, so: the fixed `control/select_1` row reads
+**1.51–1.62 µs** against the **1.589–1.639 µs**
+[D-090](docs/architecture/s13-decision-register.md#d-090) recorded, and the chunk-commit path —
+which 0.8.0 did not touch — is **2.39 → 2.40 ms**. The machine has not moved and an untouched path
+has not moved, so the 12–36% on the read paths is the code.
+
+The single-assertion row is a fixture measurement and the caveat is the load-bearing part: it is
+under budget on this fixture and remains linear in out-degree, so a high-degree hub still exceeds
+it. Dropping `idx_lc_tgt_active` bought −7.9% on that path
+([D-118](docs/architecture/s13-decision-register.md#d-118)); it did not change the complexity.
+
+All budgets measured on named reference hardware, and deliberately **not** CI gates
+([D-055](docs/architecture/s13-decision-register.md#d-055)) — an absolute `≤ 5 ms` on a shared
+runner is an assertion about whichever machine picked up the job. Regression detection uses
+criterion baselines, machine against itself. See [§9 of the architecture docs](docs/architecture/s6-s10-flows-to-dependencies.md#9-performance-budgets) for full table.
 
 ---
 
