@@ -387,6 +387,7 @@ pub struct MaterializedState {
 
 pub struct ArchiveReport {
     pub links_archived: usize,
+    pub concepts_archived: usize,   // 0.9.0, C2 -- always 0 before schema v9
     pub log_entries_archived: usize,
     pub horizon: Option<i64>,
 }

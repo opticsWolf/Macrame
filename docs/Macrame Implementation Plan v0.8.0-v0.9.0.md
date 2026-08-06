@@ -1357,8 +1357,9 @@ the pre-archive answer.
 
 **Documents.** `s4-schema.md` §4.1 and §4.6 (the third trigger becomes live) **and §4.7 — the
 ladder gains the `v8 → v9` row, which is not optional here**; `s5-modules.md`
-§5.7; `s0-s3` if Doctrine V's commentary needs the concept case named; `s13` (next free — see
-[§6](#6-decision-entries-this-plan-creates); **not** D-128, which C1 took);
+§5.7; `s0-s3` if Doctrine V's commentary needs the concept case named; `s13` ([D-129](architecture/s13-decision-register.md#d-129) for the rung and
+[D-130](architecture/s13-decision-register.md#d-130) for the partition — **two entries, because they are
+different kinds of decision**: one closes a hole, the other says what crosses a boundary);
 `s11-s12` R3 (log growth) — its mitigation now covers concepts. **`README.md` and the release
 note carry the migration**, because a rung is the one change a user cannot undo.
 
@@ -1525,6 +1526,8 @@ they have not been done.
 | | projected as | |
 |---|---|---|
 | **D-128** | D-129 | Concept archivability is **reachability**, not expiry, and it reads **both** clocks; the two derived-row foreign keys are deliberately not clauses. Landed as C1 alone rather than jointly with C2, and took the number the erasure entry below had been projected for (C1) |
+| **D-129** | D-133 | **Corrective.** Schema v9: the concepts delete guard becomes marker-gated, and `verify` starts checking the delete guards' **bodies** rather than only their names — the second half of the hole [D-126](architecture/s13-decision-register.md#d-126) found (C2 step 2) |
+| **D-130** | — | **Architectural, and unprojected.** What crosses the archive boundary: the concept row moves column for column with its `content`; `analytics_annotations` and `embeddings_*` are disposed of. Also records that **C2's step 4 was a no-op** — `reconstruct` folds the log and never reads `concepts` (C2 steps 1, 3–5) |
 
 **Still projected**, and the numbers below are estimates a third time, so they are written as *next free* rather than as claims:
 
@@ -1552,7 +1555,6 @@ they have not been done.
 | **D-129** | D-117 | **Erasure is refused on doctrine, not deferred**; the alternative is pseudonymous ids with identifying content held by the application. **Supersedes [D-022](architecture/s13-decision-register.md#d-022)'s open framing** ([§2](#2-doctrine-position-erasure-is-refused-archival-is-sanctioned)) |
 | **D-130** | D-121 | Rehydration is a physical move back and mints no transaction-time facts — **derived from the traceability requirement**, closing Appendix C's open Doctrine III question (C3) |
 | **D-131** | D-122 | The hot-side archive marker, taken or refused with C4's measurement. **[D-121](architecture/s13-decision-register.md#d-121) removed its load-bearing justification**: it is now wanted for a better error *message*, not for a correct decision |
-| **D-133** | D-129 | C2's half of the old joint entry, now on its own: the concepts delete guard becomes marker-gated, and that is the `v8 → v9` rung [D-126](architecture/s13-decision-register.md#d-126) settled (C2) |
 | **D-132** | D-128 | Archival is drivable from Python: `rehydrate` is exposed, and the traceability equality is asserted **through the binding** as well as in the crate, because a boundary that silently loses a doctrine property is the failure [§14.7](architecture/s14-python-bindings.md#147-r15-through-the-boundary) measured rather than assumed (C5) |
 ## 7. Risks
 

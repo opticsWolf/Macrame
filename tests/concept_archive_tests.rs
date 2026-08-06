@@ -301,3 +301,95 @@ async fn derived_rows_are_disposed_of_rather_than_archived() {
 
     db.close().await.unwrap();
 }
+
+/// **The sparse-rowid case, made sparse by an archive rather than by hand**
+/// (C2 exit gate).
+///
+/// `vacuum_preserves_a_sparse_rowid_pk` seeds its gaps through `raw()` and says
+/// so: through v8 there was no supported way to remove a concept, so the gaps
+/// had to be written directly and the test was *standing in* for what archival
+/// would eventually do. This is that test with the stand-in removed. The gaps
+/// here are the real thing — rows that left through the archive path — and what
+/// is asserted is that `VACUUM` afterwards leaves both the numbering and the FTS
+/// index alone.
+///
+/// It matters because `concepts_fts` is external-content keyed on `rowid_pk`
+/// (D-119). If `VACUUM` renumbered a sparse `rowid_pk`, the index would point at
+/// the wrong rows with no error and no integrity-check failure — and until an
+/// archive could actually create a gap, nothing in the suite had ever produced
+/// the precondition outside a hand-written fixture.
+#[tokio::test]
+async fn vacuum_after_an_archive_leaves_the_sparse_numbering_and_the_index_alone() {
+    let harness = TestHarness::new();
+    let db = Database::open(&harness.db_path).await.unwrap();
+
+    // Alternate archivable and not, so the survivors are genuinely interleaved
+    // rather than a contiguous tail.
+    for i in 0..8 {
+        let archivable = i % 2 == 0;
+        db.upsert_concept(
+            ConceptUpsert::new(format!("c{i}"), "Title")
+                .content(format!("searchable body {i}"))
+                .valid_from(T0)
+                .valid_to(if archivable { T1 } else { OPEN })
+                .retired(archivable),
+        )
+        .await
+        .unwrap();
+    }
+
+    let report = db.archive(CUTOFF).await.unwrap();
+    assert_eq!(report.concepts_archived, 4, "four concepts should have left");
+
+    let survivors = |db: &Database| {
+        let conn = db.read_conn().clone();
+        async move {
+            let mut rows = conn
+                .query("SELECT rowid_pk, id FROM concepts ORDER BY rowid_pk", ())
+                .await
+                .unwrap();
+            let mut v = Vec::new();
+            while let Some(r) = rows.next().await.unwrap() {
+                v.push((r.get::<i64>(0).unwrap(), r.get::<String>(1).unwrap()));
+            }
+            v
+        }
+    };
+
+    let before = survivors(&db).await;
+    assert_eq!(before.len(), 4);
+    assert!(
+        before.windows(2).any(|w| w[1].0 - w[0].0 > 1),
+        "the archive did not leave a gap, so this test proves nothing: {before:?}"
+    );
+
+    db.raw()
+        .connect()
+        .unwrap()
+        .execute("VACUUM", ())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        survivors(&db).await,
+        before,
+        "VACUUM renumbered a rowid_pk left sparse by an archive — concepts_fts \
+         is keyed on this column and now points at the wrong rows"
+    );
+
+    // The index agrees with the table on both sides of the boundary.
+    for i in 0..8 {
+        let matched = count(
+            &db,
+            &format!("SELECT COUNT(*) FROM concepts_fts WHERE concepts_fts MATCH 'body AND {i}'"),
+        )
+        .await;
+        assert_eq!(
+            matched,
+            i64::from(i % 2 != 0),
+            "concept c{i} is findable in the index but should not be, or vice versa"
+        );
+    }
+
+    db.close().await.unwrap();
+}

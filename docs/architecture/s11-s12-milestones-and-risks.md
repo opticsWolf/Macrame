@@ -30,7 +30,7 @@ The first code written is the drift-audit property test, the Monday/Wednesday/Fr
 |---|---|---|---|---|
 | <a id="r1"></a>R1 | libSQL 0.x breaking change | Medium | Medium | Pinned version; blast radius confined to connection.rs ([Doctrine I](s0-s3-foundations.md#doctrine-i)) |
 | <a id="r2"></a>R2 | DiskANN index corruption | Low | High | Per-model tables isolate blast radius; index is engine-maintained |
-| <a id="r3"></a>R3 | Log growth exceeds disk | Medium | Medium | Archive path ([§5.7](s5-modules.md#57-temporalarchivers--cold-storage)); snapshot retention policy; horizon tracking |
+| <a id="r3"></a>R3 | Log growth exceeds disk | Medium | Medium | Archive path ([§5.7](s5-modules.md#57-temporalarchivers--cold-storage)); snapshot retention policy; horizon tracking. **As of v9 the archive path also moves *concepts*, not only links and log rows ([D-129](s13-decision-register.md#d-129), [D-130](s13-decision-register.md#d-130))** — which is what closes this row's one remaining gap: a ledger whose concept table only ever grew had a floor the archive could not reach, however much log it moved |
 | <a id="r4"></a>R4 | WAL file growth under sustained writes | Low | Low | synchronous = NORMAL; WAL checkpoint is engine-managed |
 | <a id="r5"></a>R5 | Trigger amplification latency exceeds budget | Low | Medium | [§9](s6-s10-flows-to-dependencies.md#9-performance-budgets) benchmark gates; chunk-size tuning |
 | <a id="r6"></a>R6 | FakeClock / SystemClock divergence | Low | High | Clock trait is the sole time source; no SystemTime calls outside clock.rs; monotonicity floor (0.5.1) |

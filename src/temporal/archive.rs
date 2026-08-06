@@ -70,9 +70,17 @@ const COLD_SCHEMA: &[&str] = &[
     // C3's problem and not obviously safe: `concepts.rowid_pk` is a plain
     // INTEGER PRIMARY KEY, so SQLite may reuse a freed value, and archiving the
     // highest rowids can leave a later insert holding one a cold row still
-    // claims. The column is carried because a move must not lose it; whether
-    // rehydration reinstates it is a decision C3 has to take with that hazard in
-    // front of it.
+    // claims. The column is carried because a move must not lose it.
+    //
+    // **The hazard has two exits and C3 must take one of them explicitly.**
+    // Either reinstate the original `rowid_pk` when it is still free, or assign
+    // a fresh one — and in the second case **update `concepts_fts`'s
+    // `content_rowid` mapping to match**, because the FTS index is
+    // external-content keyed on this column (4.6, D-119). A rehydration that
+    // reassigns the rowid without re-pointing the index leaves the search index
+    // silently describing the wrong row, which is the exact failure `rowid_pk`
+    // was made explicit to prevent. Named here so C3 meets both exits rather
+    // than rediscovering the FTS coupling.
     r#"CREATE TABLE IF NOT EXISTS cold.concepts (
         rowid_pk         INTEGER,
         id               TEXT NOT NULL PRIMARY KEY,
