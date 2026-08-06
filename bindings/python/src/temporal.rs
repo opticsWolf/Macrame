@@ -141,6 +141,12 @@ impl PyArchiveReport {
     fn links_archived(&self) -> usize {
         self.inner.links_archived
     }
+    /// Concepts moved to the cold file (0.9.0, C2). Always `0` before schema
+    /// v9, where no concept could leave the hot table at all.
+    #[getter]
+    fn concepts_archived(&self) -> usize {
+        self.inner.concepts_archived
+    }
     #[getter]
     fn log_entries_archived(&self) -> usize {
         self.inner.log_entries_archived
@@ -155,8 +161,9 @@ impl PyArchiveReport {
         // leaking into a Python repr. The horizon is a Python `int | None` and
         // should read as one.
         format!(
-            "<macrame.ArchiveReport links={} log={} horizon={}>",
+            "<macrame.ArchiveReport links={} concepts={} log={} horizon={}>",
             self.inner.links_archived,
+            self.inner.concepts_archived,
             self.inner.log_entries_archived,
             match self.inner.horizon {
                 Some(h) => h.to_string(),

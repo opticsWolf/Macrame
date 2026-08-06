@@ -9,6 +9,9 @@ use crate::schema::ddl::ARCHIVE_SESSION_MARKER;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArchiveReport {
     pub links_archived: usize,
+    /// Concepts moved to `cold.concepts` (0.9.0, C2). Always `0` before v9,
+    /// where no concept could leave the hot table at all.
+    pub concepts_archived: usize,
     pub log_entries_archived: usize,
     /// Oldest `transaction_log.seq_id` still present in the hot file after the
     /// session, i.e. the new horizon (see glossary). `None` if the hot log is empty.
@@ -44,6 +47,42 @@ const COLD_SCHEMA: &[&str] = &[
         weight      REAL NOT NULL CHECK (weight >= 0.0 AND weight < 9e999 AND typeof(weight) = 'real'),
         properties  TEXT NOT NULL,
         PRIMARY KEY (source_id, target_id, edge_type, valid_from, recorded_at)
+    )"#,
+    // Concepts, as of v9 (C2). Trigger-free and FK-free like `cold.links`, and
+    // for the same reasons -- but note what it does NOT drop.
+    //
+    // **Every column crosses, `content` included.** Archival is a move, not a
+    // rewrite (2.3), and a move that drops a column is a rewrite. The log
+    // payload for a concept carries its `content` (4.3), so a cold concept
+    // whose text had been dropped would contradict `cold.transaction_log` about
+    // itself, and rehydration would return a concept the ledger never recorded:
+    // empty text where the log says there was text. That is the unexplained
+    // absence Doctrine V exists to prevent.
+    //
+    // The tension with D-116 is apparent rather than real. D-116 governs the
+    // *in-memory* `NodeData` representation -- `content` is not loaded by
+    // default because most readers do not want it. This is *on-disk* storage.
+    // Disk carries the text; memory does not populate it until asked. Two
+    // independent defaults, and conflating them would make rehydration lossy to
+    // save a read nobody was performing.
+    //
+    // `rowid_pk` crosses as the record of what the rowid *was*. Restoring it is
+    // C3's problem and not obviously safe: `concepts.rowid_pk` is a plain
+    // INTEGER PRIMARY KEY, so SQLite may reuse a freed value, and archiving the
+    // highest rowids can leave a later insert holding one a cold row still
+    // claims. The column is carried because a move must not lose it; whether
+    // rehydration reinstates it is a decision C3 has to take with that hazard in
+    // front of it.
+    r#"CREATE TABLE IF NOT EXISTS cold.concepts (
+        rowid_pk         INTEGER,
+        id               TEXT NOT NULL PRIMARY KEY,
+        title            TEXT NOT NULL,
+        content          TEXT NOT NULL DEFAULT '',
+        embedding_model  TEXT,
+        valid_from       TEXT NOT NULL,
+        valid_to         TEXT NOT NULL,
+        recorded_at      TEXT NOT NULL,
+        retired          INTEGER NOT NULL DEFAULT 0
     )"#,
     // seq_id is carried over verbatim from the hot log, so it is a plain
     // INTEGER PRIMARY KEY -- never AUTOINCREMENT, which would renumber history.
@@ -300,6 +339,14 @@ async fn archive_session(
             .await?;
     }
 
+    // Concepts, and **only now** — after the `links` delete, never before it
+    // ([D-128](../../docs/architecture/s13-decision-register.md)). A concept is
+    // archivable when nothing in hot `links` names it, so evaluating the
+    // predicate before the edges have gone cold archives strictly less than the
+    // session is entitled to. This ordering is the whole content of "concept
+    // archival is downstream of link archival".
+    let concepts_archived = archive_concepts(&tx, conn, cutoff).await?;
+
     let log_entries_archived = tx
         .execute(
             &format!(
@@ -344,9 +391,107 @@ async fn archive_session(
 
     Ok(ArchiveReport {
         links_archived,
+        concepts_archived,
         log_entries_archived,
         horizon,
     })
+}
+
+/// Move every concept [`CONCEPTS_ARCHIVABLE`] admits into `cold.concepts`, and
+/// dispose of its derived rows (C2).
+///
+/// # The partition, which is the decision this function encodes
+///
+/// **Entity data crosses; derivative data does not.** The concept row itself is
+/// moved column for column — a move that drops a column is a rewrite, and
+/// [Doctrine V] does not permit an absence the ledger cannot explain. Its
+/// `analytics_annotations` and `embeddings_*` rows are *deleted* rather than
+/// moved, because [Doctrine VII] makes both recomputable from the content that
+/// did cross. Carrying them would also be unimplementable for the vectors:
+/// `F32_BLOB` and DiskANN are libSQL-specific and the cold file is a plain
+/// database opened through `ATTACH`.
+///
+/// The disposal is not incidental to the move — it is what makes the move
+/// legal. `concepts` has four inbound foreign keys, and the two derived ones
+/// would refuse the `DELETE` outright.
+///
+/// # Why the deletes are not logged, and why that is right
+///
+/// `concepts` carries log triggers on insert and update but **not** on delete —
+/// there was no delete path to log while the guard was unconditional, and there
+/// deliberately still is not. Archival mints no transaction-time facts: the
+/// concept is in the cold file, the log entries describing it are either still
+/// hot or in `cold.transaction_log`, and nothing about what was believed, or
+/// when, has changed. A log entry here would assert that something happened to
+/// the concept at archive time, which is exactly the lie [Doctrine III] forbids.
+async fn archive_concepts(
+    tx: &libsql::Transaction,
+    conn: &libsql::Connection,
+    cutoff: &str,
+) -> Result<usize> {
+    let moved = tx
+        .execute(
+            &format!(
+                "INSERT OR IGNORE INTO cold.concepts
+                     (rowid_pk, id, title, content, embedding_model,
+                      valid_from, valid_to, recorded_at, retired)
+                 SELECT rowid_pk, id, title, content, embedding_model,
+                        valid_from, valid_to, recorded_at, retired
+                 FROM concepts WHERE {CONCEPTS_ARCHIVABLE}"
+            ),
+            libsql::named_params! {":cutoff": cutoff},
+        )
+        .await? as usize;
+
+    if moved == 0 {
+        return Ok(0);
+    }
+
+    // The derived rows, before the concept they hang off. `embeddings_*` is
+    // enumerated from the catalogue rather than from a list, because the set is
+    // whatever `register_model` has created on *this* database and a hard-coded
+    // list would silently miss a model the caller added.
+    let mut derived: Vec<String> = vec!["analytics_annotations".to_string()];
+    let mut rows = tx
+        .query(
+            "SELECT name FROM sqlite_master WHERE type = 'table' \
+             AND name LIKE 'embeddings\\_%' ESCAPE '\\'",
+            (),
+        )
+        .await?;
+    while let Some(row) = rows.next().await? {
+        derived.push(row.get::<String>(0)?);
+    }
+    drop(rows);
+
+    for table in &derived {
+        tx.execute(
+            &format!(
+                "DELETE FROM {table} WHERE concept_id IN \
+                 (SELECT id FROM cold.concepts)"
+            ),
+            (),
+        )
+        .await?;
+    }
+
+    // `trg_concepts_fts_delete` fires on this and keeps the search index
+    // correct — the capability v8 installed inert and this rung made reachable.
+    let deleted = delete_guarded(
+        tx,
+        conn,
+        &format!("DELETE FROM concepts WHERE {CONCEPTS_ARCHIVABLE}"),
+        cutoff,
+        "concepts",
+    )
+    .await? as usize;
+
+    debug_assert_eq!(
+        moved, deleted,
+        "the predicate selected a different set for the copy than for the delete"
+    );
+
+    Ok(deleted)
 }
 
 /// Run one of the archive's `DELETE`s, naming the table if a guard refuses it.
