@@ -18,10 +18,16 @@ pub struct ArchiveReport {
     pub horizon: Option<i64>,
 }
 
-/// Schema of the cold database. Deliberately trigger-free and FK-free: concepts
-/// are never archived (D-022), so a FK from cold.links to concepts could not be
-/// satisfied, and the delete guards must not exist on a file whose whole purpose
-/// is to receive rows.
+/// Schema of the cold database. Deliberately trigger-free and FK-free.
+///
+/// **Corrected 2026-08-07.** This comment used to justify the FK-free part with
+/// *"concepts are never archived (D-022)"*, which stopped being true in 0.9.0
+/// when C2 added `cold.concepts` — the table declared a few lines below. The
+/// reasons that survive are the other two, and they are the load-bearing ones:
+/// a FK from `cold.links` to `concepts` still could not be satisfied, because
+/// the cold file holds only the concepts that have gone cold and `cold.links`
+/// may name any of them; and the delete guards must not exist on a file whose
+/// whole purpose is to receive rows and, on rehydration, to give them back.
 const COLD_SCHEMA: &[&str] = &[
     // `weight` carries the same CHECK as the hot table (T2.1, D-083). Not
     // symmetry for its own sake: the cold file is read back by `reconstruct`
