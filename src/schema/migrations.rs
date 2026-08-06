@@ -13,7 +13,7 @@ use crate::schema::ddl::*;
 /// guarantee D-029 buys would be void on it while `user_version` insisted all
 /// was well. Reserving 1 as a value this build refuses by name is what makes
 /// "no legacy support" an enforced property instead of a README sentence.
-pub const SCHEMA_VERSION: u32 = 8;
+pub const SCHEMA_VERSION: u32 = 9;
 
 type StepFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
 
@@ -125,6 +125,16 @@ const STEPS: &[Step] = &[
         // refuted.
         suspends_foreign_keys: true,
         apply: |conn| Box::pin(add_concepts_rowid_pk(conn)),
+    },
+    Step {
+        from: 8,
+        to: 9,
+        name: "concepts-guard-marker-gated",
+        // One trigger replaced. No table is rebuilt and no row moves, so the
+        // inbound foreign keys that forced the flag on the rung above are not
+        // involved here at all.
+        suspends_foreign_keys: false,
+        apply: |conn| Box::pin(gate_concepts_guard_on_marker(conn)),
     },
 ];
 
@@ -591,6 +601,31 @@ const CONCEPTS_TRIGGERS_V7: &[&str] = &[
     "trg_concepts_fts_update",
 ];
 
+/// The concepts delete guard **as v8 had it**: unconditional, aborting every
+/// physical delete (0.9.0, C2).
+///
+/// Pinned here for the same reason [`CONCEPTS_V8`] and [`CONCEPTS_TRIGGERS_V7`]
+/// are, and the reason is easy to miss. [`add_concepts_rowid_pk`] rebuilds
+/// `concepts` and puts the triggers back by looping over [`CREATE_TRIGGERS`] —
+/// which is *today's* DDL, and today's guard is marker-gated. Left alone, the
+/// `v7 → v8` rung would install a trigger body that did not exist at v8, so a
+/// database the ladder reports as v8 would not be a v8 database.
+///
+/// Harmless in the common path, because `run` never rests at an intermediate
+/// version — a v7 file climbs 7 → 8 → 9 in one call and the next rung replaces
+/// this body anyway. It is pinned regardless, because a rung is a statement
+/// about the past and a rung that quietly writes the present into it cannot be
+/// tested against a fixture: `a_v7_database_climbs_to_v8_and_gains_rowid_pk`
+/// would have been asserting against whatever the current release happened to
+/// think, which is the failure mode this whole file is built to avoid.
+const CONCEPTS_GUARD_DELETE_V8: &str = r#"
+    CREATE TRIGGER IF NOT EXISTS trg_concepts_guard_delete
+    BEFORE DELETE ON concepts
+    BEGIN
+        SELECT RAISE(ABORT, 'macrame: concepts are never physically archived (D-022)');
+    END;
+"#;
+
 /// v7 → v8: `concepts` gains `rowid_pk`, the FTS index gains its third trigger,
 /// and the two indices with no reader are dropped (B4, D-118, D-119).
 ///
@@ -709,8 +744,41 @@ async fn add_concepts_rowid_pk(conn: &libsql::Connection) -> Result<()> {
     for trigger_ddl in CREATE_TRIGGERS {
         conn.execute(trigger_ddl, ()).await?;
     }
+
+    // (d) …then correct the one trigger the loop above gets wrong. `CREATE_TRIGGERS`
+    // is today's DDL, and today's concepts guard is marker-gated (C2); v8's was
+    // unconditional. See `CONCEPTS_GUARD_DELETE_V8`. The `IF NOT EXISTS` in both
+    // bodies is why this needs the explicit DROP: without it the loop's version
+    // stays, because a re-issue of an existing name keeps the old body.
+    conn.execute("DROP TRIGGER IF EXISTS trg_concepts_guard_delete", ())
+        .await?;
+    conn.execute(CONCEPTS_GUARD_DELETE_V8, ()).await?;
+
     conn.execute(REBUILD_CONCEPTS_FTS, ()).await?;
 
+    Ok(())
+}
+
+/// v8 → v9: the concepts delete guard becomes marker-gated (C2, D-126).
+///
+/// The whole rung is two statements, and the first is the one that matters.
+/// `CREATE TRIGGER IF NOT EXISTS` on an existing name **keeps the old body** —
+/// verified against libSQL 0.9.30, not assumed — so re-issuing the baseline
+/// against a v8 database leaves the unconditional guard exactly where it was.
+/// The `DROP` is therefore not tidiness; it is the only thing that makes the
+/// rung do anything at all. That, plus [`verify`] having compared trigger names
+/// and never bodies, is why D-126 could conclude this needs a rung rather than a
+/// baseline re-issue: without both, a v8 database opened by 0.9.0 code would
+/// carry the old guard, pass verification in silence, and then refuse concept
+/// archival at the trigger.
+///
+/// No table is rebuilt and no row moves, so this costs a schema write and
+/// nothing else — a `DROP TRIGGER` and a `CREATE TRIGGER`, independent of how
+/// large the database is. It is the cheapest rung this ladder has.
+async fn gate_concepts_guard_on_marker(conn: &libsql::Connection) -> Result<()> {
+    conn.execute("DROP TRIGGER IF EXISTS trg_concepts_guard_delete", ())
+        .await?;
+    conn.execute(CREATE_CONCEPTS_GUARD_DELETE, ()).await?;
     Ok(())
 }
 
@@ -762,14 +830,21 @@ pub(crate) const BASELINE_TABLES: &[&str] = &[
 async fn verify(conn: &libsql::Connection) -> Result<()> {
     let mut rows = conn
         .query(
-            "SELECT type, name FROM sqlite_master WHERE type IN ('table','trigger','index')",
+            "SELECT type, name, COALESCE(sql, '') FROM sqlite_master \
+             WHERE type IN ('table','trigger','index')",
             (),
         )
         .await?;
 
     let mut present: Vec<(String, String)> = Vec::new();
+    let mut bodies: Vec<(String, String)> = Vec::new();
     while let Some(row) = rows.next().await? {
-        present.push((row.get(0)?, row.get(1)?));
+        let (kind, name, sql): (String, String, String) =
+            (row.get(0)?, row.get(1)?, row.get(2)?);
+        if kind == "trigger" {
+            bodies.push((name.clone(), sql));
+        }
+        present.push((kind, name));
     }
     let has = |kind: &str, name: &str| {
         present
@@ -805,8 +880,62 @@ async fn verify(conn: &libsql::Connection) -> Result<()> {
             ),
         });
     }
+
+    // The three delete guards are checked by *body*, not only by name (0.9.0,
+    // C2, D-126). Presence was never the property that mattered for these: a
+    // guard with the right name and the wrong body is a guard that refuses a
+    // legal archive or permits an illegal delete, and the check above cannot
+    // see the difference. That is not hypothetical — it is exactly what
+    // `CREATE TRIGGER IF NOT EXISTS` produces when a baseline is re-issued
+    // against a database whose guard predates a change, and it is the reason
+    // the concepts guard needed a rung instead.
+    //
+    // The probe is `macrame_archive_session`, not the trigger's whole text.
+    // Comparing full bodies would fail on whitespace and would have to be
+    // updated by hand every time a guard is reworded, which makes it the kind
+    // of check people disable. What is asserted is the one property all three
+    // share and none may lose: **this guard is gated on the archive session.**
+    let ungated: Vec<&str> = DELETE_GUARDS
+        .iter()
+        .filter(|name| {
+            bodies
+                .iter()
+                .find(|(n, _)| n.eq_ignore_ascii_case(name))
+                .is_none_or(|(_, sql)| !sql.contains(ARCHIVE_SESSION_MARKER))
+        })
+        .copied()
+        .collect();
+
+    if !ungated.is_empty() {
+        return Err(DbError::Migration {
+            to: SCHEMA_VERSION,
+            reason: format!(
+                "schema verification failed: the database is stamped v{SCHEMA_VERSION} \
+                 but {} delete guard(s) do not probe the archive-session marker: {}. \
+                 A guard with the right name and a pre-v9 body refuses archival it \
+                 should permit; upgrading through the ladder replaces it.",
+                ungated.len(),
+                ungated.join(", ")
+            ),
+        });
+    }
+
     Ok(())
 }
+
+/// The delete guards, whose bodies [`verify`] checks rather than only their
+/// names.
+///
+/// Listed rather than discovered, on the same reasoning as
+/// [`CONCEPTS_TRIGGERS_V7`]: the property being asserted is that *these three*
+/// tables cannot lose rows outside an archive session, and a loop over whatever
+/// happens to be named `*_guard_delete` would assert whatever the schema
+/// happens to contain.
+const DELETE_GUARDS: &[&str] = &[
+    "trg_concepts_guard_delete",
+    "trg_links_guard_delete",
+    "trg_txlog_guard_delete",
+];
 
 /// The object names the DDL creates, recovered from the DDL itself.
 ///

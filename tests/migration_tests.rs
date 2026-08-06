@@ -38,7 +38,16 @@ async fn user_version(conn: &libsql::Connection) -> u32 {
 fn refusal_reason(err: DbError) -> String {
     match err {
         DbError::Migration { to, reason } => {
-            assert_eq!(to, SCHEMA_VERSION);
+            // `to` is the version the failure was trying to *reach*, which for a
+            // refusal partway up the ladder is that rung's target and not the
+            // top. This asserted equality with SCHEMA_VERSION until 0.9.0, where
+            // it held only because the last rung happened to be the top one —
+            // adding v8 → v9 made the v7 → v8 orphan refusal report 8 and broke
+            // a helper that was never testing the ladder in the first place.
+            assert!(
+                to <= SCHEMA_VERSION,
+                "a refusal cannot name a version above the ladder's top: {to}"
+            );
             reason
         }
         other => panic!("expected DbError::Migration, got {other:?}"),
@@ -343,7 +352,7 @@ async fn a_v5_database_climbs_to_v6_and_gains_the_open_interval_index() {
 #[test]
 fn a_version_bump_must_bring_its_own_rung_test() {
     assert_eq!(
-        SCHEMA_VERSION, 8,
+        SCHEMA_VERSION, 9,
         "SCHEMA_VERSION moved. Add a test for the new rung — one that starts \
          from a database at the previous version and asserts what the rung is \
          *for*, not merely that `run` reached the top."
@@ -1050,4 +1059,173 @@ async fn the_shipped_traversal_cte_stays_on_the_covering_index() {
             "{label}: the walk is no longer index-only: {plan}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// v8 → v9 — the concepts delete guard becomes marker-gated (C2, D-126)
+// ---------------------------------------------------------------------------
+
+/// The v8 guard body, reproduced here rather than imported.
+///
+/// A test that asked the crate what v8 looked like would be asking the thing
+/// under test, and would pass no matter what the rung did. This is the same
+/// discipline `v7_schema.rs` follows and the same trap the plan flagged for this
+/// item: a fixture built from today's `ddl::` constants already has the change.
+const CONCEPTS_GUARD_V8: &str = "
+    CREATE TRIGGER trg_concepts_guard_delete
+    BEFORE DELETE ON concepts
+    BEGIN
+        SELECT RAISE(ABORT, 'macrame: concepts are never physically archived (D-022)');
+    END;
+";
+
+/// Put a v9 database back into the v8 state this rung exists to leave behind:
+/// the unconditional guard, and the version stamp to match.
+async fn downgrade_guard_to_v8(conn: &libsql::Connection) {
+    conn.execute("DROP TRIGGER trg_concepts_guard_delete", ())
+        .await
+        .unwrap();
+    conn.execute(CONCEPTS_GUARD_V8, ()).await.unwrap();
+    conn.execute("PRAGMA user_version = 8", ()).await.unwrap();
+}
+
+async fn guard_sql(conn: &libsql::Connection) -> String {
+    conn.query(
+        "SELECT sql FROM sqlite_master WHERE type = 'trigger' \
+         AND name = 'trg_concepts_guard_delete'",
+        (),
+    )
+    .await
+    .unwrap()
+    .next()
+    .await
+    .unwrap()
+    .expect("the concepts delete guard should exist")
+    .get(0)
+    .unwrap()
+}
+
+#[tokio::test]
+async fn a_v8_database_climbs_to_v9_and_the_concepts_guard_becomes_conditional() {
+    let harness = TestHarness::new();
+    let conn = connect(&harness).await;
+    migrations::run(&conn).await.unwrap();
+    downgrade_guard_to_v8(&conn).await;
+
+    // Precondition, asserted rather than assumed: the fixture really is v8.
+    assert!(
+        guard_sql(&conn).await.contains("never physically archived"),
+        "the fixture did not start from the v8 guard"
+    );
+
+    migrations::run(&conn).await.unwrap();
+
+    assert_eq!(user_version(&conn).await, 9);
+    let sql = guard_sql(&conn).await;
+    assert!(
+        sql.contains(ddl::ARCHIVE_SESSION_MARKER),
+        "the guard is not marker-gated after the rung: {sql}"
+    );
+    assert!(
+        !sql.contains("never physically archived"),
+        "the v8 body survived the rung: {sql}"
+    );
+}
+
+/// **The rung cannot be replaced by re-issuing the baseline, and this is the
+/// measurement that says so** (D-126).
+///
+/// `CREATE TRIGGER IF NOT EXISTS` on an existing name keeps the old body. That
+/// is the whole reason C2 needs a schema rung rather than a baseline re-issue,
+/// and it is a claim about libSQL rather than about this crate — so it is
+/// verified against the engine here, not argued in a comment.
+#[tokio::test]
+async fn re_issuing_the_baseline_guard_keeps_the_v8_body() {
+    let harness = TestHarness::new();
+    let conn = connect(&harness).await;
+    migrations::run(&conn).await.unwrap();
+    downgrade_guard_to_v8(&conn).await;
+
+    conn.execute(ddl::CREATE_CONCEPTS_GUARD_DELETE, ())
+        .await
+        .unwrap();
+
+    let sql = guard_sql(&conn).await;
+    assert!(
+        sql.contains("never physically archived"),
+        "IF NOT EXISTS replaced the body — D-126's premise no longer holds and \
+         the v8 → v9 rung may be unnecessary: {sql}"
+    );
+}
+
+/// **The other half of D-126's hole: `verify` used to compare names only.**
+///
+/// A guard with the right name and a pre-v9 body passed verification in
+/// silence, which is what made the stale-guard failure mode invisible. A
+/// database stamped v9 whose guard is not marker-gated must now be refused —
+/// otherwise the rung above is the only thing standing between a user and a
+/// concept archival that aborts at the trigger.
+#[tokio::test]
+async fn a_v9_stamp_over_an_ungated_guard_is_refused() {
+    let harness = TestHarness::new();
+    let conn = connect(&harness).await;
+    migrations::run(&conn).await.unwrap();
+
+    // The stamp says v9; the guard says v8. Nothing in the ladder runs.
+    conn.execute("DROP TRIGGER trg_concepts_guard_delete", ())
+        .await
+        .unwrap();
+    conn.execute(CONCEPTS_GUARD_V8, ()).await.unwrap();
+
+    let reason = refusal_reason(migrations::run(&conn).await.unwrap_err());
+    assert!(
+        reason.contains("trg_concepts_guard_delete") && reason.contains("archive-session"),
+        "the refusal should name the guard and what it lacks: {reason}"
+    );
+}
+
+/// The climb from v7 passes *through* v8's guard, not around it.
+///
+/// `add_concepts_rowid_pk` rebuilds `concepts` and restores its triggers from
+/// `CREATE_TRIGGERS`, which is today's DDL — so without the pinned
+/// `CONCEPTS_GUARD_DELETE_V8` the v7 → v8 rung would install the v9 body and
+/// this whole ladder would reach v9 without the v8 → v9 rung ever doing
+/// anything. There is no way to observe that from the outside once the climb
+/// finishes, so what is asserted is the end state plus the fact that the guard
+/// is genuinely functional: an ad-hoc delete is refused, and the same delete
+/// inside a declared session is not.
+#[tokio::test]
+async fn a_v7_database_climbs_all_the_way_to_v9_with_a_working_guard() {
+    let harness = TestHarness::new();
+    let conn = connect(&harness).await;
+    seeded_v7(&conn, &["c1", "c2"]).await;
+    conn.execute("PRAGMA user_version = 7", ()).await.unwrap();
+
+    migrations::run(&conn).await.unwrap();
+    assert_eq!(user_version(&conn).await, 9);
+
+    let res = conn.execute("DELETE FROM concepts WHERE id = 'c1'", ()).await;
+    assert!(res.is_err(), "an ad-hoc concept delete must still be refused");
+
+    // Inside a declared archive session the same delete is legal — which is the
+    // capability the rung exists to grant, and the thing v8 could not do.
+    conn.execute(
+        &format!("CREATE TABLE {} (x)", ddl::ARCHIVE_SESSION_MARKER),
+        (),
+    )
+    .await
+    .unwrap();
+    // Links first. `seeded_v7` gives c1 an outbound edge, so deleting the
+    // concept while that edge is hot fails on the foreign key rather than on the
+    // guard — which is precisely the downstream relationship C1's predicate
+    // describes (D-128), reached here from the schema side.
+    conn.execute("DELETE FROM links WHERE source_id = 'c1' OR target_id = 'c1'", ())
+        .await
+        .unwrap();
+    conn.execute("DELETE FROM concepts WHERE id = 'c1'", ())
+        .await
+        .expect("a concept delete inside an archive session must be permitted at v9");
+    conn.execute(&format!("DROP TABLE {}", ddl::ARCHIVE_SESSION_MARKER), ())
+        .await
+        .unwrap();
 }

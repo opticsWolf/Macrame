@@ -325,13 +325,22 @@ BEGIN
     SELECT RAISE(ABORT, 'macrame: physical delete blocked outside archive session');
 END;
 
--- Concepts are never physically archived (D-022), so their guard is
--- unconditional rather than session-scoped: there is no legal path at all.
+-- v9 (C2, D-126): marker-gated, matching its two siblings above. Through v8
+-- this was unconditional, on D-022's reasoning that concepts are never
+-- physically archived -- which C2 makes false. An ad-hoc DELETE is still
+-- refused; it is refused for the same reason `links` is, rather than because
+-- concept archival is impossible.
 CREATE TRIGGER trg_concepts_guard_delete BEFORE DELETE ON concepts
+WHEN NOT EXISTS (
+    SELECT 1 FROM sqlite_master
+    WHERE type = 'table' AND name = 'macrame_archive_session'
+)
 BEGIN
-    SELECT RAISE(ABORT, 'macrame: concepts are never physically archived (D-022)');
+    SELECT RAISE(ABORT, 'macrame: physical delete blocked outside archive session');
 END;
 ```
+
+**The rung that installs it, and the two things that made it necessary (v9, [D-126](s13-decision-register.md#d-126)).** `CREATE TRIGGER IF NOT EXISTS` on an existing name keeps the **old body**, so re-issuing the baseline against a v8 database changes nothing; and `verify` compared `type` and `name` and never bodies, so the stale guard passed verification in silence. Both halves are closed. The `v8 → v9` rung is a `DROP TRIGGER` and a `CREATE` — no table rebuild, no data movement, cost independent of database size — and `verify` now additionally requires that **every** delete guard's body probe `macrame_archive_session`. It checks for the marker name rather than comparing full trigger text: a whitespace-sensitive comparison that has to be hand-updated whenever a guard is reworded is a check people switch off, whereas *this guard is gated on the archive session* is the one property all three share and none may lose.
 
 > **Three corrections this restoration surfaced (0.5.4).** The trigger DDL above was lost entirely to the transport corruption and is recovered from `schema::ddl`, which is the implementation rather than the pre-0.5.4 prose — and the two disagree in three ways worth naming rather than quietly reconciling.
 >

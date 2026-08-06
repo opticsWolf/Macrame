@@ -185,15 +185,25 @@ async fn test_delete_guard_triggers() {
         (),
     ).await.unwrap();
 
-    // Concepts are never physically archived (D-022): the guard is unconditional.
+    // The concepts guard is **marker-gated** as of v9 (C2, D-126), matching its
+    // two siblings. This assertion used to read `never physically archived` and
+    // pin the guard as unconditional, which is what made it the line C2 had to
+    // rewrite: an ad-hoc delete is still refused, and that is the property worth
+    // keeping, but it is refused for the same reason `links` is rather than
+    // because concept archival is impossible.
     let res = conn
         .execute("DELETE FROM concepts WHERE id = 'c1'", ())
         .await;
     assert!(res.is_err());
     let err_str = res.err().unwrap().to_string();
     assert!(
-        err_str.contains("never physically archived"),
-        "Expected unconditional concepts delete guard, got: {err_str}"
+        err_str.contains(macrame::schema::ddl::ABORT_DELETE_GUARD),
+        "Expected the marker-gated concepts delete guard, got: {err_str}"
+    );
+    assert!(
+        !err_str.contains("never physically archived"),
+        "The v8 guard body survived into v9 — a re-issued baseline keeps the old \
+         body and only the rung replaces it (D-126). Got: {err_str}"
     );
 
     // BEFORE DELETE is a *row* trigger: it cannot fire on an empty table, so

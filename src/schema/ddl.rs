@@ -129,6 +129,49 @@ pub const ABORT_DELETE_GUARD: &str = abort_delete_guard!();
 /// duration, so no other connection can reach the guard at all.
 pub const ARCHIVE_SESSION_MARKER: &str = "macrame_archive_session";
 
+/// The concepts delete guard, **marker-gated since v9** (0.9.0, C2, D-126).
+///
+/// A `pub const` rather than an anonymous entry in [`CREATE_TRIGGERS`] because
+/// two readers need exactly this text: the baseline, which installs it on a new
+/// database, and the `v8 → v9` rung, which replaces the v8 body on an existing
+/// one. A second copy is a copy that drifts, and this trigger is the one whose
+/// body carries a doctrine decision.
+///
+/// # What changed, and why re-issuing the baseline could not do it
+///
+/// Through v8 this guard was **unconditional**: `BEFORE DELETE ON concepts`
+/// aborting every time, on the reasoning that concepts are never physically
+/// archived ([D-022](../../docs/architecture/s13-decision-register.md)). C2
+/// makes that false — a declared archive session may now move a retired,
+/// unreferenced concept to the cold file — so the guard takes the same shape its
+/// two siblings have had since 0.5.3: it fires **unless** the archive-session
+/// marker is present.
+///
+/// It needs a rung of its own, and that was measured rather than assumed
+/// (D-126). `CREATE TRIGGER IF NOT EXISTS` on an existing name keeps the **old
+/// body** — re-issuing the baseline against a v8 database leaves the
+/// unconditional guard exactly where it was — and `verify` compared `type` and
+/// `name` and never bodies, so the stale guard passed verification in silence.
+/// Both halves are now closed: the rung drops and recreates, and `verify`
+/// checks that every delete guard's body probes the marker.
+pub const CREATE_CONCEPTS_GUARD_DELETE: &str = concat!(
+    r#"
+    CREATE TRIGGER IF NOT EXISTS trg_concepts_guard_delete
+    BEFORE DELETE ON concepts
+    WHEN NOT EXISTS (
+        SELECT 1 FROM sqlite_master
+        WHERE type = 'table' AND name = '"#,
+    "macrame_archive_session",
+    r#"'
+    )
+    BEGIN
+        SELECT RAISE(ABORT, '"#,
+    abort_delete_guard!(),
+    r#"');
+    END;
+    "#
+);
+
 /// The `concepts` ledger table (§4.1).
 ///
 /// # `rowid_pk` is explicit, and that is the whole point (v8, D-119)
@@ -561,15 +604,7 @@ pub const CREATE_TRIGGERS: &[&str] = &[
                 NEW.recorded_at);
     END;
     "#,
-    // Concepts are NEVER physically archived (D-022), so this guard is
-    // unconditional -- there is no session in which the delete becomes legal.
-    r#"
-    CREATE TRIGGER IF NOT EXISTS trg_concepts_guard_delete
-    BEFORE DELETE ON concepts
-    BEGIN
-        SELECT RAISE(ABORT, 'macrame: concepts are never physically archived (D-022)');
-    END;
-    "#,
+    CREATE_CONCEPTS_GUARD_DELETE,
     // D-008 (revised): probe main.sqlite_master for the archive-session marker.
     // SQLite forbids a trigger in `main` from referencing objects in another
     // database, temp included, so the original temp.sqlite_master probe fails

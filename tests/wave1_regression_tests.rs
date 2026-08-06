@@ -1480,21 +1480,29 @@ async fn vacuum_preserves_a_sparse_rowid_pk() {
     db.close().await.unwrap();
 }
 
-/// **`trg_concepts_fts_delete` is installed, and cannot fire** (v8, D-119, §4.6).
+/// **`trg_concepts_fts_delete` is installed, and fires only inside an archive
+/// session** (v8 D-119; conditional since v9, C2, §4.6).
 ///
 /// Both halves, because either alone is misleading. That it exists is what
-/// 0.9.0 needs and what makes this the last *table-rebuild* rung before 1.0;
-/// that it cannot fire is why installing it in 0.8.0 changes nothing observable.
+/// concept archival needs; that it is unreachable outside a session is why
+/// installing it in 0.8.0 changed nothing observable.
 ///
-/// Not the last rung outright — 0.9.0 still needs a trigger-only `v8 → v9` for
-/// the guard (D-126). This comment said "the last one" and that was too strong.
+/// The inertness was never a property of this trigger — it belonged to
+/// `trg_concepts_guard_delete`, a `BEFORE DELETE` that aborted every time, so
+/// the statement never reached `AFTER DELETE`. **C2 makes that guard
+/// marker-gated (D-126), so the inertness became conditional with it**, and this
+/// test now says so from both sides: outside a session the guard still refuses
+/// and the index is untouched; inside one the delete succeeds and the index
+/// follows it.
 ///
-/// The inertness is not a property of the trigger — it is `trg_concepts_guard_delete`,
-/// a `BEFORE DELETE` that always aborts, so the statement never reaches
-/// `AFTER DELETE`. That dependency is the reason to pin it rather than assume
-/// it: when 0.9.0 makes the guard conditional this test is what says so.
+/// Worth recording that this test did **not** go red when the guard changed,
+/// although the comment it carried predicted it would. It only ever attempted an
+/// *ad-hoc* delete, which is still refused at v9 — so the assertion stayed true
+/// while the sentence explaining it stopped being. A test can outlive its own
+/// reasoning without failing, which is why the reasoning is worth re-reading
+/// whenever the thing it depends on moves.
 #[tokio::test]
-async fn the_fts_delete_trigger_is_installed_and_inert() {
+async fn the_fts_delete_trigger_is_installed_and_fires_only_in_a_session() {
     let harness = TestHarness::new();
     let db = Database::open(&harness.db_path).await.unwrap();
 
@@ -1527,22 +1535,37 @@ async fn the_fts_delete_trigger_is_installed_and_inert() {
          archival silently stales the search index"
     );
 
-    // And it is unreachable: the delete guard refuses first.
-    let refused = db
-        .raw()
-        .connect()
-        .unwrap()
-        .execute("DELETE FROM concepts WHERE id = 'c0'", ())
-        .await;
+    // Outside a session the guard refuses first, so the trigger is unreachable
+    // and the index is untouched.
+    let conn = db.raw().connect().unwrap();
+    let refused = conn.execute("DELETE FROM concepts WHERE id = 'c0'", ()).await;
     assert!(
         refused.is_err(),
-        "a concept was physically deleted (D-022), which also means the FTS \
-         delete trigger is no longer inert"
+        "an ad-hoc concept delete must still be refused at v9"
     );
     assert_eq!(
         hits(&db).await,
         1,
         "the refused delete must leave the index alone"
+    );
+
+    // Inside one it fires — the half that could not be asserted before C2,
+    // because until v9 there was no legal concept delete to assert it with.
+    let marker = macrame::schema::ddl::ARCHIVE_SESSION_MARKER;
+    conn.execute(&format!("CREATE TABLE {marker} (x)"), ())
+        .await
+        .unwrap();
+    conn.execute("DELETE FROM concepts WHERE id = 'c0'", ())
+        .await
+        .expect("a concept delete inside an archive session is legal at v9");
+    conn.execute(&format!("DROP TABLE {marker}"), ())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        hits(&db).await,
+        0,
+        "the concept left the hot table and the FTS index still matches it —          `trg_concepts_fts_delete` did not fire, which is exactly the silent          staleness v8 installed it to prevent"
     );
 
     db.close().await.unwrap();
