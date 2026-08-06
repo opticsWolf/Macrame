@@ -206,6 +206,13 @@ let report = db.archive(cutoff).await?;                // ArchiveReport { links_
 // boundaries the caller did not choose, and the caller cannot see it happen.
 let reports: Vec<ArchiveReport> =
     db.archive_windowed(cutoff, Duration::from_secs(86_400)).await?;
+
+// Which concepts an archive at `cutoff` would be entitled to move (0.9.0,
+// D-128, C1). A free function, like `reconstruct`'s: it takes a connection
+// rather than the handle, and it is read-only -- nothing archives concepts yet.
+// The answer is a function of the hot state now, and archiving links first
+// generally enlarges it, so ask after the link archive rather than before.
+let ids: Vec<String> = archivable_concepts(db.read_conn(), cutoff).await?;
 ```
 
 Every method backed by a `HighPriCommand` or a `LowPriCommand` carries the `# Latency` rustdoc section [§5.1.8](s5-modules.md#518-write-queue-latency-and-caller-timeouts-052-d-028) specifies, including the rule that a `tokio::time::timeout` bounds the caller's wait and does not cancel the command ([D-028](s13-decision-register.md#d-028)).

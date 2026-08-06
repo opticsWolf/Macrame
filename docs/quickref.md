@@ -123,7 +123,7 @@ recent log                detached on archive
 |---|---|---|
 | `schema` | `schema/ddl.rs`, `schema/migrations.rs` | DDL generation, trigger/index creation, `user_version` migration runner |
 | `graph` | `graph/builder.rs`, `graph/subgraph.rs`, `graph/vector_filter.rs` | CTE compilation, subgraph loading, vector filter strategies, byte budget |
-| `temporal` | `temporal/replay.rs`, `temporal/snapshot.rs`, `temporal/as_of.rs` | `reconstruct()`, `as_of()`, snapshot cadence/retention, archive |
+| `temporal` | `temporal/replay.rs`, `temporal/snapshot.rs`, `temporal/as_of.rs`, `temporal/archive.rs` | `reconstruct()`, `as_of()`, snapshot cadence/retention, archive, `archivable_concepts()` |
 | `vector` | `vector/mod.rs`, `vector/registry.rs`, `vector/model.rs`, `vector/hybrid.rs` | Model registration, embedding upsert, DiskANN search, hybrid RRF fusion |
 | `integrity` | `integrity/shadow.rs`, `integrity/rebuild.rs` | `audit_current()`, `rebuild_current()` (atomic), `rebuild_current_chunked()` (shadow-swap), `ShadowStep`/`ShadowOutcome` |
 | `metrics` | `metrics.rs` | `ActorMetrics`, `HoldTimer`, `CommandKind`, `MetricsSnapshot` — feature-gated, zero-cost when off |
@@ -390,6 +390,14 @@ pub struct ArchiveReport {
     pub log_entries_archived: usize,
     pub horizon: Option<i64>,
 }
+
+// Which concepts an archive at `cutoff` would be entitled to move: retired,
+// both clocks behind the cutoff, and no surviving hot `links` row naming it in
+// either direction (0.9.0, D-128). Read-only -- nothing archives concepts yet.
+pub async fn archivable_concepts(
+    conn: &libsql::Connection,
+    cutoff: &str,
+) -> Result<Vec<String>>;
 
 pub struct ChainCheck {
     pub timestamp: String,

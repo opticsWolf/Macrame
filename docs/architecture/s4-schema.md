@@ -55,6 +55,10 @@ CREATE TABLE concepts (
 -- query paths.
 ```
 
+**Archivability is the first thing that reads all three of these columns at once (0.9.0, [D-128](s13-decision-register.md#d-128), C1).** The orthogonality note above is what makes that worth stating here rather than only in [§5.7](s5-modules.md#57-temporalarchivers--cold-storage): `valid_to` and `retired` answer different questions and serve different query paths, so a predicate requiring **both** — plus `recorded_at` behind the cutoff, plus no surviving hot `links` row naming the concept — is a conjunction across two axes that this schema otherwise keeps apart. It is deliberate. A concept still visible to the application (`retired = 0`) must not go cold whatever its valid time says, and a concept the user trashed while it is still temporally valid must not either. Only the corner where all three agree, and nothing points at the row, is archivable.
+
+Nothing in this section changes for it: `CONCEPTS_ARCHIVABLE` is a query over the columns above, not a constraint on them, and no DDL moves until C2 adds `cold.concepts` and makes `trg_concepts_guard_delete` conditional ([§4.6](#46-triggers), [D-126](s13-decision-register.md#d-126)).
+
 Per-model embedding tables are not part of the baseline schema: `register_model` creates each one, with its DiskANN index, in a single transaction ([§5.9](s5-modules.md#59-vector--embeddings-the-model-registry-and-search), [D-037](s13-decision-register.md#d-037)). The shape is fixed and the name is derived from a validated [`ModelName`](s5-modules.md#59-vector--embeddings-the-model-registry-and-search):
 
 ```sql
