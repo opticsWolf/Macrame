@@ -2,7 +2,7 @@
 
 **From:** 0.9.0 (schema v10)
 **To:** 0.10.0 (**schema v10 — no rung**)
-**Source:** [`architectural-review-v3.md`](../architectural-review-v3.md), which extends `architectural-review-v2.md`
+**Source:** `architectural-review-v3.md`, which extends `architectural-review-v2.md` — external review documents, not kept in the repository
 **Shape:** one invariant closed, one performance claim settled by measurement, one binding hardened, and a documentation reconciliation that has now misled two reviews.
 
 ---
