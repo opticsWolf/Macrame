@@ -155,18 +155,38 @@ async fn main() {
         }
 
         // Chunk size held constant, table size varied, per trigger config.
+        //
+        // 0.11.0 (Appendix C item 1) turned this into the attribution rig for
+        // D-136's unexplained residual, which needed one more column. The drops
+        // are **cumulative**, left to right, so each column subtracts exactly
+        // one component and the difference between two neighbouring columns is
+        // that component's cost. `none` is the bare `INSERT INTO links` — the
+        // floor this path could ever reach — and without it "log only" was the
+        // last column, leaving the log trigger and the base insert summed into
+        // one figure that could not be split.
+        //
+        // What attribution reads is not a column but the *growth* down a
+        // column: the residual is whatever gets more expensive as the table
+        // fills, so a component that costs the same at 0 and at 8,000 is not
+        // the answer however large it is.
         "table" => {
             println!("== fixed 90-row chunk vs table size ==");
             println!(
-                "  {:>7}  {:>10}  {:>10}  {:>10}",
-                "preload", "all three", "no guard", "log only"
+                "  {:>7}  {:>10}  {:>10}  {:>10}  {:>10}",
+                "preload", "all three", "no guard", "log only", "none"
             );
+            let mut baseline: Option<Vec<f64>> = None;
             for preload in [0usize, 2_000, 8_000] {
                 let mut cells = Vec::new();
                 for drops in [
                     vec![],
                     vec!["trg_links_single_open"],
                     vec!["trg_links_single_open", "trg_links_current_sync"],
+                    vec![
+                        "trg_links_single_open",
+                        "trg_links_current_sync",
+                        "trg_links_log_insert",
+                    ],
                 ] {
                     let name = format!("t{preload}_{}.db", drops.len());
                     let db = fresh(&dir, &name).await;
@@ -183,9 +203,29 @@ async fn main() {
                     cells.push(ms(loop_t + commit_t));
                 }
                 println!(
-                    "  {:>7}  {:>9.2}  {:>9.2}  {:>9.2}",
-                    preload, cells[0], cells[1], cells[2]
+                    "  {:>7}  {:>9.2}  {:>9.2}  {:>9.2}  {:>9.2}",
+                    preload, cells[0], cells[1], cells[2], cells[3]
                 );
+                if baseline.is_none() {
+                    baseline = Some(cells.clone());
+                }
+                if preload == 8_000 {
+                    let z = baseline.as_ref().unwrap();
+                    println!(
+                        "\n  growth 0 -> 8,000 (ms) : {:>9.2}  {:>9.2}  {:>9.2}  {:>9.2}",
+                        cells[0] - z[0],
+                        cells[1] - z[1],
+                        cells[2] - z[2],
+                        cells[3] - z[3]
+                    );
+                    println!(
+                        "  attributed to          : guard {:>6.2}   sync {:>6.2}   log {:>6.2}   insert {:>6.2}",
+                        (cells[0] - z[0]) - (cells[1] - z[1]),
+                        (cells[1] - z[1]) - (cells[2] - z[2]),
+                        (cells[2] - z[2]) - (cells[3] - z[3]),
+                        cells[3] - z[3]
+                    );
+                }
             }
         }
 
@@ -288,6 +328,205 @@ async fn main() {
                 while let Some(row) = rows.next().await.unwrap() {
                     println!("  {label:<26} {}", row.get::<String>(3).unwrap());
                 }
+            }
+        }
+
+        // Inside `trg_links_current_sync`, and what it is paying for (0.11.0,
+        // Appendix C item 1). `table` attributes the whole residual to this one
+        // trigger, and `lc` shows the statement it runs is *not* expensive:
+        // 90 direct upserts into an 8,000-row `links_current` cost ~0.5 ms
+        // against the ~6 ms the trigger costs on the same table. So the cost is
+        // in the environment the statement runs in, and this splits that.
+        //
+        // Guard and log trigger are dropped in every arm, so the only thing
+        // being measured is the base insert plus the sync trigger. Each arm
+        // removes one obligation from the upsert:
+        //
+        // * `fk off`   — the two `concepts` foreign keys on `links_current`,
+        //   which `lc` had switched off and `table` had on. That difference is
+        //   the first suspect precisely because it was never controlled for.
+        // * `-cover` / `-open` — the two secondary indexes, dropped one at a
+        //   time. Both lead on `source_id`, and this fixture gives every row
+        //   the same one, so they are asked to maintain 8,000 entries under a
+        //   single leading key.
+        // * `-both`    — the floor.
+        "sync" => {
+            // Every arm is one connection, and the only difference between arms
+            // is the SQL run on it between opening and measuring. That makes
+            // the *preparation* a variable rather than a fixture detail, which
+            // is what the first version of this experiment got wrong.
+            //
+            // `+cache` tests cache pressure, because the per-index arms came
+            // out *super-additive*: dropping either index alone recovered ~80%
+            // of the cost, and two indexes cannot cost eight times what one
+            // costs unless something crosses a threshold between the two cases.
+            // The actor sets no `cache_size` (`apply_pragmas` in
+            // `connection.rs`), so the default ~2 MB is the threshold.
+            //
+            // `warm` and `ckpt` test the alternative reading of that same
+            // super-additivity, and it is a reading about the *instrument*:
+            // the three fast arms are exactly the three that ran a `DROP INDEX`
+            // before measuring, and a drop is a write. `warm` performs a schema
+            // write that touches no data — so if it reads fast, the indexes are
+            // exonerated and what is being measured is the first substantial
+            // write after opening a connection on a populated file. `ckpt`
+            // separates the WAL from the page cache as the thing that state
+            // lives in.
+            const ARMS: [(&str, &[&str]); 8] = [
+                ("as shipped", &[]),
+                ("fk off", &["PRAGMA foreign_keys = OFF"]),
+                ("-cover", &["DROP INDEX idx_lc_traversal_cover"]),
+                ("-open", &["DROP INDEX idx_lc_open_interval"]),
+                (
+                    "-both",
+                    &[
+                        "DROP INDEX idx_lc_traversal_cover",
+                        "DROP INDEX idx_lc_open_interval",
+                    ],
+                ),
+                ("+cache", &["PRAGMA cache_size = -524288"]),
+                (
+                    "warm",
+                    &["CREATE TABLE zz_warm (x INTEGER)", "DROP TABLE zz_warm"],
+                ),
+                ("ckpt", &["PRAGMA wal_checkpoint(TRUNCATE)"]),
+            ];
+            println!("== inside trg_links_current_sync, 90-row chunk ==");
+            print!("  {:>7}", "preload");
+            for (label, _) in ARMS {
+                print!("  {label:>10}");
+            }
+            println!();
+            for preload in [0usize, 8_000] {
+                let mut cells = Vec::new();
+                for (i, (_, prep)) in ARMS.iter().enumerate() {
+                    let name = format!("y{preload}_{i}.db");
+                    let db = fresh(&dir, &name).await;
+                    seed(&db, preload + 200).await;
+                    for c in (0..preload).collect::<Vec<_>>().chunks(500) {
+                        db.write_bulk_atomic(hub_edges(c[0] + 1, c.len(), "PRE"))
+                            .await
+                            .unwrap();
+                    }
+                    db.close().await.unwrap();
+                    let (_raw, conn) = raw_conn(&dir, &name).await;
+                    drop_triggers(&conn, &["trg_links_single_open", "trg_links_log_insert"]).await;
+                    for sql in *prep {
+                        // `wal_checkpoint` returns rows, so it is a query.
+                        conn.query(sql, ()).await.unwrap();
+                    }
+                    let (loop_t, commit_t) = insert_raw(&conn, 90, "MEASURED").await;
+                    cells.push(ms(loop_t + commit_t));
+                }
+                print!("  {preload:>7}");
+                for c in &cells {
+                    print!("  {c:>10.2}");
+                }
+                println!();
+            }
+        }
+
+        // Is the residual a property of the index, or of the fixture's key
+        // distribution? (0.11.0, Appendix C item 1 → item 2.)
+        //
+        // `sync` attributes the growth to `links_current`'s two secondary
+        // indexes: dropping them takes a 90-row chunk into an 8,000-edge table
+        // from ~5 ms to ~1 ms, and the alternatives are refuted — a larger
+        // cache does not help, and neither does a schema write or a checkpoint
+        // before measuring, which rules out the "any write warms it" reading of
+        // the same numbers.
+        //
+        // That leaves *why*. `idx_lc_traversal_cover` is
+        // `(source_id, valid_from, valid_to, weight, edge_type, target_id)`,
+        // and the star fixture gives all 8,000 rows the same source, the same
+        // two timestamps and the same weight — four of them 27-character
+        // strings. Every key comparison walks five identical columns before it
+        // reaches the one that discriminates.
+        //
+        // So this holds *everything* constant except the key distribution:
+        // both arms preload the same edge count into the same schema over the
+        // same 8,200 concepts, and differ only in whether the edges share a
+        // source. `chain` is D-088's shape, out-degree 1.
+        "shape" => {
+            println!("== 90-row chunk into an 8,000-edge table, by key distribution ==");
+            println!(
+                "  {:>18}  {:>12}  {:>12}  {:>10}",
+                "preload shape", "as shipped", "-cover", "ratio"
+            );
+            for hub in [true, false] {
+                let mut cells = Vec::new();
+                for drop_cover in [false, true] {
+                    let name = format!("h{hub}_{drop_cover}.db");
+                    let db = fresh(&dir, &name).await;
+                    seed(&db, 8_300).await;
+                    for c in (0..8_000usize).collect::<Vec<_>>().chunks(500) {
+                        let batch: Vec<EdgeAssertion> = c
+                            .iter()
+                            .map(|&k| {
+                                let (s, t) = if hub {
+                                    (0, k + 1)
+                                } else {
+                                    // A chain: one edge per source, so the
+                                    // index's leading column discriminates on
+                                    // the first comparison.
+                                    (k, k + 1)
+                                };
+                                EdgeAssertion::new(
+                                    format!("c{s:07}"),
+                                    format!("c{t:07}"),
+                                    "PRE",
+                                )
+                                .valid_from(TS)
+                                .valid_to(OPEN)
+                            })
+                            .collect();
+                        db.write_bulk_atomic(batch).await.unwrap();
+                    }
+                    db.close().await.unwrap();
+                    let (_raw, conn) = raw_conn(&dir, &name).await;
+                    if drop_cover {
+                        conn.query("DROP INDEX idx_lc_traversal_cover", ())
+                            .await
+                            .unwrap();
+                    }
+                    // The measured chunk follows the same distribution as the
+                    // table it lands in, because a hub chunk into a chain would
+                    // be measuring a third thing.
+                    let tx = conn
+                        .transaction_with_behavior(libsql::TransactionBehavior::Immediate)
+                        .await
+                        .unwrap();
+                    let stmt = tx.prepare(INSERT_LINK_SQL).await.unwrap();
+                    let t = Instant::now();
+                    for k in 0..90usize {
+                        let (s, t_id) = if hub { (0, 8_100 + k) } else { (8_100 + k, 8_101 + k) };
+                        stmt.reset();
+                        stmt.execute(libsql::params![
+                            format!("c{s:07}"),
+                            format!("c{t_id:07}"),
+                            "MEASURED",
+                            TS,
+                            OPEN,
+                            1.0f64,
+                            "{}",
+                            TS
+                        ])
+                        .await
+                        .unwrap();
+                    }
+                    let loop_t = t.elapsed();
+                    drop(stmt);
+                    let t = Instant::now();
+                    tx.commit().await.unwrap();
+                    cells.push(ms(loop_t + t.elapsed()));
+                }
+                println!(
+                    "  {:>18}  {:>11.2}  {:>11.2}  {:>9.2}x",
+                    if hub { "star (one source)" } else { "chain (8,000 srcs)" },
+                    cells[0],
+                    cells[1],
+                    cells[0] / cells[1]
+                );
             }
         }
 

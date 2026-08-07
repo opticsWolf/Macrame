@@ -80,7 +80,20 @@ struct Claim {
     doc_name: &'static str,
     /// The document itself, via `include_str!`.
     doc: &'static str,
-    /// The criterion group that measures it, as named in `benches/budgets.rs`.
+    /// What measured it.
+    ///
+    /// Either a criterion group named in `benches/budgets.rs`, or — for a claim
+    /// substantiated by a controlled comparison rather than by a benchmark —
+    /// `"example:<file>/<experiment>"`. The second form was added in 0.11.0
+    /// with [D-142](../docs/architecture/s13-decision-register.md#d-142),
+    /// because attribution is not a benchmark: it is a set of arms that differ
+    /// by one component, and criterion measures throughput on one arm at a
+    /// time. Without the second form the registry could only cover figures
+    /// produced by `benches/`, which is a minority of what this project
+    /// publishes — [D-056](../docs/architecture/s13-decision-register.md#d-056)
+    /// and [D-059](../docs/architecture/s13-decision-register.md#d-059) are
+    /// both example-backed — and a registry that cannot express its evidence
+    /// silently narrows to the claims that happen to fit it.
     bench_group: &'static str,
     /// The register entry that last ratified it, lower-case anchor form.
     decision: &'static str,
@@ -137,6 +150,7 @@ const CONNECTION: &str = include_str!("../src/connection.rs");
 const BUDGETS: &str = include_str!("../benches/budgets.rs");
 const REGISTER: &str = include_str!("../docs/architecture/s13-decision-register.md");
 const APPENDICES: &str = include_str!("../docs/architecture/appendices.md");
+const CHUNK_DIAG: &str = include_str!("../examples/chunk_diag.rs");
 
 /// The fixture strings, named once so a typo cannot silently split a key.
 mod fx {
@@ -148,6 +162,17 @@ mod fx {
 }
 
 const LATENCY: &str = "latency, median, reference hardware";
+
+/// Not a latency. A *decomposition* of one, which is why it is its own metric:
+/// `9.06 ms` and `89% of the growth` are two facts about the same operation and
+/// the same fixture, and collapsing them onto one key would make the one-value
+/// rule fire on two claims that do not disagree (D-139, D-142).
+const ATTRIBUTION: &str = "share of growth 0 -> 8,000 edges, median of three sessions";
+
+/// The fact itself, named once: three documents state it three ways.
+const ATTRIBUTED: &str =
+    "89% of the growth is links_current secondary-index maintenance; the \r
+     single-open guard contributes none";
 
 const REGISTRY: &[Claim] = &[
     // ---- single edge assertion, warm handle -------------------------------
@@ -330,7 +355,7 @@ const REGISTRY: &[Claim] = &[
         operation: "chunk commit, edges, 90 rows",
         fixture: fx::SEEDED,
         metric: LATENCY,
-        value: "9.06 ms — the 3 ms bound missed by ~3×, residual unattributed",
+        value: "9.06 ms — the 3 ms bound missed by ~3×, residual attributed to the links_current sync trigger",
         text: "**9.06 ms into an 8,000-edge table**",
         doc_name: "docs/architecture/s6-s10-flows-to-dependencies.md",
         doc: S9,
@@ -342,7 +367,7 @@ const REGISTRY: &[Claim] = &[
         operation: "chunk commit, edges, 90 rows",
         fixture: fx::SEEDED,
         metric: LATENCY,
-        value: "9.06 ms — the 3 ms bound missed by ~3×, residual unattributed",
+        value: "9.06 ms — the 3 ms bound missed by ~3×, residual attributed to the links_current sync trigger",
         text: "90-edge chunk takes **9.06 ms** into an 8,000-edge table",
         doc_name: "src/connection.rs",
         doc: CONNECTION,
@@ -354,12 +379,54 @@ const REGISTRY: &[Claim] = &[
         operation: "chunk commit, edges, 90 rows",
         fixture: fx::SEEDED,
         metric: LATENCY,
-        value: "9.06 ms — the 3 ms bound missed by ~3×, residual unattributed",
+        value: "9.06 ms — the 3 ms bound missed by ~3×, residual attributed to the links_current sync trigger",
         text: "edges into an 8,000-edge table take **9.06 ms**",
         doc_name: "src/connection.rs",
         doc: CONNECTION,
         bench_group: "chunk_budget",
         decision: "d-136",
+        status: Live,
+    },
+    // ---- what that 9.06 ms is made of (0.11.0, D-142) ---------------------
+    //
+    // Registered for the same reason the three above are: one figure, restated
+    // in three documents, and nothing structural connecting them. This one was
+    // published in four places on the day it was measured, which is exactly the
+    // condition that produced the 47.7 / 8.0 split this file exists for.
+    Claim {
+        operation: "chunk commit, edges, 90 rows",
+        fixture: fx::SEEDED,
+        metric: ATTRIBUTION,
+        value: ATTRIBUTED,
+        text: "89% of it secondary-index maintenance on `links_current`",
+        doc_name: "docs/architecture/s6-s10-flows-to-dependencies.md",
+        doc: S9,
+        bench_group: "example:chunk_diag/sync",
+        decision: "d-142",
+        status: Live,
+    },
+    Claim {
+        operation: "chunk commit, edges, 90 rows",
+        fixture: fx::SEEDED,
+        metric: ATTRIBUTION,
+        value: ATTRIBUTED,
+        text: "89% of the growth is maintenance of `idx_lc_traversal_cover`",
+        doc_name: "src/connection.rs",
+        doc: CONNECTION,
+        bench_group: "example:chunk_diag/sync",
+        decision: "d-142",
+        status: Live,
+    },
+    Claim {
+        operation: "chunk commit, edges, 90 rows",
+        fixture: fx::SEEDED,
+        metric: ATTRIBUTION,
+        value: ATTRIBUTED,
+        text: "89% of the growth from an empty table to an 8,000-edge one",
+        doc_name: "docs/architecture/appendices.md",
+        doc: APPENDICES,
+        bench_group: "example:chunk_diag/sync",
+        decision: "d-142",
         status: Live,
     },
 ];
@@ -395,14 +462,46 @@ fn every_claim_still_appears_in_its_document() {
     }
 }
 
-/// Every claim names a criterion group that exists.
+/// Every claim names a criterion group — or an example experiment — that exists.
 ///
 /// Matched as `controlled_group(c, "name")` rather than as a bare substring:
 /// the group names appear in prose in that file too, and a check that a string
-/// occurs *somewhere* in a 1,600-line bench file is not a check.
+/// occurs *somewhere* in a 1,600-line bench file is not a check. The example
+/// form is held to the same standard — it must match the `match` arm that
+/// selects the experiment, not the name anywhere in the file, which in
+/// `chunk_diag.rs` also appears in several comments.
+///
+/// An unrecognised example file is a **panic, not a pass**. That is the whole
+/// risk of widening this field: a check that silently accepts anything it does
+/// not recognise is worse than no check, because it reads as one.
 #[test]
 fn every_claim_names_a_bench_group_that_exists() {
     for c in REGISTRY {
+        if let Some(rest) = c.bench_group.strip_prefix("example:") {
+            let (file, experiment) = rest.split_once('/').unwrap_or_else(|| {
+                panic!(
+                    "{}: example evidence must be \"example:<file>/<experiment>\", got {:?}",
+                    c.operation, c.bench_group
+                )
+            });
+            let source = match file {
+                "chunk_diag" => CHUNK_DIAG,
+                other => panic!(
+                    "{}: no example source is registered under {other:?}. Add it \
+                     beside CHUNK_DIAG — an unknown name must not pass silently.",
+                    c.operation
+                ),
+            };
+            let arm = format!("\"{experiment}\" =>");
+            assert!(
+                source.contains(&arm),
+                "{}: claims are substantiated by examples/{file}.rs experiment \
+                 {experiment:?}, which that file does not select. A renamed or \
+                 deleted experiment leaves the claim standing on nothing.",
+                c.operation
+            );
+            continue;
+        }
         let decl = format!("controlled_group(c, \"{}\")", c.bench_group);
         assert!(
             BUDGETS.contains(&decl),

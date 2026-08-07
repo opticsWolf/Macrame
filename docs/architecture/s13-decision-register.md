@@ -2035,3 +2035,68 @@ The tempting fix was to split `metric` — "the constant's derivation figure" ve
 The dry-run never settled which figures earn an entry, and this forced it. The registry covers **claims about current cost**. README's table is a *per-release measurement series*, and registering every cell would collide with the current-cost entry on every future column, because two honest measurements of one thing never agree to three digits — the false positive the three-part key exists to avoid. A series cell earns an entry in one case only: **it contradicts a current-cost claim by more than noise.** 0.10.0 has exactly one.
 
 **Rejected.** *Splitting `metric`* — above; it defeats the gate from inside. *Updating the four 2.39 locations to 2.71* — re-derives a load-bearing constant from one session with no mechanism. *Leaving the 2.71 figure unregistered* — a published performance number with no gate is the defect [D-139](s13-decision-register.md#d-139) was built for; publishing one in the same release would be self-refuting. *Omitting the row from the 0.10.0 column* — the column would then be a selection of the rows that agreed, which is worse than no column. *Re-running until a session agrees with 2.39* — five measurements at a 1.1% spread is not a sampling problem, and choosing the run that matches the published number is the reason [D-070](s13-decision-register.md#d-070) mandates a median in the first place. *Raising the budget or gating on it* — [D-055](s13-decision-register.md#d-055); the row is inside its 3 ms budget regardless, and that is not what changed.
+---
+
+<a id="d-142"></a>D-142 — the chunk row's ~3× residual is **attributed**: it is `links_current` secondary-index maintenance inside `trg_links_current_sync`, and four other explanations are refuted (0.11.0, [Appendix C](appendices.md#named-for-0110-in-this-order) item 1). [D-004](s13-decision-register.md#d-004), [D-042](s13-decision-register.md#d-042), [D-055](s13-decision-register.md#d-055), [D-056](s13-decision-register.md#d-056), [D-058](s13-decision-register.md#d-058), [D-059](s13-decision-register.md#d-059), [D-070](s13-decision-register.md#d-070), [D-088](s13-decision-register.md#d-088), [D-136](s13-decision-register.md#d-136), [§5.1.5](s5-modules.md#515-cooperative-chunking--the-golden-rule), [§9](s6-s10-flows-to-dependencies.md#9-performance-budgets). Evidence: `examples/chunk_diag.rs` (`table`, `sync`, `shape`).
+
+> **[D-136](s13-decision-register.md#d-136) left a measured number with a stated *cause unknown*. The cause is one trigger, and most of what makes it expensive is an index this project chose deliberately and can still defend.**
+
+## Method, and the column that was missing
+
+[D-056](s13-decision-register.md#d-056) attributed 92% of chunk-commit cost to the ledger triggers by dropping them and re-measuring; [D-064](s13-decision-register.md#d-064) is a second instance of isolation finding a cause argument had missed. This is the same instrument. `chunk_diag table` holds the chunk at 90 rows, varies the table it lands in, and drops the three `links` insert triggers **cumulatively**, so the difference between neighbouring columns is one component's cost.
+
+It stopped one column short. `log only` was the last arm, which summed the log trigger and the bare `INSERT INTO links` into a figure that could not be split; `none` is added, and it is the floor this path could reach.
+
+**What attribution reads is the growth down a column, not the column.** The residual is by definition whatever gets more expensive as the table fills, so a component that costs the same at 0 rows and at 8,000 is not the answer however large it is. That distinction is what makes the single-open guard's exoneration below a result rather than an omission.
+
+## The answer
+
+Medians of three sessions, 90-row chunk, `star_of_stars` via `seed_edges` — [D-059](s13-decision-register.md#d-059)'s own generator, so this is comparable to every earlier figure on this row:
+
+| growth, 0 → 8,000 edges | ms |
+|---|---|
+| total, all three triggers | **+4.15** |
+| ├ `trg_links_single_open` (the guard) | −0.85 — **zero within noise** |
+| ├ `trg_links_current_sync` | **+4.65** |
+| ├ `trg_links_log_insert` | +0.11 |
+| └ bare `INSERT INTO links` | +0.24 |
+
+**Effectively all of it is the `links_current` write.** The log trigger and the base insert together carry ~0.35 ms of a 4.15 ms rise, and the guard carries none — which is [D-059](s13-decision-register.md#d-059)'s `v5 → v6` index doing exactly what it shipped to do, now visible as a measurement rather than as an absence of complaints.
+
+`chunk_diag sync` then splits the trigger, with guard and log dropped in every arm:
+
+| arm | 0 rows | 8,000 rows | growth |
+|---|---|---|---|
+| as shipped | 1.91 | 4.81 | **+2.90** |
+| both secondary indexes dropped | 0.63 | 0.94 | **+0.31** |
+
+**89% of the growth is index maintenance on `links_current`.** The statement itself is not the cost: `chunk_diag lc` runs the trigger's own upsert *directly* against the same 8,000-row table and it takes 0.49 ms — an order of magnitude under what the trigger costs on the same data. What is expensive is maintaining `idx_lc_traversal_cover` and `idx_lc_open_interval` while it runs.
+
+## Four explanations that were tested and are wrong
+
+Each of these was a live hypothesis with a plausible mechanism, and each is refuted by a measurement rather than by argument. They are recorded because the next person to look at this row will think of them too.
+
+| hypothesis | test | result at 8,000 rows |
+|---|---|---|
+| page-cache pressure | `PRAGMA cache_size = -524288` | 5.54 vs 4.81 — **no help** |
+| foreign-key enforcement | `PRAGMA foreign_keys = OFF` | 4.93 vs 4.81 — **no help** |
+| an instrument artifact | a schema write, then a checkpoint, before measuring | 5.43 / 5.40 — **no help** |
+| the fixture's key distribution | `chain`, 8,000 sources, same row counts | 7.84 vs 8.04 — **indistinguishable** |
+
+The third deserves its own sentence, because it very nearly published a wrong cause. The per-index arms came out **super-additive** — dropping either index alone recovered ~80% of the cost, which index maintenance cannot do — and the three fast arms were exactly the three that had run a `DROP INDEX` before measuring. A drop is a write, so "any substantial write warms the connection and the next chunk is cheap" explained every number on the table without involving indexes at all. `warm` performs a schema write touching no data and `ckpt` truncates the WAL; both read slow. The instrument is not the story, and it took two arms to know that.
+
+The fourth is the one that matters for what comes next. `idx_lc_traversal_cover` is `(source_id, valid_from, valid_to, weight, edge_type, target_id)`, and the star fixture gives all 8,000 rows the same first five values — four of them 27-character timestamps — so every key comparison walks five identical columns before it discriminates. That is a specific, testable reason for the cost to be a **fixture** property. It is not: a chain with 8,000 distinct sources costs the same. The residual belongs to the row count, not to the shape.
+
+## What this does not claim
+
+**The 9.06 ms figure is unchanged and was not re-measured here.** §9's row is an API-path bench; `chunk_diag` drives a raw connection so it can drop triggers, and its absolute numbers are not comparable to it. What transfers is the *decomposition*, which is what item 1 asked for.
+
+**The components do not sum, and the arms interact.** Dropping `idx_lc_traversal_cover` saves ~3.7 ms with the guard removed and ~1.5 ms with it present, because the guard's plan depends on which indexes exist — the same coupling [D-064](s13-decision-register.md#d-064) is about. Every figure above is therefore a decomposition *under its stated configuration*, not a term in an additive model, and reading them as independent line items would overstate what isolation can deliver.
+
+**Nothing is fixed by this entry**, and the obvious fix is a trade rather than a defect. The expensive index is [D-042](s13-decision-register.md#d-042)'s covering index for the traversal, and its width is the whole point: the recursive step never touches the base table. Narrowing it to make the write path cheaper would move cost onto the read path that six columns were chosen to protect, and that is a decision needing both sides measured. It is named here so the option is not rediscovered as a novelty.
+
+## What it unblocks
+
+[Appendix C](appendices.md#named-for-0110-in-this-order) ordered item 1 before item 2 on the grounds that running the [D-088](s13-decision-register.md#d-088) matrix first would produce four constants all carrying the same unexplained component. That reasoning holds and the order was right — but the `shape` arm above says the residual is **shape-independent**, which is a genuinely useful thing to know before re-deriving four constants against four shapes: it predicts that the shapes will differ in what they cost, and not in what the cost is made of.
+
+**Rejected.** *Publishing the first `sync` table as the answer* — it attributed the residual to index maintenance on evidence that also fitted "any write warms it", and the two arms that separated them cost one run. *Re-deriving the `chunk_rows` constants in the same change* — that is item 2, it is mechanical once the cause is known, and folding it in here would put a measurement and a constant change in one commit where the constant could not be reviewed on its own. *Narrowing `idx_lc_traversal_cover`* — above; a write-path saving paid for out of the read path [D-042](s13-decision-register.md#d-042) built it for, with only one side measured. *Adding a `cache_size` pragma anyway* — it did not help here, and a pragma added on a refuted hypothesis is a constant nobody can remove later. *Leaving the residual unattributed until a user complains* — [Appendix C](appendices.md#named-for-0110-in-this-order)'s trigger condition is a proposal to change a `chunk_rows` constant, and item 2 *is* that proposal.

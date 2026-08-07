@@ -68,10 +68,20 @@ use crate::vector::ModelName;
 /// for — the empty arm read 2.69 and 2.65 ms beside it against the 2.39 ms
 /// published above, so the *ratio* is 3.4× here and 3.35× there.
 ///
-/// **The residual is unattributed.** It is not the missing index, which shipped
-/// in 0.5.6, and nothing has measured what it is. Re-deriving these constants
-/// against a realistic fixture needs a decision about what "realistic" is, which
-/// is why it has not been done silently.
+/// **The residual is attributed as of 0.11.0 (D-142).** It is not the missing
+/// index, which shipped in 0.5.6; it is the `links_current` write. Dropping the
+/// three `links` insert triggers one at a time puts effectively all of the
+/// growth in `trg_links_current_sync` — the single-open guard contributes none,
+/// the log trigger and the base insert ~0.35 ms of a 4.15 ms rise — and within
+/// that trigger, 89% of the growth is maintenance of `idx_lc_traversal_cover`
+/// and `idx_lc_open_interval` rather than the upsert itself, which costs 0.49 ms
+/// run directly against the same table. Page-cache size, foreign keys and the
+/// fixture's key distribution were each tested and are each not the cause.
+///
+/// Knowing the cause does not by itself change the constant: the expensive index
+/// is D-042's covering index for the traversal, so narrowing it moves cost onto
+/// the read path it exists to protect. Re-deriving these constants against the
+/// D-088 fixture matrix is the named successor.
 pub mod chunk_rows {
     /// Edge assertions (`bulk_import`).
     ///
@@ -90,8 +100,16 @@ pub mod chunk_rows {
     /// `EXISTS` scans the whole out-degree, "a schema defect with a proven fix,
     /// recorded in D-059 and not applied here" — described 0.5.5. The fix *was*
     /// applied, as the `v5 → v6` rung, and took this from 47.7 ms to ~8 ms.
-    /// What survives is the miss, not its cause: the bound is exceeded ~3×, by
-    /// something nobody has attributed.
+    /// What survives is the miss: the bound is still exceeded ~3×. Its cause is
+    /// no longer unknown — D-142 attributes it to `trg_links_current_sync`, and
+    /// within that to secondary-index maintenance on `links_current` — and the
+    /// guard this comment used to blame contributes **no** growth at all.
+    ///
+    /// **The constant is unchanged, and attribution is why that is a decision
+    /// rather than an omission.** The cost is D-042's covering index, which is
+    /// wide on purpose; lowering `EDGES` would buy latency and cost throughput
+    /// on a path whose per-row cost grows with the table either way. D-088's
+    /// fixture matrix is the named successor.
     ///
     /// D-134 retired the growth claim on the neighbouring *single-assertion*
     /// path and did not measure this one; D-136 is why this line now carries a
