@@ -1098,6 +1098,12 @@ fn hydrate_scaling(c: &mut Criterion) {
 /// could plausibly be expensive: the probe binds all three equality columns, so
 /// out-degree should not matter, and if it does the index is not being used the
 /// way `the_single_open_probe_seeks_rather_than_scans` says it is.
+///
+/// **Three arms, and why the top one is 8,000.** Two points can only show "not
+/// growing between these two"; three can show flat. 8,000 is not an arbitrary
+/// third point — it is the degree D-059's original evidence is stated at
+/// (`ddl.rs:509`, 47.7 ms pre-index against 8.0 ms post-index), so this arm and
+/// the number the schema docs publish are finally measured at the same scale.
 fn overlap_guard(c: &mut Criterion) {
     let rt = runtime();
     let hub = 2_000 * scale();
@@ -1105,7 +1111,7 @@ fn overlap_guard(c: &mut Criterion) {
     let mut group = controlled_group(c, "overlap_guard");
     group.sample_size(20);
 
-    for degree in [0usize, hub] {
+    for degree in [0usize, hub, 4 * hub] {
         group.bench_with_input(
             BenchmarkId::from_parameter(degree),
             &degree,

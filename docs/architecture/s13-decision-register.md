@@ -1745,3 +1745,52 @@ The property is restated as the claim that is now true — **a concept leaves th
 **Two things are worth carrying forward, and the second is the larger one.** The test's own docstring said *"the stronger half cannot be asserted until C2 archives one"* — it named its own revision, C2 arrived, and nothing connected the two, because nothing was watching. And a feature-gated target is invisible to a gate run without the feature, so "330 across 27 targets" was a true sentence about a smaller suite than it sounded like. The correction is to the *claim*, not only to the test: an exit gate that does not name its feature set has not said what it ran.
 
 **Rejected.** *Exposing `archivable_concepts` to Python to give the test a reader* — it is a free function over a connection, and adding a query method to make a test assertable is the test choosing the API. *Softening the Python round-trip test to `reconstruct` alone* — [D-130](s13-decision-register.md#d-130) says the fold never reads `concepts`, so that test passes against a rehydration that writes garbage. *A tuple for `RehydrateReport`* — above. *Deferring the property-test fix to a follow-up* — it was already three items late, and the reason it was late is that nothing forced it.
+
+<a id="d-134"></a>D-134 — the single-assertion **out-degree** caveat is retired on measurement, superseding [D-127](s13-decision-register.md#d-127)'s rejection; the replacement claim is **O(version count per edge key)** and this entry is its register home (0.10.0, W1). [D-055](s13-decision-register.md#d-055), [D-058](s13-decision-register.md#d-058), [D-059](s13-decision-register.md#d-059), [D-070](s13-decision-register.md#d-070), [D-088](s13-decision-register.md#d-088), [D-090](s13-decision-register.md#d-090), [D-127](s13-decision-register.md#d-127), [§5.1.5](s5-modules.md#515-cooperative-chunking--the-golden-rule), [§9](s6-s10-flows-to-dependencies.md#9-performance-budgets).
+
+> **The caveat outlived the defect it described by four minor versions, and the only thing that could retire it was the one thing nobody had done: run the bench that was already in the file.**
+
+## What was claimed, and what is true
+
+Nine documentation locations — two of them in the normative [§9](s6-s10-flows-to-dependencies.md#9-performance-budgets) — said a single `assert_edge` is O(out-degree) on the source node, and two of them published **47.7 ms** as its cost. That was true of 0.5.4 and has been false since the v6 rung shipped `idx_lc_open_interval` ([D-059](s13-decision-register.md#d-059)).
+
+`overlap_guard` in `benches/budgets.rs` — which existed, was registered, and had never been run for publication — measures `assert_edge` against a hub at three out-degrees. Median of three sessions, arms in the same session as their control:
+
+| arm | median | 95% CI | within-arm spread across sessions |
+|---|---|---|---|
+| `control/select_1` | 1.521 µs | 1.514 – 1.531 | 0.7% |
+| out-degree 0 | 983 µs | 955 – 1026 | 11% |
+| out-degree 2,000 | 920 µs | 891 – 948 | 2.0% |
+| out-degree 8,000 | 882 µs | 855 – 916 | 4.6% |
+
+**A 4,000× increase in out-degree produces no increase in latency**, and the intervals overlap across nearly their full width. The claim is retired. `idx_lc_open_interval` is chosen on this path, which is what `the_single_open_probe_seeks_rather_than_scans` already asserted about the plan and nothing had confirmed about the clock.
+
+**The third arm is 8,000 because that is D-059's own scale** (`ddl.rs:509`). Two points can only show *not growing between these two*; three can show flat, and until this wave the bench stopped at 2,000 while the docs published a number taken at 8,000.
+
+## Three numbers that must not be compared, and the trap is arithmetic
+
+D-059's figures — 4.4 ms empty, 18.4 ms at 2,000, 47.7 ms at 8,000, 8.0 ms post-index — are for a **90-row chunk**, not one assertion. Post-index that is 89 µs per row; this entry's single assertion is 882 µs, roughly ten times it. Neither number is wrong and the ratio is not a regression: a chunked insert amortises one actor hop and one transaction across 90 rows, and a single interactive assertion pays both alone. Recorded because the two figures sit under similar prose, differ by an order of magnitude, and invite exactly one wrong subtraction.
+
+## What replaces the claim, and where its cap comes from
+
+The guard's real cost is the number of **intervals recorded for one `(source_id, target_id, edge_type)`** — a version count, not an out-degree. `OVERLAP_CANDIDATES` (`connection.rs:2270`) is the statement this is a property of, and its rustdoc has said so since the range predicate was dropped; what it lacked was a register entry, which is what makes a property survive a refactor. A fact that governs a published budget and lives in exactly one non-normative comment is one edit away from being lost — and losing it is precisely how the *wrong* complexity came to be published nine times.
+
+**The archive is what caps the count.** Version count per edge key grows only by re-assertion of the same triple, and archival moves superseded intervals out of `links_current`. So the unbounded case is a database that re-asserts one edge indefinitely and never archives — which is the condition under which a `LIMIT` cap on `OVERLAP_CANDIDATES` would become due. That deferral is now a citation rather than an argument.
+
+## Why the apparent downward trend is not published as one
+
+The medians decline ~10% across the three arms, and the tempting reading — *higher out-degree is faster* — is unsupported. Session 4 read 924 / 924 / 916: dead flat. The decline appears only in the two sessions where the **out-degree 0** arm ran high, and that arm is the least stable in the table at 11% spread against 2.0% and 4.6%. The effect is one arm's variance, not a trend.
+
+An earlier draft of this entry attributed the decline to an artifact instead: criterion held wall-clock roughly constant while per-iteration setup grew, so the arms ran 840, 40 and 20 timed iterations respectively, and iteration count changes cache warmth per sample in the same direction as the effect. That asymmetry is real and is recorded — anyone re-running this should know the arms are not iteration-matched — but it is **not** what produced the trend, and session 4 is why. Kept because the wrong explanation was plausible, arrived first, and would have shipped as a finding.
+
+## The figures are published as a shape, not as decimals
+
+[D-070](s13-decision-register.md#d-070)'s ~29% session-to-session noise is visible here in the place D-070 says it is: the control read 1.518 / 1.528 / 1.521 µs within one sitting and 1.664 / 1.718 µs in two earlier ones. **Normalising by the control does not rescue the precision.** The out-degree 0 arm expressed as a ratio reads 736× / 693× / 647× across sessions — a 13% spread, better than the 25% in raw times and still nowhere near a publishable decimal. So [§9](s6-s10-flows-to-dependencies.md#9-performance-budgets) and the W3 prose claim the *shape* — flat in out-degree, measured at 0 / 2K / 8K, sub-millisecond on reference hardware — and give an order of magnitude. Control normalisation makes sessions comparable; it does not make them precise, and the distinction is worth stating because the ratio table looks like it does.
+
+## Why this supersedes D-127 rather than correcting it
+
+[D-127](s13-decision-register.md#d-127) considered dropping this caveat at 0.8.0 and rejected it: *"the fixture is not the hazard, the complexity is."* That was the right call **on the evidence available**, which was a plan-shape assertion and no clock. The evidence has now been taken, and it says the complexity is not there either. D-127 is not reversed for being careless — it is superseded for having been careful about a question that had not yet been measured, which is the outcome [D-088](s13-decision-register.md#d-088) exists to produce.
+
+**Ordering was the whole point.** A prose sweep run before this bench would have been the *third* unmeasured move of the same claim, and the release exists to stop doing that.
+
+**Rejected.** *Sweeping the prose first and measuring later* — above; [D-088](s13-decision-register.md#d-088). *Publishing the millisecond medians as a §9 row* — [D-070](s13-decision-register.md#d-070); a figure with 11% session spread stated to three digits asserts a precision it does not have. *Publishing the control-normalised ratio instead* — 13% spread, same objection, and it looks more authoritative than the raw number it replaces. *Keeping two arms* — cannot distinguish flat from not-growing-yet. *Reporting the ~10% decline as "faster at high degree"* — one arm's variance; session 4 is flat. *A schema rung or a new `EXPLAIN` assertion* — those are the remedies for the *growing* outcome, and the measurement did not produce it; `the_single_open_probe_seeks_rather_than_scans` already pins the plan. *Adding the `LIMIT` cap to `OVERLAP_CANDIDATES` now* — no measurement shows the version count reaching a size that matters, and the trigger condition for revisiting is stated above rather than left implicit ([§13](s13-decision-register.md)'s own standard: an omission with no trigger condition is indistinguishable from an oversight). *Leaving the replacement claim in rustdoc alone* — that is the state that produced this entry.
