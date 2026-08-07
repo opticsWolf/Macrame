@@ -1856,6 +1856,8 @@ Both control arms use a real abort with no `#[cfg(test)]` seam, by the route `te
 
 **The budget is still missed by ~3×, and the cause is still unknown.** It is not the missing index — that shipped as the `v5 → v6` rung. Nothing has attributed the residual, and this entry does not either; what changes is that the miss is now a measurement rather than a quotation, so a future fix has something to move.
 
+**Both successors are named for 0.11.0 in [Appendix C](appendices.md#named-for-0110-in-this-order), with their order and their trigger condition** — attribute the residual first, then re-derive the four `chunk_rows` constants against the [D-088](s13-decision-register.md#d-088) matrix, which is the decision D-059 was waiting for when it wrote that the constants "need a realistic fixture". Recorded there rather than left to a commit message because what goes missing between releases is which number a piece of work was meant to explain.
+
 ## The label on D-134's own evidence was wrong by 3×
 
 Found while scoping the arm above. `seed_edges(n)` builds `Shape::StarOfStars`, and that generator makes node 0 the source of `edges / 3` (`fixtures.rs:189`). `overlap_guard` parameterises its arms by the count handed to `seed_edges` — **edges in the table** — and D-134 published them as out-degrees. The arms are 0 / 2,000 / 8,000 edges, at which the probed hub carries out-degree **0 / 666 / 2,666**.
