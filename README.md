@@ -188,7 +188,7 @@ reasons a table of 0.7.0 numbers would have been describing a different crate.
 
 | Operation | Budget | 0.7.0 | 0.8.0 | 0.9.0 |
 |---|---|---|---|---|
-| Single assertion | ≤ 5 ms | — | 258 µs, and **still O(out-degree), not O(1)** (D-059) | 224 µs |
+| Single assertion | ≤ 5 ms | — | 258 µs, published with an **O(out-degree)** caveat (D-059) | 224 µs, and the caveat is **retired on measurement** (D-134) |
 | Single concept upsert | ≤ 3 ms | — | — | 198 µs |
 | Chunk commit (edges, 90 rows) | ≤ 3 ms | 2.39 ms | 2.40 ms | 2.38 ms |
 | Three-hop traversal | ≤ 10 ms | 2.1 ms | **1.66 ms** | 1.61 ms |
@@ -219,9 +219,12 @@ budget the gating is not measurable on this fixture — worth stating, because "
 the hot write path" is the kind of change that is usually paid for somewhere.
 
 **The single-assertion row reads 13% lower and that is not claimed as an improvement.** Nothing in
-0.9.0 touches the `links` write path, and no mechanism explains it; the row is also the one this
-project already flags as complexity-bound rather than a stable constant, since it remains linear in
-out-degree. It is reported as measured and attributed to nothing.
+0.9.0 touches the `links` write path, and no mechanism explains it. It is reported as measured and
+attributed to nothing. The 0.9.0 text added a second reason to distrust the figure — that the row is
+complexity-bound rather than a stable constant, "since it remains linear in out-degree" — and that
+half is now withdrawn: it was never measured, and
+[D-134](docs/architecture/s13-decision-register.md#d-134) measured it. What remains is an
+unexplained 13%, which is the smaller and more honest claim.
 
 **Figures are the median of three runs, and the reason is a 21% excursion that the control did not
 catch.** The first pass read the full fold at **20.4 ms** — with `control/select_1` sitting normal at
@@ -231,10 +234,20 @@ I/O-bound row needs repetition *as well as* a control. [D-070](docs/architecture
 put this project's session-to-session noise at ~29%, which is exactly the size of the thing that
 almost got written down here as a regression.
 
-The single-assertion row is a fixture measurement and the caveat is the load-bearing part: it is
-under budget on this fixture and remains linear in out-degree, so a high-degree hub still exceeds
-it. Dropping `idx_lc_tgt_active` bought −7.9% on that path
-([D-118](docs/architecture/s13-decision-register.md#d-118)); it did not change the complexity.
+**The single-assertion row's caveat is retired, and it was wrong for four minor versions.** This
+paragraph used to say the row "remains linear in out-degree, so a high-degree hub still exceeds it".
+`overlap_guard` now measures the assertion at out-degree 0, 2,000 and 8,000 — 983 / 920 / 882 µs,
+median of three sessions against a 1.52 µs control — so a 4,000× increase in out-degree costs
+nothing ([D-134](docs/architecture/s13-decision-register.md#d-134)). The claim described the access
+path as it stood in 0.5.5 and has been false since the `v5 → v6` rung shipped `idx_lc_open_interval`
+([D-059](docs/architecture/s13-decision-register.md#d-059)) — it outlived the defect by four
+releases because nothing measured it. The real cost is O(version count per edge key), which
+archival caps. Dropping `idx_lc_tgt_active` bought −7.9% on that path
+([D-118](docs/architecture/s13-decision-register.md#d-118)); the complexity claim it was said not to
+change was not there to change.
+
+Those figures are a shape, not a decimal: session-to-session spread on this path is ~11%, and
+normalising by the control does not remove it ([D-070](docs/architecture/s13-decision-register.md#d-070)).
 
 All budgets measured on named reference hardware, and deliberately **not** CI gates
 ([D-055](docs/architecture/s13-decision-register.md#d-055)) — an absolute `≤ 5 ms` on a shared

@@ -56,11 +56,16 @@ use crate::vector::ModelName;
 /// `chunk_budget` seeds concepts and starts with **no links and no vectors**,
 /// and D-059 established that per-row cost on the edge and embedding paths grows
 /// with the size of the structure being written, not with the chunk. The same
-/// 90-edge chunk takes 47.7 ms against an 8,000-edge hub. So the bound is met as
-/// measured and *not* met on a large database, most of that gap being the schema
-/// defect D-059 documents. Re-deriving these against a realistic fixture needs a
-/// decision about what "realistic" is, which is why it has not been done
-/// silently.
+/// 90-edge chunk takes **8.0 ms** against an 8,000-edge hub, and stays flat
+/// there. So the bound is met as measured and *not* met on a large database.
+///
+/// That gap used to be published here as 47.7 ms and attributed to the schema
+/// defect D-059 documents. The defect was fixed by the `v5 → v6` rung and the
+/// figure was never updated: 8.0 ms is the post-index measurement (`ddl.rs:512`).
+/// The remaining 3.3× over `CHUNK_BUDGET` is **unattributed** — it is not the
+/// missing index, and nothing has since measured what it is. Re-deriving these
+/// against a realistic fixture needs a decision about what "realistic" is, which
+/// is why it has not been done silently.
 pub mod chunk_rows {
     /// Edge assertions (`bulk_import`).
     ///
@@ -71,10 +76,16 @@ pub mod chunk_rows {
     /// a chunk measured into an empty database.
     ///
     /// **This size does not meet the 3 ms bound on a large database.** 90 edges
-    /// into an 8,000-edge hub take 47.7 ms, because `trg_links_single_open`'s
-    /// `EXISTS` is served by `idx_lc_traversal_cover` with only `source_id`
-    /// bound and therefore scans the whole out-degree. That is a schema defect
-    /// with a proven fix, recorded in D-059 and not applied here.
+    /// into an 8,000-edge hub take **8.0 ms**, and stay flat as the hub grows.
+    ///
+    /// The reason given here until 0.10.0 — that `trg_links_single_open`'s
+    /// `EXISTS` scans the whole out-degree, "a schema defect with a proven fix,
+    /// recorded in D-059 and not applied here" — described 0.5.5. The fix
+    /// *was* applied, as the `v5 → v6` rung, and took this from 47.7 ms to 8.0
+    /// ms and flat. What survives is the miss, not its cause: the bound is
+    /// still exceeded by 3.3×, and by something nobody has measured. D-134
+    /// retired the growth claim on the neighbouring *single-assertion* path;
+    /// it did not measure this one.
     pub const EDGES: usize = 90;
 
     /// Concept upserts (`write_concepts`).
