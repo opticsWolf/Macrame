@@ -2005,3 +2005,33 @@ W4.11 recorded that `README`'s *"362 with `--all-features`"* had no CI step behi
 - **W4.12** — `nul.pdb` deleted. **The redirect that made it is not in this repository**: no `> nul` occurs in any script, workflow or manifest, and the file was untracked and already covered by `.gitignore`'s `*.pdb`. So the second half of the item has no target, and saying so is the finding — it came from a hand-run command, not from anything the project will do again.
 
 **Rejected.** *Adding the `--all-features` job at a higher retry budget* — more attempts also means more chances to launder a real failure into a pass, which `ci.yml` already argues about the property step; and 4-in-5 red is not a budget problem. *Keeping the 362 figure with a footnote* — a published count whose configuration nothing runs is [D-139](s13-decision-register.md#d-139)'s defect in a different register. *Weakening `is_closed`'s sentence to match reality* — reality was the thing that was wrong. *Striking §4.3's `embedding_model` note* — v1 payloads are still readable and still lose the field. *Listing the real test files in §3's tree* — it would be accurate for one release; the shape is accurate indefinitely.
+
+---
+
+<a id="d-141"></a>D-141 — the 90-row edge chunk re-measures **14% high with a 1.1% spread and a normal control**, and the registry gains `Contested` rather than a way to hide it (0.10.0, README's 0.10.0 column). [D-055](s13-decision-register.md#d-055), [D-058](s13-decision-register.md#d-058), [D-070](s13-decision-register.md#d-070), [D-090](s13-decision-register.md#d-090), [D-136](s13-decision-register.md#d-136), [D-139](s13-decision-register.md#d-139), [Appendix C](appendices.md#named-for-0110-in-this-order).
+
+> **The claim registry was built in W5 to catch a number drifting between documents. Two waves later it caught one, and the honest fix was to widen the schema rather than the tolerance.**
+
+## The measurement
+
+README's performance table gained a 0.10.0 column: ten rows, median of three sessions, `control/select_1` published per group. Eight of ten land within ±8% of 0.9.0 — inside [D-134](s13-decision-register.md#d-134)'s measured ~11% single-arm variance and far inside [D-070](s13-decision-register.md#d-070)'s ~29% session spread — which is the expected result, because 0.10.0 changed no read path, no fold and no write path.
+
+**Chunk commit (edges, 90 rows) does not fit.** Published 2.39 / 2.40 / 2.38 ms across 0.7.0–0.9.0; now **2.71 ms**, from five measurements across the day at 2.65, 2.69, 2.70, 2.71, 2.73 — a **1.1% spread**, with `control/select_1` at 1.55–1.69 µs against [D-090](s13-decision-register.md#d-090)'s recorded 1.589–1.639. A 14% rise that stable, with the control where it belongs, is not session variance.
+
+**It is unattributed, and stated as such.** Nothing in 0.10.0 touches the edge write path: W2's marker check runs at `open`, and W4.8's `debug_assert`s are compiled out of the release bench that produced these numbers. It is also not the new seeded arm contaminating its group — that arm was filtered out of these runs entirely and the empty arm still reads 2.7. This entry does not explain it; it records that the figure moved, the same standard [D-136](s13-decision-register.md#d-136) applied to the 3× budget miss.
+
+**It does not overturn `chunk_rows::EDGES`.** [D-058](s13-decision-register.md#d-058) *solved* the 90-row constant against the 3 ms bound from the 2.39 ms figure. One afternoon, one machine, no mechanism, and a constant that governs every bulk write is not a trade worth making. [Appendix C](appendices.md#named-for-0110-in-this-order)'s 0.11.0 list already owns the re-derivation and now has a second reason to run it.
+
+## Why the registry gained a category instead of a workaround
+
+Registering the new figure put **2.39 ms** and **2.71 ms** under one `(operation, fixture, metric)` key, and [D-139](s13-decision-register.md#d-139)'s one-value rule went red. Correctly: four documents publish 2.39 as the current cost and the README now publishes 2.71.
+
+The tempting fix was to split `metric` — "the constant's derivation figure" versus "the release re-measurement" — so the two stopped sharing a key. **That would have made the test pass by hiding exactly what it had detected**, and it is the failure mode a registry is most vulnerable to, because the person editing the schema is the person inconvenienced by it.
+
+`Status::Contested { with, owner }` keeps the key intact and makes the conflict a recorded fact. It is exempt from the one-value rule and from nothing else, and `every_contested_claim_names_who_reconciles_it` sets the bar deliberately high: the contested value must be reproduced verbatim **and** be genuinely published by another entry under the same key, and the owner must resolve to a real anchor. Recording a conflict is meant to cost more than fixing one.
+
+## What the registry covers, now written down
+
+The dry-run never settled which figures earn an entry, and this forced it. The registry covers **claims about current cost**. README's table is a *per-release measurement series*, and registering every cell would collide with the current-cost entry on every future column, because two honest measurements of one thing never agree to three digits — the false positive the three-part key exists to avoid. A series cell earns an entry in one case only: **it contradicts a current-cost claim by more than noise.** 0.10.0 has exactly one.
+
+**Rejected.** *Splitting `metric`* — above; it defeats the gate from inside. *Updating the four 2.39 locations to 2.71* — re-derives a load-bearing constant from one session with no mechanism. *Leaving the 2.71 figure unregistered* — a published performance number with no gate is the defect [D-139](s13-decision-register.md#d-139) was built for; publishing one in the same release would be self-refuting. *Omitting the row from the 0.10.0 column* — the column would then be a selection of the rows that agreed, which is worse than no column. *Re-running until a session agrees with 2.39* — five measurements at a 1.1% spread is not a sampling problem, and choosing the run that matches the published number is the reason [D-070](s13-decision-register.md#d-070) mandates a median in the first place. *Raising the budget or gating on it* — [D-055](s13-decision-register.md#d-055); the row is inside its 3 ms budget regardless, and that is not what changed.

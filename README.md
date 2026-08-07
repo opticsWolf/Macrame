@@ -139,7 +139,7 @@ v8 is the last rung that could change a *primary key* before the 1.0 freeze: `ro
 | Runtime | tokio async, single process |
 | Engine | libSQL 0.9.30 (MIT, unmodified) |
 | Schema version | 10 |
-| Test suite | 330 Rust · 339 with `metrics` · 353 Python — all green (measured 2026-08-07). The three `property-tests` binaries (23 tests) are **run as their own step** — see below. **`--all-features` is not a supported configuration**, see below |
+| Test suite | 340 Rust · 349 with `metrics` · 355 Python — all green (measured 2026-08-07, 0.10.0). The three `property-tests` binaries (23 tests) are **run as their own step** — see below. **`--all-features` is not a supported configuration**, see below. Regenerate rather than trust this line: `python scripts/run_rust_suite.py --features metrics` |
 | Dependencies | tokio, serde, bincode, zstd, thiserror, tracing, ulid |
 
 ### Module Map
@@ -156,7 +156,7 @@ v8 is the last rung that could change a *primary key* before the 1.0 freeze: `ro
 
 ---
 
-## Python Bindings (v0.9.0)
+## Python Bindings (v0.10.0)
 
 | Detail | Value |
 |---|---|
@@ -186,18 +186,43 @@ Re-measured at 0.8.0, because [B2](docs/architecture/s13-decision-register.md#d-
 load carries, and [B4](docs/architecture/s13-decision-register.md#d-118) dropped an index — three
 reasons a table of 0.7.0 numbers would have been describing a different crate.
 
-| Operation | Budget | 0.7.0 | 0.8.0 | 0.9.0 |
-|---|---|---|---|---|
-| Single assertion | ≤ 5 ms | — | 258 µs, published with an **O(out-degree)** caveat (D-059) | 224 µs, and the caveat is **retired on measurement** (D-134) |
-| Single concept upsert | ≤ 3 ms | — | — | 198 µs |
-| Chunk commit (edges, 90 rows) | ≤ 3 ms | 2.39 ms | 2.40 ms | 2.38 ms |
-| Three-hop traversal | ≤ 10 ms | 2.1 ms | **1.66 ms** | 1.61 ms |
-| Vector top-10 | ≤ 20 ms | 294 µs | **246 µs** | 248 µs |
-| Hybrid top-10 | ≤ 50 ms | 2.0 ms | **1.77 ms** | 1.77 ms |
-| Full fold (reconstruct) | ≤ 100 ms | 21 ms | **16.9 ms** | 17.1 ms |
-| Composition (snapshot + delta) | ≤ 100 ms | 3.4 ms | **2.18 ms** | 2.22 ms |
-| Rehydrate, 1 concept | ≤ 5 ms | — | n/a | 3.71 ms |
-| Rehydrate, per concept after the 1st | ≤ 300 µs | — | n/a | ~74 µs to n=1,000; **114 µs at n=10,000** |
+| Operation | Budget | 0.7.0 | 0.8.0 | 0.9.0 | 0.10.0 |
+|---|---|---|---|---|---|
+| Single assertion | ≤ 5 ms | — | 258 µs, published with an **O(out-degree)** caveat (D-059) | 224 µs, and the caveat is **retired on measurement** (D-134) | 220 µs |
+| Single concept upsert | ≤ 3 ms | — | — | 198 µs | 193 µs |
+| Chunk commit (edges, 90 rows) | ≤ 3 ms | 2.39 ms | 2.40 ms | 2.38 ms | **2.71 ms — see below** |
+| Three-hop traversal | ≤ 10 ms | 2.1 ms | **1.66 ms** | 1.61 ms | 1.72 ms |
+| Vector top-10 | ≤ 20 ms | 294 µs | **246 µs** | 248 µs | 264 µs |
+| Hybrid top-10 | ≤ 50 ms | 2.0 ms | **1.77 ms** | 1.77 ms | 1.79 ms |
+| Full fold (reconstruct) | ≤ 100 ms | 21 ms | **16.9 ms** | 17.1 ms | 16.5 ms |
+| Composition (snapshot + delta) | ≤ 100 ms | 3.4 ms | **2.18 ms** | 2.22 ms | 2.06 ms |
+| Rehydrate, 1 concept | ≤ 5 ms | — | n/a | 3.71 ms | 3.41 ms |
+| Rehydrate, per concept after the 1st | ≤ 300 µs | — | n/a | ~74 µs to n=1,000; **114 µs at n=10,000** | ~71 µs to n=1,000; **105 µs at n=10,000** |
+
+**0.10.0's column is a full re-measurement, median of three sessions, controls published below.**
+Every row is inside its budget. Eight of the ten are within ±8% of 0.9.0 — below the ~11%
+single-arm variance [D-134](docs/architecture/s13-decision-register.md#d-134) measured and far
+below [D-070](docs/architecture/s13-decision-register.md#d-070)'s ~29% session spread — which is
+the expected answer, because 0.10.0 changed no traversal, no search, no fold and no write path.
+`control/select_1` reads **1.55–1.69 µs** per group against
+[D-090](docs/architecture/s13-decision-register.md#d-090)'s recorded **1.589–1.639 µs**, so the
+machine is where it was.
+
+**One row is not noise, and it is not explained.** Chunk commit has published 2.39 / 2.40 / 2.38 ms
+for three releases and now reads **2.71 ms** — five measurements across today's sessions at 2.65,
+2.69, 2.70, 2.71, 2.73, a **1.1% spread** with a normal control beside it. A 14% rise that stable is
+not session variance. Nothing in 0.10.0 touches the edge write path: W2's check runs at `open`, and
+W4.8's asserts are `debug_assert`s a release bench compiles out. **It is reported as measured and
+attributed to nothing**, which is the same standard
+[D-136](docs/architecture/s13-decision-register.md#d-136) applied to the 3× budget miss on the
+populated-table arm.
+
+**It does not overturn `chunk_rows::EDGES`.** [D-058](docs/architecture/s13-decision-register.md#d-058)
+solved the 90-row constant against the 3 ms bound *from* the 2.39 ms figure, and one afternoon on one
+machine with no mechanism is not grounds to re-derive a load-bearing constant. The reconciliation is
+already owned: it is item 1 of
+[Appendix C's 0.11.0 list](docs/architecture/appendices.md#named-for-0110-in-this-order), which
+existed before this measurement and now has a second reason to run.
 
 **Two controls, or the read-path numbers would mean nothing.** A uniform improvement across
 unrelated paths is what a faster *machine* looks like, so: the fixed `control/select_1` row reads
