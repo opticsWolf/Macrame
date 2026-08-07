@@ -2100,3 +2100,58 @@ The fourth is the one that matters for what comes next. `idx_lc_traversal_cover`
 [Appendix C](appendices.md#named-for-0110-in-this-order) ordered item 1 before item 2 on the grounds that running the [D-088](s13-decision-register.md#d-088) matrix first would produce four constants all carrying the same unexplained component. That reasoning holds and the order was right — but the `shape` arm above says the residual is **shape-independent**, which is a genuinely useful thing to know before re-deriving four constants against four shapes: it predicts that the shapes will differ in what they cost, and not in what the cost is made of.
 
 **Rejected.** *Publishing the first `sync` table as the answer* — it attributed the residual to index maintenance on evidence that also fitted "any write warms it", and the two arms that separated them cost one run. *Re-deriving the `chunk_rows` constants in the same change* — that is item 2, it is mechanical once the cause is known, and folding it in here would put a measurement and a constant change in one commit where the constant could not be reviewed on its own. *Narrowing `idx_lc_traversal_cover`* — above; a write-path saving paid for out of the read path [D-042](s13-decision-register.md#d-042) built it for, with only one side measured. *Adding a `cache_size` pragma anyway* — it did not help here, and a pragma added on a refuted hypothesis is a constant nobody can remove later. *Leaving the residual unattributed until a user complains* — [Appendix C](appendices.md#named-for-0110-in-this-order)'s trigger condition is a proposal to change a `chunk_rows` constant, and item 2 *is* that proposal.
+---
+
+<a id="d-143"></a>D-143 — the four `chunk_rows` constants are re-derived against the [D-088](s13-decision-register.md#d-088) matrix: three hold with headroom, the edge constant misses by ~2.7×, and **no row count can fix it** (0.11.0, [Appendix C](appendices.md#named-for-0110-in-this-order) item 2). [D-011](s13-decision-register.md#d-011), [D-055](s13-decision-register.md#d-055), [D-057](s13-decision-register.md#d-057), [D-058](s13-decision-register.md#d-058), [D-059](s13-decision-register.md#d-059), [D-070](s13-decision-register.md#d-070), [D-079](s13-decision-register.md#d-079), [D-088](s13-decision-register.md#d-088), [D-136](s13-decision-register.md#d-136), [D-142](s13-decision-register.md#d-142), [§5.1.5](s5-modules.md#515-cooperative-chunking--the-golden-rule), [§9](s6-s10-flows-to-dependencies.md#9-performance-budgets). Evidence: `examples/chunk_matrix.rs`.
+
+> **[D-059](s13-decision-register.md#d-059) wrote that the chunk constants "are empty-database figures and need a realistic fixture, which requires deciding what 'realistic' means". Four realistic fixtures agree, and what they agree on is that the question was mis-shaped: a row count cannot bound a duration on a path whose per-row cost grows with the table.**
+
+**Fixture: all four of the [D-088](s13-decision-register.md#d-088) matrix**, each populated to the same 8,000 edges — the population `chunk_budget`'s seeded arm and [D-142](s13-decision-register.md#d-142) use, so these figures sit beside those rather than beneath them. The measured chunk is identical on every shape; only the table it lands in differs.
+
+## The edge path, on four shapes
+
+Medians of three sessions on `star_of_stars`, two on the rest. `write_bulk_atomic` writes any size as exactly one transaction, so this sweep can cross the bound rather than stop at it:
+
+| rows | star | clustered | chain | dense_small |
+|---|---|---|---|---|
+| 5 | 0.46 | 0.39 | 1.53 | 0.38 |
+| 10 | 1.35 | 1.45 | 2.01 | 1.35 |
+| 20 | **2.11** | **2.50** | **2.55** | **2.32** |
+| 45 | 3.98 | 4.27 | 5.37 | **9.70** |
+| 90 (the constant) | **8.22** | 8.75 | 10.83 | 12.60 |
+
+**All four shapes give the same answer: 20.** The current constant is 90, and at 90 the bound is missed by 2.7× on the mildest shape and 3.6× on the worst.
+
+Two things the matrix adds that one shape could not. **The verdict is shape-independent and the cost is not** — `dense_small` is 2.4× the star at 45 rows, reproduced to 9.70 and 9.71 in two sessions, which is not noise; the shapes diverge above the crossing and agree below it. And **`chain` is the worst shape at small sizes** (1.53 ms for five rows against 0.38), which inverts the intuition that a hub is the hard case — at chunk sizes this small the fixed cost per transaction dominates and the hub's advantage is that its pages are already warm.
+
+## The other three hold, and shape cannot see them
+
+| path | constant | measured, populated | headroom |
+|---|---|---|---|
+| concepts | 70 | 1.76 ms | 1.7× |
+| annotations | 600 | 1.34 ms | 2.2× |
+| embeddings | 30 | 1.68 ms | 1.8× |
+
+Run on `star_of_stars` and `chain`, the extremes of node count at this population (8,001 against 7,273), and they agree to ~1% — 1.76 / 1.75, 1.34 / 1.33, 1.68 / 1.60. **These three paths never read `links`**, so a graph shape reaches them only through `transaction_log` size and the file, and [D-142](s13-decision-register.md#d-142) already measured that channel at ~0.11 ms of a 4.15 ms rise. Appendix C's "four shapes, four constants" is answered as *four shapes, one constant that needs anything* — and the three that hold are the reason the item was worth running rather than assuming.
+
+## Why the constant is **not** changed to 20
+
+Because 20 is not a fix. It is the same defect at a different population.
+
+Per-row cost on this path grows with the size of `links_current` ([D-059](s13-decision-register.md#d-059), mechanism in [D-142](s13-decision-register.md#d-142)). 20 rows meet 3 ms *at 8,000 edges*. At 90,000, [D-059](s13-decision-register.md#d-059) measured 90 rows at 1.06 s — and even after the `v5 → v6` index that population is an order of magnitude past the one measured here. A constant chosen at 8,000 is a constant that will be wrong at 80,000, and re-deriving it per release is a treadmill rather than a design.
+
+Against that, the cost of moving it is certain and immediate. [D-058](s13-decision-register.md#d-058) measured chunking as a throughput *loss* on this path — 1,000 edges cost 85.5 ms as one transaction against 94.7 ms as eleven chunks — so cutting 90 to 20 turns eleven chunks into fifty and pays that penalty on every bulk import, to buy conformance at one table size. **A certain cost for a population-specific benefit is the wrong trade**, and it is the trade [D-141](s13-decision-register.md#d-141) declined three months earlier on weaker evidence than this.
+
+## What the re-derivation actually found
+
+[D-058](s13-decision-register.md#d-058) already established the important half: **the golden rule is a bound on duration, and the row count is not part of it.** The four constants are an approximation of that bound, fitted at one population — and this entry is the measurement showing the approximation has expired on one of the four paths.
+
+The fix that follows is not a number. It is for the chunk loop to stop on **elapsed time** approaching `CHUNK_BUDGET` rather than on a row count, with the constants becoming an upper bound rather than the criterion. That is a change to the write actor and it is named here rather than made here, because it is a design decision with its own alternatives and it should not arrive as a side effect of a measurement.
+
+**The detector already exists and nothing needs to wait for it.** [D-079](s13-decision-register.md#d-079)'s `MetricsSnapshot` counts holds over `CHUNK_BUDGET` and names the longest with its command, so a deployment that is actually suffering this can see it today — which is why the miss is recorded as a documented, measured limitation rather than treated as urgent.
+
+## One thing found while running it
+
+`chunk_scaling`'s doc comment says *"Every size here is ≤ `CHUNK_ROWS`, so each measurement is exactly one chunk and one transaction."* That was true in 0.5.5, when `CHUNK_ROWS` was a single constant at 1,000. [D-058](s13-decision-register.md#d-058) replaced it with four per-path constants of 90 / 70 / 600 / 30 in the same release, and the sentence was not revisited: the group sweeps to 1,000, so on three of its four paths the larger points are several chunks and several transactions, measuring the chunked path rather than a chunk. Corrected in place. It is the same defect class as [D-136](s13-decision-register.md#d-136) — a sentence that stayed behind when the thing it described moved — found in the file that measures the constant it describes.
+
+**Rejected.** *Lowering `chunk_rows::EDGES` to 20* — above; a certain throughput cost on every bulk import for conformance at one population, on a path whose cost grows with a table that grows. *Raising the 3 ms bound to what the path actually costs* — the bound is a latency contract with the high-priority tier ([D-010](s13-decision-register.md#d-010), [D-011](s13-decision-register.md#d-011)), not an observation about the write path; moving it to fit the measurement would make it unfalsifiable. *Making the chunk loop time-based in this change* — the right fix, and a write-actor design decision that should not ride in on a measurement commit. *Re-deriving the other three constants upward on their headroom* — the sweeps stop at each constant because the public API chunks above it ([D-057](s13-decision-register.md#d-057) is why these three are measured through the API at all), so the data to raise them does not exist and inferring it from a linear fit is what [D-056](s13-decision-register.md#d-056) got wrong. *Reporting one shape because all four agreed* — the agreement **is** the result, and it is only a result because four were run; `dense_small` diverging by 2.4× above the crossing is what shows the agreement is not an artefact of measuring the same thing four times.

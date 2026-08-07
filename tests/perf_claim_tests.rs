@@ -151,6 +151,7 @@ const BUDGETS: &str = include_str!("../benches/budgets.rs");
 const REGISTER: &str = include_str!("../docs/architecture/s13-decision-register.md");
 const APPENDICES: &str = include_str!("../docs/architecture/appendices.md");
 const CHUNK_DIAG: &str = include_str!("../examples/chunk_diag.rs");
+const CHUNK_MATRIX: &str = include_str!("../examples/chunk_matrix.rs");
 
 /// The fixture strings, named once so a typo cannot silently split a key.
 mod fx {
@@ -159,6 +160,9 @@ mod fx {
         "database rebuilt per iteration, Shape::StarOfStars at 0 / 2,000 / 8,000 edges";
     pub const EMPTY: &str = "empty database (chunk_budget, concepts seeded, no links)";
     pub const SEEDED: &str = "8,000-edge table (chunk_budget's seeded arm, W4.13)";
+    /// All four D-088 shapes at one population — the fixture *is* the plural.
+    pub const MATRIX: &str =
+        "all four D-088 shapes, each populated to 8,000 edges (chunk_matrix)";
 }
 
 const LATENCY: &str = "latency, median, reference hardware";
@@ -168,6 +172,17 @@ const LATENCY: &str = "latency, median, reference hardware";
 /// the same fixture, and collapsing them onto one key would make the one-value
 /// rule fire on two claims that do not disagree (D-139, D-142).
 const ATTRIBUTION: &str = "share of growth 0 -> 8,000 edges, median of three sessions";
+
+/// A *derivation*, not an observation: the largest chunk size meeting the
+/// 3 ms bound. Its own metric for the same reason ATTRIBUTION is — `9.06 ms`,
+/// `89% of the growth` and `20 rows` are three facts about one operation and
+/// one fixture, and sharing a key would fire the one-value rule on claims that
+/// do not disagree (D-139, D-143).
+const DERIVED: &str = "largest chunk size within the 3 ms bound, populated database";
+
+/// Named once: three documents state it three ways.
+const DERIVED_EDGES: &str =
+    "20 rows on all four D-088 shapes, against a constant of 90 that is      deliberately not changed";
 
 /// The fact itself, named once: three documents state it three ways.
 const ATTRIBUTED: &str =
@@ -429,6 +444,43 @@ const REGISTRY: &[Claim] = &[
         decision: "d-142",
         status: Live,
     },
+    // ---- the re-derivation, and the constant it did not change (D-143) ----
+    Claim {
+        operation: "chunk commit, edges, 90 rows",
+        fixture: fx::MATRIX,
+        metric: DERIVED,
+        value: DERIVED_EDGES,
+        text: "**the largest size within the bound is 20**, not 90",
+        doc_name: "docs/architecture/s6-s10-flows-to-dependencies.md",
+        doc: S9,
+        bench_group: "example:chunk_matrix/edges",
+        decision: "d-143",
+        status: Live,
+    },
+    Claim {
+        operation: "chunk commit, edges, 90 rows",
+        fixture: fx::MATRIX,
+        metric: DERIVED,
+        value: DERIVED_EDGES,
+        text: "the largest size meeting the bound is **20**",
+        doc_name: "src/connection.rs",
+        doc: CONNECTION,
+        bench_group: "example:chunk_matrix/edges",
+        decision: "d-143",
+        status: Live,
+    },
+    Claim {
+        operation: "chunk commit, edges, 90 rows",
+        fixture: fx::MATRIX,
+        metric: DERIVED,
+        value: DERIVED_EDGES,
+        text: "the largest size within the bound is **20**, against a constant of 90",
+        doc_name: "docs/architecture/appendices.md",
+        doc: APPENDICES,
+        bench_group: "example:chunk_matrix/edges",
+        decision: "d-143",
+        status: Live,
+    },
 ];
 
 /// Whitespace-normalised, for the reason `index_plan_tests` documents: the
@@ -486,6 +538,7 @@ fn every_claim_names_a_bench_group_that_exists() {
             });
             let source = match file {
                 "chunk_diag" => CHUNK_DIAG,
+                "chunk_matrix" => CHUNK_MATRIX,
                 other => panic!(
                     "{}: no example source is registered under {other:?}. Add it \
                      beside CHUNK_DIAG — an unknown name must not pass silently.",

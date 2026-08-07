@@ -105,11 +105,14 @@ pub mod chunk_rows {
     /// within that to secondary-index maintenance on `links_current` — and the
     /// guard this comment used to blame contributes **no** growth at all.
     ///
-    /// **The constant is unchanged, and attribution is why that is a decision
-    /// rather than an omission.** The cost is D-042's covering index, which is
-    /// wide on purpose; lowering `EDGES` would buy latency and cost throughput
-    /// on a path whose per-row cost grows with the table either way. D-088's
-    /// fixture matrix is the named successor.
+    /// **The constant is unchanged, and that is now a measured decision**
+    /// (D-143). Re-derived against all four D-088 shapes at 8,000 edges, they
+    /// agree that the largest size meeting the bound is **20**. It stays at 90
+    /// because 20 is the same miss at a larger population — per-row cost grows
+    /// with `links_current`, so a constant fitted at 8,000 edges is wrong at
+    /// 80,000 — while the throughput cost of turning eleven chunks into fifty
+    /// is certain and immediate (D-058). The fix is not a row count: it is for
+    /// the chunk loop to stop on elapsed time, which is named for 0.12.0.
     ///
     /// D-134 retired the growth claim on the neighbouring *single-assertion*
     /// path and did not measure this one; D-136 is why this line now carries a

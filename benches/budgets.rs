@@ -563,8 +563,18 @@ fn chunk_budget(c: &mut Criterion) {
 ///
 /// All four paths, because [D-057](../docs/architecture/s13-decision-register.md)
 /// measured their per-row costs spanning 31× and a single row count cannot bound
-/// four different durations. Every size here is ≤ `CHUNK_ROWS`, so each
-/// measurement is exactly one chunk and one transaction.
+/// four different durations.
+///
+/// **This comment said "every size here is ≤ `CHUNK_ROWS`, so each measurement
+/// is exactly one chunk and one transaction" until 0.11.0, and it stopped being
+/// true in the release that wrote it** (D-143). It was written when `CHUNK_ROWS`
+/// was one constant at 1,000; [D-058](../docs/architecture/s13-decision-register.md)
+/// replaced it with four per-path constants of 90 / 70 / 600 / 30 in the same
+/// release and this sentence was not revisited. The sweep still runs to 1,000,
+/// so above each path's own constant these points measure the **chunked path** —
+/// several transactions — rather than one chunk. That is a legitimate thing to
+/// measure and it is not what the sentence claimed. The edge arm is the
+/// exception: `write_bulk_atomic` is one transaction at any size.
 fn chunk_scaling(c: &mut Criterion) {
     let rt = runtime();
     const SIZES: [usize; 6] = [1, 10, 50, 100, 500, 1_000];
