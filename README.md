@@ -186,15 +186,18 @@ Re-measured at 0.8.0, because [B2](docs/architecture/s13-decision-register.md#d-
 load carries, and [B4](docs/architecture/s13-decision-register.md#d-118) dropped an index — three
 reasons a table of 0.7.0 numbers would have been describing a different crate.
 
-| Operation | Budget | 0.7.0 | 0.8.0 |
-|---|---|---|---|
-| Single assertion | ≤ 5 ms | — | 258 µs, and **still O(out-degree), not O(1)** (D-059) |
-| Chunk commit (edges, 90 rows) | ≤ 3 ms | 2.39 ms | 2.40 ms |
-| Three-hop traversal | ≤ 10 ms | 2.1 ms | **1.66 ms** |
-| Vector top-10 | ≤ 20 ms | 294 µs | **246 µs** |
-| Hybrid top-10 | ≤ 50 ms | 2.0 ms | **1.77 ms** |
-| Full fold (reconstruct) | ≤ 100 ms | 21 ms | **16.9 ms** |
-| Composition (snapshot + delta) | ≤ 100 ms | 3.4 ms | **2.18 ms** |
+| Operation | Budget | 0.7.0 | 0.8.0 | 0.9.0 |
+|---|---|---|---|---|
+| Single assertion | ≤ 5 ms | — | 258 µs, and **still O(out-degree), not O(1)** (D-059) | 224 µs |
+| Single concept upsert | ≤ 3 ms | — | — | 198 µs |
+| Chunk commit (edges, 90 rows) | ≤ 3 ms | 2.39 ms | 2.40 ms | 2.38 ms |
+| Three-hop traversal | ≤ 10 ms | 2.1 ms | **1.66 ms** | 1.61 ms |
+| Vector top-10 | ≤ 20 ms | 294 µs | **246 µs** | 248 µs |
+| Hybrid top-10 | ≤ 50 ms | 2.0 ms | **1.77 ms** | 1.77 ms |
+| Full fold (reconstruct) | ≤ 100 ms | 21 ms | **16.9 ms** | 17.1 ms |
+| Composition (snapshot + delta) | ≤ 100 ms | 3.4 ms | **2.18 ms** | 2.22 ms |
+| Rehydrate, 1 concept | ≤ 5 ms | — | n/a | 3.71 ms |
+| Rehydrate, per concept after the 1st | ≤ 300 µs | — | n/a | ~74 µs to n=1,000; **114 µs at n=10,000** |
 
 **Two controls, or the read-path numbers would mean nothing.** A uniform improvement across
 unrelated paths is what a faster *machine* looks like, so: the fixed `control/select_1` row reads
@@ -202,6 +205,31 @@ unrelated paths is what a faster *machine* looks like, so: the fixed `control/se
 [D-090](docs/architecture/s13-decision-register.md#d-090) recorded, and the chunk-commit path —
 which 0.8.0 did not touch — is **2.39 → 2.40 ms**. The machine has not moved and an untouched path
 has not moved, so the 12–36% on the read paths is the code.
+
+**0.9.0 re-measured the same rows and the answer is "nothing moved", which is the result rather
+than the absence of one.** 0.9.0 changed the archive path and two triggers; it touched no traversal,
+no search and no fold, so a table that showed a change would be evidence of a problem. Every
+carried-over row but one is within **3.2%** of its 0.8.0 figure — the largest being three-hop
+traversal at −3.1% — with `control/select_1` at **1.51–1.54 µs** across every group.
+
+**The new row is the one 0.9.0 could plausibly have cost something.** The `v9 → v10` rung puts a
+`WHEN NOT EXISTS (SELECT 1 FROM sqlite_master …)` clause on the concepts insert log trigger, and it
+is evaluated on **every concept write**, not only during an archive. At **198 µs** against a 3 ms
+budget the gating is not measurable on this fixture — worth stating, because "we added a subquery to
+the hot write path" is the kind of change that is usually paid for somewhere.
+
+**The single-assertion row reads 13% lower and that is not claimed as an improvement.** Nothing in
+0.9.0 touches the `links` write path, and no mechanism explains it; the row is also the one this
+project already flags as complexity-bound rather than a stable constant, since it remains linear in
+out-degree. It is reported as measured and attributed to nothing.
+
+**Figures are the median of three runs, and the reason is a 21% excursion that the control did not
+catch.** The first pass read the full fold at **20.4 ms** — with `control/select_1` sitting normal at
+1.59 µs — and two repeats returned 16.96 and 17.09 ms. A `SELECT 1` round trip bounds machine,
+scheduler and engine-overhead noise; it does not bound page-cache state or fsync variance, so an
+I/O-bound row needs repetition *as well as* a control. [D-070](docs/architecture/s13-decision-register.md#d-070)
+put this project's session-to-session noise at ~29%, which is exactly the size of the thing that
+almost got written down here as a regression.
 
 The single-assertion row is a fixture measurement and the caveat is the load-bearing part: it is
 under budget on this fixture and remains linear in out-degree, so a high-degree hub still exceeds
