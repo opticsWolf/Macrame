@@ -1896,3 +1896,34 @@ The fourth row is [D-091](s13-decision-register.md#d-091)'s missing-file case on
 `ATTACH` is permitted, and it can name any file the process can open. So the connection is a read surface over the filesystem, not over this database. That is a property of exposing arbitrary SQL and not of the open flags — `read_conn()` allows `ATTACH` too — and it is recorded here so that a future reader of the permission table does not mistake "writes are bounded" for "reads are".
 
 **Rejected.** *Refusing `ATTACH` in `diagnostic_query`* — there is no write to refuse, and a statement filter over arbitrary SQL is a parser, which is the thing D-091 declined to build. *Leaving the table at four rows* — the missing rows were the ones a reader would reach for when asking whether the boundary holds; a claim with an untested edge is the shape [D-088](s13-decision-register.md#d-088) objects to on the performance side. *Probing `ATTACH` only on `diagnostic_conn()`* — the table has two columns and an empty cell reads as unknown; `read_conn()`'s attachment refusal is `query_only`, the same reversible thing as its own `INSERT` row, and the footnote says so. *Promoting this to a §4.7 row* — §4.7 lists what the schema does not enforce; this is a boundary that holds.
+
+---
+
+<a id="d-138"></a>D-138 — the Python diagnostic path is bounded to one outstanding open, and the Rust method it wraps is documented rather than locked (0.10.0, W4.1 + W4.2). [D-091](s13-decision-register.md#d-091), [D-092](s13-decision-register.md#d-092), [D-095](s13-decision-register.md#d-095), [D-137](s13-decision-register.md#d-137), [§14](s14-python-bindings.md).
+
+> **One method on the handle opens the file, and sharing a handle across threads is the thing every binding tells you is safe.**
+
+## The exposure
+
+`Database::open` from many threads is R15's known shape, and `tests_py/probes/r15_concurrent_open.py` measured it through the binding in 0.7.0. What nobody had looked at is that **`diagnostic_conn()` opens the file too, once per call** — it is the only method on the handle that does, everything else running on connections established at `open`. `with_db` releases the GIL, so *N* Python threads inside `diagnostic_query` are *N* concurrent opens. A caller reaches that state by opening one handle and sharing it, which is the shape the binding otherwise recommends ([D-092](s13-decision-register.md#d-092)).
+
+**Measured before deciding, at width 48, 18 runs per arm:**
+
+| arm | bad runs | how they failed |
+|---|---|---|
+| unserialised | **7 / 18** | 2 × `0xC0000005`; 4 × `database is locked`; 1 × `bad parameter or other API misuse` |
+| serialised (shipped) | 0 / 18 | — |
+
+The unserialised arm was produced by commenting the `lock()` out and rebuilding, so the two rows differ in one line of code and nothing else.
+
+**The dominant failure mode is not the crash.** Five of the seven came back as a *returned* `EngineError`. That is worse-shaped than the access violation for this particular method: a survivable error on `diagnostic_query` reads as a fact about the database, and it arrives on the surface a caller uses precisely when the typed answer is already in doubt. A crash is at least unambiguous.
+
+## Why the fix is in the binding and the crate only gets a paragraph
+
+`std::sync::Mutex`, not tokio's — the critical section is a `block_on`, not an await point, so no future holds the guard. It is taken *inside* `with_db`, after the GIL is released and after `inner.read()`, which is the order part 3 of `database.rs`'s module docs establishes; nothing takes them the other way, so `close()` queues behind a diagnostic call rather than deadlocking with it. Semantics are unchanged: the connection is still opened per call, still read-only, still the caller's own.
+
+**`Database::diagnostic_conn` does not take the same lock, and that is the decision, not an omission.** Its rustdoc promises the connection is *the caller's own*; a hidden queue in front of it would contradict that, and would put a lock the caller cannot see or measure on the one surface whose job is to answer questions when everything else is suspect. The binding can bound it because it wraps the call in a method a Python caller cannot see into. A Rust caller can hold their own mutex, and the rustdoc now tells them to, with the numbers.
+
+**W4.1 and W4.2 shipped together deliberately.** A mitigation in the binding with no warning on the API it wraps does not remove the exposure — it moves it to Rust callers and deletes the evidence that it exists.
+
+**Rejected.** *Locking inside `diagnostic_conn`* — above; it would make the crate's own documentation false. *A connection pool, or caching one diagnostic connection on the handle* — the per-call open **is** the semantic ([D-091](s13-decision-register.md#d-091)): a cached connection would outlive the call, be shared, and reintroduce exactly the shared-reader problem `read_conn()` already has and this method exists to avoid. *A `RwLock` allowing concurrent diagnostic reads* — the contended resource is `open`, not the reads; a read lock would permit precisely the concurrency that faults. *Leaving it, since R15 is upstream and known* — R15 is documented as a fault on concurrent **open**, and no reader of that row would connect it to sharing one handle. That gap is the finding. *Making the probe a test* — it takes access violations by design; `tests_py/probes/` exists for that, and the suite instead asserts the mitigation did not cost correctness at a width that cannot fault.

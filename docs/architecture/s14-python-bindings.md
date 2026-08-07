@@ -283,9 +283,17 @@ and that is a design constraint rather than an accident:
 and `explain()` each open the file `SQLITE_OPEN_READ_ONLY`, run the statement, and drop
 the connection. The capability [T5.1](s13-decision-register.md#d-091) wanted — an
 OS-level boundary rather than a reversible `PRAGMA` — is preserved; the object that would
-let a caller keep it and do something else with it is not. Opening per call is also the
-[R15](s11-s12-milestones-and-risks.md#r15)-safe shape: the fault counts *concurrent*
-opens, and 500 sequential opens in one process measured clean.
+let a caller keep it and do something else with it is not.
+
+**Opening per call was called "the R15-safe shape" here, and that was half right**
+([D-138](s13-decision-register.md#d-138), 0.10.0). Sequential opens are safe — 500 in one
+process measured clean, and that is what the sentence was reasoning from. But the fault
+counts *concurrent* opens, and per-call opening is what puts them on this path: `block_on`
+releases the GIL, so *N* threads inside `diagnostic_query` are *N* concurrent opens,
+reached by sharing one handle rather than by opening many. Measured at width 48: **7 bad
+runs in 18**, two of them `0xC0000005` and five *returned* SQLite errors. These two calls
+now take a mutex that bounds the path to one outstanding open — the only serialised
+methods on the surface — and `tests_py/probes/r15_diagnostic_path.py` is the measurement.
 
 ---
 
@@ -308,6 +316,14 @@ Two things follow, and both are now measured rather than transferred:
   which is this shape.
 - Application guidance is unchanged from [D-092](s13-decision-register.md#d-092): a
   bounded set of handles opened once, not one per request.
+
+**A third thing follows, and 0.7.0 did not see it.** "Handles opened once" is necessary
+and was assumed sufficient, because `open` looked like the only place the file gets
+opened. It is not: `diagnostic_conn()` opens per call, so a *correctly* held single handle
+shared across threads still reaches R15 through `diagnostic_query` and `explain`. That
+path is now serialised in the binding ([D-138](s13-decision-register.md#d-138)); the Rust
+`Database::diagnostic_conn` is documented rather than locked, and its rustdoc carries the
+same numbers.
 
 **The reporting hazard does *not* carry across intact, and P6 measured the difference.**
 This section said it did, on the strength of the mechanism being the same fault. The
@@ -363,9 +379,11 @@ covered:
 | Metrics | that the counters are **real** in the wheel, which is the whole of D-093 |
 | End to end | the *seams*: a `Subgraph` outliving an archive, search agreeing with the traversal it filtered by, counters covering a whole session, a reopened ledger answering the same questions |
 
-`tests_py/probes/` holds diagnostics that are deliberately **not** tests — R15's reproducer
-crashes the interpreter when it succeeds, and a suite that dies is not a suite that
-reports. This mirrors `examples/*_diag.rs` on the Rust side.
+`tests_py/probes/` holds diagnostics that are deliberately **not** tests — R15's reproducers
+crash the interpreter when they succeed, and a suite that dies is not a suite that
+reports. This mirrors `examples/*_diag.rs` on the Rust side. Two live there:
+`r15_concurrent_open.py` (many opens) and `r15_diagnostic_path.py` (one handle, many
+diagnostic calls), the second added in 0.10.0 with a before/after arm.
 
 **Run `python tests_py/run_suite.py`, not bare pytest, wherever the answer gates something**
 ([D-107](s13-decision-register.md#d-107)). It is not a wrapper for tidiness: the four ways

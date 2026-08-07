@@ -785,6 +785,34 @@ impl Database {
     /// is recorded, not acted on: D-050 removed the strategy for two reasons and
     /// this addresses one of them.
     ///
+    /// # Calling this concurrently is R15's shape
+    ///
+    /// **This is the one method on `Database` that opens the file.** Everything
+    /// else runs on connections established once, at `open`. Each call here is
+    /// a fresh `libsql::Builder::…build()`, so *N* threads calling it at once
+    /// are *N* concurrent opens — which is exactly the pattern behind
+    /// [R15](https://github.com/opticsWolf/Macrame#known-risks), the upstream
+    /// libSQL access violation (`0xC0000005`) that `examples/r15_soak.rs`
+    /// reproduces and `RUST_TEST_THREADS=1` exists to avoid in the suite.
+    ///
+    /// **This is measured, not inferred.** 48 threads sharing one handle and
+    /// calling only this method: 7 bad runs in 18 — two access violations and
+    /// five *returned* SQLite errors (`database is locked`, `bad parameter or
+    /// other API misuse`). With the calls serialised, 0 in 18
+    /// (`tests_py/probes/r15_diagnostic_path.py`). The returned-error mode is
+    /// the one to watch for: it looks like a fact about the database, on the
+    /// method a caller reaches for when they already doubt the typed answer.
+    ///
+    /// **Bound this yourself if you call it from more than one thread.** One
+    /// outstanding open at a time is enough; a mutex around the call costs
+    /// nothing on a diagnostic path. This method does not do it for you on
+    /// purpose: serialising behind a lock the caller cannot see would
+    /// contradict the thing above it — that the connection is *the caller's
+    /// own* — and it would put a hidden queue in front of the one surface whose
+    /// job is to answer questions when the typed path is already suspect. The
+    /// Python binding does bound it, because it wraps this in a method a caller
+    /// cannot see into (`PyDatabase::diagnostic_rows`); a Rust caller can.
+    ///
     /// # Errors
     ///
     /// The file must already exist. `SQLITE_OPEN_READ_ONLY` drops

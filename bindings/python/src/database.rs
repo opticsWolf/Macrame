@@ -40,7 +40,7 @@
 //! [`PyDatabase::with_db`] exists rather than each method taking its own guard.
 
 use std::path::PathBuf;
-use std::sync::RwLock;
+use std::sync::{Mutex, RwLock};
 
 use pyo3::prelude::*;
 use pyo3::types::PyType;
@@ -67,6 +67,8 @@ pub(crate) struct PyDatabase {
     /// handle that cannot say what it was is needlessly unhelpful in a
     /// traceback.
     path: PathBuf,
+    /// Serialises the diagnostic path's opens. See [`PyDatabase::diagnostic_rows`].
+    diagnostic_open: Mutex<()>,
 }
 
 impl PyDatabase {
@@ -91,6 +93,64 @@ impl PyDatabase {
             let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
             let db = guard.as_ref().ok_or_else(closed_error)?;
             f(db)
+        })
+    }
+
+    /// Run `sql` on a fresh diagnostic connection, **one caller at a time**.
+    ///
+    /// # Why this is serialised when nothing else here is
+    ///
+    /// Every other method on this handle runs against connections opened once,
+    /// at `Database::open`. This path is the exception: `diagnostic_conn()`
+    /// performs a *new* `libsql::Builder::…build()` per call
+    /// ([D-091](../../../docs/architecture/s13-decision-register.md)), and
+    /// `with_db` releases the GIL, so two Python threads calling
+    /// `diagnostic_query` reach `build()` concurrently. That is
+    /// [R15](../../../README.md)'s shape — the upstream libSQL access violation
+    /// on concurrent opens — reachable from ordinary Python with no `unsafe`
+    /// and no threading the caller would think twice about. Measured at width
+    /// 48: **7 bad runs in 18** without this lock — two `0xC0000005` and five
+    /// returned SQLite errors — and **0 in 18** with it
+    /// (`tests_py/probes/r15_diagnostic_path.py`).
+    ///
+    /// The mutex bounds this path to one outstanding open. It changes no
+    /// semantics: the connection is still opened and dropped per call, still
+    /// read-only, still the caller's own. Two threads that would have opened
+    /// simultaneously now queue, and a diagnostic path is where queueing is
+    /// cheapest.
+    ///
+    /// **This mitigates the Python symptom, not R15** — the Rust API has the
+    /// same exposure and is documented rather than locked, because a
+    /// `Database::diagnostic_conn` that serialised behind a mutex the caller
+    /// cannot see would be lying about being "the caller's own". See that
+    /// method's rustdoc.
+    ///
+    /// `std::sync::Mutex`, not `tokio`'s: the critical section is a
+    /// `block_on`, not an await point, so there is no future to hold the guard
+    /// across. Poisoning is ignored for the same reason as in `with_db` — the
+    /// guarded data is `()`.
+    ///
+    /// # Lock order
+    ///
+    /// Taken *inside* `with_db`, so: GIL released, then `inner.read()`, then
+    /// this. Nothing acquires them the other way round, and `close()` waits on
+    /// `inner.write()` behind a diagnostic call rather than deadlocking with
+    /// it.
+    fn diagnostic_rows(
+        &self,
+        py: Python<'_>,
+        sql: String,
+        bound: Vec<libsql::Value>,
+    ) -> PyResult<rows::RawRows> {
+        self.with_db(py, move |db| {
+            let _one_open_at_a_time = self
+                .diagnostic_open
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            rows::map_err(runtime().block_on(async {
+                let conn = db.diagnostic_conn().await?;
+                rows::collect(&conn, &sql, bound).await
+            }))
         })
     }
 
@@ -166,6 +226,7 @@ impl PyDatabase {
         Ok(Self {
             inner: RwLock::new(Some(db)),
             path,
+            diagnostic_open: Mutex::new(()),
         })
     }
 
@@ -1027,6 +1088,11 @@ impl PyDatabase {
     /// For ordinary reads use the typed surface — `traverse`, `load_subgraph`,
     /// `reconstruct`, the search methods — which coerces and validates. This one
     /// is for looking at the file when a typed answer is the thing in doubt.
+    ///
+    /// **Calls on this path serialise across threads.** Each one opens a
+    /// connection, and concurrent opens are R15's shape, so `diagnostic_query`
+    /// and `explain` take a mutex the rest of the surface does not. Reads on
+    /// the typed surface stay concurrent. See `PyDatabase::diagnostic_rows`.
     #[pyo3(signature = (sql, params = None))]
     fn diagnostic_query<'py>(
         &self,
@@ -1041,13 +1107,7 @@ impl PyDatabase {
                 .map(|item| rows::py_to_value(&item?))
                 .collect::<PyResult<_>>()?,
         };
-        let sql = sql.to_string();
-        let raw = self.with_db(py, move |db| {
-            rows::map_err(runtime().block_on(async {
-                let conn = db.diagnostic_conn().await?;
-                rows::collect(&conn, &sql, bound).await
-            }))
-        })?;
+        let raw = self.diagnostic_rows(py, sql.to_string(), bound)?;
         rows::rows_to_py(py, raw)
     }
 
@@ -1057,13 +1117,7 @@ impl PyDatabase {
     /// plan's shape is not a query's shape, and callers want the detail rather
     /// than three columns of bookkeeping.
     fn explain(&self, py: Python<'_>, sql: &str) -> PyResult<Vec<String>> {
-        let sql = format!("EXPLAIN QUERY PLAN {sql}");
-        let raw = self.with_db(py, move |db| {
-            rows::map_err(runtime().block_on(async {
-                let conn = db.diagnostic_conn().await?;
-                rows::collect(&conn, &sql, Vec::new()).await
-            }))
-        })?;
+        let raw = self.diagnostic_rows(py, format!("EXPLAIN QUERY PLAN {sql}"), Vec::new())?;
         Ok(raw
             .into_iter()
             .filter_map(|cells| match cells.last() {

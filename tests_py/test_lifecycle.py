@@ -210,6 +210,60 @@ def test_concurrent_calls_on_one_handle_do_not_raise_borrow_errors(db_path):
     assert not errors, f"concurrent access raised: {errors!r}"
 
 
+def test_concurrent_diagnostic_queries_on_one_handle_stay_correct(db_path):
+    """The diagnostic path is the only surface that opens the file per call.
+
+    Every other method runs on connections established at ``open``. This one
+    calls ``diagnostic_conn()``, which is a fresh ``build()`` each time, and
+    ``block_on`` releases the GIL — so before 0.10.0 W4.1 four threads here
+    were four concurrent opens, which is R15's shape and is reproducible from
+    Python (``tests_py/probes/r15_concurrent_open.py``).
+
+    The binding now serialises this path behind a mutex. What that must not
+    break is the answer: a serialised call still runs on its own connection,
+    so every thread must get the same, correct row back rather than a shared
+    cursor's leftovers.
+
+    A pass here is not a proof that R15 cannot fire — four threads is far
+    below the width that reproduces it. It asserts the mitigation did not cost
+    correctness; the width arm is the probe, and is deliberately not a test.
+    """
+    errors: list[BaseException] = []
+    seen: list[int] = []
+
+    with macrame.Database.open(db_path) as db:
+        db.write_concepts(
+            [
+                macrame.ConceptUpsert(
+                    id="a",
+                    title="A",
+                    content="body",
+                    valid_from="2026-01-01T00:00:00.000000Z",
+                )
+            ]
+        )
+
+        def hammer():
+            try:
+                for _ in range(25):
+                    rows = db.diagnostic_query("SELECT COUNT(*) FROM concepts")
+                    seen.append(rows[0][0])
+                    plan = db.explain("SELECT * FROM concepts")
+                    assert plan, "EXPLAIN QUERY PLAN returned no detail rows"
+            except BaseException as exc:  # noqa: BLE001 - recording, not handling
+                errors.append(exc)
+
+        threads = [threading.Thread(target=hammer) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+
+    assert not errors, f"concurrent diagnostic calls raised: {errors!r}"
+    assert len(seen) == 100, f"expected 100 answers, got {len(seen)}"
+    assert set(seen) == {1}, f"a concurrent call saw the wrong count: {set(seen)}"
+
+
 # --------------------------------------------------------------------------
 # Collection without close
 # --------------------------------------------------------------------------
