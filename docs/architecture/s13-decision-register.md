@@ -1867,3 +1867,32 @@ Found while scoping the arm above. `seed_edges(n)` builds `Shape::StarOfStars`, 
 **D-059's "8,000-edge hub" has the same property**, being the same generator — which is what makes the two comparable, and is a small part of why the original claim was hard to see through: a claim *about out-degree* was evidenced by a fixture *labelled by table size*, and nobody reconciled the two for four releases.
 
 **Rejected.** *Leaving the 8.0 ms cited and marked "not re-measured"* — the marking is honest and the number is still unfalsifiable; [D-088](s13-decision-register.md#d-088) is about what is published, not about how it is hedged. *Seeding a true out-degree-8,000 hub instead* — it would measure a different fixture from D-059's and forfeit the comparison, which is the whole reason this arm is worth having; the guard is O(version count) anyway, so out-degree is not the variable. *Restating D-134's conclusion as well as its labels* — the conclusion was never a function of the mislabel; out-degree really does vary by thousands across the arms. *Re-running the whole `chunk_budget` group to a third session* — the two agree to 0.3% on the arm that matters, which is far inside [D-070](s13-decision-register.md#d-070)'s noise and does not need a tiebreak. *Adding an assertion that pins the hub's out-degree* — the fixture is already pinned by `fixture_matrix_tests`; what failed was reading it, not the fixture.
+
+---
+
+<a id="d-137"></a>D-137 — `ATTACH` does not escape `SQLITE_OPEN_READ_ONLY`, so `diagnostic_conn`'s boundary bounds the connection rather than one file (0.10.0, W4.3). [D-050](s13-decision-register.md#d-050), [D-091](s13-decision-register.md#d-091), [§4.7](s4-schema.md#47-what-this-schema-does-not-enforce).
+
+> **A claim about a connection was evidenced only against the file it was opened on, and the one statement that reaches past that file had never been run.**
+
+## Why this was worth one `cargo run`
+
+`diagnostic_conn`'s rustdoc says the read-only open is "a boundary rather than a guardrail", and backs it with a four-row table measured by `examples/readonly_open_probe.rs`. Every row of that table is about `main`. `ATTACH` is the one statement that opens a *second* database on the same connection, and nothing had checked whether the attachment inherits the flags. If it did not, then `diagnostic_query` — the only arbitrary-SQL surface the Python binding exposes ([D-091](s13-decision-register.md#d-091)) — was a writable path through a connection documented as unwritable, and the sentence above would have been false in the only way that matters.
+
+**It inherits.** Measured on libSQL 0.9.30 against the live WAL database, after `PRAGMA query_only = OFF` so the pragma cannot be credited with the refusal:
+
+| statement | `diagnostic_conn()` |
+|---|---|
+| `ATTACH` an existing writable file | allowed |
+| `INSERT` into the attachment | refused (`attempt to write a readonly database`) |
+| `CREATE TABLE` in the attachment | refused |
+| `ATTACH` a path that does not exist | refused (`SQLITE_CANTOPEN`), and no file is created |
+
+The fourth row is [D-091](s13-decision-register.md#d-091)'s missing-file case one level down: `SQLITE_OPEN_CREATE` is dropped for the attachment exactly as it is for `main`, so `ATTACH` cannot be used to conjure a scratch file either.
+
+**This makes W4.1 a complete mitigation of its own scope rather than a partial one.** W4.1 bounds *concurrent opens*, which is [R15](../../README.md)'s shape. It does nothing about what a single holder can do once open, and the reason to run this probe before writing it was that a writable attachment would have been a second, unrelated defect needing a different fix — refusing `ATTACH` inside `diagnostic_query`, or amending the boundary claim. Neither is needed.
+
+## What it *does* widen, stated because the probe makes it visible
+
+`ATTACH` is permitted, and it can name any file the process can open. So the connection is a read surface over the filesystem, not over this database. That is a property of exposing arbitrary SQL and not of the open flags — `read_conn()` allows `ATTACH` too — and it is recorded here so that a future reader of the permission table does not mistake "writes are bounded" for "reads are".
+
+**Rejected.** *Refusing `ATTACH` in `diagnostic_query`* — there is no write to refuse, and a statement filter over arbitrary SQL is a parser, which is the thing D-091 declined to build. *Leaving the table at four rows* — the missing rows were the ones a reader would reach for when asking whether the boundary holds; a claim with an untested edge is the shape [D-088](s13-decision-register.md#d-088) objects to on the performance side. *Probing `ATTACH` only on `diagnostic_conn()`* — the table has two columns and an empty cell reads as unknown; `read_conn()`'s attachment refusal is `query_only`, the same reversible thing as its own `INSERT` row, and the footnote says so. *Promoting this to a §4.7 row* — §4.7 lists what the schema does not enforce; this is a boundary that holds.

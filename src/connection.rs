@@ -744,11 +744,34 @@ impl Database {
     /// | `INSERT` | refused | refused |
     /// | `PRAGMA query_only = OFF` | **allowed** | allowed |
     /// | `INSERT` after that | **allowed** | **refused** |
+    /// | `ATTACH` an existing file | allowed | allowed |
+    /// | `INSERT` into the attachment | refused¹ | **refused** |
+    /// | `ATTACH` a path that does not exist | — | refused (`SQLITE_CANTOPEN`) |
     ///
     /// The third and fourth rows are the whole difference: turning the pragma
     /// off restores writes on `read_conn()` and does not here. That is what
     /// "boundary rather than guardrail" means, and it is now a number rather
     /// than a claim.
+    ///
+    /// ¹ On `read_conn()` that refusal is `query_only` — the same reversible
+    /// thing as row 2. On `diagnostic_conn()` it is the open flags, and the
+    /// probe runs it *after* `query_only = OFF` so that the pragma cannot be
+    /// what is doing the work.
+    ///
+    /// # `ATTACH` is permitted, and does not widen the write boundary
+    ///
+    /// Checked because `diagnostic_query` (Python) is the only arbitrary-SQL
+    /// surface this crate exposes, and an attachment is a second `open` whose
+    /// flags it does not obviously inherit. It does inherit them: the
+    /// attachment is read-only, and a nonexistent path is `SQLITE_CANTOPEN`
+    /// rather than a new file, because `SQLITE_OPEN_CREATE` is dropped for the
+    /// attachment as it is for `main`. So `SQLITE_OPEN_READ_ONLY` bounds the
+    /// **connection**, not just the one file it names (0.10.0, W4.3).
+    ///
+    /// What it does widen is *reading*: an `ATTACH` can name any file the
+    /// process can open, so this connection is a read surface over the
+    /// filesystem, not over this database. That is a property of arbitrary SQL
+    /// rather than of the flags, and it is unchanged by them.
     ///
     /// # One way this is *more* permissive, which is worth knowing
     ///

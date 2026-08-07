@@ -15,9 +15,11 @@
 //!      claim, since `read_conn()`'s pragma is reversible in one statement and
 //!      that is T5.1's stated reason for wanting something stronger.
 //!
-//! It also checks the case the proposal does not mention: opening read-only
+//! It also checks two cases the proposal does not mention: opening read-only
 //! against a path that **does not exist yet**, since `SQLITE_OPEN_CREATE` is
-//! dropped along with write access.
+//! dropped along with write access; and whether `ATTACH` escapes any of it,
+//! since an attachment is a second `open` and `diagnostic_query` is the only
+//! arbitrary-SQL surface the bindings expose (0.10.0, W4.3).
 //!
 //! Run with:  cargo run --example readonly_open_probe
 
@@ -135,6 +137,73 @@ async fn main() {
         .map(|_| ());
     report("INSERT after query_only = OFF", ins2).await;
 
+    // ---- 4. can it ATTACH a writable file and write through the attachment? ----
+    //
+    // Everything above is about `main`. `diagnostic_query` is the only
+    // arbitrary-SQL surface the Python binding exposes, so if an attachment
+    // carries its own, more permissive flags, then `SQLITE_OPEN_READ_ONLY` is a
+    // boundary around one *file* rather than around the *connection* — and the
+    // "boundary rather than guardrail" claim above would need qualifying
+    // (0.10.0, W4.3). Deliberately run *after* `query_only = OFF`, so a refusal
+    // here is not the pragma doing the work.
+    let scratch = dir.path().join("scratch.db");
+    {
+        let w = Builder::new_local(&scratch).build().await.unwrap();
+        let c = w.connect().unwrap();
+        c.execute("CREATE TABLE s (x INTEGER)", ()).await.unwrap();
+    }
+
+    println!("\nATTACH, through the same SQLITE_OPEN_READ_ONLY connection:");
+
+    let att = conn
+        .execute(
+            &format!("ATTACH DATABASE '{}' AS scratch", scratch.display()),
+            (),
+        )
+        .await
+        .map(|_| ());
+    let attached = att.is_ok();
+    report("ATTACH an existing writable file", att).await;
+
+    if attached {
+        let w = conn
+            .execute("INSERT INTO scratch.s (x) VALUES (1)", ())
+            .await
+            .map(|_| ());
+        report("INSERT into the attachment", w).await;
+
+        let d = conn
+            .execute("CREATE TABLE scratch.t (x INTEGER)", ())
+            .await
+            .map(|_| ());
+        report("CREATE TABLE in the attachment", d).await;
+
+        let _ = conn.execute("DETACH DATABASE scratch", ()).await;
+    }
+
+    // The `SQLITE_OPEN_CREATE` question again, one level down: a read-only main
+    // cannot create its own file (section 5), but an attachment is a separate
+    // open and might not inherit that.
+    let fresh = dir.path().join("attach_me.db");
+    let att2 = conn
+        .execute(
+            &format!("ATTACH DATABASE '{}' AS fresh", fresh.display()),
+            (),
+        )
+        .await
+        .map(|_| ());
+    let attached2 = att2.is_ok();
+    report("ATTACH a nonexistent path", att2).await;
+    println!("  file now exists: {}", fresh.exists());
+    if attached2 {
+        let d = conn
+            .execute("CREATE TABLE fresh.t (x INTEGER)", ())
+            .await
+            .map(|_| ());
+        report("CREATE TABLE in the fresh attachment", d).await;
+        let _ = conn.execute("DETACH DATABASE fresh", ()).await;
+    }
+
     // ---- the same three, through `read_conn()`, for comparison ----
     println!("\nthrough read_conn() (PRAGMA query_only = ON), for comparison:");
     let rc = db.read_conn();
@@ -160,10 +229,29 @@ async fn main() {
         .await
         .map(|_| ());
     report("INSERT after query_only = OFF", ins4).await;
-    // Put it back, so `close()` is not run against a reader the probe disarmed.
+    // Put it back, so `close()` is not run against a reader the probe disarmed,
+    // and so the ATTACH rows below measure the connection as it ships.
     let _ = rc.execute("PRAGMA query_only = ON", ()).await;
 
-    // ---- 4. read-only against a path that does not exist ----
+    let att3 = rc
+        .execute(
+            &format!("ATTACH DATABASE '{}' AS scratch", scratch.display()),
+            (),
+        )
+        .await
+        .map(|_| ());
+    let attached3 = att3.is_ok();
+    report("ATTACH an existing writable file", att3).await;
+    if attached3 {
+        let w = rc
+            .execute("INSERT INTO scratch.s (x) VALUES (2)", ())
+            .await
+            .map(|_| ());
+        report("INSERT into the attachment", w).await;
+        let _ = rc.execute("DETACH DATABASE scratch", ()).await;
+    }
+
+    // ---- 5. read-only against a path that does not exist ----
     let missing = dir.path().join("nope.db");
     let r = Builder::new_local(&missing)
         .flags(OpenFlags::SQLITE_OPEN_READ_ONLY)
