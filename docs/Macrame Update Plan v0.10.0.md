@@ -263,6 +263,18 @@ All compile-time `include_str!`, all cheap:
 
 **Record `D-135`:** *performance claims get a registry, on the D-089 pattern.*
 
+### W5 result (done, 0.10.0) — the dry-run changed the key
+
+Recorded as **[D-139](architecture/s13-decision-register.md#d-139)**, not D-135: that slot went to W2's marker check, which this plan anticipated might need its own entry.
+
+**The dry-run did its job, and the proposed key failed it.** `(operation, metric)` goes red on *both* seed claims against correct documentation: `224 µs` and `983 µs` are both the single assertion's median (`write_path` warm vs `overlap_guard` per-iteration), and `2.39 ms` and `9.06 ms` are both the 90-row edge chunk (empty vs seeded). The fixture is the difference and the difference is the finding — so the key is **`(operation, fixture, metric)`**, which is [D-088](architecture/s13-decision-register.md#d-088)'s own rule arriving where it was missing.
+
+**One location did not fit, which is the design feedback the acceptance asked for.** §9's D-127 paragraph publishes *258 µs* for an operation whose live figure is 224 µs — history kept verbatim, on this register's own practice. Hence `Status::Superseded { by }`: checked for existence and for naming a bench, exempt from the one-value rule, required to name the decision that retired it.
+
+`tests/perf_claim_tests.rs`, **15 entries, 5 tests** — the plan's three, plus `every_claim_names_a_decision_that_exists` and `the_registry_covers_the_claims_that_drifted` (a floor, without which the other four pass on an empty registry). `text` pins the wording to its document; a separate `value` field carries the fact, because four documents state one measurement in three wordings.
+
+**Each gate was falsified before being trusted** — five mutations, five reds, reverted. Green on a first run against fifteen hand-written entries is also what a miswired gate looks like.
+
 ---
 
 ## 7. Acceptance for the release

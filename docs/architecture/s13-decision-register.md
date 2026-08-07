@@ -1927,3 +1927,44 @@ The unserialised arm was produced by commenting the `lock()` out and rebuilding,
 **W4.1 and W4.2 shipped together deliberately.** A mitigation in the binding with no warning on the API it wraps does not remove the exposure — it moves it to Rust callers and deletes the evidence that it exists.
 
 **Rejected.** *Locking inside `diagnostic_conn`* — above; it would make the crate's own documentation false. *A connection pool, or caching one diagnostic connection on the handle* — the per-call open **is** the semantic ([D-091](s13-decision-register.md#d-091)): a cached connection would outlive the call, be shared, and reintroduce exactly the shared-reader problem `read_conn()` already has and this method exists to avoid. *A `RwLock` allowing concurrent diagnostic reads* — the contended resource is `open`, not the reads; a read lock would permit precisely the concurrency that faults. *Leaving it, since R15 is upstream and known* — R15 is documented as a fault on concurrent **open**, and no reader of that row would connect it to sharing one handle. That gap is the finding. *Making the probe a test* — it takes access violations by design; `tests_py/probes/` exists for that, and the suite instead asserts the mitigation did not cost correctness at a width that cannot fault.
+
+---
+
+<a id="d-139"></a>D-139 — published performance claims get a registry, on the [D-089](s13-decision-register.md#d-089) pattern; and the dry-run changed the key before a line of test code was written (0.10.0, W5.1 + W5.2). [D-055](s13-decision-register.md#d-055), [D-070](s13-decision-register.md#d-070), [D-088](s13-decision-register.md#d-088), [D-089](s13-decision-register.md#d-089), [D-127](s13-decision-register.md#d-127), [D-134](s13-decision-register.md#d-134), [D-136](s13-decision-register.md#d-136).
+
+> **Nine texts, two facts, nothing connecting them — which is how a number stayed wrong for four releases and how its replacement stayed unmeasured for one wave.**
+
+## What the registry is for
+
+[D-089](s13-decision-register.md#d-089) inverted index justification: a registry keyed by the *thing being claimed*, so adding an index without naming its reader is a red test rather than a line nobody revisits. `perf_claim_tests.rs` applies the same inversion to prose. It does **not** assert that any number is correct — [D-055](s13-decision-register.md#d-055) rules out benches as CI gates, and [D-070](s13-decision-register.md#d-070)'s ~29% session noise is why. It asserts that every published claim is traceable to a bench that exists and a decision that ratified it, and that one fact is not published as two numbers.
+
+## The dry-run, and what it found
+
+W5.1 required hand-populating the schema against the locations W3 touched and checking for collisions *by inspection*, before implementing — on the reasoning that a gate which cries wolf in its first week is worse than the drift it was built to catch. That was the right order, because **the proposed key was wrong, and both of its own seed claims would have failed it.**
+
+The plan keyed a claim by `(operation, metric)`. Against the live text:
+
+| operation | metric | published values | where |
+|---|---|---|---|
+| single edge assertion | latency, median | **224 µs** and **983 / 920 / 882 µs** | `README`, `quickref`, [§9](s6-s10-flows-to-dependencies.md#9-performance-budgets) |
+| chunk commit, edges, 90 rows | latency, median | **2.39 ms** and **9.06 ms** | `README`, `quickref`, §9, `connection.rs` |
+
+Both keys carry two values, and **both are legitimate.** 224 µs is `write_path/assert_edge` — a warm handle, 2,000 concepts, no links. 983 µs is `overlap_guard` — a database built per iteration, `Shape::StarOfStars`. 2.39 ms is `chunk_budget`'s empty arm and 9.06 ms is its seeded one. Same operation, same metric, different fixture, and the difference *is the finding* in each case.
+
+**So the key is `(operation, fixture, metric)`.** That is not a patch on the plan; it is [D-088](s13-decision-register.md#d-088)'s own rule — a performance decision names its fixture — arriving where it was missing. Under the two-part key the test goes red on its first run against correct documentation, which is precisely the failure this project has on record twice (`ci.yml` on why rustfmt is advisory, `doc_sync_tests.rs` on why the API check is deliberately shallow). Under the three-part key the two claims separate into four, and each carries one number.
+
+**The dry-run also found a location that does not fit, and that is design feedback rather than an exception.** [§9](s6-s10-flows-to-dependencies.md#9-performance-budgets)'s D-127 paragraph publishes *258 µs* for the single assertion — a 0.8.0 figure, deliberately preserved with its retired caveat, on this register's rule that history is kept verbatim. It is a real published number for a registered key and it must not be a collision. Hence `Status::Superseded { by }`: such entries are still checked for existence and still name a bench, but are exempt from the one-value rule and must name the decision that retired them. A registry that could not express "this number is history" would have forced the register's own practice to be deleted to make a test pass.
+
+## What the three tests are
+
+1. `every_claim_still_appears_in_its_document` — `every_reproduced_query_still_exists_in_its_source` applied to prose. Whitespace-normalised, for the CRLF reason that file already documents.
+2. `every_claim_names_a_bench_group_that_exists` — the group must appear as a `controlled_group(c, "…")` in `benches/budgets.rs`, not merely as a string somewhere in it. A claim whose bench is renamed or deleted goes red.
+3. `one_operation_fixture_metric_key_carries_one_value` — named for the key rather than for the number, so its soundness is readable from its name. This is the check that would have caught 47.7 ms and 8.0 ms published for the same thing 460 lines apart.
+
+A fourth was added that the plan did not ask for: `every_claim_names_a_decision_that_exists`, resolving each `decision` against the register's own anchors. The registry's value is the *link*, and a claim citing a D-number that was never written is the same defect one level up. A fifth, `the_registry_covers_the_claims_that_drifted`, holds a floor per operation — without it every assertion above passes on an empty registry, and deleting the entry is the cheapest way to make a red test green.
+
+**All five were made to fail before being trusted.** Green on the first run against fifteen hand-written entries is the outcome a badly wired gate also produces. Each was falsified by mutation and the mutation reverted: a `text` fragment that is not in its document, a `bench_group` that `budgets.rs` does not declare, a `decision` with no anchor, one member of a key given a different `value`, and one entry deleted to take an operation below its floor. Five mutations, five reds, each with the message it was written to give.
+
+**Rejected.** *Keying on the number* — the plan's own argument: `2.39 ms` legitimately appearing for two different operations would be a red test. *Keeping `(operation, metric)` and splitting the operation strings instead* ("single edge assertion, warm" vs "…, cold fixture") — it encodes the fixture in a free-text field where nothing can group on it, which is the structural gap that let nine texts drift. *Excluding superseded figures from the registry entirely* — then nothing checks that the history still says what the register claims it says, and the most likely way to break §9's D-127 paragraph is to edit it while updating the live row above it. *Asserting the numbers against a bench run* — [D-055](s13-decision-register.md#d-055); an absolute threshold asserted on a shared runner is an assertion about the runner. *Seeding it with every §9 row* — the registry earns its keep on claims that have actually drifted; the two that did are the seed, and `the_registry_covers_the_claims_that_drifted` keeps it from being quietly emptied.
+
+**On the numbering:** the plan calls this entry `D-135` twice. That slot went to W2's marker check, which the plan itself anticipated might need its own entry. This is D-139.
