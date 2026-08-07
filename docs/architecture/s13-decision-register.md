@@ -1796,3 +1796,41 @@ An earlier draft of this entry attributed the decline to an artifact instead: cr
 **Ordering was the whole point.** A prose sweep run before this bench would have been the *third* unmeasured move of the same claim, and the release exists to stop doing that.
 
 **Rejected.** *Sweeping the prose first and measuring later* — above; [D-088](s13-decision-register.md#d-088). *Publishing the millisecond medians as a §9 row* — [D-070](s13-decision-register.md#d-070); a figure with 11% session spread stated to three digits asserts a precision it does not have. *Publishing the control-normalised ratio instead* — 13% spread, same objection, and it looks more authoritative than the raw number it replaces. *Keeping two arms* — cannot distinguish flat from not-growing-yet. *Reporting the ~10% decline as "faster at high degree"* — one arm's variance; session 4 is flat. *A schema rung or a new `EXPLAIN` assertion* — those are the remedies for the *growing* outcome, and the measurement did not produce it; `the_single_open_probe_seeks_rather_than_scans` already pins the plan. *Adding the `LIMIT` cap to `OVERLAP_CANDIDATES` now* — no measurement shows the version count reaching a size that matters, and the trigger condition for revisiting is stated above rather than left implicit ([§13](s13-decision-register.md)'s own standard: an omission with no trigger condition is indistinguishable from an oversight). *Leaving the replacement claim in rustdoc alone* — that is the state that produced this entry.
+
+<a id="d-135"></a>D-135 — a committed archive-session marker is **detected at open** and refused with its own error; it is not preventable, and the entry says so (0.10.0, W2). [D-008](s13-decision-register.md#d-008), [D-008a](s13-decision-register.md#d-008a), [D-008b](s13-decision-register.md#d-008b), [D-068](s13-decision-register.md#d-068), [D-069](s13-decision-register.md#d-069), [D-091](s13-decision-register.md#d-091), [D-099](s13-decision-register.md#d-099), [D-126](s13-decision-register.md#d-126), [Doctrine IV](s0-s3-foundations.md#doctrine-iv), [Doctrine V](s0-s3-foundations.md#doctrine-v), [§4.7](s4-schema.md#47-what-this-schema-does-not-enforce), [§5.7](s5-modules.md#57-temporalarchivers--cold-storage).
+
+> **One `CREATE TABLE` turns off every physical-delete guard in the schema and silences the concept ledger, and until 0.10.0 nothing looked.**
+
+## The switch
+
+`macrame_archive_session` is how three delete guards and `trg_concepts_log_insert` learn that an archive is running. Its presence is the *permission*. Create it and commit it, and `concepts`, `links` and `transaction_log` all accept physical deletes, and a concept insert writes no `transaction_log` row — [Doctrine IV](s0-s3-foundations.md#doctrine-iv) and [Doctrine V](s0-s3-foundations.md#doctrine-v) suspended at the same instant, with no error, no counter, and nothing in the database recording that it happened.
+
+**The existing safety argument is about crashes, is correct about them, and does not cover this.** Both archive paths bracket the marker inside the session transaction (`archive.rs:302/401`, `583/683`), so a commit drops it and a rollback discards it; `temporal_tests::a_failed_archive_session_leaves_the_hot_database_untouched_and_the_guards_armed` asserts exactly that, across two cases, the second dying after rows are deleted so rollback is load-bearing. None of it says anything about a writer that issues the `CREATE TABLE` itself — and [§4.7](s4-schema.md#47-what-this-schema-does-not-enforce) row 2 has conceded since 0.6.0 that such writers exist, by way of `raw()` ([D-068](s13-decision-register.md#d-068)) and the free connection-taking functions.
+
+## Detection, not prevention, and the distinction is the entry
+
+The schema cannot express *this table must not exist*. Nothing can stop a process that already has a write handle from creating it and using it for the life of that connection. What is now true is narrower and worth having: **the condition cannot survive to the next open unnoticed.** `verify()` refuses it, so the window shrinks from indefinite to one process lifetime.
+
+Stated plainly here because the natural reading of "closed in 0.10.0" would be that the hole is gone, and it is not. §4.7's new row carries the same sentence.
+
+## Why `verify()` and nowhere else
+
+The check is one more scan of a vector `verify` has already built from `sqlite_master` — the same pass that checks table, trigger and index presence and the three guard bodies ([D-126](s13-decision-register.md#d-126)). No new query, and it runs at every `Database::open`.
+
+**It is safe *there* and would not be safe on a hot path**, which is the property most at risk from a future simplification. `verify` reads committed state at open, so it cannot observe an in-flight session; a check on any path that runs *during* a session would see the marker and refuse a healthy database mid-archive. The reasoning is in the control test's docstring rather than only here, because the person who moves the check will be reading the test.
+
+## A new variant, which is what makes this 0.10.0
+
+`DbError::ArchiveSessionLeaked` rather than `Migration`: the schema is intact, and sending a reader to the migration ladder for a fault a `DROP TABLE` fixes is [D-069](s13-decision-register.md#d-069)'s defect — an error naming the wrong subject. `DbError` is not `#[non_exhaustive]`, so the variant is a breaking change, and that is the release's justification for a minor bump rather than a patch.
+
+The message carries the remedy because it is the only place a user will look for it: it names the `DROP TABLE`, and it says to audit for deletions and missing log rows since the table appeared — the second half matters more, since the damage is already done and dropping the table does not undo it.
+
+On the Python side the variant reached `errors.rs`'s wildcard-free `match` as a compile error, which is [D-099](s13-decision-register.md#d-099)'s mechanism working exactly as specified. `ArchiveSessionLeakedError` is grouped under `IntegrityError` rather than beside `ArchiveViolationError` under `TemporalError`: the latter is a guard *refusing* a delete, which is the invariants holding; this is the invariants being unenforced.
+
+## What the tests are, after one of them was found to already exist
+
+W2 was planned with four tests, one of which — the crash-safety claim "asserted rather than argued" — rested on a false premise. It was already asserted, in `temporal_tests`, with a better fixture than the plan proposed. The test written in its place asserts the thing that is genuinely new: **an aborted archive must still open.** A new refusal's characteristic failure is the false positive, and a recoverable failed archive is the most plausible way for a healthy database to look suspicious.
+
+Both control arms use a real abort with no `#[cfg(test)]` seam, by the route `temporal_tests` established: `COLD_SCHEMA` uses `IF NOT EXISTS`, so a cold file pre-created with a truncated `links` table survives it untouched and the copy fails on a missing column — inside the session, after the marker. Each such test pins the failure to that column, because an abort *before* the marker would make the reopen assertion pass while proving nothing.
+
+**Rejected.** *Preventing the marker rather than detecting it* — not expressible; claiming otherwise would be the more dangerous entry. *Reusing `DbError::Migration`* — above; the schema is right and the contents are wrong. *Checking on a hot path, or in the guards themselves* — would refuse a healthy database mid-archive, for the reason above. *A schema rung* — nothing in the DDL changes; this is a check over `sqlite_master`, and [D-036](s13-decision-register.md#d-036)'s ladder is for structure. *Dropping the marker automatically at open instead of refusing* — silently repairing a database whose guards have been off for an unknown period would destroy the only evidence that anything happened, and the deletions it permitted are not recoverable by dropping the table. *Writing the fourth test as planned* — it duplicated `temporal_tests` more weakly; the premise that the claim was unasserted was wrong, and shipping the test anyway would have added a test and no coverage.

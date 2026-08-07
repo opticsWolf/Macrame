@@ -966,6 +966,28 @@ async fn verify(conn: &libsql::Connection) -> Result<()> {
         });
     }
 
+    // The guards above are checked for being *gated*. This checks that the gate
+    // is not currently open (0.10.0, W2).
+    //
+    // A committed `macrame_archive_session` disarms all three delete guards and
+    // silences the concepts log-insert trigger — Doctrine IV and Doctrine V
+    // suspended at once, with no error and no counter. Nothing checked for it,
+    // and the safety argument on record (§5.7) is about *crashes*: it is correct
+    // about those, because both archive paths bracket the marker inside the
+    // session transaction, so a rollback discards it. It says nothing about a
+    // writer that creates the table directly, and §4.7 concedes raw writers.
+    //
+    // Free to check here: `present` is already built, so this is one more scan
+    // of a vector, not another query. And it is safe *here specifically* —
+    // `verify` reads committed state at open, so it cannot observe an in-flight
+    // session and refuse a healthy database mid-archive. Moving it onto a path
+    // that runs during a session would break that.
+    if has("table", ARCHIVE_SESSION_MARKER) {
+        return Err(DbError::ArchiveSessionLeaked {
+            marker: ARCHIVE_SESSION_MARKER.to_string(),
+        });
+    }
+
     Ok(())
 }
 

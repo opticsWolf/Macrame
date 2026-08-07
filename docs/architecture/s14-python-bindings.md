@@ -140,7 +140,7 @@ structured fields set as attributes and `str(e)` still the `#[error]` rendering 
 ```text
 MacrameError
 ├── EngineError, MigrationError, NotFoundError, DiagnosticConnError, MacrameClosedError
-├── IntegrityError    overlaps, drift, rebuild, recorded_at, weights
+├── IntegrityError    overlaps, drift, rebuild, recorded_at, weights, leaked archive session
 ├── ValidationError   edge types, ids, timestamps, model names, attribute mode
 ├── VectorError       dimensions, unregistered models
 ├── TemporalError     replay, snapshots, payload versions, archive

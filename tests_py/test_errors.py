@@ -77,6 +77,11 @@ EXPECTED: dict[str, tuple[str, str, dict]] = {
         "IntegrityError",
         {"got": "2026-01-01T00:00:00.000000Z", "had": "2026-06-01T00:00:00.000000Z"},
     ),
+    "ArchiveSessionLeaked": (
+        "ArchiveSessionLeakedError",
+        "IntegrityError",
+        {"marker": "macrame_archive_session"},
+    ),
     # -- validation --
     "InvalidEdgeType": ("InvalidEdgeTypeError", "ValidationError", {"edge_type": "bad-type"}),
     "InvalidId": ("InvalidIdError", "ValidationError", {"id": "bad|id", "reason": "sample-reason"}),

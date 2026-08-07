@@ -683,3 +683,217 @@ async fn an_archive_leaves_no_drift_although_it_no_longer_checks_itself() {
         "archive left links_current drifted from the projection"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The marker as *committed* state: the disarm switch (0.10.0, W2)
+// ---------------------------------------------------------------------------
+//
+// The tests above establish that the marker works — it gates the guards, it is
+// invisible to other connections while uncommitted, and a rollback re-arms.
+// These four cover the case none of them does: the table being present when no
+// archive is running. While it is, all three delete guards are disarmed and
+// `trg_concepts_log_insert` writes nothing, so Doctrine IV and Doctrine V are
+// suspended together, with no error and no counter.
+//
+// Nothing checked for it before 0.10.0. The safety argument on record is about
+// crashes and is correct about them; it says nothing about a writer that
+// creates the table directly, and §4.7 concedes raw writers exist.
+
+const W2_T0: &str = "2026-01-01T00:00:00.000000Z";
+const W2_T1: &str = "2026-02-01T00:00:00.000000Z";
+const W2_CUTOFF: &str = "2099-01-01T00:00:00.000000Z";
+
+/// Seed one archivable edge, so an archive has real work to do.
+async fn w2_seeded(path: &std::path::Path) -> macrame::Database {
+    let db = macrame::Database::open(path).await.unwrap();
+    for id in ["c1", "c2"] {
+        db.upsert_concept(macrame::ConceptUpsert::new(id, "N").valid_from(W2_T0))
+            .await
+            .unwrap();
+    }
+    db.assert_edge(
+        macrame::graph::EdgeAssertion::new("c1", "c2", "KNOWS")
+            .valid_from(W2_T0)
+            .valid_to(W2_T1),
+    )
+    .await
+    .unwrap();
+    db
+}
+
+/// Write the marker as committed state, the way a raw writer would.
+async fn w2_leak_marker(db: &macrame::Database) {
+    // Outside the actor and outside any transaction. `raw()` is
+    // `#[doc(hidden)]` and provoking a guard is its documented legitimate use
+    // (D-091).
+    db.raw()
+        .connect()
+        .unwrap()
+        .execute("CREATE TABLE macrame_archive_session (x)", ())
+        .await
+        .unwrap();
+}
+
+/// `Database` is not `Debug`, so `expect_err` is unavailable on an open.
+async fn w2_open_err(path: &std::path::Path) -> DbError {
+    match macrame::Database::open(path).await {
+        Ok(_) => panic!("open must be refused while the marker is present"),
+        Err(e) => e,
+    }
+}
+
+/// Committed marker, fresh open, refused.
+#[tokio::test]
+async fn a_leaked_archive_session_marker_is_refused_at_open() {
+    let harness = TestHarness::new();
+
+    let db = macrame::Database::open(&harness.db_path).await.unwrap();
+    w2_leak_marker(&db).await;
+    db.close().await.unwrap();
+
+    let err = w2_open_err(&harness.db_path).await;
+    assert!(
+        matches!(err, DbError::ArchiveSessionLeaked { ref marker }
+                 if marker == "macrame_archive_session"),
+        "expected ArchiveSessionLeaked, got {err:?}"
+    );
+}
+
+/// The remedy is in the message, because the message is where it is looked for.
+///
+/// A `DROP TABLE` is the whole fix and the user can run it. An error that
+/// diagnoses a condition without saying how to clear it sends the reader to the
+/// source; D-069's rule is that the caller is told what to do.
+#[tokio::test]
+async fn the_marker_check_names_the_remedy() {
+    let harness = TestHarness::new();
+
+    let db = macrame::Database::open(&harness.db_path).await.unwrap();
+    w2_leak_marker(&db).await;
+    db.close().await.unwrap();
+
+    let msg = w2_open_err(&harness.db_path).await.to_string();
+
+    assert!(
+        msg.contains("DROP TABLE macrame_archive_session"),
+        "the message must carry the runnable remedy, got: {msg}"
+    );
+    assert!(
+        msg.contains("audit"),
+        "the message must say the damage needs auditing, got: {msg}"
+    );
+}
+
+/// **The control arm, and it is not optional.**
+///
+/// A check that refuses healthy databases is worse than no check, and this
+/// project has that shape on record: `verify` chose presence-by-name over a
+/// count of `sqlite_master` precisely because the count refused files carrying
+/// legitimate extra objects.
+///
+/// The false-positive analysis rests on one property: **the marker is never
+/// committed state.** Both archive paths bracket it inside the session
+/// transaction (`archive.rs:302/401` and `583/683`), so a commit drops it and a
+/// rollback discards it; and `verify()` reads *committed* state at open, so it
+/// cannot observe an in-flight session.
+///
+/// That sentence is here rather than only in the register because the obvious
+/// "simplification" of this check is to move it somewhere cheaper or more
+/// central — and on any path that runs *during* a session it would refuse a
+/// healthy database mid-archive. The check is safe where it is, not safe in
+/// general.
+#[tokio::test]
+async fn a_normal_archive_leaves_no_marker_and_reopens_clean() {
+    let harness = TestHarness::new();
+
+    let db = w2_seeded(&harness.db_path).await;
+    let report = db.archive(W2_CUTOFF).await.unwrap();
+    assert!(
+        report.links_archived > 0,
+        "the archive must actually run, or the control proves nothing about a \
+         path that opened a session"
+    );
+    db.close().await.unwrap();
+
+    macrame::Database::open(&harness.db_path)
+        .await
+        .expect("a database that has completed an archive must still open")
+        .close()
+        .await
+        .unwrap();
+}
+
+/// The second control arm: an **aborted** archive must still reopen.
+///
+/// **This is deliberately not "the crash-safety claim, asserted rather than
+/// argued".** W2 was planned on the premise that the claim was only ever
+/// argued; that premise is false.
+/// `temporal_tests::a_failed_archive_session_leaves_the_hot_database_untouched_and_the_guards_armed`
+/// already asserts it, with a stronger fixture than anything proposed here: two
+/// cases, the second breaking `cold.transaction_log` so the session dies *after*
+/// rows have been deleted, which is where rollback is load-bearing rather than
+/// incidental. It counts the marker in `sqlite_master` directly and requires it
+/// to be zero. Duplicating that, more weakly, would add a test and no coverage.
+///
+/// What is genuinely new is the **refusal added in 0.10.0**, and the risk a new
+/// refusal carries is the false positive. An aborted archive is the most
+/// plausible way for a healthy database to end up looking suspicious, so it is
+/// the arm worth having: the check must not turn a recoverable failed archive
+/// into a database that will not open.
+///
+/// The abort is real and needs no `#[cfg(test)]` seam. `COLD_SCHEMA` creates
+/// the cold tables with `IF NOT EXISTS`, and its own comment records the
+/// consequence: an existing cold database keeps whatever definition it was
+/// created with. A cold file pre-created with a truncated `links` table
+/// therefore survives `COLD_SCHEMA` untouched, and the `INSERT … SELECT` that
+/// follows — inside the session, after the marker is created — fails on the
+/// missing columns.
+#[tokio::test]
+async fn an_aborted_archive_still_reopens_under_the_marker_check() {
+    let harness = TestHarness::new();
+
+    // The cold path `Database::open` derives, pre-created with a `links` table
+    // carrying one column instead of eight.
+    let cold_path = harness.temp_dir.path().join("test_macrame_archive.db");
+    {
+        let cold = libsql::Builder::new_local(&cold_path).build().await.unwrap();
+        cold.connect()
+            .unwrap()
+            .execute("CREATE TABLE links (source_id TEXT)", ())
+            .await
+            .unwrap();
+    }
+
+    let db = w2_seeded(&harness.db_path).await;
+    let err = db
+        .archive(W2_CUTOFF)
+        .await
+        .expect_err("the rigged cold file must abort the session");
+    // **This assertion is what stops the test being vacuous.** If the archive
+    // failed *before* `CREATE TABLE {MARKER}`, the reopen below would succeed
+    // for a reason having nothing to do with the marker, and the test would
+    // pass while asserting nothing — the shape D-133 records finding in C5's
+    // column check. Naming the missing column pins the failure to the
+    // `INSERT … SELECT`, which is after the marker. The same technique, and
+    // the same reason for it, as the `missing_column` assertion in
+    // `temporal_tests`.
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("target_id"),
+        "the abort must come from the rigged cold table, i.e. from *after* the \
+         marker was created — got: {msg}"
+    );
+
+    db.close().await.unwrap();
+
+    // The point of the test: the new refusal does not fire here. Asserted
+    // *through* `Database::open`, so this and the check cannot drift apart —
+    // `temporal_tests` covers the marker's absence directly, this covers what
+    // 0.10.0 now does about it.
+    macrame::Database::open(&harness.db_path)
+        .await
+        .expect("an aborted archive must not leave a database that refuses to open")
+        .close()
+        .await
+        .unwrap();
+}

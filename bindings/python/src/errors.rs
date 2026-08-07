@@ -198,6 +198,20 @@ create_exception!(
     "A concept update carried a `recorded_at` that does not advance. \
      Attributes: `got`, `had`."
 );
+create_exception!(
+    macrame,
+    ArchiveSessionLeakedError,
+    IntegrityError,
+    "The archive-session marker table is present as committed state, which \
+     disarms the three delete guards and silences the concept log-insert \
+     trigger. Attribute: `marker`.\n\n\
+     Grouped with the integrity errors rather than beside \
+     `ArchiveViolationError`, which is temporal: that one is the guard \
+     refusing a delete, which is the ledger's invariants holding. This is \
+     those invariants being unenforced. The message names the remedy — the \
+     fix is a single `DROP TABLE` — and an audit of deletions and missing log \
+     rows since the table appeared."
+);
 
 // -- ValidationError --------------------------------------------------------
 
@@ -446,6 +460,10 @@ fn build(py: Python<'_>, err: DbError) -> PyErr {
             raise::<ArchiveViolationError, _>(py, m, |e| e.setattr("table", table))
         }
 
+        DbError::ArchiveSessionLeaked { marker } => {
+            raise::<ArchiveSessionLeakedError, _>(py, m, |e| e.setattr("marker", marker))
+        }
+
         DbError::AttributeModeUnstated { as_of } => {
             raise::<AttributeModeUnstatedError, _>(py, m, |e| e.setattr("as_of", as_of))
         }
@@ -566,6 +584,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
         RebuildFailedError,
         RebuildInterruptedError,
         RecordedAtRegressionError,
+        ArchiveSessionLeakedError,
         // validation
         InvalidEdgeTypeError,
         InvalidIdError,

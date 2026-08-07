@@ -93,6 +93,45 @@ pub enum DbError {
     #[error("physical delete blocked outside archive session ({table})")]
     ArchiveViolation { table: String },
 
+    /// The archive-session marker exists as **committed** state (0.10.0, W2).
+    ///
+    /// [`ArchiveViolation`] is this guard working. This variant is the guard
+    /// having been silently switched off: while
+    /// `macrame_archive_session` is present, `trg_concepts_guard_delete`,
+    /// `trg_links_guard_delete` and `trg_txlog_guard_delete` all evaluate their
+    /// `WHEN` to false and permit the deletes they exist to refuse, and
+    /// `trg_concepts_log_insert` writes no `transaction_log` row for a concept
+    /// insert. [Doctrine IV] and [Doctrine V] are both suspended, with no error
+    /// and no counter — which is why the condition needs a name of its own.
+    ///
+    /// **It cannot be produced by an archive session, crashed or otherwise.**
+    /// `archive()` and `archive_windowed()` create and drop the marker inside
+    /// the same transaction that does the work, so a commit drops it and a
+    /// rollback discards it; and [`crate::schema::migrations::verify`] reads
+    /// committed state, so it cannot see an in-flight session. Reaching this
+    /// error therefore means something wrote the table outside the write actor
+    /// — the raw-writer case §4.7 concedes exists.
+    ///
+    /// Not a [`Migration`] error: the schema is intact. What is wrong is the
+    /// database's *contents*, and saying "your schema is wrong" would send the
+    /// reader to the migration ladder for a fault a `DROP TABLE` fixes.
+    ///
+    /// [Doctrine IV]: ../../docs/architecture/s0-s3-foundations.md#doctrine-iv
+    /// [Doctrine V]: ../../docs/architecture/s0-s3-foundations.md#doctrine-v
+    /// [`ArchiveViolation`]: DbError::ArchiveViolation
+    /// [`Migration`]: DbError::Migration
+    #[error(
+        "the archive-session marker table {marker:?} is present as committed \
+         state. While it exists, the delete guards on concepts, links and \
+         transaction_log are disarmed and concept inserts write no \
+         transaction_log row. An archive session creates and drops this table \
+         inside one transaction, so it should never be visible here — \
+         something wrote it outside the write actor. Drop it (DROP TABLE \
+         {marker}) and audit for deletions and missing log rows since it \
+         appeared"
+    )]
+    ArchiveSessionLeaked { marker: String },
+
     /// A traversal asked about the past without saying which text it wanted
     /// (T3.2, D-085).
     ///

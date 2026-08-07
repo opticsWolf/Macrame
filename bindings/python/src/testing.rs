@@ -64,6 +64,7 @@ pub(crate) const DB_ERROR_VARIANTS: &[&str] = &[
     "WriterDroppedResponder",
     "WriterStopped",
     "RecordedAtRegression",
+    "ArchiveSessionLeaked",
 ];
 
 #[pyfunction]
@@ -172,6 +173,13 @@ fn sample(name: &str) -> Option<DbError> {
         "RecordedAtRegression" => DbError::RecordedAtRegression {
             got: "2026-01-01T00:00:00.000000Z".into(),
             had: "2026-06-01T00:00:00.000000Z".into(),
+        },
+        // The real marker name, not a distinctive placeholder: this message
+        // tells the reader to `DROP TABLE <marker>`, so a sample carrying a
+        // fake name would make the remedy assertion pass against a string no
+        // user could ever run.
+        "ArchiveSessionLeaked" => DbError::ArchiveSessionLeaked {
+            marker: "macrame_archive_session".into(),
         },
         _ => return None,
     })

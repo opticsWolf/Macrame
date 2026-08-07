@@ -828,6 +828,9 @@ class RecordedAtRegressionError(IntegrityError):
     got: str
     had: str
 
+class ArchiveSessionLeakedError(IntegrityError):
+    marker: str
+
 class DimMismatchError(VectorError):
     got: int
     expected: int

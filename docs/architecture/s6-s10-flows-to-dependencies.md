@@ -117,6 +117,18 @@ pub enum DbError {
     ArchiveViolation { table: String },
 
     #[error(
+        "the archive-session marker table {marker:?} is present as committed \
+         state. While it exists, the delete guards on concepts, links and \
+         transaction_log are disarmed and concept inserts write no \
+         transaction_log row. An archive session creates and drops this table \
+         inside one transaction, so it should never be visible here — \
+         something wrote it outside the write actor. Drop it (DROP TABLE \
+         {marker}) and audit for deletions and missing log rows since it \
+         appeared"
+    )]
+    ArchiveSessionLeaked { marker: String },
+
+    #[error(
         "traversal as_of({as_of}) did not state an attribute mode: topology at \
          {as_of} would be returned with attributes as they are *now*. Call \
          .attribute_mode(AttributeMode::AtTime) for attributes as believed at \

@@ -71,6 +71,7 @@ from ._macrame import (
     Annotation,
     ArchiveReport,
     RehydrateReport,
+    ArchiveSessionLeakedError,
     ArchiveViolationError,
     ArchiveWindowError,
     AttributeMode,
@@ -185,6 +186,7 @@ __all__ = [
     "RebuildFailedError",
     "RebuildInterruptedError",
     "RecordedAtRegressionError",
+    "ArchiveSessionLeakedError",
     # validation
     "InvalidEdgeTypeError",
     "InvalidIdError",
