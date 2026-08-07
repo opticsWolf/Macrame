@@ -269,7 +269,7 @@ Belief, current — for each interval key, the assertion with the greatest recor
 
 Chunk boundary (0.4.5) — the moment between two committed chunks of a low-priority job; the only point at which the writer re-polls the high-priority queue.
 
-Cooperative chunking (0.4.5) — the discipline by which low-priority workers split bulk writes into 500–1,000-row transactions, yielding the writer to the priority poll between them. The golden rule of [§5.1.5](s5-modules.md#515-cooperative-chunking--the-golden-rule).
+Cooperative chunking (0.4.5) — the discipline by which low-priority workers split bulk writes into per-path chunks — 90 edges, 70 concepts, 600 annotations, 30 embeddings, each solved against a 3 ms duration bound ([D-058](s13-decision-register.md#d-058)) — yielding the writer to the priority poll between them. The "500–1,000-row" figure this entry carried until 0.10.0 was the 0.4.5 estimate, superseded by measurement in 0.5.6. The golden rule of [§5.1.5](s5-modules.md#515-cooperative-chunking--the-golden-rule).
 
 Horizon — the oldest transaction_log sequence still present in the hot file. Reconstruction older than the horizon composes from the archive via the per-query ATTACH path ([§5.5](s5-modules.md#55-temporalreplayrs-and-temporalsnapshotrs--reconstruction-and-snapshots), [D-026](s13-decision-register.md#d-026)). The horizon is recorded in the cold database during each archive session; a crash between scheduled windows leaves the horizon at the last committed window, and the next run resumes from there.
 

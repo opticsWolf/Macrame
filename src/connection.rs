@@ -994,6 +994,12 @@ impl Database {
     /// client on the machine.
     ///
     /// [D-068]: ../../docs/architecture/s13-decision-register.md#d-068
+    // convention (D-068/D-091): `raw()` is #[doc(hidden)] and is NOT exposed by
+    // any binding. Everything above this line is invisible on docs.rs and
+    // invisible to a contributor reading the Python surface list, which is where
+    // the decision to expose it would actually be taken — hence this sentinel and
+    // its twin in `bindings/python/src/lib.rs` (0.10.0, W4.10). The documented
+    // path for every non-write use is `diagnostic_conn`.
     #[doc(hidden)]
     pub fn raw(&self) -> &libsql::Database {
         &self.db

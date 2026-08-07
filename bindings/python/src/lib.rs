@@ -113,6 +113,17 @@ fn _macrame(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     m.add_class::<database::PyDatabase>()?;
 
+    // convention (D-068/D-091): `Database::raw()` is deliberately NOT on this
+    // list and must not be added. It hands back a write-capable connection the
+    // write actor does not own, which dissolves the single-writer property
+    // CHUNK_BUDGET's latency argument and the overlap guard both rest on. Its
+    // Rust rustdoc is #[doc(hidden)], so a contributor deciding to expose it
+    // would be standing *here*, seeing nothing — hence this line and its twin at
+    // `connection.rs`'s `raw()` (0.10.0, W4.10).
+    //
+    // The supported diagnostic path is `diagnostic_query` / `explain`, which
+    // open `SQLITE_OPEN_READ_ONLY` per call (D-091) and serialise (D-138).
+
     m.add_function(wrap_pyfunction!(engine_linked, m)?)?;
     m.add_function(wrap_pyfunction!(chunk_budget_ms, m)?)?;
     m.add_function(wrap_pyfunction!(estimate_bulk_hold, m)?)?;

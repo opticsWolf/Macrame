@@ -53,7 +53,7 @@ Explicitly out of scope: forking or patching libSQL; multi-process or client-ser
 |  | DDL gen  | | CTE gen  | | as_of     | | DiskANN|           |
 |  | triggers | | vector_  | | replay    | | hybrid |           |
 |  | migratns | | filter   | | snapshot  | | RRF    |           |
-|  |          | | petgraph | | archive   | |        |           |
+|  |          | | algorthm | | archive   | |        |           |
 |  +----+-----+ +----+-----+ +-----+-----+ +---+----+           |
 |       +-------------+------+-------+-----------+              |
 |                     |                                         |
@@ -80,7 +80,7 @@ Explicitly out of scope: forking or patching libSQL; multi-process or client-ser
 
 The horizontal line through the middle of this diagram is the most important boundary in the project. Above it, everything is owned by this crate and written in safe Rust: the schema and its triggers, the compilers that turn builder calls into SQL, the temporal machinery, the API. Below it sits a battle-tested MIT-licensed engine whose internals we treat as opaque. The architecture deliberately exploits libSQL's distinguishing features — the native vector type with its auto-maintained DiskANN index, window functions, JSON functions, ATTACH, the user_version migration hook — while depending on none of its unstable features: no CDC consumption, no replication internals, no experimental pragmas. When libSQL releases a breaking 0.x change, the blast radius is confined to connection.rs and the pinned version in Cargo.toml.
 
-The concurrency model follows the embedded profile, amended in 0.4.5. One process owns the file; within it, one writer and many readers coexist under WAL journaling. As of 0.4.5, the writer is not an entry point but a task: the sole write-capable connection lives inside a dedicated Tokio task (the Write Actor, [§5.1](s5-modules.md#51-connectionrs--the-handle-the-pragmas-and-the-write-actor)), and every other part of the system — UI handlers, analytics workers, the archive scheduler — addresses it through a two-tier priority channel. Write serialization is structural in the strongest sense: no other task holds a connection that can write, so no amount of API misuse can produce a second writer. As of 0.5.0, this guarantee is reinforced at the engine level: the read connection carries PRAGMA query_only = ON, converting the Rust-ownership invariant into a runtime enforcement that survives even a logic error in connection routing. Readers never block on the writer, and never traverse the actor at all. Background writers are bounded by cooperative chunking: no low-priority transaction may hold the lock longer than one 500–1,000-row chunk, so the worst-case latency of a UI assertion is one chunk commit, not one bulk job. This is deliberately less ambitious than a server database, and deliberately sufficient: a desktop knowledge ledger does not need distributed consensus; it needs to never lose a fact — and to never make the user wait for one.
+The concurrency model follows the embedded profile, amended in 0.4.5. One process owns the file; within it, one writer and many readers coexist under WAL journaling. As of 0.4.5, the writer is not an entry point but a task: the sole write-capable connection lives inside a dedicated Tokio task (the Write Actor, [§5.1](s5-modules.md#51-connectionrs--the-handle-the-pragmas-and-the-write-actor)), and every other part of the system — UI handlers, analytics workers, the archive scheduler — addresses it through a two-tier priority channel. Write serialization is structural in the strongest sense: no other task holds a connection that can write, so no amount of API misuse can produce a second writer. As of 0.5.0, this guarantee is reinforced at the engine level: the read connection carries PRAGMA query_only = ON, converting the Rust-ownership invariant into a runtime enforcement that survives even a logic error in connection routing. Readers never block on the writer, and never traverse the actor at all. Background writers are bounded by cooperative chunking: no low-priority transaction may hold the lock longer than one chunk, and the chunk sizes are per-path constants solved against a 3 ms duration bound rather than one row range — 90 edges, 70 concepts, 600 annotations, 30 embeddings ([D-058](s13-decision-register.md#d-058)). The worst-case latency of a UI assertion is one chunk commit, not one bulk job. This paragraph said "500–1,000-row" until 0.10.0, which was the 0.4.5 estimate the measurement replaced. This is deliberately less ambitious than a server database, and deliberately sufficient: a desktop knowledge ledger does not need distributed consensus; it needs to never lose a fact — and to never make the user wait for one.
 
 ## §3 Crate Layout
 ```text
@@ -116,7 +116,8 @@ macrame/
 │   │   ├── embedding.rs        # Vec ↔ F32_BLOB codec, per-model dims
 │   │   ├── model.rs            # §5.9 — ModelName newtype (validated identifier, D-037)
 │   │   ├── registry.rs         # §5.9 — register_model, declared_dimension
-│   │   └── search.rs           # §5.9 — top-k, RRF fusion
+│   │   ├── search.rs           # §5.9 — top-k, RRF fusion
+│   │   └── hybrid.rs           # §5.9 — hybrid vector + FTS, RRF (D-051)
 │   ├── integrity/
 │   │   ├── mod.rs              # LATEST_BELIEF_PROJECTION — the single definition (D-077)
 │   │   ├── audit.rs            # audit_current() — read-side
@@ -133,14 +134,26 @@ macrame/
 │       │                       #   HYDRATE_CHUNK under SQLITE_MAX_VARIABLE_NUMBER
 │       └── clock.rs            # Clock trait; SystemClock (monotonic floor + strict parser),
 │                               #   FakeClock (Send + Sync interior)
-└── tests/
-    ├── harness.rs              # temp-dir fixtures, FakeClock wiring, actor helpers
-    ├── graph_tests.rs
-    ├── temporal_tests.rs
-    ├── vector_tests.rs
-    ├── integrity_tests.rs
-    └── concurrency_tests.rs    # actor priority, chunk boundaries, containment, shutdown
+├── tests/                      # 28 integration targets; the shape, not the list
+│   ├── common/                 #   harness.rs (temp-dir fixtures, FakeClock wiring),
+│   │                           #   fixtures.rs (the D-088 shape matrix)
+│   ├── graph_tests.rs          #   …and temporal_, vector_, integrity_,
+│   │                           #   concurrency_, migration_, write_path_, …
+│   ├── *_property_tests.rs     #   quarantined behind --features property-tests (R15)
+│   └── doc_sync_tests.rs       #   the gates: doc_link_, index_plan_, perf_claim_,
+│                               #   fixture_matrix_, packaging_ (D-089, D-139)
+├── benches/budgets.rs          # §9, criterion, every group carries control/select_1 (D-090)
+├── examples/                   # diagnostics that are not tests — r15_soak, readonly_open_probe
+├── bindings/python/src/        # §14 — pyo3 0.29, maturin; the wheel `macrame-db`
+│   ├── lib.rs                  #   module init and the exported surface
+│   ├── database.rs             #   the handle: frozen pyclass over RwLock<Option<Database>>
+│   ├── errors.rs               #   wildcard-free match over DbError (D-099)
+│   └── graph.rs, temporal.rs, vector.rs, rows.rs, types.rs, …
+├── python/macrame/             # the Python-side package: __init__.py, _macrame.pyi
+└── tests_py/                   # pytest suite; probes/ holds the R15 reproducers (D-107)
 ```
+
+**The `tests/` and `bindings/` entries are shapes rather than inventories**, and deliberately so after 0.10.0 (W4.7): this tree listed five test files for years while the suite grew to twenty-eight, and a list that is wrong is worse than a shape that is right. `python scripts/run_rust_suite.py` enumerates the real set.
 
 Each module owns one concern and one failure mode. graph/builder.rs is the only place SQL strings for traversal are constructed; temporal/replay.rs is the only place the log is folded; integrity/ is the only place links_current is written outside the trigger path; and connection.rs is the only place a write-capable connection exists. This concentration is deliberate: when a class of bug has exactly one address, it can be tested there and nowhere else needs to worry.
 

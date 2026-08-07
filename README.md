@@ -139,7 +139,7 @@ v8 is the last rung that could change a *primary key* before the 1.0 freeze: `ro
 | Runtime | tokio async, single process |
 | Engine | libSQL 0.9.30 (MIT, unmodified) |
 | Schema version | 10 |
-| Test suite | 330 Rust · 339 with `metrics` · 362 with `--all-features` · 353 Python — all green (measured 2026-08-07). The three `property-tests` binaries (23 tests) are **run as their own step** — see below |
+| Test suite | 330 Rust · 339 with `metrics` · 353 Python — all green (measured 2026-08-07). The three `property-tests` binaries (23 tests) are **run as their own step** — see below. **`--all-features` is not a supported configuration**, see below |
 | Dependencies | tokio, serde, bincode, zstd, thiserror, tracing, ulid |
 
 ### Module Map
@@ -265,6 +265,8 @@ criterion baselines, machine against itself. See [§9 of the architecture docs](
 | **Property test binaries fault mid-suite** | `property-tests` feature gate; serialised runs; CI classifies each run rather than counting failures, and retries only a crash |
 | **Covering index wins over selective** | `EXPLAIN QUERY PLAN` assertions on every index-sensitive query |
 | **Snapshot chain divergence** | `verify_snapshot_chain()` reports but does not repair (snapshots are disposable) |
+
+**`--all-features` is not a configuration this project supports or gates**, and 0.10.0 stopped publishing a test count for it. `--all-features` is `metrics` + `property-tests` together, which puts the R15-prone binaries back inside the main run — the exact arrangement the step above exists to avoid. Measured 2026-08-07: **4 of 4 runs crashed at one attempt, and 4 of 5 still went red at the six-attempt retry budget** the quarantined step uses. A required job that fails four times in five is not a gate, it is noise that teaches people to re-run CI without reading it. Run `--features metrics` and `--features property-tests` as the two separate steps CI does ([D-140](docs/architecture/s13-decision-register.md#d-140)).
 
 ---
 

@@ -184,6 +184,20 @@ Independent of W1–W3; each is self-contained **except that W4.3 runs before W4
 | W4.12 | `nul.pdb` residue | delete it; find the `> nul` redirect (Git Bash treats `nul` as a filename) | v3 N7 |
 | W4.13 | the 8.0 ms chunk figure is cited forward, never measured; and `overlap_guard`'s arms are labelled by table size, not out-degree | add a seeded-hub arm to `chunk_budget`, run it, replace the cited figure — and correct the arm labels W1 published | **added in-wave, 0.10.0** |
 
+### W4.4–W4.12 result (done, 0.10.0) — one item came back the other way
+
+All nine landed. Recorded as **[D-140](architecture/s13-decision-register.md#d-140)**.
+
+**W4.11 is the exception, and the plan's stated preference is refused on measurement.** "Prefer adding" the `--all-features` CI job rested on the R15 interaction between `metrics` and `property-tests` being unmeasured. Measured: **4 / 4 red at one attempt, 4 / 5 red at the six-attempt budget** the quarantined step uses. `--all-features` puts the R15-prone binaries back inside the main run, which is the arrangement that step exists to prevent. So the alternative is taken — the *362* count is dropped from `README.md:142` — and the reason is published in Known Risks so nobody re-adds it. This is the second plan instruction this release refused on evidence; W3's was the first.
+
+**W4.12 has no second half.** `nul.pdb` is deleted, but no `> nul` redirect exists anywhere in the repository — no script, workflow or manifest — and the file was untracked and already covered by `.gitignore`. It came from a hand-run command, so there is nothing to fix.
+
+Two items found more than they were scoped for: W4.6's quickref table also cited `tests/plan_pinning.rs`, a file that has never existed under that name; and W4.4's neighbourhood published `'v', 1` for a concept payload that has been `v2` since 0.5.6. Both corrected.
+
+W4.7's `tests/` tree is rewritten as a **shape rather than an inventory** — it listed five files against twenty-eight real ones — with `bindings/`, `python/` and `tests_py/` added.
+
+**Verification:** `scripts/run_rust_suite.py --features metrics` → **PASSED, 348 across 29 targets, attempt 1/3**, with W4.8's five `debug_assert!(graph.is_closed())` live in a debug build. No closure violation anywhere in the suite. Python 355 passed, 2 skipped.
+
 ### W4.13 — Measure the chunk figure W3 could only cite, and fix what W1 mislabelled
 
 **Two defects, one bench change, and the second was found while scoping the first.**

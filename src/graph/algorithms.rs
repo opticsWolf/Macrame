@@ -36,6 +36,25 @@ use std::collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque};
 
 use super::subgraph::Subgraph;
 
+/// The message every entry assert carries.
+///
+/// [`Subgraph`]'s type-level docs state the closure invariant and say that
+/// "every algorithm in [`super::algorithms`] is written assuming it and none of
+/// them re-checks". [`Subgraph::is_closed`]'s own rustdoc has claimed since
+/// 0.6.0 that it is "used by tests and `debug_assert`s" — and no `debug_assert`
+/// existed anywhere in `src/`.
+///
+/// 0.10.0 (W4.8) writes them rather than softening the sentence. A live
+/// assumption that no assertion covers is one refactor away from being a silent
+/// wrong answer instead of a panic, and the invariant has failed once already
+/// (defect Z, Wave 1: a retired neighbour left an `EdgeRef` pointing at a node
+/// the loader had filtered out). `is_closed` is O(V + E) and these are
+/// `debug_assert`s, so release builds pay nothing.
+const CLOSURE: &str = "Subgraph closure invariant violated on entry: adjacency \
+                       references a node that is not in `nodes`. Every algorithm \
+                       here assumes closure and none re-checks it — see \
+                       `Subgraph`'s type docs and `drop_dangling_adjacency`.";
+
 /// A total order over `f64` so distances can live in a `BinaryHeap`.
 ///
 /// `f64` is only `PartialOrd` because `NaN` compares false against everything,
@@ -65,6 +84,7 @@ impl PartialOrd for OrdF64 {
 /// Returns node id -> shortest distance from `start`, including `start` at 0.0.
 /// Unreachable nodes are absent rather than present at infinity.
 pub fn dijkstra(graph: &Subgraph, start: &str) -> BTreeMap<String, f64> {
+    debug_assert!(graph.is_closed(), "{CLOSURE}");
     let mut dist = BTreeMap::new();
     let mut heap = BinaryHeap::new();
 
@@ -111,6 +131,7 @@ pub fn astar<F>(
 where
     F: Fn(&str, &str) -> f64,
 {
+    debug_assert!(graph.is_closed(), "{CLOSURE}");
     if !graph.contains_node(start) || !graph.contains_node(goal) {
         return None;
     }
@@ -183,6 +204,7 @@ fn reconstruct(came_from: &BTreeMap<String, String>, goal: &str, limit: usize) -
 /// components ordered by their first element — so the result is comparable
 /// across runs without the caller having to normalise it.
 pub fn scc(graph: &Subgraph) -> Vec<Vec<String>> {
+    debug_assert!(graph.is_closed(), "{CLOSURE}");
     let mut visited = BTreeSet::new();
     let mut order = Vec::new();
 
@@ -251,6 +273,7 @@ pub fn scc(graph: &Subgraph) -> Vec<Vec<String>> {
 /// count once each — a node held in by three edges to one neighbour has degree
 /// three, which is what makes this a multigraph core.
 pub fn k_core(graph: &Subgraph, k: usize) -> BTreeSet<String> {
+    debug_assert!(graph.is_closed(), "{CLOSURE}");
     let mut degree: BTreeMap<String, usize> = graph
         .node_ids()
         .map(|n| (n.to_string(), graph.degree(n)))
@@ -389,6 +412,7 @@ const LOUVAIN_MIN_GAIN: f64 = 1e-12;
 ///
 /// [D-115]: ../../docs/architecture/s13-decision-register.md
 pub fn louvain(graph: &Subgraph) -> BTreeMap<String, usize> {
+    debug_assert!(graph.is_closed(), "{CLOSURE}");
     let m = graph.total_weight();
 
     // Every node its own community: the only sensible answer with no edges, and

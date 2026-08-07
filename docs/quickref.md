@@ -741,10 +741,13 @@ pub fn estimated_bulk_hold(edges: &[EdgeAssertion]) -> Duration  // ~34 ms / 500
 | **Diagnostic examples** | Measurement and diagnosis; not part of test suite | `examples/*.rs` |
 | **Doc sync tests** | API surface matches architecture | `tests/doc_sync_tests.rs` (build failure on mismatch) |
 | **Fixture matrix** | Four-shape fixture; every decision names fixture | `tests/fixtures.rs` (D-088) |
-| **Plan-pinning** | Index plans asserted by `EXPLAIN QUERY PLAN` | `tests/plan_pinning.rs` (D-089) |
+| **Plan-pinning** | Index plans asserted by `EXPLAIN QUERY PLAN`; every index names the query that reads it | `tests/index_plan_tests.rs` (D-089) |
+| **Claim registry** | Every published performance figure names a bench and a decision, and one `(operation, fixture, metric)` carries one value | `tests/perf_claim_tests.rs` (D-139) |
 | **Bench controls** | Control row distinguishes machine shift from baseline shift | `benches/budgets.rs` (D-090) |
 
-**Total** (measured 2026-08-02): **296** Rust with default features, **305** with `metrics`, **316** with `property-tests`, **344** Python. The suite is pinned by `tests/doc_sync_tests.rs` which fails the build when the public API diverges from this document.
+**Totals are not reproduced here** (0.10.0, W4.6). They were, as four hard numbers with a measurement date, and they went stale every release that added a test — which is every release. `python scripts/run_rust_suite.py` prints the current count for whatever feature set you pass it, and `python tests_py/run_suite.py` does the same on the Python side; a number you can regenerate in one command does not need a copy in a document that nothing checks. The README carries a dated snapshot for readers who want a rough size, and that one is a snapshot on purpose.
+
+The surface itself *is* pinned: `tests/doc_sync_tests.rs` fails the build when the public API diverges from this document.
 
 **How to run it so the answer means something** (D-110). Use `python scripts/run_rust_suite.py --features metrics`, not bare `cargo test`. Under R15 a crashed target prints no `test result:` line while every other target prints its own, so the run comes back with a *smaller pass count and zero failures* — green to anything summing passes. The script classifies each run as `CRASH`, `FAILED`, `INCOMPLETE`, `TEARDOWN` or `BUILD` and retries only `CRASH`; a genuine failure is named on attempt 1. Both CI steps go through it, at three attempts for the main suite and six for the quarantined property step, which faults far more often. Same shape as `tests_py/run_suite.py` (D-107), deliberately not the same implementation.
 

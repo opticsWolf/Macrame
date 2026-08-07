@@ -459,6 +459,13 @@ impl Subgraph {
     /// Whether the closure invariant holds. Used by tests and `debug_assert`s.
     ///
     /// Cheap enough to call in a test and O(V + E), so not on any hot path.
+    ///
+    /// **The `debug_assert`s were only a claim until 0.10.0** (W4.8). This
+    /// sentence shipped in 0.6.0 and none existed in `src/`; they now sit at the
+    /// entry of `dijkstra`, `astar`, `scc`, `k_core` and `louvain`
+    /// (`algorithms::CLOSURE`). Writing them was the fix rather than weakening
+    /// the sentence: the type docs above say every algorithm assumes closure and
+    /// none re-checks it, and an assert is the auditable form of that.
     pub fn is_closed(&self) -> bool {
         self.out_adj
             .iter()

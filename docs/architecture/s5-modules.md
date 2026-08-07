@@ -204,6 +204,10 @@ async fn run_writer_actor(
 ```
 
 Each execute runs exactly one transaction — BEGIN IMMEDIATE … COMMIT — and routes its DbError, if any, to the command's responder rather than to the loop; a failed assertion must not kill the writer. The loop is the only scheduler in the system, and its policy is one line: between any two transactions, re-check the UI queue before touching the background queue. The priority queue decides who goes next; it does not — cannot — interrupt a transaction already in flight, because SQLite's lock is not preemptible. That single fact is the reason [§5.1.5](s5-modules.md#515-cooperative-chunking--the-golden-rule) exists.
+
+**The preemption is strict, so low-priority starvation is unbounded — by design, and stated here because it had never been written down** (0.10.0, W4.5). "Re-check the UI queue before touching the background queue" has no ageing term, no fairness quota and no ceiling on how long a low-priority command may wait: a workload that keeps the high-priority queue non-empty holds every background job at the boundary indefinitely. That is the right trade for a desktop ledger — the alternative is admitting a UI stall to let an archive proceed, and a user who cannot type is a worse failure than an archive that runs later — but it is a real property and an unbounded one, not an approximation of fairness.
+
+**It has a detector rather than a bound.** `MetricsSnapshot::low_depth_max` (`metrics.rs:455`, behind `--features metrics`, [D-079](s13-decision-register.md#d-079)) is the high-water mark of the low-priority queue depth. A depth that rises and does not come back down is starvation happening, and it is observable without inferring anything from latency. The choice to measure rather than to bound is the same one [D-055](s13-decision-register.md#d-055) makes about the budgets: a threshold this crate picked would be a threshold about someone else's workload.
 ```rust
 // shape only — see Appendix A for normative signatures
 

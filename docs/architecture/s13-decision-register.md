@@ -1968,3 +1968,40 @@ A fourth was added that the plan did not ask for: `every_claim_names_a_decision_
 **Rejected.** *Keying on the number* — the plan's own argument: `2.39 ms` legitimately appearing for two different operations would be a red test. *Keeping `(operation, metric)` and splitting the operation strings instead* ("single edge assertion, warm" vs "…, cold fixture") — it encodes the fixture in a free-text field where nothing can group on it, which is the structural gap that let nine texts drift. *Excluding superseded figures from the registry entirely* — then nothing checks that the history still says what the register claims it says, and the most likely way to break §9's D-127 paragraph is to edit it while updating the live row above it. *Asserting the numbers against a bench run* — [D-055](s13-decision-register.md#d-055); an absolute threshold asserted on a shared runner is an assertion about the runner. *Seeding it with every §9 row* — the registry earns its keep on claims that have actually drifted; the two that did are the seed, and `the_registry_covers_the_claims_that_drifted` keeps it from being quietly emptied.
 
 **On the numbering:** the plan calls this entry `D-135` twice. That slot went to W2's marker check, which the plan itself anticipated might need its own entry. This is D-139.
+
+---
+
+<a id="d-140"></a>D-140 — `--all-features` is measured to be ungateable and stops being published; and `is_closed`'s `debug_assert`s are written rather than the sentence weakened (0.10.0, W4.4–W4.12). [D-039](s13-decision-register.md#d-039), [D-055](s13-decision-register.md#d-055), [D-058](s13-decision-register.md#d-058), [D-068](s13-decision-register.md#d-068), [D-079](s13-decision-register.md#d-079), [D-089](s13-decision-register.md#d-089), [D-091](s13-decision-register.md#d-091), [D-110](s13-decision-register.md#d-110), [D-133](s13-decision-register.md#d-133).
+
+> **A wave of small true things, one of which turned out to be false the moment it was measured.**
+
+## `--all-features` — the plan said add the job; the measurement says there is no job to add
+
+W4.11 recorded that `README`'s *"362 with `--all-features`"* had no CI step behind it, and preferred **adding the step** over dropping the number, on the reasoning that the R15 interaction between `metrics` and `property-tests` was unmeasured. It is now measured, and it settles the item the other way.
+
+| budget | red runs |
+|---|---|
+| `--attempts 1` | **4 / 4** |
+| `--attempts 6` (the quarantined step's budget) | **4 / 5** |
+
+`--all-features` is `metrics` + `property-tests`, which puts the R15-prone binaries back inside the main run — precisely the arrangement the separate quarantined step exists to prevent, and [D-133](s13-decision-register.md#d-133)'s observation that a feature-gated target is not covered by "the suite passing" cuts the same way here. A required job failing four times in five is not a gate; it is the "cries wolf" failure [D-139](s13-decision-register.md#d-139) had just finished arguing against, and it would train reviewers to re-run CI without reading it.
+
+**So the count is dropped and the reason is published**, in the README's Known Risks section rather than in a commit message, because a reader who notices the missing number will otherwise re-add it. The two supported configurations remain the two CI runs.
+
+**This is the second time in this release a plan instruction was refused on evidence** — W3's was a deletion that would have removed a live limitation. Both are recorded; a plan that is followed where it is wrong produces a worse artefact than one that is argued with.
+
+## `is_closed` — the asserts existed only in its own rustdoc
+
+`Subgraph::is_closed`'s docs have said "used by tests and `debug_assert`s" since 0.6.0, and no `debug_assert` existed anywhere in `src/`. W4.8 **writes them** — at the entry of `dijkstra`, `astar`, `scc`, `k_core` and `louvain` — rather than softening the sentence, because `Subgraph`'s type docs state that every algorithm assumes closure and none re-checks it, and an assert is the auditable form of a live assumption. The invariant has failed once already (defect Z, Wave 1: a retired neighbour left an `EdgeRef` pointing at a node the loader had filtered out), which is the argument against treating it as self-evidently true. `is_closed` is O(V + E) and these are `debug_assert`s, so release builds pay nothing and the debug suite gains a tripwire.
+
+## The rest of the sweep, in one line each
+
+- **W4.4** — §4.3's note that concept payloads omit `embedding_model` is settled: payload **v2** carries it (0.5.6 Wave 1). The note is kept, not struck, because **v1 payloads still exist and are never rewritten** — a pre-0.5.6 database really does lose the field on a fold. The neighbouring "`'v', 1`" was stale for concepts and now names both versions.
+- **W4.5** — §5.1 states what strict preemption means: low-priority starvation is **unbounded by design**, with no ageing term or fairness quota, and `MetricsSnapshot::low_depth_max` ([D-079](s13-decision-register.md#d-079)) is the detector. Measured rather than bounded, on [D-055](s13-decision-register.md#d-055)'s reasoning that a threshold this crate picked would be about someone else's workload.
+- **W4.6** — quickref's four hard test counts are replaced by a pointer to `scripts/run_rust_suite.py` ([D-110](s13-decision-register.md#d-110)), so they cannot drift again. It also cited `tests/plan_pinning.rs`, which has not existed under that name; corrected, and `perf_claim_tests` added beside it.
+- **W4.7** — §2/§3 divergences: `petgraph` dropped from the diagram (native since 0.5.x, [D-039](s13-decision-register.md#d-039)), the **500–1,000-row** chunk estimate replaced by [D-058](s13-decision-register.md#d-058)'s measured per-path sizes in all three places it survived, `vector/hybrid.rs` added, and the `tests/` tree — five files listed against twenty-eight real ones — rewritten as a **shape rather than an inventory**, with `bindings/`, `python/` and `tests_py/` added. A list that is wrong is worse than a shape that is right.
+- **W4.9** — §4.3 records that `recorded_at` monotonicity is guarded on `UPDATE` and not on `INSERT`, **and why a `BEFORE INSERT` guard would not close it**: no `OLD` row to compare against, so the only predicate is a scan for the table maximum on every insert, and it would still accept a future timestamp. The guarantee lives in `SystemClock`'s floor, which a raw writer is already outside — the same writer can flip a `PRAGMA`.
+- **W4.10** — `raw()`'s convention gets a `// convention (D-068/D-091):` sentinel at both ends: beside the function, and beside the Python surface list in `bindings/python/src/lib.rs`, which is where a contributor deciding to expose it would actually be standing. Its Rust rustdoc is `#[doc(hidden)]`, so that reader currently sees nothing.
+- **W4.12** — `nul.pdb` deleted. **The redirect that made it is not in this repository**: no `> nul` occurs in any script, workflow or manifest, and the file was untracked and already covered by `.gitignore`'s `*.pdb`. So the second half of the item has no target, and saying so is the finding — it came from a hand-run command, not from anything the project will do again.
+
+**Rejected.** *Adding the `--all-features` job at a higher retry budget* — more attempts also means more chances to launder a real failure into a pass, which `ci.yml` already argues about the property step; and 4-in-5 red is not a budget problem. *Keeping the 362 figure with a footnote* — a published count whose configuration nothing runs is [D-139](s13-decision-register.md#d-139)'s defect in a different register. *Weakening `is_closed`'s sentence to match reality* — reality was the thing that was wrong. *Striking §4.3's `embedding_model` note* — v1 payloads are still readable and still lose the field. *Listing the real test files in §3's tree* — it would be accurate for one release; the shape is accurate indefinitely.
