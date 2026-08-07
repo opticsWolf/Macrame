@@ -403,6 +403,60 @@ fn chunk_budget(c: &mut Criterion) {
         },
     );
 
+    // The same chunk into a **populated** table (0.10.0, W4.13).
+    //
+    // Every other arm in this group starts empty, which is what `CHUNK_BUDGET`'s
+    // own "known limitation" section concedes. The consequence went unnoticed
+    // for four releases: §9 and `chunk_rows::EDGES` published a figure for this
+    // case that no bench produced — first 47.7 ms (D-059's *pre-index*
+    // measurement, carried forward after the index shipped), then 8.0 ms (the
+    // post-index one, still cited rather than measured).
+    //
+    // Seeded with `seed_edges`, which is the same `star_of_stars` generator
+    // D-059 used, so this number is comparable to the one it replaces rather
+    // than merely newer. Note what that fixture actually builds: 8,000 edges in
+    // the table, of which the hub `c0000000` is the source of `edges / 3` —
+    // **out-degree ≈ 2,666, not 8,000**. D-059's "8,000-edge hub" means the same
+    // thing, which is why the two are comparable and why neither is a statement
+    // about out-degree 8,000.
+    let seeded_edges = 8_000 * scale();
+    group.bench_function(
+        format!(
+            "edges/{} into a {seeded_edges}-edge table (§5.1.5 ≤ 3 ms)",
+            chunk_rows::EDGES
+        ),
+        |b| {
+            b.iter_batched(
+                || {
+                    rt.block_on(async {
+                        let fx = fixture().await;
+                        seed_concepts(&fx.db, seeded_edges + chunk_rows::EDGES + 1).await;
+                        seed_edges(&fx.db, seeded_edges).await;
+                        fx
+                    })
+                },
+                |fx| {
+                    // Targets past the seeded range, and a distinct edge type,
+                    // so the chunk adds new pairs rather than colliding with
+                    // the fixture's open intervals.
+                    let edges: Vec<EdgeAssertion> = (0..chunk_rows::EDGES)
+                        .map(|k| {
+                            EdgeAssertion::new(
+                                "c0000000",
+                                format!("c{:07}", seeded_edges + k + 1),
+                                "CHUNK",
+                            )
+                            .valid_from(TS)
+                            .valid_to(OPEN)
+                        })
+                        .collect();
+                    rt.block_on(fx.db.write_bulk_atomic(edges)).unwrap()
+                },
+                BatchSize::PerIteration,
+            )
+        },
+    );
+
     group.bench_function(
         format!("concepts/{} (§5.1.5 ≤ 3 ms)", chunk_rows::CONCEPTS),
         |b| {
@@ -1101,9 +1155,19 @@ fn hydrate_scaling(c: &mut Criterion) {
 ///
 /// **Three arms, and why the top one is 8,000.** Two points can only show "not
 /// growing between these two"; three can show flat. 8,000 is not an arbitrary
-/// third point — it is the degree D-059's original evidence is stated at
+/// third point — it is the size D-059's original evidence is stated at
 /// (`ddl.rs:509`, 47.7 ms pre-index against 8.0 ms post-index), so this arm and
 /// the number the schema docs publish are finally measured at the same scale.
+///
+/// **The arm parameter is edges in the table, not the hub's out-degree** — read
+/// it that way or the numbers mean something they do not (0.10.0, W4.13).
+/// `seed_edges` builds `Shape::StarOfStars`, whose generator makes node 0 the
+/// source of `edges / 3` (`fixtures.rs:189`), so the three arms probe a hub of
+/// out-degree **0 / 666 / 2,666**. D-059's "8,000-edge hub" is the same fixture
+/// and means the same thing, which is what keeps the two comparable. The
+/// hypothesis above is unaffected — 0 to 2,666 is still four thousand times
+/// nothing — but a figure published as "out-degree 8,000" would be wrong by 3×,
+/// and was, in nine documents, until W4.13.
 fn overlap_guard(c: &mut Criterion) {
     let rt = runtime();
     let hub = 2_000 * scale();

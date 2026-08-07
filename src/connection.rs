@@ -56,14 +56,20 @@ use crate::vector::ModelName;
 /// `chunk_budget` seeds concepts and starts with **no links and no vectors**,
 /// and D-059 established that per-row cost on the edge and embedding paths grows
 /// with the size of the structure being written, not with the chunk. The same
-/// 90-edge chunk takes **8.0 ms** against an 8,000-edge hub, and stays flat
-/// there. So the bound is met as measured and *not* met on a large database.
+/// 90-edge chunk takes **9.06 ms** into an 8,000-edge table. So the bound is met
+/// as measured here and *not* met on a populated database.
 ///
-/// That gap used to be published here as 47.7 ms and attributed to the schema
+/// That gap was published as 47.7 ms until 0.10.0 and attributed to the schema
 /// defect D-059 documents. The defect was fixed by the `v5 → v6` rung and the
-/// figure was never updated: 8.0 ms is the post-index measurement (`ddl.rs:512`).
-/// The remaining 3.3× over `CHUNK_BUDGET` is **unattributed** — it is not the
-/// missing index, and nothing has since measured what it is. Re-deriving these
+/// figure was never updated. 9.08 ms is a 0.10.0 measurement, not D-059's 8.0 ms
+/// carried forward: `chunk_budget` gained a seeded arm, because until it did,
+/// nothing in the bench suite wrote a chunk into a populated table and this
+/// number was unfalsifiable. It agrees with D-059 once the session is accounted
+/// for — the empty arm read 2.69 and 2.65 ms beside it against the 2.39 ms
+/// published above, so the *ratio* is 3.4× here and 3.35× there.
+///
+/// **The residual is unattributed.** It is not the missing index, which shipped
+/// in 0.5.6, and nothing has measured what it is. Re-deriving these constants
 /// against a realistic fixture needs a decision about what "realistic" is, which
 /// is why it has not been done silently.
 pub mod chunk_rows {
@@ -75,17 +81,21 @@ pub mod chunk_rows {
     /// claimed it was 3.3× *faster*; that came from multiplying eleven copies of
     /// a chunk measured into an empty database.
     ///
-    /// **This size does not meet the 3 ms bound on a large database.** 90 edges
-    /// into an 8,000-edge hub take **8.0 ms**, and stay flat as the hub grows.
+    /// **This size does not meet the 3 ms bound on a populated database.** 90
+    /// edges into an 8,000-edge table take **9.06 ms** — measured, two sessions
+    /// at 9.08 and 9.05, against an empty-table arm of 2.69 and 2.65 beside
+    /// them (D-136).
     ///
     /// The reason given here until 0.10.0 — that `trg_links_single_open`'s
     /// `EXISTS` scans the whole out-degree, "a schema defect with a proven fix,
-    /// recorded in D-059 and not applied here" — described 0.5.5. The fix
-    /// *was* applied, as the `v5 → v6` rung, and took this from 47.7 ms to 8.0
-    /// ms and flat. What survives is the miss, not its cause: the bound is
-    /// still exceeded by 3.3×, and by something nobody has measured. D-134
-    /// retired the growth claim on the neighbouring *single-assertion* path;
-    /// it did not measure this one.
+    /// recorded in D-059 and not applied here" — described 0.5.5. The fix *was*
+    /// applied, as the `v5 → v6` rung, and took this from 47.7 ms to ~8 ms.
+    /// What survives is the miss, not its cause: the bound is exceeded ~3×, by
+    /// something nobody has attributed.
+    ///
+    /// D-134 retired the growth claim on the neighbouring *single-assertion*
+    /// path and did not measure this one; D-136 is why this line now carries a
+    /// measurement rather than a figure quoted from 0.5.6.
     pub const EDGES: usize = 90;
 
     /// Concept upserts (`write_concepts`).

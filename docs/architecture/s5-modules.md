@@ -275,7 +275,7 @@ The mechanism is diagnosed in [D-059](s13-decision-register.md#d-059) and differ
 
 The index is a win at every table size measured, including the empty one, so it costs the write path nothing to carry. The four constants were re-derived against it and **stand unchanged**: 2.76 / 2.57 / 2.56 / 2.26 ms for edges 90, concepts 70, annotations 600, embeddings 30 — all inside the bound, and uniformly ~9% above [D-058](s13-decision-register.md#d-058)'s figures on paths whose code did not change, which is session drift rather than regression.
 
-**The other half of the diagnosis above — that the defect "slows every interactive `assert_edge` on a high-degree node" — went unmeasured until 0.10.0, and is now retired too** ([D-134](s13-decision-register.md#d-134)). The table here re-measured the *chunk*; the interactive path kept the caveat for four more releases on the strength of the same fixed index. Measured at out-degree 0 / 2,000 / 8,000 it does not move.
+**The other half of the diagnosis above — that the defect "slows every interactive `assert_edge` on a high-degree node" — went unmeasured until 0.10.0, and is now retired too** ([D-134](s13-decision-register.md#d-134)). The table here re-measured the *chunk*; the interactive path kept the caveat for four more releases on the strength of the same fixed index. Measured into tables of 0 / 2,000 / 8,000 edges — hub out-degree 0 / 666 / 2,666 on this same fixture — it does not move.
 
 #### The bound's scope: three operations are exempt
 

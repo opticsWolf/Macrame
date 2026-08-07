@@ -254,7 +254,7 @@ All targets are measured on the reference hardware (Windows 11, NVMe SSD, 32 GB 
 
 | Operation | Target | Mechanism |
 |---|---|---|
-| Single edge assertion (incl. trigger writes) | ≤ 5 ms | One BEGIN IMMEDIATE … COMMIT; three table writes. **Flat in out-degree, measured** ([D-134](s13-decision-register.md#d-134)): sub-millisecond at out-degree 0 / 2,000 / 8,000, so the "not met at high out-degree" caveat this row carried from 0.5.5 to 0.9.0 is retired — it described the pre-v6 access path ([D-059](s13-decision-register.md#d-059)). The cost is O(version count per edge key), which archival caps |
+| Single edge assertion (incl. trigger writes) | ≤ 5 ms | One BEGIN IMMEDIATE … COMMIT; three table writes. **Flat in out-degree, measured** ([D-134](s13-decision-register.md#d-134)): sub-millisecond into tables of 0 / 2,000 / 8,000 edges, at which the probed hub carries out-degree 0 / 666 / 2,666, so the "not met at high out-degree" caveat this row carried from 0.5.5 to 0.9.0 is retired — it described the pre-v6 access path ([D-059](s13-decision-register.md#d-059)). The cost is O(version count per edge key), which archival caps |
 | Single edge retirement | ≤ 5 ms | Same shape as assertion |
 | Single concept upsert | ≤ 3 ms | One table write + one log entry |
 | 3-hop traversal, warm cache (1K edges) | ≤ 10 ms | Recursive CTE over links_current, indexed |
@@ -273,7 +273,7 @@ All targets are measured on the reference hardware (Windows 11, NVMe SSD, 32 GB 
 | Vector top-10 search (100K concepts) | ≤ 20 ms | DiskANN index scan |
 | Hybrid search, top-10 (100K concepts) | ≤ 50 ms | DiskANN + FTS5 + RRF fusion |
 | Chunk commit, 500 rows, trigger-amplified | ≤ 3 ms | [§5.1.5](s5-modules.md#515-cooperative-chunking--the-golden-rule) golden rule calibration. **Superseded in 0.5.5 ([D-058](s13-decision-register.md#d-058))** — the duration is the budget and the row count is not part of it. See the four rows below |
-| Chunk commit, edges, 90 rows | ≤ 3 ms | 2.39 ms measured **on an empty database**; **8.0 ms and flat** against an 8,000-edge hub since the `v5 → v6` rung shipped `idx_lc_open_interval` ([D-059](s13-decision-register.md#d-059), post-index figure at `ddl.rs:512`). **This row is still missed on a large database** — by 2.7×, where the pre-index 47.7 ms published here until 0.10.0 said 16× — and the residual is now unattributed rather than blamed on a fixed defect. Not re-measured in 0.10.0: [D-134](s13-decision-register.md#d-134) measured the *single assertion*, which is a different operation. `chunk_rows::EDGES` ([D-058](s13-decision-register.md#d-058)) |
+| Chunk commit, edges, 90 rows | ≤ 3 ms | 2.39 ms **on an empty database**; **9.06 ms into an 8,000-edge table**, measured in 0.10.0 across two sessions (9.08, 9.05) against empty-arm controls of 2.69 and 2.65 ms beside them ([D-136](s13-decision-register.md#d-136)). **This row is missed on a populated database, by ~3×** — where the pre-index 47.7 ms published here until 0.10.0 said 16× — and the residual is **unattributed**: it is not the missing index, which shipped in 0.5.6. `chunk_rows::EDGES` ([D-058](s13-decision-register.md#d-058)) |
 | Chunk commit, concepts, 70 rows | ≤ 3 ms | 2.35 ms measured. `chunk_rows::CONCEPTS` |
 | Chunk commit, annotations, 600 rows | ≤ 3 ms | 2.36 ms measured. `chunk_rows::ANNOTATIONS` |
 | Chunk commit, embeddings, 30 rows | ≤ 3 ms | 2.06 ms measured. `chunk_rows::EMBEDDINGS` |

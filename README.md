@@ -236,9 +236,10 @@ almost got written down here as a regression.
 
 **The single-assertion row's caveat is retired, and it was wrong for four minor versions.** This
 paragraph used to say the row "remains linear in out-degree, so a high-degree hub still exceeds it".
-`overlap_guard` now measures the assertion at out-degree 0, 2,000 and 8,000 — 983 / 920 / 882 µs,
-median of three sessions against a 1.52 µs control — so a 4,000× increase in out-degree costs
-nothing ([D-134](docs/architecture/s13-decision-register.md#d-134)). The claim described the access
+`overlap_guard` now measures the assertion into tables of 0, 2,000 and 8,000 edges — hub out-degree
+0, 666 and 2,666 — at 983 / 920 / 882 µs, median of three sessions against a 1.52 µs control, so
+out-degree rises by thousands and latency does not move
+([D-134](docs/architecture/s13-decision-register.md#d-134)). The claim described the access
 path as it stood in 0.5.5 and has been false since the `v5 → v6` rung shipped `idx_lc_open_interval`
 ([D-059](docs/architecture/s13-decision-register.md#d-059)) — it outlived the defect by four
 releases because nothing measured it. The real cost is O(version count per edge key), which

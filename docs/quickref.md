@@ -691,7 +691,7 @@ pub fn estimated_bulk_hold(edges: &[EdgeAssertion]) -> Duration  // ~34 ms / 500
 
 | Operation | Budget | Measured | Notes |
 |---|---|---|---|
-| Single assertion | ≤ 5 ms | 224 µs | **Flat in out-degree** (D-134): measured at 0 / 2,000 / 8,000 with no rise. The old "not met at high out-degree" caveat described the pre-v6 access path (D-059). Real cost is O(version count per edge key), capped by archival |
+| Single assertion | ≤ 5 ms | 224 µs | **Flat in out-degree** (D-134): measured into tables of 0 / 2,000 / 8,000 edges — hub out-degree 0 / 666 / 2,666 — with no rise. The old "not met at high out-degree" caveat described the pre-v6 access path (D-059). Real cost is O(version count per edge key), capped by archival |
 | Chunk commit, edges 90 rows | ≤ 3 ms | ~2.39 ms | Fully amplified (triggers included) |
 | Chunk commit, concepts 70 rows | ≤ 3 ms | ~2.35 ms | |
 | Chunk commit, annotations 600 rows | ≤ 3 ms | ~2.36 ms | |

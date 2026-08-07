@@ -182,6 +182,27 @@ Independent of W1–W3; each is self-contained **except that W4.3 runs before W4
 | W4.10 | `raw()`'s convention lives only in hidden rustdoc | a `// convention (D-068/D-091):` sentinel at `connection.rs:925` and beside the Python surface list in `bindings/python/src/lib.rs`, where a binding contributor adding `raw()` would be standing | v2 §6.4 |
 | W4.11 | `--all-features` test count has no CI job | add the run to `ci.yml`, or drop "362" from `README.md:142`. Prefer adding — `--all-features` is `metrics` + `property-tests`, and the R15 interaction between them is currently unmeasured | v3 N6 |
 | W4.12 | `nul.pdb` residue | delete it; find the `> nul` redirect (Git Bash treats `nul` as a filename) | v3 N7 |
+| W4.13 | the 8.0 ms chunk figure is cited forward, never measured; and `overlap_guard`'s arms are labelled by table size, not out-degree | add a seeded-hub arm to `chunk_budget`, run it, replace the cited figure — and correct the arm labels W1 published | **added in-wave, 0.10.0** |
+
+### W4.13 — Measure the chunk figure W3 could only cite, and fix what W1 mislabelled
+
+**Two defects, one bench change, and the second was found while scoping the first.**
+
+**(a) The 8.0 ms is unmeasured.** W3 replaced §9's and `chunk_rows::EDGES`'s pre-index **47.7 ms** with **8.0 ms**, which is correct but is [D-059](architecture/s13-decision-register.md#d-059)'s 0.5.6 figure cited forward. `chunk_budget` seeds concepts and **no links** by design, so nothing in the bench suite measures a chunk into a populated table. That leaves a published §9 number with no measurement behind it — the shape [D-088](architecture/s13-decision-register.md#d-088) forbids and the exact shape W1 existed to correct. Marking it "not re-measured" was honest and left it unfalsifiable.
+
+**(b) `overlap_guard`'s arms do not mean what their labels say.** `seed_edges(n)` builds `Shape::StarOfStars`, whose generator (`fixtures.rs:189`) gives node 0 an out-degree of `edges / 3`. The arms are therefore **0 / 2,000 / 8,000 edges in the table**, at which the probed hub `c0000000` has out-degree **0 / 666 / 2,666**. W1 published them as out-degrees; that is wrong by 3×.
+
+**The conclusion survives and the wording does not.** Out-degree still varied from 0 to 2,666 with no rise in latency, so *flat in out-degree* stands. But every location W3 touched states the arms as `0 / 2,000 / 8,000` out-degree, and each must be restated as table size with the hub degree named.
+
+**This also explains something about D-059.** Its own "8,000-edge hub" comes from the same generator, so it means the same thing — 8,000 edges in the table, hub degree ~2,666. The two figures are therefore comparable, which is what matters for (a). It is also a small part of why the original claim was confusing: a claim *about out-degree* was evidenced by a fixture *labelled by table size*.
+
+| Step | What |
+|---|---|
+| W4.13.1 | `chunk_budget` gains an `edges/90 into an 8,000-edge table` arm, seeded with the same `seed_edges` D-059 used, so the number is comparable rather than merely new |
+| W4.13.2 | Run it; replace the cited 8.0 ms in `s6-s10:264` and `connection.rs` with the measured figure, or confirm it |
+| W4.13.3 | Restate every arm label W1/W3 published — D-134, README, `quickref.md`, §9, `s5-modules.md`, the release note, and `overlap_guard`'s own rustdoc |
+
+**Acceptance:** no §9 row cites a figure no bench produces, and no document states an out-degree the fixture does not create.
 
 **W4.3 is sequenced ahead of W4.1, because it determines whether W4.1 is a complete mitigation or a partial one.** W4.1 bounds *concurrent opens*, which is the R15 shape. It does nothing about what a *single* caller can do through the connection once open. If `ATTACH` on a `SQLITE_OPEN_READ_ONLY` connection yields a writable attachment, then `diagnostic_query` — the only arbitrary-SQL surface the binding exposes — is a back door around the "OS-level boundary, not a reversible pragma" claim, and that is a different defect with a different fix (refusing `ATTACH` in `diagnostic_query`, or amending the claim). Running the two-row probe first costs one `cargo run --example` and decides which of those W4.1 is part of.
 

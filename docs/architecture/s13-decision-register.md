@@ -1519,7 +1519,7 @@ Machine unmoved, untouched path unmoved, read paths moved. That triangulates the
 
 **The single-assertion row changed shape and the caveat is the load-bearing half.** It now carries a number (258 µs on this fixture) where it previously carried only *"not met at high out-degree"*. Both are true and the second still governs: [D-118](s13-decision-register.md#d-118)'s index drop bought −7.9% on that path and **did not change the complexity** — the single-open guard still scans the source's whole out-degree ([D-059](s13-decision-register.md#d-059)), so a high-degree hub still exceeds 5 ms. A measured figure beside an unchanged complexity claim is an invitation to read the figure as the answer, so the row states both and the README repeats the caveat rather than the number alone.
 
-**Superseded on this point by [D-134](s13-decision-register.md#d-134) (0.10.0), and the table above is left as it was recorded.** The caveat this entry declined to drop has been measured and does not hold: the single assertion is flat at out-degree 0 / 2,000 / 8,000. The reasoning here — *the fixture is not the hazard, the complexity is* — was correct given what was available, which was a plan-shape assertion and no clock; what it could not know is that the complexity had already been removed by the `v5 → v6` rung two releases earlier. The 258 µs row and its "still O(out-degree)" cell stay as written because they record what 0.8.0 measured and believed, and rewriting that would destroy the evidence that the claim survived a deliberate review. D-134 carries the retirement and the replacement claim.
+**Superseded on this point by [D-134](s13-decision-register.md#d-134) (0.10.0), and the table above is left as it was recorded.** The caveat this entry declined to drop has been measured and does not hold: the single assertion is flat across tables of 0 / 2,000 / 8,000 edges, at which the probed hub carries out-degree 0 / 666 / 2,666 ([D-136](s13-decision-register.md#d-136) corrects the labels D-134 first published). The reasoning here — *the fixture is not the hazard, the complexity is* — was correct given what was available, which was a plan-shape assertion and no clock; what it could not know is that the complexity had already been removed by the `v5 → v6` rung two releases earlier. The 258 µs row and its "still O(out-degree)" cell stay as written because they record what 0.8.0 measured and believed, and rewriting that would destroy the evidence that the claim survived a deliberate review. D-134 carries the retirement and the replacement claim.
 
 **These are still not gates**, and 0.8.0 does not change that ([D-055](s13-decision-register.md#d-055)). An absolute `≤ 5 ms` asserted on a shared CI runner is an assertion about whichever machine picked up the job — the flaky red this project refuses by name elsewhere. Regression detection remains criterion baselines, machine against itself.
 
@@ -1758,16 +1758,18 @@ Nine documentation locations — two of them in the normative [§9](s6-s10-flows
 
 `overlap_guard` in `benches/budgets.rs` — which existed, was registered, and had never been run for publication — measures `assert_edge` against a hub at three out-degrees. Median of three sessions, arms in the same session as their control:
 
-| arm | median | 95% CI | within-arm spread across sessions |
-|---|---|---|---|
-| `control/select_1` | 1.521 µs | 1.514 – 1.531 | 0.7% |
-| out-degree 0 | 983 µs | 955 – 1026 | 11% |
-| out-degree 2,000 | 920 µs | 891 – 948 | 2.0% |
-| out-degree 8,000 | 882 µs | 855 – 916 | 4.6% |
+| arm (edges in table) | hub out-degree | median | 95% CI | within-arm spread across sessions |
+|---|---|---|---|---|
+| `control/select_1` | — | 1.521 µs | 1.514 – 1.531 | 0.7% |
+| 0 | 0 | 983 µs | 955 – 1026 | 11% |
+| 2,000 | 666 | 920 µs | 891 – 948 | 2.0% |
+| 8,000 | 2,666 | 882 µs | 855 – 916 | 4.6% |
 
-**A 4,000× increase in out-degree produces no increase in latency**, and the intervals overlap across nearly their full width. The claim is retired. `idx_lc_open_interval` is chosen on this path, which is what `the_single_open_probe_seeks_rather_than_scans` already asserted about the plan and nothing had confirmed about the clock.
+**Out-degree rises from 0 to 2,666 and latency does not move**, and the intervals overlap across nearly their full width. The claim is retired. `idx_lc_open_interval` is chosen on this path, which is what `the_single_open_probe_seeks_rather_than_scans` already asserted about the plan and nothing had confirmed about the clock.
 
 **The third arm is 8,000 because that is D-059's own scale** (`ddl.rs:509`). Two points can only show *not growing between these two*; three can show flat, and until this wave the bench stopped at 2,000 while the docs published a number taken at 8,000.
+
+**The arm parameter is table size, not out-degree, and this entry said otherwise when first written (corrected in W4.13).** `seed_edges` builds `Shape::StarOfStars`, whose generator makes node 0 the source of `edges / 3` (`fixtures.rs:189`) — so the arms are 0 / 2,000 / 8,000 **edges in the table** and the probed hub carries 0 / 666 / 2,666 of them. The first draft of this table published the arm parameter as the out-degree, overstating it by 3×. The conclusion is unchanged, because 2,666 is still an enormous multiple of zero and the curve is flat across it; the wording is not, because "measured at out-degree 8,000" is a claim the fixture does not support. D-059's own "8,000-edge hub" comes from the same generator and means the same thing, which is what keeps the two figures comparable — and is a small part of why the original claim was confusing, since a claim *about out-degree* was evidenced by a fixture *labelled by table size*.
 
 ## Three numbers that must not be compared, and the trap is arithmetic
 
@@ -1834,3 +1836,32 @@ W2 was planned with four tests, one of which — the crash-safety claim "asserte
 Both control arms use a real abort with no `#[cfg(test)]` seam, by the route `temporal_tests` established: `COLD_SCHEMA` uses `IF NOT EXISTS`, so a cold file pre-created with a truncated `links` table survives it untouched and the copy fails on a missing column — inside the session, after the marker. Each such test pins the failure to that column, because an abort *before* the marker would make the reopen assertion pass while proving nothing.
 
 **Rejected.** *Preventing the marker rather than detecting it* — not expressible; claiming otherwise would be the more dangerous entry. *Reusing `DbError::Migration`* — above; the schema is right and the contents are wrong. *Checking on a hot path, or in the guards themselves* — would refuse a healthy database mid-archive, for the reason above. *A schema rung* — nothing in the DDL changes; this is a check over `sqlite_master`, and [D-036](s13-decision-register.md#d-036)'s ladder is for structure. *Dropping the marker automatically at open instead of refusing* — silently repairing a database whose guards have been off for an unknown period would destroy the only evidence that anything happened, and the deletions it permitted are not recoverable by dropping the table. *Writing the fourth test as planned* — it duplicated `temporal_tests` more weakly; the premise that the claim was unasserted was wrong, and shipping the test anyway would have added a test and no coverage.
+
+<a id="d-136"></a>D-136 — the chunk figure §9 had only ever *cited* is measured, and [D-134](s13-decision-register.md#d-134)'s arm labels are corrected: they are table sizes, not out-degrees (0.10.0, W4.13). [D-055](s13-decision-register.md#d-055), [D-058](s13-decision-register.md#d-058), [D-059](s13-decision-register.md#d-059), [D-070](s13-decision-register.md#d-070), [D-088](s13-decision-register.md#d-088), [D-090](s13-decision-register.md#d-090), [D-134](s13-decision-register.md#d-134), [§5.1.5](s5-modules.md#515-cooperative-chunking--the-golden-rule), [§9](s6-s10-flows-to-dependencies.md#9-performance-budgets).
+
+> **W3 replaced a wrong number with a right one and left it just as unmeasured, and the wave that fixed that found the label on its own evidence was overstated by 3×.**
+
+## The number nothing produced
+
+[D-134](s13-decision-register.md#d-134)'s prose sweep took §9's chunk row and `chunk_rows::EDGES` from the pre-index **47.7 ms** to the post-index **8.0 ms**. Both figures are D-059's; the second was cited forward from 0.5.6 and marked "not re-measured". That is more honest than what it replaced and no more falsifiable, because `chunk_budget` seeds concepts and **no links** by design — nothing in the bench suite wrote a chunk into a populated table. A §9 row backed by a five-year-old quotation is the state [D-088](s13-decision-register.md#d-088) exists to forbid, and the wave that had just spent itself correcting exactly that shipped one.
+
+`chunk_budget` gains a seeded arm, using `seed_edges` — D-059's own generator — so the result is comparable rather than merely newer:
+
+| arm | session 1 | session 2 | published |
+|---|---|---|---|
+| `edges/90`, empty table | 2.69 ms | 2.65 ms | 2.39 ms ([D-058](s13-decision-register.md#d-058)) |
+| `edges/90` into an 8,000-edge table | 9.08 ms | 9.05 ms | — |
+
+**It corroborates D-059 rather than replacing it.** The absolute figure is ~13% above the quoted 8.0 ms, and the empty arm is ~12% above its own published 2.39 ms in the same sessions — so the session is running slow and the *ratio* is the stable quantity: **3.4× the empty-table cost here, 3.35× there**. [D-070](s13-decision-register.md#d-070) again, and the reason the row now states a measurement with its control rather than a number alone.
+
+**The budget is still missed by ~3×, and the cause is still unknown.** It is not the missing index — that shipped as the `v5 → v6` rung. Nothing has attributed the residual, and this entry does not either; what changes is that the miss is now a measurement rather than a quotation, so a future fix has something to move.
+
+## The label on D-134's own evidence was wrong by 3×
+
+Found while scoping the arm above. `seed_edges(n)` builds `Shape::StarOfStars`, and that generator makes node 0 the source of `edges / 3` (`fixtures.rs:189`). `overlap_guard` parameterises its arms by the count handed to `seed_edges` — **edges in the table** — and D-134 published them as out-degrees. The arms are 0 / 2,000 / 8,000 edges, at which the probed hub carries out-degree **0 / 666 / 2,666**.
+
+**The conclusion stands and the wording did not.** Out-degree ranges from 0 to 2,666 across the arms with no rise in latency, which retires the caveat exactly as D-134 says. What was not supportable is the sentence "measured at out-degree 8,000", which appeared in nine places. Every one is restated.
+
+**D-059's "8,000-edge hub" has the same property**, being the same generator — which is what makes the two comparable, and is a small part of why the original claim was hard to see through: a claim *about out-degree* was evidenced by a fixture *labelled by table size*, and nobody reconciled the two for four releases.
+
+**Rejected.** *Leaving the 8.0 ms cited and marked "not re-measured"* — the marking is honest and the number is still unfalsifiable; [D-088](s13-decision-register.md#d-088) is about what is published, not about how it is hedged. *Seeding a true out-degree-8,000 hub instead* — it would measure a different fixture from D-059's and forfeit the comparison, which is the whole reason this arm is worth having; the guard is O(version count) anyway, so out-degree is not the variable. *Restating D-134's conclusion as well as its labels* — the conclusion was never a function of the mislabel; out-degree really does vary by thousands across the arms. *Re-running the whole `chunk_budget` group to a third session* — the two agree to 0.3% on the arm that matters, which is far inside [D-070](s13-decision-register.md#d-070)'s noise and does not need a tiebreak. *Adding an assertion that pins the hub's out-degree* — the fixture is already pinned by `fixture_matrix_tests`; what failed was reading it, not the fixture.
