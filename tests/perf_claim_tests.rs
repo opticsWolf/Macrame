@@ -344,22 +344,29 @@ const REGISTRY: &[Claim] = &[
         status: Live,
     },
     // The 0.10.0 re-measurement of the same arm, in README's per-release table.
-    // Contested rather than Live: it disagrees with the four entries above by
-    // 14%, at a 1.1% spread, with a normal control — and nothing explains it.
+    //
+    // `Contested` for two releases, and **closed in 0.12.0** (D-145): six
+    // sessions showed the arm tracking `control/select_1` monotonically, and
+    // conditioned on a normal control it reads 2.36 ms at a 0.4% spread. The
+    // 2.71 figure is the elevated-control state. So this is history now, not a
+    // conflict — `Superseded` rather than deleted, because README's column is a
+    // per-release series and 2.71 is genuinely what was measured then.
+    //
+    // Worth keeping as an example of what the category is for: the entry that
+    // opened the contest (D-141) was wrong about *why* the figures differed,
+    // and the registry still did its job — it kept the disagreement addressable
+    // for two releases instead of letting one number quietly overwrite another.
     Claim {
         operation: "chunk commit, edges, 90 rows",
         fixture: fx::EMPTY,
         metric: LATENCY,
-        value: "2.71 ms — re-measured at 0.10.0, unattributed",
+        value: "2.71 ms — the 0.10.0 column's figure, since explained as an elevated-control session",
         text: "**2.71 ms — see below**",
         doc_name: "README.md",
         doc: README,
         bench_group: "chunk_budget",
-        decision: "d-141",
-        status: Contested {
-            with: "2.39 ms",
-            owner: "named-for-0110-in-this-order",
-        },
+        decision: "d-145",
+        status: Superseded { by: "d-145" },
     },
     // ---- chunk commit, edges, 90 rows, into a populated table -------------
     //
@@ -652,34 +659,85 @@ fn one_operation_fixture_metric_key_carries_one_value() {
 #[test]
 fn every_contested_claim_names_who_reconciles_it() {
     for c in REGISTRY {
-        let Contested { with, owner } = c.status else {
-            continue;
-        };
-
-        // The contested value must actually be published under this key, or
-        // the entry is describing a disagreement that does not exist.
-        let peer = REGISTRY.iter().any(|o| {
-            o.operation == c.operation
-                && o.fixture == c.fixture
-                && o.metric == c.metric
-                && o.value.contains(with)
-        });
-        assert!(
-            peer,
-            "{}: contests {with:?}, and no other entry under this key publishes              it. Either the conflict is stale or the peer entry was deleted.",
-            c.doc_name
-        );
-
-        let heading = format!("<a id=\"{owner}\"></a>");
-        let slug = format!("#{owner}");
-        assert!(
-            REGISTER.contains(&heading)
-                || APPENDICES.contains(&slug)
-                || REGISTER.contains(&slug),
-            "{}: contested, and its reconciliation owner {owner:?} resolves to              nothing. A recorded conflict with no owner is an excuse.",
-            c.doc_name
-        );
+        if let Err(why) = contested_is_well_formed(c, REGISTRY) {
+            panic!("{}: {why}", c.doc_name);
+        }
     }
+
+    // **The registry currently holds no `Contested` entry** — D-145 closed the
+    // only one — so the loop above passes over an empty set and proves nothing.
+    // A gate that cannot fail is the thing this file exists to object to, so
+    // the detector is exercised against fixtures here, the same way
+    // `doc_sync_tests`'s schedule-pattern test keeps its parser alive.
+    let peer = || Claim {
+        operation: "synthetic",
+        fixture: "synthetic",
+        metric: "synthetic",
+        value: "1.00 ms",
+        text: "",
+        doc_name: "none",
+        doc: "",
+        bench_group: "chunk_budget",
+        decision: "d-145",
+        status: Live,
+    };
+    let contested = |with, owner| Claim {
+        status: Contested { with, owner },
+        value: "2.00 ms",
+        ..peer()
+    };
+
+    let well_formed = [contested("1.00 ms", "d-145"), peer()];
+    assert!(
+        contested_is_well_formed(&well_formed[0], &well_formed).is_ok(),
+        "a contest naming a value its peer publishes, and a real anchor, must pass"
+    );
+
+    let no_peer = [contested("9.99 ms", "d-145"), peer()];
+    assert!(
+        contested_is_well_formed(&no_peer[0], &no_peer).is_err(),
+        "a contest against a value nobody publishes must fail"
+    );
+
+    let no_owner = [contested("1.00 ms", "d-nonexistent"), peer()];
+    assert!(
+        contested_is_well_formed(&no_owner[0], &no_owner).is_err(),
+        "a contest whose owner anchor resolves to nothing must fail"
+    );
+}
+
+/// The two conditions a `Contested` entry has to meet.
+///
+/// Extracted from the test so it can be run against fixtures as well as against
+/// the registry. It returns rather than asserts for the same reason: a check
+/// that can only panic cannot be shown to fire.
+fn contested_is_well_formed(c: &Claim, registry: &[Claim]) -> Result<(), String> {
+    let Contested { with, owner } = c.status else {
+        return Ok(());
+    };
+
+    // The contested value must actually be published under this key, or the
+    // entry is describing a disagreement that does not exist.
+    let peer = registry.iter().any(|o| {
+        o.operation == c.operation
+            && o.fixture == c.fixture
+            && o.metric == c.metric
+            && o.value.contains(with)
+    });
+    if !peer {
+        return Err(format!(
+            "contests {with:?}, and no other entry under this key publishes it.              Either the conflict is stale or the peer entry was deleted."
+        ));
+    }
+
+    let heading = format!("<a id=\"{owner}\"></a>");
+    let slug = format!("#{owner}");
+    if !(REGISTER.contains(&heading) || APPENDICES.contains(&slug) || REGISTER.contains(&slug)) {
+        return Err(format!(
+            "contested, and its reconciliation owner {owner:?} resolves to              nothing. A recorded conflict with no owner is an excuse."
+        ));
+    }
+    Ok(())
 }
 
 /// The registry still covers the two claims that actually drifted.

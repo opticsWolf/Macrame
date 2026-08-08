@@ -2188,3 +2188,53 @@ Falsified before being trusted: the broken link was restored, the gate exited 1 
 Not a link. `verify` is private and this is a *public* error type's documentation, so the honest form names the function and its file and says why it is not a link — a reader who wants it can find it, and nobody is tempted to restore a link that cannot resolve. Making `verify` public to satisfy the link would widen the API surface to fix a documentation defect, which is the tail wagging the dog.
 
 **Rejected.** *Making `verify` `pub`* — above; a public item exists for callers, not for rustdoc. *`#[allow(rustdoc::broken_intra_doc_links)]` on the variant* — it silences the class on that item forever to fix one instance, and the next broken link there would be invisible again. *A `#[test]` that greps rustdoc's output* — it would need rustdoc to have run, which is the thing that was not happening; the dependency is backwards. *Adding a fourth registry for doc links* — `doc_link_tests` already validates the **markdown** links between architecture files and could not have seen this one, because intra-doc links are a Rust construct resolved by a different tool; a registry would have to reimplement rustdoc's resolver. *Leaving it to CI* — CI did catch it, after a tag and a release note. A gate that only fires downstream of a release is a gate that reports history.
+---
+
+<a id="d-145"></a>D-145 — the contested chunk figure is **closed, in favour of 2.39 ms**: [D-141](s13-decision-register.md#d-141) read within-session stability as evidence about between-session variance, and it is not (0.12.0). [D-055](s13-decision-register.md#d-055), [D-058](s13-decision-register.md#d-058), [D-070](s13-decision-register.md#d-070), [D-090](s13-decision-register.md#d-090), [D-110](s13-decision-register.md#d-110), [D-136](s13-decision-register.md#d-136), [D-139](s13-decision-register.md#d-139), [D-141](s13-decision-register.md#d-141), [D-143](s13-decision-register.md#d-143), [§9](s6-s10-flows-to-dependencies.md#9-performance-budgets).
+
+> **The gate held: a `Contested` claim survived two releases and was still there to be settled. What did not hold was the reasoning that opened it, and this entry is mostly about that.**
+
+**Fixture: `chunk_budget`'s empty arm** — concepts seeded, no links ([D-088](s13-decision-register.md#d-088)). The same arm in both disputed measurements.
+
+## What the contest was
+
+[D-141](s13-decision-register.md#d-141) registered README's 0.10.0 column reading **2.71 ms** against the **2.39 ms** four documents publish as the current cost, and declined to resolve it by editing either. Its argument for treating the rise as real, quoted so it can be checked: *"five measurements across the day at 2.65, 2.69, 2.70, 2.71, 2.73 — a **1.1% spread**, with `control/select_1` at 1.55–1.69 µs … A 14% rise that stable, with the control where it belongs, is not session variance."*
+
+## Six sessions, and the control is the finding
+
+| session | `control/select_1` | `edges/90` |
+|---|---|---|
+| 1 | 1.888 µs | 2.732 ms |
+| 2 | 1.574 µs | 2.542 ms |
+| 3 | 1.765 µs | 2.614 ms |
+| 4 | **1.544 µs** | **2.356 ms** |
+| 5 | **1.509 µs** | **2.358 ms** |
+| 6 | **1.528 µs** | **2.365 ms** |
+
+**The arm tracks the control monotonically.** Ordered by control, the arm is ordered too, across six sessions with no exception. Conditioned on a control at or below [D-090](s13-decision-register.md#d-090)'s recorded 1.589–1.639 µs, the arm reads **2.356 / 2.358 / 2.365** — a **0.4% spread**, agreeing with the published 2.39 ms to within 1.4%. Conditioned on an elevated control it reads 2.54–2.73, which is the disputed figure.
+
+**So 2.71 ms is a measurement of a slow machine, not of a slow chunk.** The contest is closed and 2.39 ms stands as the published current cost. Nothing in four documents changes.
+
+## The error in D-141, stated plainly
+
+Its five measurements really were 1.1% apart. That fact carries no information about the question it was used to answer. **Within-session spread measures the instrument; between-session spread measures the machine** — and [D-070](s13-decision-register.md#d-070) had already put the second at ~29%, more than twice the 14% gap being called "not session variance". D-141 cited D-070's figure in the paragraph immediately above, applied it to the eight rows that agreed, and did not apply it to the one that did not.
+
+**The control was in the data and was read the wrong way round.** D-141 said 1.55–1.69 µs was "the control where it belongs" against a recorded 1.589–1.639. It straddles that band and exceeds it at the top; today's *normal* sessions read 1.509–1.544. Those five measurements were taken in the elevated state, and the control said so at the time. What was missing was the comparison this entry makes — arm against control, across sessions, rather than arm against a remembered number.
+
+**The right lesson is not "measure more".** D-141 explicitly rejected *"re-running until a session agrees with 2.39"*, and that rejection was correct: choosing the run that matches the published figure is the practice [D-070](s13-decision-register.md#d-070)'s median rule exists to prevent. This is not that. Six sessions were run *before* knowing which way they would fall, all six are published above, and the resolution comes from a relationship between two columns rather than from picking a row.
+
+## What closes, and what this does not touch
+
+`Status::Contested` becomes `Superseded { by: "d-145" }` for the README entry. That is the category behaving as designed: the 0.10.0 column **keeps 2.71 ms verbatim**, because it is a per-release measurement series and this register does not rewrite history — the number was honestly measured and is now explained. README's prose beside it is corrected, since "attributed to nothing" is no longer true.
+
+**`chunk_rows::EDGES` is unaffected in both directions.** D-141 declined to update the four 2.39 locations partly on the grounds that doing so would re-derive a load-bearing constant; that objection has since expired anyway, because [D-143](s13-decision-register.md#d-143) re-derived the constant against the [D-088](s13-decision-register.md#d-088) matrix on grounds that never mention this figure. The constant stays at 90 for D-143's reasons, and would have regardless of how this contest resolved.
+
+**Nothing here disturbs [D-136](s13-decision-register.md#d-136) or [D-142](s13-decision-register.md#d-142).** Those concern the *populated* arm, whose ratio to the empty arm is the quantity they publish precisely because the absolutes move with the session — which is this entry's finding arriving one release early, on the row next door.
+
+## Why it needed closing rather than re-pointing
+
+D-141 named [Appendix C](appendices.md#named-for-0110-in-this-order)'s 0.11.0 list as the owner. Both items in that list shipped in 0.11.0 and neither addressed this, so the claim was pointing at a completed section — and `every_contested_claim_names_who_reconciles_it` stayed green throughout, because the anchor resolved. **That is [D-110](s13-decision-register.md#d-110)'s defect exactly**: D-087 and D-089 read "Scheduled for 0.7.0" while 0.7.0 shipped without them, every anchor resolving perfectly. A reference that looks like ownership is not ownership.
+
+Re-pointing to 0.12.0 would have reproduced it a third time. The gate's requirement that an owner *exist* cannot be strengthened into a requirement that the owner *act* without teaching the test to read prose, so the standing answer is to close a contest at the first release that can, rather than to let it accumulate owners.
+
+**Rejected.** *Re-pointing the owner to 0.12.0* — above; a third instance of the same defect, and the measurement that closes it cost six bench sessions. *Updating the four 2.39 locations to 2.71* — it is the elevated-control figure, so this would have published the artifact and retired the fact. *Rewriting README's 0.10.0 cell to 2.36* — the column is a per-release series and 2.71 is what was measured then; correcting the prose keeps the record honest without falsifying the observation. *Leaving `Contested` in place until 0.12.0's chunk work* — the time-based chunk loop changes what the constant is derived from, not what a chunk costs, so it would not have resolved this either. *Adding a rule that a bench figure must be normalised by its control before publication* — [D-055](s13-decision-register.md#d-055) and [D-090](s13-decision-register.md#d-090) already require the control to be published per group, and it was; the failure was in reading it, and a rule that restates an existing rule does not fix a reading.

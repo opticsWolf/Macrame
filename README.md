@@ -208,21 +208,24 @@ the expected answer, because 0.10.0 changed no traversal, no search, no fold and
 [D-090](docs/architecture/s13-decision-register.md#d-090)'s recorded **1.589–1.639 µs**, so the
 machine is where it was.
 
-**One row is not noise, and it is not explained.** Chunk commit has published 2.39 / 2.40 / 2.38 ms
-for three releases and now reads **2.71 ms** — five measurements across today's sessions at 2.65,
-2.69, 2.70, 2.71, 2.73, a **1.1% spread** with a normal control beside it. A 14% rise that stable is
-not session variance. Nothing in 0.10.0 touches the edge write path: W2's check runs at `open`, and
-W4.8's asserts are `debug_assert`s a release bench compiles out. **It is reported as measured and
-attributed to nothing**, which is the same standard
-[D-136](docs/architecture/s13-decision-register.md#d-136) applied to the 3× budget miss on the
-populated-table arm.
+**One row read high, and 0.12.0 explained it: the machine, not the chunk**
+([D-145](docs/architecture/s13-decision-register.md#d-145)). Chunk commit has published
+2.39 / 2.40 / 2.38 ms for three releases and this column reads **2.71 ms** — five measurements at a
+1.1% spread, which was taken at the time as evidence that a 14% rise could not be session variance.
+It was not evidence about that at all: a tight spread *within* a session says nothing about the
+spread *between* sessions, which [D-070](docs/architecture/s13-decision-register.md#d-070) had
+already measured at ~29%. Re-run over six sessions, the arm tracks `control/select_1`
+monotonically — with the control at or below D-090's recorded band it reads **2.356 / 2.358 /
+2.365 ms**, a 0.4% spread agreeing with 2.39; with an elevated control it reads 2.54-2.73.
+**The cell is left at 2.71 because that is what was measured here**, and this table is a
+per-release series rather than a statement of current cost. The current cost is 2.39 ms.
 
-**It does not overturn `chunk_rows::EDGES`.** [D-058](docs/architecture/s13-decision-register.md#d-058)
-solved the 90-row constant against the 3 ms bound *from* the 2.39 ms figure, and one afternoon on one
-machine with no mechanism is not grounds to re-derive a load-bearing constant. The reconciliation is
-already owned: it is item 1 of
-[Appendix C's 0.11.0 list](docs/architecture/appendices.md#named-for-0110-in-this-order), which
-existed before this measurement and now has a second reason to run.
+**It never overturned `chunk_rows::EDGES`, and by 0.11.0 it could not have.**
+[D-058](docs/architecture/s13-decision-register.md#d-058) solved the 90-row constant against the
+3 ms bound *from* the 2.39 ms figure, which is why a 14% move in that figure looked consequential.
+It is not any more: [D-143](docs/architecture/s13-decision-register.md#d-143) re-derived all four
+constants against the fixture matrix, on grounds that never mention this number. The constant stays
+at 90 for those reasons, and would have whichever way this row resolved.
 
 **Two controls, or the read-path numbers would mean nothing.** A uniform improvement across
 unrelated paths is what a faster *machine* looks like, so: the fixed `control/select_1` row reads
