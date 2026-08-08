@@ -1,6 +1,6 @@
 # Macrame — Architecture Quick Reference
 
-**v0.11.0 · A Bitemporal Graph Ledger on libSQL**
+**v0.12.0 · A Bitemporal Graph Ledger on libSQL**
 
 ---
 
@@ -788,7 +788,7 @@ The surface itself *is* pinned: `tests/doc_sync_tests.rs` fails the build when t
 
 ---
 
-## 10. Python Bindings (v0.11.0)
+## 10. Python Bindings (v0.12.0)
 
 A synchronous Python binding built on pyo3 0.29 and maturin, delivered as a wheel alongside the Rust crate. The binding is **synchronous** (D-095): the Write Actor serialises every write through one channel, so exposing `await` on the write path advertises concurrency the architecture does not grant. A mixed async/sync surface is worse than either pure form.
 
@@ -829,4 +829,4 @@ A synchronous Python binding built on pyo3 0.29 and maturin, delivered as a whee
 
 ---
 
-*Last updated: 2026-08-07 · v0.11.0 · Synced against architecture (s4–s14, appendices A–C) · Pinned by `tests/doc_sync_tests.rs` and `tests/perf_claim_tests.rs`*
+*Last updated: 2026-08-08 · v0.12.0 · Synced against architecture (s4–s14, appendices A–C) · Pinned by `tests/doc_sync_tests.rs` and `tests/perf_claim_tests.rs`*

@@ -139,7 +139,7 @@ v8 is the last rung that could change a *primary key* before the 1.0 freeze: `ro
 | Runtime | tokio async, single process |
 | Engine | libSQL 0.9.30 (MIT, unmodified) |
 | Schema version | 10 |
-| Test suite | 340 Rust · 349 with `metrics` · 355 Python — all green (measured 2026-08-07, 0.11.0). The three `property-tests` binaries (23 tests) are **run as their own step** — see below. **`--all-features` is not a supported configuration**, see below. Regenerate rather than trust this line: `python scripts/run_rust_suite.py --features metrics` |
+| Test suite | 348 Rust · 357 with `metrics` · 355 Python — all green (measured 2026-08-08, 0.12.0). The three `property-tests` binaries (23 tests) are **run as their own step** — see below. **`--all-features` is not a supported configuration**, see below. Regenerate rather than trust this line: `python scripts/run_rust_suite.py --features metrics` |
 | Dependencies | tokio, serde, bincode, zstd, thiserror, tracing, ulid |
 
 ### Module Map
@@ -156,7 +156,7 @@ v8 is the last rung that could change a *primary key* before the 1.0 freeze: `ro
 
 ---
 
-## Python Bindings (v0.11.0)
+## Python Bindings (v0.12.0)
 
 | Detail | Value |
 |---|---|

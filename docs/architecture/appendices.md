@@ -321,9 +321,19 @@ Two items opened in 0.10.0 by [D-136](s13-decision-register.md#d-136). They are 
 
 ### Named for 0.12.0, and it is one item
 
-**Make the chunk loop stop on elapsed time rather than on a row count.** Both 0.11.0 items are delivered and they converge on this. [D-058](s13-decision-register.md#d-058) had already re-derived §5.1.5's golden rule as *a bound on duration, where the row count is not part of it*; the four `chunk_rows` constants are an approximation of that bound fitted at one population, and [D-143](s13-decision-register.md#d-143) is the measurement showing the approximation has expired on the edge path — no row count satisfies a fixed duration on a path whose per-row cost grows with the table. The constants would become an upper bound rather than the criterion.
+**Make the chunk loop stop on elapsed time rather than on a row count. — DELIVERED in 0.12.0 ([D-146](s13-decision-register.md#d-146)).** Both 0.11.0 items are delivered and they converge on this. [D-058](s13-decision-register.md#d-058) had already re-derived §5.1.5's golden rule as *a bound on duration, where the row count is not part of it*; the four `chunk_rows` constants are an approximation of that bound fitted at one population, and [D-143](s13-decision-register.md#d-143) is the measurement showing the approximation has expired on the edge path — no row count satisfies a fixed duration on a path whose per-row cost grows with the table. The constants would become an upper bound rather than the criterion.
 
 This is a **write-actor design change** with its own alternatives — where the clock is read, what happens to a chunk already in flight when the budget elapses, and whether a time-based loop can still promise the caller a predictable transaction size — which is exactly why it was not taken as a side effect of measuring. [D-079](s13-decision-register.md#d-079)'s over-budget hold counter is the detector that already exists, and it is why this is scheduled rather than urgent.
+
+All three alternatives were answered ([D-146](s13-decision-register.md#d-146)): the clock is read in the actor around its own transaction, the chunk in flight always commits in full because the lock is not preemptible, and the predictable transaction size is **given up** — the boundaries are now machine-dependent and [§5.1.6](s5-modules.md#516-the-fidelity-boundary-of-chunked-writes) says so.
+
+### Named for 0.13.0, and both come from measuring 0.12.0
+
+**1. The first chunk is the worst one, and nothing yet stops that.** [D-146](s13-decision-register.md#d-146) measured the adaptive loop's longest hold at **7.7–10.2 ms** against **7.6–15.2 ms** for the fixed size it replaced — barely moved, because the loop starts at the ceiling and cannot know better until it has paid for one chunk at that size. The typical stall halved; the worst did not move. A warm-up chunk would fix it and is *a size chosen ahead of time by another name*, which is the thing 0.12.0 just removed — so it needs the measurement first: what does the first chunk cost at sizes between the floor and the ceiling, on the D-088 matrix, and is there a starting size that is cheap when wrong and quick to grow when right.
+
+**2. A cold arm for R15.** [D-147](s13-decision-register.md#d-147) measured the quarantined step at 93% per attempt under sustained load, against ~78% implied by CI's own red rate and 45–75% recorded for single binaries in earlier sessions. The conclusion was that the rate is a property of the machine and the load rather than of this crate, and the measurement that would separate those two — runs spaced minutes apart on the same box — has not been taken. Until it is, no figure here predicts any other machine, which is a documented limitation and not a blocker.
+
+**The trigger that makes either due sooner:** for the first, a report of a visible stall attributable to a bulk import; for the second, a proposal to change the retry budget, or an R15 rate quoted anywhere outside `.cargo/config.toml`.
 
 ---
 
