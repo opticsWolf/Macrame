@@ -127,7 +127,7 @@ recent log                detached on archive
 | `vector` | `vector/mod.rs`, `vector/registry.rs`, `vector/model.rs`, `vector/hybrid.rs` | Model registration, embedding upsert, DiskANN search, hybrid RRF fusion |
 | `integrity` | `integrity/shadow.rs`, `integrity/rebuild.rs` | `audit_current()`, `rebuild_current()` (atomic), `rebuild_current_chunked()` (shadow-swap), `ShadowStep`/`ShadowOutcome` |
 | `metrics` | `metrics.rs` | `ActorMetrics`, `HoldTimer`, `CommandKind`, `MetricsSnapshot` — feature-gated, zero-cost when off |
-| `util` | `util/clock.rs`, `util/timestamp.rs`, `util/ids.rs`, `util/limits.rs` | `Clock` trait, timestamp normalization/parsing, ULID generation, `CHUNK_BUDGET`, `HYDRATE_CHUNK` |
+| `util` | `util/clock.rs`, `util/timestamp.rs`, `util/ids.rs`, `util/limits.rs` | `Clock` trait, timestamp normalization/parsing, ULID generation, `HYDRATE_CHUNK` (`CHUNK_BUDGET` is in `connection.rs`) |
 | `connection` | `connection.rs` | `Database` handle, Write Actor, priority channels, `low_chunked()`, `ActorShared` |
 | `error` | `error.rs` | `DbError` enum, error classification |
 | `prelude` | `prelude.rs` | Re-exports `AttributeMode`, `EdgeAssertion`, `TraversalBuilder` (not `Subgraph` or algorithms) |
@@ -668,7 +668,9 @@ pub fn estimated_bulk_hold(edges: &[EdgeAssertion]) -> Duration  // ~34 ms / 500
 
 **`normalize()`**: Widens second-precision timestamps to canonical form. Rejects offsets, missing Z, millisecond precision.
 
-**`util/limits.rs`**: Centralises chunking and operational constants. `CHUNK_BUDGET` (3 ms) is the duration bound for all chunking; `HYDRATE_CHUNK` (400) is a bind-variable ceiling imposed by SQLite; `BULK_ATOMIC_WARN_HOLD` (250 ms) is the threshold above which `write_bulk_atomic` warns; `SAMPLE_LIMIT` (32) caps `ChainCheck` disagreement lists; `MAX_ARCHIVE_SESSIONS` (4,096) bounds `archive_windowed`.
+**`util/limits.rs`**: Holds only the ceilings **SQLite imposes**, which is the distinction the module exists for — `HYDRATE_CHUNK` (400) is a bind-variable ceiling and `SQLITE_MAX_VARIABLE_NUMBER` (999) is the limit it stays under. Nothing here is a tuning choice, and no amount of measurement will move either number.
+
+**The tuning constants are in `connection.rs`**, beside the actor they bound: `CHUNK_BUDGET` (3 ms), the duration bound all chunking is derived from; `CHUNK_FLOOR` (35), the smallest chunk the adaptive loop will fall to; `chunk_rows` (90/70/600/30), the per-path ceilings; `BULK_ATOMIC_WARN_HOLD` (250 ms), above which `write_bulk_atomic` warns; and `MAX_ARCHIVE_SESSIONS` (4,096), bounding `archive_windowed`. `SAMPLE_LIMIT` (32), which caps `ChainCheck` disagreement lists, is in `temporal/replay.rs`. *This paragraph read "`util/limits.rs` centralises chunking and operational constants" and listed all of the above as living there; none of them ever did.*
 
 ---
 
