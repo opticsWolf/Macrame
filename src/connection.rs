@@ -193,23 +193,27 @@ pub struct ChunkOutcome {
 /// one or two rows, where nearly all the work is `BEGIN`/`COMMIT` and the import
 /// no longer finishes.
 ///
-/// 35 is measured, on the [D-088](../docs/architecture/s13-decision-register.md)
-/// matrix at 8,000 edges. It costs about **4.1 ms** on a populated table and
-/// **1.6 ms** on an empty one; the fixed-cost share is ~19% populated and ~51%
-/// empty. Both rows are published rather than one averaged pair, because they
-/// disagree and the disagreement is the finding.
+/// 35 is measured, and **re-measured against the loop that uses it** — the
+/// difference matters, because the figure this constant shipped with was an
+/// extrapolation. `examples/chunk_matrix.rs -- converge` runs a 900-edge
+/// `bulk_import` into each of the four D-088 shapes at 8,000 edges and reports
+/// the actor's own per-transaction readings. A 35-row chunk costs **3.11–3.43 ms**
+/// across the four shapes, two sessions, excluding the run-up. The floor misses
+/// the 3 ms bound by 0.1–0.4 ms, not by the ~1.1 ms predicted from the sweep.
 ///
-/// So on a populated table the floor misses the 3 ms bound by ~1.1 ms, and does
-/// so in **steady state** — not as a one-chunk transient on the way down. The
-/// defense is the argument [`CHUNK_BUDGET`] is answerable to rather than the
-/// number itself: an interactive assertion arriving at the worst moment waits
-/// 4.1 ms for the chunk in flight and then runs its own ≤ 5 ms write, so 9.1 ms
-/// against a 16.7 ms frame. Still inside the frame, which is what the bound was
-/// ever protecting. Halving the floor would buy ~1 ms of that and cost the
-/// import a third of its throughput.
+/// The miss is **steady state** — not a one-chunk transient on the way down —
+/// and the defense is the argument [`CHUNK_BUDGET`] is answerable to rather than
+/// the number itself: an interactive assertion arriving at the worst moment
+/// waits ~3.2 ms for the chunk in flight and then runs its own ≤ 5 ms write, so
+/// ~8.2 ms against a 16.7 ms frame.
 ///
-/// Revisable, and the comment carries what to re-measure: the fixed-cost share
-/// on the populated arm of `examples/chunk_matrix.rs`.
+/// What the same measurement says about the *size*: on this path at this
+/// population the loop goes `[90, 35, 35, …]` on all four shapes and never picks
+/// anything between. The proportional shrink from a 90-row chunk proposes ~31
+/// rows, which clamps here — so on the edge path the floor is not a safety net
+/// under the controller, it **is** the operating point, and this number is
+/// carrying more weight than a backstop normally would. Re-measure it, not the
+/// controller, when the edge path's per-row cost changes.
 const CHUNK_FLOOR: usize = 35;
 
 /// Size of the next chunk, from what the last one cost (0.12.0, W2).

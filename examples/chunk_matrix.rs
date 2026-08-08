@@ -14,7 +14,23 @@
 //! ```text
 //! cargo run --release --example chunk_matrix -- edges <star|clustered|chain|dense>
 //! cargo run --release --example chunk_matrix -- rest  <star|clustered|chain|dense>
+//! cargo run --release --features metrics \
+//!     --example chunk_matrix -- converge <star|clustered|chain|dense>
 //! ```
+//!
+//! # The third mode measures the loop, not the constant (0.12.0, W6)
+//!
+//! `edges` and `rest` above ask what a chunk of a *given* size costs, which is
+//! the question the constants were derived from. Once the loop sizes itself
+//! (§5.1.5) that question stops being the interesting one: what matters is where
+//! it settles, how many chunks it takes to get there, and what the adapting
+//! costs in throughput.
+//!
+//! `converge` needs `--features metrics`, and the reason is worth stating —
+//! the numbers it reports are the actor's own per-transaction readings, the same
+//! ones the controller is steering on. Timing `bulk_import` from outside would
+//! measure the queue as well, and would report a different quantity from the one
+//! that chose the sizes.
 //!
 //! One shape per invocation, because a populated fixture per sweep point means
 //! six local database opens and R15 (`STATUS_ACCESS_VIOLATION`) scales with
@@ -285,6 +301,174 @@ async fn main() {
             db.close().await.unwrap();
         }
 
+        // What the adaptive loop settles at, and what settling costs (W6).
+        "converge" => converge(&dir, shape).await,
+
         other => println!("unknown mode: {other}"),
     }
+}
+
+/// Edges imported in the `converge` arm. Ten chunks at the ceiling and about
+/// twenty-six at the floor — enough that convergence is a small share of the
+/// run rather than the whole of it, which is what makes the throughput column
+/// mean anything.
+const BATCH: usize = 900;
+
+#[cfg(not(feature = "metrics"))]
+async fn converge(_dir: &tempfile::TempDir, _shape: fixtures::Shape) {
+    println!(
+        "  converge imports {BATCH} edges and reports the actor's own \
+         per-transaction readings,\n  which a default build does not keep.\n  \
+         re-run with: cargo run --release --features metrics --example chunk_matrix -- converge ..."
+    );
+}
+
+/// Import `BATCH` edges through the adaptive loop and through fixed
+/// ceiling-sized transactions, into two identical fresh fixtures.
+///
+/// # Two arms, two fixtures, and the second one is not free of caveats
+///
+/// The fixed arm sends 90-row batches through `write_bulk_atomic`, because
+/// there is no longer any way to make `bulk_import` hold a size. That puts it on
+/// the *high-priority* tier while the adaptive arm runs on the low one. The
+/// transactions themselves are identical — same rows, same triggers, one
+/// `BEGIN`/`COMMIT` per chunk — and with no concurrent load there is nothing for
+/// the tier to change, but it is a difference and it is not hidden here.
+///
+/// A fresh fixture per arm for the reason the `edges` sweep gives: per-row cost
+/// on this path is a function of `links_current`, so running the second arm into
+/// the table the first one just grew would confound the comparison with 900
+/// edges of population.
+#[cfg(feature = "metrics")]
+async fn converge(dir: &tempfile::TempDir, shape: fixtures::Shape) {
+    use macrame::metrics::CommandKind;
+
+    // Populated with `write_bulk_atomic`, not `bulk_import`, so the fixture's
+    // own writes land under a different `CommandKind` and the counters below
+    // describe the measured import alone rather than needing a baseline
+    // subtracted from them.
+    async fn fixture(dir: &tempfile::TempDir, name: &str, shape: fixtures::Shape) -> (Database, usize) {
+        let nodes = nodes_for(shape, POPULATION);
+        let db = Database::open_with_cadence(dir.path().join(name), None)
+            .await
+            .unwrap();
+        let mut concepts = shape.concepts(nodes);
+        concepts.extend((nodes..nodes + BATCH + 8).map(fixtures::concept));
+        for c in concepts.chunks(600) {
+            db.write_concepts(c.to_vec()).await.unwrap();
+        }
+        let mut edges = shape.edges(nodes);
+        edges.truncate(POPULATION);
+        for chunk in edges.chunks(2_000) {
+            db.write_bulk_atomic(chunk.to_vec()).await.unwrap();
+        }
+        (db, nodes)
+    }
+
+    // --- adaptive -------------------------------------------------------
+    let (db, nodes) = fixture(dir, "ca.db", shape).await;
+    println!("  nodes in fixture: {nodes}\n");
+
+    let t = Instant::now();
+    db.bulk_import(measured_chunk(BATCH, nodes)).await.unwrap();
+    let adaptive_total = ms(t.elapsed());
+
+    let snap = db.metrics();
+    let k = snap
+        .kinds
+        .iter()
+        .find(|k| k.kind == CommandKind::BulkImportChunk)
+        .expect("the import ran no chunks");
+    let (chunks, mean_hold, longest, over) = (k.turns, ms(k.mean), ms(k.longest), k.over_budget);
+
+    // The size trace, read out of the ledger rather than out of the loop.
+    // §5.1.6 says each chunk is one transaction under one `recorded_at`, so
+    // grouping the import's own rows by stamp *is* the sequence of sizes — the
+    // same property `bulk_import_is_atomic_per_chunk_not_overall` asserts, used
+    // here as an instrument.
+    let mut trace = Vec::new();
+    let mut rows = db
+        .read_conn()
+        .query(
+            "SELECT COUNT(*) FROM links WHERE edge_type = 'MEASURED' \
+             GROUP BY recorded_at ORDER BY recorded_at",
+            (),
+        )
+        .await
+        .unwrap();
+    while let Some(r) = rows.next().await.unwrap() {
+        trace.push(r.get::<u64>(0).unwrap() as usize);
+    }
+    db.close().await.unwrap();
+
+    // Steady state excludes the run-up: the loop starts at the ceiling and
+    // cannot know better until the first chunk has already been paid for, so a
+    // mean over every chunk answers a different question from "what does this
+    // cost once it has settled".
+    // The modal size, not the last one: the final chunk is whatever remainder
+    // the batch left and says nothing about where the loop settled.
+    let settled = trace
+        .iter()
+        .max_by_key(|n| trace.iter().filter(|m| m == n).count())
+        .copied()
+        .unwrap_or(0);
+    let steady_mean = (mean_hold * chunks as f64 - longest) / (chunks - 1) as f64;
+
+    println!("  adaptive");
+    println!(
+        "    chunks {chunks:>5}   mean size {:>6.1} rows   settled at {settled} rows",
+        BATCH as f64 / chunks as f64,
+    );
+    if trace.len() > 6 {
+        println!(
+            "    sizes  {:?} .. {:?}",
+            &trace[..3],
+            &trace[trace.len() - 3..]
+        );
+    } else {
+        println!("    sizes  {trace:?}");
+    }
+    println!("    hold   mean {mean_hold:>7.2} ms   longest {longest:>7.2} ms   over budget {over} of {chunks}");
+    println!("    hold   mean excluding the first chunk: {steady_mean:>6.2} ms");
+    println!(
+        "    total  {adaptive_total:>8.2} ms   ({:.1} µs/edge)",
+        adaptive_total * 1e3 / BATCH as f64
+    );
+
+    // --- fixed at the ceiling -------------------------------------------
+    let (db, nodes) = fixture(dir, "cf.db", shape).await;
+    let batch = measured_chunk(BATCH, nodes);
+    let (mut fixed_total, mut worst, mut n) = (0.0f64, 0.0f64, 0u64);
+    for chunk in batch.chunks(chunk_rows::EDGES) {
+        let t = Instant::now();
+        db.write_bulk_atomic(chunk.to_vec()).await.unwrap();
+        let e = ms(t.elapsed());
+        fixed_total += e;
+        worst = worst.max(e);
+        n += 1;
+    }
+    db.close().await.unwrap();
+
+    println!("\n  fixed at the ceiling ({} rows)", chunk_rows::EDGES);
+    println!("    chunks {n:>5}   hold mean {:>7.2} ms   longest {worst:>7.2} ms", fixed_total / n as f64);
+    println!(
+        "    total  {fixed_total:>8.2} ms   ({:.1} µs/edge)",
+        fixed_total * 1e3 / BATCH as f64
+    );
+
+    println!("\n  budget {BUDGET_MS} ms");
+    println!(
+        "  latency  : longest hold {:.2}x {}",
+        longest / worst,
+        if longest < worst { "-- the adaptive loop is the shorter stall" } else { "-- adapting did NOT shorten the worst stall" }
+    );
+    println!(
+        "  throughput: {:.2}x  {}",
+        adaptive_total / fixed_total,
+        if adaptive_total > fixed_total {
+            "-- more chunks, more fixed cost, as D-058 predicts"
+        } else {
+            "-- no throughput cost measured on this shape"
+        }
+    );
 }

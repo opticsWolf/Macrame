@@ -189,6 +189,18 @@ const ATTRIBUTED: &str =
     "89% of the growth is links_current secondary-index maintenance; the \r
      single-open guard contributes none";
 
+/// The floor's own cost, measured against the loop rather than extrapolated
+/// from a sweep — which is the correction D-146 is partly about.
+const FLOOR_COST: &str = "3.11-3.43 ms at 35 rows, all four shapes, two sessions";
+
+/// Two metrics on one operation, because the two numbers moved in different
+/// directions and the register publishes both. Collapsing them would have let
+/// the good one stand for the pair.
+const WORST_STALL: &str = "longest hold, adaptive against fixed ceiling-sized chunks";
+const WORST_STALL_VALUE: &str = "7.7-10.2 ms against 7.6-15.2 ms (0.67-1.01x)";
+const TYPICAL_STALL: &str = "mean hold, adaptive against fixed ceiling-sized chunks";
+const TYPICAL_STALL_VALUE: &str = "3.4-3.7 ms against 7.1-8.3 ms (2.1-2.4x shorter)";
+
 const REGISTRY: &[Claim] = &[
     // ---- single edge assertion, warm handle -------------------------------
     Claim {
@@ -486,6 +498,134 @@ const REGISTRY: &[Claim] = &[
         doc: APPENDICES,
         bench_group: "example:chunk_matrix/edges",
         decision: "d-143",
+        status: Live,
+    },
+    // ---- what the adaptive loop settled at, and what it bought (D-146) ----
+    //
+    // Three keys, one operation. The floor's cost, the worst stall and the
+    // typical stall are three facts about one import on one fixture, and the
+    // second and third disagree in *direction* — the worst stall barely moved
+    // while the typical one halved. Sharing a metric would fire the one-value
+    // rule on claims that do not disagree; separating them is what makes the
+    // uncomfortable one publishable beside the good one (D-139).
+    Claim {
+        operation: "chunk commit, edges, 35 rows (the floor)",
+        fixture: fx::MATRIX,
+        metric: LATENCY,
+        value: FLOOR_COST,
+        text: "A 35-row chunk costs **3.11–3.43 ms**",
+        doc_name: "src/connection.rs",
+        doc: CONNECTION,
+        bench_group: "example:chunk_matrix/converge",
+        decision: "d-146",
+        status: Live,
+    },
+    Claim {
+        operation: "chunk commit, edges, 35 rows (the floor)",
+        fixture: fx::MATRIX,
+        metric: LATENCY,
+        value: FLOOR_COST,
+        text: "a 35-row chunk costs **3.11–3.43 ms** across the four shapes over two sessions",
+        doc_name: "docs/architecture/s5-modules.md",
+        doc: S5,
+        bench_group: "example:chunk_matrix/converge",
+        decision: "d-146",
+        status: Live,
+    },
+    Claim {
+        operation: "chunk commit, edges, 35 rows (the floor)",
+        fixture: fx::MATRIX,
+        metric: LATENCY,
+        value: FLOOR_COST,
+        text: "measured at **3.11–3.43 ms** on the four D-088 shapes",
+        doc_name: "docs/quickref.md",
+        doc: QUICKREF,
+        bench_group: "example:chunk_matrix/converge",
+        decision: "d-146",
+        status: Live,
+    },
+    Claim {
+        operation: "chunk commit, edges, 35 rows (the floor)",
+        fixture: fx::MATRIX,
+        metric: LATENCY,
+        value: FLOOR_COST,
+        text: "**3.11–3.43 ms** across four shapes and two sessions",
+        doc_name: "docs/architecture/s13-decision-register.md",
+        doc: REGISTER,
+        bench_group: "example:chunk_matrix/converge",
+        decision: "d-146",
+        status: Live,
+    },
+    Claim {
+        operation: "bulk_import of 900 edges",
+        fixture: fx::MATRIX,
+        metric: WORST_STALL,
+        value: WORST_STALL_VALUE,
+        text: "**7.7–10.2 ms** against **7.6–15.2 ms** for fixed ceiling-sized chunks",
+        doc_name: "docs/architecture/s5-modules.md",
+        doc: S5,
+        bench_group: "example:chunk_matrix/converge",
+        decision: "d-146",
+        status: Live,
+    },
+    Claim {
+        operation: "bulk_import of 900 edges",
+        fixture: fx::MATRIX,
+        metric: WORST_STALL,
+        value: WORST_STALL_VALUE,
+        text: "(7.7–10.2 vs 7.6–15.2 ms)",
+        doc_name: "docs/quickref.md",
+        doc: QUICKREF,
+        bench_group: "example:chunk_matrix/converge",
+        decision: "d-146",
+        status: Live,
+    },
+    Claim {
+        operation: "bulk_import of 900 edges",
+        fixture: fx::MATRIX,
+        metric: WORST_STALL,
+        value: WORST_STALL_VALUE,
+        text: "**7.7–10.2 ms against 7.6–15.2 ms**",
+        doc_name: "docs/architecture/s13-decision-register.md",
+        doc: REGISTER,
+        bench_group: "example:chunk_matrix/converge",
+        decision: "d-146",
+        status: Live,
+    },
+    Claim {
+        operation: "bulk_import of 900 edges",
+        fixture: fx::MATRIX,
+        metric: TYPICAL_STALL,
+        value: TYPICAL_STALL_VALUE,
+        text: "mean hold **3.4–3.7 ms against 7.1–8.3 ms**, a 2.1–2.4× shorter wait",
+        doc_name: "docs/architecture/s5-modules.md",
+        doc: S5,
+        bench_group: "example:chunk_matrix/converge",
+        decision: "d-146",
+        status: Live,
+    },
+    Claim {
+        operation: "bulk_import of 900 edges",
+        fixture: fx::MATRIX,
+        metric: TYPICAL_STALL,
+        value: TYPICAL_STALL_VALUE,
+        text: "mean hold **3.4–3.7 ms against 7.1–8.3 ms** fixed, a 2.1–2.4× shorter typical stall",
+        doc_name: "docs/quickref.md",
+        doc: QUICKREF,
+        bench_group: "example:chunk_matrix/converge",
+        decision: "d-146",
+        status: Live,
+    },
+    Claim {
+        operation: "bulk_import of 900 edges",
+        fixture: fx::MATRIX,
+        metric: TYPICAL_STALL,
+        value: TYPICAL_STALL_VALUE,
+        text: "mean hold **3.4–3.7 ms against 7.1–8.3 ms**, 2.1–2.4× shorter",
+        doc_name: "docs/architecture/s13-decision-register.md",
+        doc: REGISTER,
+        bench_group: "example:chunk_matrix/converge",
+        decision: "d-146",
         status: Live,
     },
 ];
