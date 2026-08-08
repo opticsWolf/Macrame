@@ -196,3 +196,28 @@ jobs:
           merge-multiple: true
       - run: ls -la dist
       - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # Re-running a tag must not be a hard failure (0.11.0).
+          #
+          # `v0.10.0` was re-pointed and force-pushed to carry a documentation
+          # fix, because `release.yml`'s crates.io publish gates on the whole of
+          # `ci.yml` and a broken intra-doc link was holding it (D-144). This
+          # workflow gates on `python.yml` instead, so the wheel had already
+          # published — and the re-pushed tag re-ran this job against a version
+          # PyPI already had. Without this, that is a red X on a tag whose real
+          # outcome is "nothing needed doing".
+          #
+          # **The cost is real and is accepted deliberately.** A genuine upload
+          # failure caused by the version already existing — the classic case
+          # being a bump that was forgotten, so the build silently republishes
+          # the previous release's number — now reports success instead of
+          # stopping. What makes that acceptable here is that the failure has
+          # another detector that runs *first*: `release.yml`'s `check-version`
+          # compares the tag against `Cargo.toml`, and `tests/packaging_tests.rs`
+          # pins the wheel's `__version__` to the same manifest. A forgotten bump
+          # is caught by the tag, not by PyPI's rejection.
+          #
+          # It does not weaken the "a version number cannot be reused" rule this
+          # job's `if:` condition is written around. It changes what happens when
+          # the number is not being spent at all.
+          skip-existing: true
