@@ -107,8 +107,10 @@ pub enum DbError {
     /// **It cannot be produced by an archive session, crashed or otherwise.**
     /// `archive()` and `archive_windowed()` create and drop the marker inside
     /// the same transaction that does the work, so a commit drops it and a
-    /// rollback discards it; and [`crate::schema::migrations::verify`] reads
-    /// committed state, so it cannot see an in-flight session. Reaching this
+    /// rollback discards it; and the check that raises this error —
+    /// `verify` in `src/schema/migrations.rs`, which is private, hence the file
+    /// reference rather than a link — reads committed state, so it cannot see an
+    /// in-flight session. Reaching this
     /// error therefore means something wrote the table outside the write actor
     /// — the raw-writer case §4.7 concedes exists.
     ///
