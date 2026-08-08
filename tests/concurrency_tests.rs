@@ -284,23 +284,38 @@ async fn a_lone_high_priority_write_is_still_serviced_before_a_saturated_backlog
 ///
 /// This is the tradeoff the `chunk_rows` doc comment states, and it is a real
 /// consequence a caller has to plan for, not an implementation detail: a failure
-/// in chunk two leaves chunk one committed. The counts below are exact so that
-/// the boundary itself is pinned — `chunk_rows::EDGES` rows survive, the partial
-/// chunk leaves nothing.
+/// partway leaves the earlier chunks committed.
+///
+/// # This test asserts the property, not where the boundary falls (0.12.0, W4)
+///
+/// Through 0.11.0 the counts here were exact — `chunk_rows::EDGES` rows survive
+/// — because the chunk size was a constant and the boundary was therefore a
+/// fact about the code. W3 made the size a function of measured hold, so the
+/// boundary is now machine- and load-dependent, and a test that pinned it would
+/// be pinning the speed of the machine that ran it.
+///
+/// What §5.1.6 actually promises survives that change intact, and is what is
+/// checked below: **a prefix commits**, contiguously; **the failing chunk rolls
+/// back whole**; and **each chunk is one transaction under one stamp**, so the
+/// committed rows partition into contiguous same-stamp runs. This test is the
+/// executable form of that section, which is why it is kept rather than relaxed
+/// into a smoke test.
 #[tokio::test]
 async fn bulk_import_is_atomic_per_chunk_not_overall() {
     let harness = TestHarness::new();
     let db = Database::open(&harness.db_path).await.unwrap();
 
-    let n = chunk_rows::EDGES;
+    // Several chunks' worth at any size the controller can choose, so the
+    // violation is reached with a prefix already committed.
+    let n = 400usize;
     let nodes = std::iter::once("SRC".to_string()).chain((0..=n).map(|i| format!("T{i}")));
     seed_nodes(&db, nodes).await;
 
     let mut edges: Vec<EdgeAssertion> = (0..n)
         .map(|i| edge("SRC", &format!("T{i}"), "KNOWS", T1))
         .collect();
-    // Chunk two: one good row, then a second open interval on an edge chunk one
-    // already asserted, which trips `trg_links_single_open`.
+    // A second open interval on an edge already asserted earlier in this batch,
+    // which trips `trg_links_single_open` in whichever chunk it lands in.
     edges.push(edge("SRC", &format!("T{n}"), "KNOWS", T1));
     edges.push(edge("SRC", "T0", "KNOWS", T2));
 
@@ -310,27 +325,88 @@ async fn bulk_import_is_atomic_per_chunk_not_overall() {
         "got {err:?}"
     );
 
-    assert_eq!(
-        count(&db, "SELECT COUNT(*) FROM links").await,
-        n as i64,
-        "the first chunk must stay committed -- `bulk_import` is not all-or-nothing"
+    let committed = count(&db, "SELECT COUNT(*) FROM links").await;
+    assert!(
+        committed > 0,
+        "nothing committed -- `bulk_import` is not all-or-nothing, so a failure \
+         at row {n} must leave the chunks before it in place"
     );
-    assert_eq!(
-        count(
-            &db,
-            &format!("SELECT COUNT(*) FROM links WHERE target_id = 'T{n}'")
-        )
-        .await,
-        0,
-        "the good row that shared a chunk with the failure must have rolled back with it"
+    assert!(
+        committed < n as i64,
+        "everything committed ({committed} rows), so the chunk holding the \
+         violation did not roll back"
     );
+
+    // The prefix is contiguous: targets T0..T{committed-1} are present and
+    // nothing past them is. Written as one query so a gap anywhere shows up.
+    let in_prefix = count(
+        &db,
+        &format!(
+            "SELECT COUNT(*) FROM links WHERE CAST(SUBSTR(target_id, 2) AS INTEGER) < {committed}"
+        ),
+    )
+    .await;
     assert_eq!(
-        count(&db, "SELECT COUNT(DISTINCT recorded_at) FROM links").await,
-        1,
-        "a chunk is one transaction under one stamp"
+        in_prefix, committed,
+        "the committed rows are not the contiguous prefix of the batch"
+    );
+
+    // §5.1.6, as an ordering: every stamp covers one contiguous run, so no two
+    // chunks share a stamp and no chunk carries two. Equivalent and cheaper to
+    // check — the number of stamps equals the number of runs of equal stamps
+    // when the rows are read in batch order.
+    let stamps = count(&db, "SELECT COUNT(DISTINCT recorded_at) FROM links").await;
+    let runs = count(
+        &db,
+        "SELECT COUNT(*) FROM ( \
+             SELECT recorded_at, LAG(recorded_at) OVER ( \
+                 ORDER BY CAST(SUBSTR(target_id, 2) AS INTEGER)) AS prev \
+             FROM links \
+         ) WHERE prev IS NULL OR prev <> recorded_at",
+    )
+    .await;
+    assert!(stamps >= 1, "the committed prefix carries no stamp at all");
+    assert_eq!(
+        stamps, runs,
+        "a stamp spans a discontiguous set of rows: {stamps} distinct stamps \
+         across {runs} runs, so a chunk is not one transaction under one stamp"
     );
 
     // The materialized view is not left inconsistent by the partial import.
+    assert_eq!(audit_current(db.read_conn()).await.unwrap(), 0);
+}
+
+/// The failing chunk rolls back **whole**, stated where the boundary is known
+/// (0.12.0, W4).
+///
+/// The test above cannot say this without naming a size: if the violating row
+/// happened to land first in its chunk, no good row would be lost with it. A
+/// batch small enough to be one chunk at any size the controller can choose
+/// removes the question — the first chunk is always the path's ceiling, so two
+/// rows are always one transaction, and a violation must therefore commit
+/// nothing at all.
+#[tokio::test]
+async fn a_violation_in_a_single_chunk_batch_commits_nothing() {
+    let harness = TestHarness::new();
+    let db = Database::open(&harness.db_path).await.unwrap();
+    seed_nodes(&db, ["SRC", "T0", "T1"].map(String::from)).await;
+
+    let edges = vec![
+        edge("SRC", "T1", "KNOWS", T1),
+        edge("SRC", "T0", "KNOWS", T1),
+        edge("SRC", "T0", "KNOWS", T2),
+    ];
+    let err = db.bulk_import(edges).await.unwrap_err();
+    assert!(
+        matches!(err, DbError::SingleOpenViolation { .. }),
+        "got {err:?}"
+    );
+    assert_eq!(
+        count(&db, "SELECT COUNT(*) FROM links").await,
+        0,
+        "the good rows that shared a chunk with the failure must have rolled \
+         back with it"
+    );
     assert_eq!(audit_current(db.read_conn()).await.unwrap(), 0);
 }
 

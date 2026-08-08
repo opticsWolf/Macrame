@@ -176,11 +176,29 @@ fn bucket_of(micros: u64) -> usize {
 
 /// Times one actor turn.
 ///
-/// With the `metrics` feature off this reads no clock and holds nothing: the
-/// call site is identical, the cost is not paid. That is the whole reason it is
-/// a type rather than a bare `Instant::now()` in the loop.
+/// # This clock is no longer optional (0.12.0, W1)
+///
+/// Until 0.11.0 the field was `#[cfg(feature = "metrics")]` and `elapsed()`
+/// returned `Duration::ZERO` in a default build: the reading existed only to
+/// feed [`ActorMetrics::record_hold`]'s histogram, so a build that did not keep
+/// the histogram had no reason to read a clock.
+///
+/// The chunk loop changed what the reading is *for*. A chunk's measured hold is
+/// now the input to the next chunk's size (`connection::next_chunk_size`, named
+/// in prose because it is private — D-144), which means it is a control signal
+/// in every build and not an observation in some of them. Left gated, `bulk_import` would have sized its chunks off
+/// `Duration::ZERO` — a value that reads as "comfortably under budget" — and
+/// grown every chunk to the ceiling, in exactly the builds nobody was measuring.
+///
+/// So the clock is unconditional and **only the histogram is still gated**:
+/// `record_hold` remains a no-op without the feature. What that costs is one
+/// `Instant::now()` pair per actor turn — tens of nanoseconds against a turn
+/// measured in microseconds at best, and the same reasoning §5.1.5 uses to
+/// decide that a channel hop is free beside a chunk.
+///
+/// It stays a type rather than a bare `Instant::now()` in the loop because the
+/// ordering guarantee in [`crate::connection`]'s `Turn` is attached to it.
 pub struct HoldTimer {
-    #[cfg(feature = "metrics")]
     start: std::time::Instant,
 }
 
@@ -188,21 +206,13 @@ impl HoldTimer {
     #[inline]
     pub fn start() -> Self {
         Self {
-            #[cfg(feature = "metrics")]
             start: std::time::Instant::now(),
         }
     }
 
     #[inline]
     pub fn elapsed(&self) -> Duration {
-        #[cfg(feature = "metrics")]
-        {
-            self.start.elapsed()
-        }
-        #[cfg(not(feature = "metrics"))]
-        {
-            Duration::ZERO
-        }
+        self.start.elapsed()
     }
 }
 

@@ -82,6 +82,21 @@ use crate::vector::ModelName;
 /// is D-042's covering index for the traversal, so narrowing it moves cost onto
 /// the read path it exists to protect. Re-deriving these constants against the
 /// D-088 fixture matrix is the named successor.
+///
+/// # These are ceilings as of 0.12.0, not sizes
+///
+/// D-143 re-derived all four against the D-088 matrix and the edge path came
+/// back **20** against a shipped 90 — and 20 would have been wrong at 80,000
+/// edges for the same reason 90 is wrong at 8,000, because per-row cost there
+/// grows with `links_current`. The finding was that no row count can bound a
+/// duration on such a path.
+///
+/// So the chunk loop stopped trying to pick one ahead of time. Each chunk is
+/// timed by the actor and its measured hold chooses the next size; these
+/// constants are the **largest** size that will ever be asked for, and every
+/// derivation below still applies to them as such. A path may run well under its
+/// constant on a populated database and at exactly it on an empty one, and both
+/// are the bound being met rather than a size being missed.
 pub mod chunk_rows {
     /// Edge assertions (`bulk_import`).
     ///
@@ -112,7 +127,9 @@ pub mod chunk_rows {
     /// with `links_current`, so a constant fitted at 8,000 edges is wrong at
     /// 80,000 — while the throughput cost of turning eleven chunks into fifty
     /// is certain and immediate (D-058). The fix is not a row count: it is for
-    /// the chunk loop to stop on elapsed time, which is named for 0.12.0.
+    /// the chunk loop to stop on elapsed time, **delivered in 0.12.0**. This
+    /// number is now the ceiling that loop starts from and never exceeds; on a
+    /// populated table it converges below it within a chunk or two.
     ///
     /// D-134 retired the growth claim on the neighbouring *single-assertion*
     /// path and did not measure this one; D-136 is why this line now carries a
@@ -144,6 +161,109 @@ pub mod chunk_rows {
     /// [`EDGES`] there is nothing here to fix — but it does mean this size buys
     /// latency at some throughput, not for free.
     pub const EMBEDDINGS: usize = 30;
+}
+
+/// What one chunk transaction cost, reported by the actor to the caller-side
+/// chunk loop (0.12.0, W1).
+///
+/// `held` is measured **inside** the actor, around its own transaction, and
+/// therefore excludes the time the command spent queued. That exclusion is the
+/// point: queue time is what strict preemption *does*, and a controller fed
+/// `send + await` would shrink chunks as punishment for the actor correctly
+/// serving an interactive write first.
+///
+/// Public only because [`LowPriCommand`] is. Nothing outside this crate
+/// constructs one, and it is deliberately not re-exported at the crate root.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChunkOutcome {
+    /// Rows the transaction actually wrote.
+    pub rows: usize,
+    /// How long the actor held the write lock for them.
+    pub held: std::time::Duration,
+}
+
+/// Smallest chunk the adaptive loop will fall to (0.12.0, W2).
+///
+/// # A floor is a deliberate, measured violation of [`CHUNK_BUDGET`]
+///
+/// Feedback alone converges to whatever size meets the budget, and on a
+/// populated `links` table that size keeps falling — per-row cost there grows
+/// with the table (D-059, D-142), so there is no size at which the *fixed* cost
+/// of a transaction stops dominating. Left unbounded the loop reaches chunks of
+/// one or two rows, where nearly all the work is `BEGIN`/`COMMIT` and the import
+/// no longer finishes.
+///
+/// 35 is measured, on the [D-088](../docs/architecture/s13-decision-register.md)
+/// matrix at 8,000 edges. It costs about **4.1 ms** on a populated table and
+/// **1.6 ms** on an empty one; the fixed-cost share is ~19% populated and ~51%
+/// empty. Both rows are published rather than one averaged pair, because they
+/// disagree and the disagreement is the finding.
+///
+/// So on a populated table the floor misses the 3 ms bound by ~1.1 ms, and does
+/// so in **steady state** — not as a one-chunk transient on the way down. The
+/// defense is the argument [`CHUNK_BUDGET`] is answerable to rather than the
+/// number itself: an interactive assertion arriving at the worst moment waits
+/// 4.1 ms for the chunk in flight and then runs its own ≤ 5 ms write, so 9.1 ms
+/// against a 16.7 ms frame. Still inside the frame, which is what the bound was
+/// ever protecting. Halving the floor would buy ~1 ms of that and cost the
+/// import a third of its throughput.
+///
+/// Revisable, and the comment carries what to re-measure: the fixed-cost share
+/// on the populated arm of `examples/chunk_matrix.rs`.
+const CHUNK_FLOOR: usize = 35;
+
+/// Size of the next chunk, from what the last one cost (0.12.0, W2).
+///
+/// Pure on purpose — no clock, no database, no actor — so the control law can be
+/// tested for the properties that matter without a fixture. Three regimes:
+///
+/// | last hold | response | why |
+/// |---|---|---|
+/// | over `budget` | shrink to `current · budget / held`, × 0.9 | back off *fast* from a bound already being exceeded; the 0.9 undershoots so the correction does not have to be repeated |
+/// | under `budget / 2` | grow by a quarter of `current`, at least one row | approach the bound *slowly*; the dead band above it stops a size that is merely comfortable from oscillating |
+/// | otherwise | hold | in band, and moving costs more than it buys |
+///
+/// The asymmetry is the whole design. Proportional shrinking converges from
+/// above in one or two steps, which matters because every step over budget is a
+/// latency miss a caller can feel; additive growth cannot overshoot by more than
+/// 25%, which matters because the ceiling is a throughput preference and not a
+/// bound.
+///
+/// `ceiling` is the path's [`chunk_rows`] constant, which is why those constants
+/// keep their values and their derivations: they are no longer the size, they
+/// are the largest size this will ever ask for. `floor` is [`CHUNK_FLOOR`] —
+/// see there for the budget it knowingly misses.
+///
+/// Never returns 0, at any input, including `held == 0` or `current == 0`.
+fn next_chunk_size(
+    current: usize,
+    held: std::time::Duration,
+    budget: std::time::Duration,
+    floor: usize,
+    ceiling: usize,
+) -> usize {
+    let held = held.as_nanos().max(1);
+    let budget_ns = budget.as_nanos().max(1);
+    let current = current.max(1);
+
+    let next = if held > budget_ns {
+        // Integer math, and the `max(1)` matters: a chunk 200× over budget
+        // would otherwise propose 0 and the loop would stop making progress.
+        let scaled = (current as u128) * budget_ns * 9 / (held * 10);
+        (scaled as usize).max(1)
+    } else if held * 2 < budget_ns {
+        // Saturating because `current` is a `usize` and this is the one branch
+        // that adds to it. Nothing sane reaches the boundary; the clamp below
+        // makes the answer correct anyway rather than a debug panic.
+        current.saturating_add((current / 4).max(1))
+    } else {
+        current
+    };
+
+    // Applied last and unconditionally, so a caller that passes a reversed pair
+    // gets the floor rather than a panic — and `max(1)` last of all, because a
+    // chunk of zero rows is the single answer no loop can make progress from.
+    next.clamp(floor.min(ceiling), ceiling).max(1)
 }
 
 /// The latency bound [`chunk_rows`] is derived from (§5.1.5, D-058).
@@ -434,7 +554,7 @@ pub enum LowPriCommand {
     /// One chunk of **concepts** — a ledger write, logged and versioned.
     WriteConceptsChunk {
         chunk: Vec<ConceptUpsert>,
-        responder: oneshot::Sender<Result<usize>>,
+        responder: oneshot::Sender<Result<ChunkOutcome>>,
     },
     /// One chunk of **derived annotations** — off-ledger, no log trigger (D-041).
     ///
@@ -443,7 +563,7 @@ pub enum LowPriCommand {
     /// crossing D-075 undid.
     WriteAnalyticsChunk {
         chunk: Vec<Annotation>,
-        responder: oneshot::Sender<Result<usize>>,
+        responder: oneshot::Sender<Result<ChunkOutcome>>,
     },
     /// One chunk of vectors for one model (§5.9, D-048).
     ///
@@ -452,11 +572,11 @@ pub enum LowPriCommand {
     UpsertEmbeddingChunk {
         model: ModelName,
         chunk: Vec<(String, Vec<f32>)>,
-        responder: oneshot::Sender<Result<usize>>,
+        responder: oneshot::Sender<Result<ChunkOutcome>>,
     },
     BulkImportChunk {
         chunk: Vec<EdgeAssertion>,
-        responder: oneshot::Sender<Result<usize>>,
+        responder: oneshot::Sender<Result<ChunkOutcome>>,
     },
     Archive {
         cutoff: String,
@@ -1253,14 +1373,19 @@ impl Database {
     /// committed. That is the tradeoff [`chunk_rows`] documents — use
     /// [`Database::write_bulk_atomic`] when the batch must be all-or-nothing.
     ///
-    /// Chunked at [`chunk_rows::EDGES`], which is also faster in total than the
-    /// larger chunks this used through 0.5.5 (D-058).
+    /// Chunked adaptively, at most [`chunk_rows::EDGES`] rows at a time: that
+    /// constant is where the loop starts and the largest chunk it will send, and
+    /// each chunk's measured hold sizes the next against [`CHUNK_BUDGET`]. It is
+    /// also faster in total than the larger chunks this used through 0.5.5
+    /// (D-058).
+    ///
+    /// A consequence worth planning for: the chunk boundaries — and so the
+    /// `recorded_at` stamps this import writes — depend on how fast the machine
+    /// was, not only on how many edges were passed (§5.1.6).
     pub async fn bulk_import(&self, edges: Vec<EdgeAssertion>) -> Result<usize> {
         let edges = normalize_all(edges)?;
-        let chunks: Vec<_> = edges.chunks(chunk_rows::EDGES).map(<[_]>::to_vec).collect();
-        self.low_chunked(chunks, |chunk, responder| LowPriCommand::BulkImportChunk {
-            chunk,
-            responder,
+        self.low_chunked(edges, chunk_rows::EDGES, |chunk, responder| {
+            LowPriCommand::BulkImportChunk { chunk, responder }
         })
         .await
     }
@@ -1282,11 +1407,7 @@ impl Database {
             .into_iter()
             .map(ConceptUpsert::normalized)
             .collect::<Result<_>>()?;
-        let chunks: Vec<_> = concepts
-            .chunks(chunk_rows::CONCEPTS)
-            .map(<[_]>::to_vec)
-            .collect();
-        self.low_chunked(chunks, |chunk, responder| {
+        self.low_chunked(concepts, chunk_rows::CONCEPTS, |chunk, responder| {
             LowPriCommand::WriteConceptsChunk { chunk, responder }
         })
         .await
@@ -1366,11 +1487,7 @@ impl Database {
         model: &ModelName,
         rows: Vec<(String, Vec<f32>)>,
     ) -> Result<usize> {
-        let chunks: Vec<_> = rows
-            .chunks(chunk_rows::EMBEDDINGS)
-            .map(<[_]>::to_vec)
-            .collect();
-        self.low_chunked(chunks, |chunk, responder| {
+        self.low_chunked(rows, chunk_rows::EMBEDDINGS, |chunk, responder| {
             LowPriCommand::UpsertEmbeddingChunk {
                 model: model.clone(),
                 chunk,
@@ -1420,19 +1537,16 @@ impl Database {
     /// concept. Rerunning an algorithm replaces the previous pass rather than
     /// recording that the world changed.
     ///
-    /// Low priority and chunked at [`chunk_rows::ANNOTATIONS`] — the largest of
-    /// the four, because this is the only bulk table carrying no triggers at all
+    /// Low priority and chunked at up to [`chunk_rows::ANNOTATIONS`] — the
+    /// largest ceiling of the four, because this is the only bulk table carrying
+    /// no triggers at all
     /// and its rows are correspondingly cheap (D-058) — so a 50,000-label Louvain
     /// save yields to interactive writes at every chunk boundary and carries the
     /// per-chunk fidelity boundary of §5.1.6 — a partially written pass is
     /// recoverable by rerunning, which is the property that makes derived state
     /// safe to write this way and assertions not.
     pub async fn write_analytics_annotations(&self, annotations: Vec<Annotation>) -> Result<usize> {
-        let chunks: Vec<_> = annotations
-            .chunks(chunk_rows::ANNOTATIONS)
-            .map(<[_]>::to_vec)
-            .collect();
-        self.low_chunked(chunks, |chunk, responder| {
+        self.low_chunked(annotations, chunk_rows::ANNOTATIONS, |chunk, responder| {
             LowPriCommand::WriteAnalyticsChunk { chunk, responder }
         })
         .await
@@ -1679,21 +1793,51 @@ impl Database {
     ///
     /// Sending stops at the first error, so what commits is exactly the prefix
     /// before the failure.
-    async fn low_chunked<C>(
+    /// # The size is now measured, not assumed (0.12.0, W3)
+    ///
+    /// Until 0.11.0 the caller pre-split into `chunks(chunk_rows::WHATEVER)` and
+    /// this loop sent what it was given. That made the constant *the* size, and
+    /// D-143 is the record of a constant fitted at one population being wrong at
+    /// another: all four D-088 shapes agreed the largest in-budget edge chunk was
+    /// **20** against a shipped 90, and 20 would itself have been wrong at 80,000
+    /// edges, because per-row cost on that path grows with `links_current`.
+    ///
+    /// No row count can bound a duration on such a path, so the loop stopped
+    /// trying to pick one ahead of time. `ceiling` — still the path's
+    /// [`chunk_rows`] constant, with its derivation intact — is now the largest
+    /// size this will ever ask for, and each chunk's measured hold chooses the
+    /// next through `next_chunk_size`.
+    ///
+    /// **Feedback, not preemption.** The chunk in flight always commits in full;
+    /// the SQLite write lock is not preemptible, so nothing here can shorten a
+    /// transaction already running. A batch of one chunk gets no protection at
+    /// all, and convergence costs one or two chunks — which is the price of the
+    /// bound being a duration rather than a promise.
+    ///
+    /// The last chunk's outcome is discarded, there being no next chunk to size.
+    async fn low_chunked<T>(
         &self,
-        chunks: Vec<C>,
-        make: impl Fn(C, oneshot::Sender<Result<usize>>) -> LowPriCommand,
+        items: Vec<T>,
+        ceiling: usize,
+        make: impl Fn(Vec<T>, oneshot::Sender<Result<ChunkOutcome>>) -> LowPriCommand,
     ) -> Result<usize> {
+        let mut items = items.into_iter();
+        let mut size = ceiling.max(1);
         let mut written = 0usize;
-        for chunk in chunks {
+        loop {
+            let chunk: Vec<T> = items.by_ref().take(size).collect();
+            if chunk.is_empty() {
+                return Ok(written);
+            }
             let (tx, rx) = oneshot::channel();
             self.lowpri_tx
                 .send(make(chunk, tx))
                 .await
                 .map_err(|_| DbError::WriterUnavailable)?;
-            written += rx.await.map_err(|_| DbError::WriterDroppedResponder)??;
+            let outcome = rx.await.map_err(|_| DbError::WriterDroppedResponder)??;
+            written += outcome.rows;
+            size = next_chunk_size(size, outcome.held, CHUNK_BUDGET, CHUNK_FLOOR, ceiling);
         }
-        Ok(written)
     }
 
     async fn low<T>(
@@ -1981,6 +2125,23 @@ impl<'a> Turn<'a> {
             .record_hold(self.kind, self.timer.elapsed());
         let _ = responder.send(res);
     }
+
+    /// [`answer`](Self::answer) for a chunk: the same reading, handed back to the
+    /// caller as well as recorded (0.12.0, W1).
+    ///
+    /// One `elapsed()` serves both, so the duration the chunk loop sizes against
+    /// is *the same number* the histogram shows — a controller and a dashboard
+    /// disagreeing about what a chunk cost would be a bad way to spend a
+    /// debugging session.
+    ///
+    /// The record-then-send ordering documented on [`Turn`] is preserved, and
+    /// matters here for the same reason: the send wakes the caller, which may be
+    /// scheduled before this method returns.
+    fn answer_chunk(&self, responder: oneshot::Sender<Result<ChunkOutcome>>, res: Result<usize>) {
+        let held = self.timer.elapsed();
+        self.shared.metrics.record_hold(self.kind, held);
+        let _ = responder.send(res.map(|rows| ChunkOutcome { rows, held }));
+    }
 }
 
 const INSERT_LINK: &str = "INSERT INTO links \
@@ -2183,15 +2344,15 @@ impl LowPriCommand {
                 // separately, so a shared stamp would claim a simultaneity the
                 // storage does not have.
                 let stamp = clock.now();
-                turn.answer(responder, write_edges_atomic(conn, &chunk, &stamp).await);
+                turn.answer_chunk(responder, write_edges_atomic(conn, &chunk, &stamp).await);
             }
             LowPriCommand::WriteConceptsChunk { chunk, responder } => {
                 let stamp = clock.now();
-                turn.answer(responder, write_concepts_atomic(conn, &chunk, &stamp).await);
+                turn.answer_chunk(responder, write_concepts_atomic(conn, &chunk, &stamp).await);
             }
             LowPriCommand::WriteAnalyticsChunk { chunk, responder } => {
                 let stamp = clock.now();
-                turn.answer(
+                turn.answer_chunk(
                     responder,
                     write_annotations_atomic(conn, &chunk, &stamp).await,
                 );
@@ -2205,7 +2366,7 @@ impl LowPriCommand {
                 // axis. It is a derived artifact of a model applied to content
                 // (Doctrine VII), and the ledger already records when the
                 // content changed.
-                turn.answer(
+                turn.answer_chunk(
                     responder,
                     crate::vector::search::upsert_embedding_chunk(conn, &model, &chunk).await,
                 );
@@ -2789,5 +2950,160 @@ mod tests {
     #[test]
     fn the_warning_threshold_is_not_the_chunk_budget() {
         assert!(BULK_ATOMIC_WARN_HOLD > CHUNK_BUDGET * 10);
+    }
+
+    // -----------------------------------------------------------------------
+    // next_chunk_size — the control law (0.12.0, W2)
+    //
+    // All of these run without a database, a clock or an actor, which is why
+    // W2 comes before W3: the loop that will use this function can only be
+    // tested against a real write, and the properties below cannot be observed
+    // there without also observing the machine.
+    // -----------------------------------------------------------------------
+
+    use std::time::Duration;
+
+    /// `next_chunk_size` with the shipped budget and floor.
+    fn step_to(current: usize, held_ms: f64, ceiling: usize) -> usize {
+        next_chunk_size(
+            current,
+            Duration::from_nanos((held_ms * 1_000_000.0) as u64),
+            CHUNK_BUDGET,
+            CHUNK_FLOOR,
+            ceiling,
+        )
+    }
+
+    /// The edge path, which is every test here that does not say otherwise.
+    fn step(current: usize, held_ms: f64) -> usize {
+        step_to(current, held_ms, chunk_rows::EDGES)
+    }
+
+    /// Iterate the law against a machine that costs `per_row_us` per row plus a
+    /// fixed `overhead_ms` per transaction — the two-term model D-142 measured.
+    fn converge(
+        start: usize,
+        per_row_us: f64,
+        overhead_ms: f64,
+        ceiling: usize,
+        steps: usize,
+    ) -> Vec<usize> {
+        let mut size = start;
+        (0..steps)
+            .map(|_| {
+                let held = overhead_ms + per_row_us * size as f64 / 1000.0;
+                size = step_to(size, held, ceiling);
+                size
+            })
+            .collect()
+    }
+
+    /// The reason the shrink is proportional rather than a halving: at 4× over
+    /// budget, halving needs three steps and every one of them is a latency
+    /// miss a caller can feel.
+    ///
+    /// Run on the annotations path, because it is the only one whose ceiling
+    /// leaves room to start far above a size that is reachable — on the edge
+    /// path a 4× miss lands under [`CHUNK_FLOOR`], which is a different test.
+    #[test]
+    fn a_chunk_far_over_budget_converges_from_above_in_at_most_two_steps() {
+        const CEILING: usize = chunk_rows::ANNOTATIONS;
+        let (per_row_us, overhead_ms) = (20.0, 0.05);
+        let held = |n: usize| overhead_ms + per_row_us * n as f64 / 1000.0;
+        assert!(held(CEILING) > 4.0 * 3.0, "the start is not far over budget");
+
+        let trace = converge(CEILING, per_row_us, overhead_ms, CEILING, 4);
+        let first_in_budget = trace
+            .iter()
+            .position(|&n| held(n) <= 3.0)
+            .expect("never reached the budget");
+        assert!(
+            first_in_budget <= 1,
+            "took {} steps to get under budget: {trace:?}",
+            first_in_budget + 1
+        );
+    }
+
+    /// Growth is additive, so a size that is merely comfortable cannot leap the
+    /// ceiling — and cannot overshoot the budget by more than a quarter.
+    #[test]
+    fn growth_is_slow_and_shrinking_is_fast() {
+        let grown = step(40, 1.0);
+        assert!(
+            (41..=50).contains(&grown),
+            "40 rows at 1 ms should grow by about a quarter, got {grown}"
+        );
+        let shrunk = step(90, 9.0);
+        assert!(
+            shrunk <= 40,
+            "90 rows at 3x the budget should shrink proportionally, got {shrunk}"
+        );
+    }
+
+    /// The dead band. Between `budget / 2` and `budget` the size is right and
+    /// moving it only costs a re-measurement; without this the law oscillates
+    /// across the bound forever.
+    #[test]
+    fn a_chunk_inside_the_band_is_left_alone() {
+        for held_ms in [1.6, 2.0, 2.5, 2.9, 3.0] {
+            assert_eq!(step(60, held_ms), 60, "moved at {held_ms} ms");
+        }
+        assert_ne!(step(60, 1.4), 60, "did not grow at well under half budget");
+    }
+
+    /// Both clamps, and the floor's violation stated as a test rather than only
+    /// as a comment: a populated table drives this to `CHUNK_FLOOR` and holds it
+    /// there **over budget**, which is [`CHUNK_FLOOR`]'s documented trade.
+    #[test]
+    fn the_floor_and_the_ceiling_both_hold() {
+        // 118 µs/row + 0.03 ms fixed — the populated arm, where 35 rows is
+        // ~4.1 ms and no size in range meets the bound.
+        let trace = converge(chunk_rows::EDGES, 118.0, 0.03, chunk_rows::EDGES, 8);
+        assert!(
+            trace.iter().all(|&n| n >= CHUNK_FLOOR),
+            "fell through the floor: {trace:?}"
+        );
+        assert_eq!(*trace.last().unwrap(), CHUNK_FLOOR, "settled off the floor");
+
+        // A free machine cannot grow past the path's constant.
+        let fast = converge(CHUNK_FLOOR, 1.0, 0.01, chunk_rows::EDGES, 40);
+        assert_eq!(*fast.last().unwrap(), chunk_rows::EDGES);
+        assert!(fast.iter().all(|&n| n <= chunk_rows::EDGES));
+    }
+
+    /// Zero is the one answer that cannot be recovered from: a loop asked for
+    /// chunks of no rows makes no progress and never finishes. Degenerate
+    /// inputs included, since `held` is a measurement and measurements arrive
+    /// from a machine under load.
+    #[test]
+    fn the_law_never_returns_zero() {
+        let cases = [
+            (0usize, Duration::ZERO),
+            (0, Duration::from_secs(60)),
+            (1, Duration::from_secs(60)),
+            (90, Duration::from_secs(3600)),
+            (usize::MAX, Duration::from_nanos(1)),
+            (1, Duration::ZERO),
+        ];
+        for (current, held) in cases {
+            for (floor, ceiling) in [(35, 90), (1, 1), (0, 0), (90, 35)] {
+                let n = next_chunk_size(current, held, CHUNK_BUDGET, floor, ceiling);
+                assert!(
+                    n > 0,
+                    "returned 0 for current={current}, held={held:?}, \
+                     floor={floor}, ceiling={ceiling}"
+                );
+            }
+        }
+    }
+
+    /// A zero budget is not a configuration anyone should reach, but it is one
+    /// division away from a panic, so it is pinned.
+    #[test]
+    fn a_zero_budget_shrinks_to_the_floor_rather_than_dividing_by_it() {
+        assert_eq!(
+            next_chunk_size(90, Duration::from_millis(1), Duration::ZERO, 35, 90),
+            35
+        );
     }
 }

@@ -84,24 +84,41 @@ async fn snapshot(db: &Database) -> Vec<(String, String, String, f64, String)> {
 /// really does run many chunks and the keyset boundaries are exercised rather
 /// than skipped — a version that projected only the first chunk and stopped
 /// would pass a smaller fixture.
+///
+/// # Both rebuilds run against **one** seeding (0.12.0, W3)
+///
+/// This used to seed two databases identically and compare their results, which
+/// worked only because `seed`'s `bulk_import` was deterministic: a fixed chunk
+/// size meant a fixed number of chunks, and therefore the same `recorded_at` on
+/// the same row in both. W3 made the chunk size a function of measured hold, so
+/// the two seedings now disagree about the stamps — legitimately, and it is what
+/// §5.1.6's note about machine-dependent boundaries means in practice.
+///
+/// Seeding once and running both rebuilds over the same rows removes the
+/// dependence and is the stronger test anyway: it compares the two paths on
+/// identical input rather than on input that was merely supposed to be
+/// identical. The atomic rebuild runs second, so the chunked table has to
+/// survive being reprojected over.
 #[tokio::test]
 async fn the_chunked_rebuild_produces_what_the_atomic_one_does() {
-    let atomic = {
-        let harness = TestHarness::new();
-        let db = harness.db_with_fake_clock().await;
-        seed(&db, 900, 3).await;
-        db.rebuild_current().await.unwrap();
-        let s = snapshot(&db).await;
-        db.close().await.unwrap();
-        s
-    };
-
     let harness = TestHarness::new();
     let db = harness.db_with_fake_clock().await;
     seed(&db, 900, 3).await;
 
     let report = db.rebuild_current_chunked().await.unwrap();
     assert_eq!(report.rows_rebuilt, 900);
+    let chunked_first = snapshot(&db).await;
+
+    db.rebuild_current().await.unwrap();
+    let atomic = snapshot(&db).await;
+    assert_eq!(
+        chunked_first, atomic,
+        "the two repairs disagree about current belief"
+    );
+
+    // And again from the atomic table, so the comparison is not an artifact of
+    // which one ran first.
+    db.rebuild_current_chunked().await.unwrap();
 
     let chunked = snapshot(&db).await;
     assert_eq!(
