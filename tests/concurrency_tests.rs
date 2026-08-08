@@ -295,11 +295,18 @@ async fn a_lone_high_priority_write_is_still_serviced_before_a_saturated_backlog
 /// be pinning the speed of the machine that ran it.
 ///
 /// What §5.1.6 actually promises survives that change intact, and is what is
-/// checked below: **a prefix commits**, contiguously; **the failing chunk rolls
-/// back whole**; and **each chunk is one transaction under one stamp**, so the
-/// committed rows partition into contiguous same-stamp runs. This test is the
-/// executable form of that section, which is why it is kept rather than relaxed
-/// into a smoke test.
+/// checked below: **a prefix commits**, contiguously and not the whole batch;
+/// and **each chunk is one transaction under one stamp**, so the committed rows
+/// partition into contiguous same-stamp runs. This test is the executable form
+/// of that section, which is why it is kept rather than relaxed into a smoke
+/// test.
+///
+/// The third property — that the failing chunk rolls back *whole* — is not here
+/// and cannot be, for the reason `a_violation_in_a_single_chunk_batch_commits_nothing`
+/// below states: it is only visible when a good row shares the failing chunk,
+/// and whether one does is now a fact about the machine. Asserting it here is
+/// the mistake this test made in its first version and paid for at 26 runs in
+/// 120.
 #[tokio::test]
 async fn bulk_import_is_atomic_per_chunk_not_overall() {
     let harness = TestHarness::new();
@@ -319,6 +326,7 @@ async fn bulk_import_is_atomic_per_chunk_not_overall() {
     edges.push(edge("SRC", &format!("T{n}"), "KNOWS", T1));
     edges.push(edge("SRC", "T0", "KNOWS", T2));
 
+    let edge_count = edges.len();
     let err = db.bulk_import(edges).await.unwrap_err();
     assert!(
         matches!(err, DbError::SingleOpenViolation { .. }),
@@ -331,10 +339,22 @@ async fn bulk_import_is_atomic_per_chunk_not_overall() {
         "nothing committed -- `bulk_import` is not all-or-nothing, so a failure \
          at row {n} must leave the chunks before it in place"
     );
+    // Strictly fewer than the batch, not fewer than `n`.
+    //
+    // `committed < n` was the first version of this line and it was wrong for
+    // the reason this test's own doc comment gives two paragraphs up: it
+    // assumes at least one *good* row shares the failing chunk, which is only
+    // true if the violation does not land first in its chunk. Where the
+    // boundaries fall is now a fact about the machine, so that happens — 26
+    // times in 120 runs while the R15 study loaded this box, and never once
+    // under the fixed chunk size this test was written against.
+    //
+    // Asserting the violating chunk rolls back *whole* needs a batch whose
+    // boundaries are known, which is what the single-chunk test below is for.
     assert!(
-        committed < n as i64,
-        "everything committed ({committed} rows), so the chunk holding the \
-         violation did not roll back"
+        committed < edge_count as i64,
+        "everything committed ({committed} of {edge_count} rows), so nothing \
+         rolled back and the violation was not caught"
     );
 
     // The prefix is contiguous: targets T0..T{committed-1} are present and

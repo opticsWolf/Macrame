@@ -127,6 +127,49 @@
 # n = 20. That is inside the noise band above and settles nothing; resolving it
 # needs n in the hundreds.
 #
+# Re-measured at 0.12.0, on the QUARANTINED STEP AS A WHOLE rather than on one
+# binary, because that is the quantity README and ci.yml were both quoting and
+# neither had measured. `run_rust_suite.py --features property-tests
+# --attempts 1`, run 100 times back to back on an otherwise idle Windows box:
+#
+#     the quarantined step, per attempt              93/100   93%
+#       of which doctrine_property_tests                 69
+#       of which integrity_property_tests                23
+#       of which one other binary                         1
+#
+# 95% interval 86-97%. Every figure this project had published for this was
+# lower: README said "~50/50", ci.yml sized a six-attempt budget on p ~ 0.6, and
+# run_rust_suite.py told the reader to expect a red step "roughly 1 run in 20".
+# At 93% per attempt, six consecutive crashes is 0.93^6 = **65%** -- the
+# quarantined step goes red about two runs in three, not one in twenty. All
+# three now point here instead of restating a number.
+#
+# TWO CAVEATS, both load-bearing.
+#
+# 1. THIS IS THE SUSTAINED-LOAD REGIME. 100 suite runs back to back is a hot
+#    machine by construction, and this file already records that load moves this
+#    number by tens of points. It is the regime CI runs in and not the one a
+#    developer running the suite once is in. A cold arm -- runs spaced minutes
+#    apart -- is what would separate the two, and has not been measured.
+#
+# 2. A FLAKY TEST BIASES THIS DOWNWARD, and the first pass of this measurement
+#    was biased by one. `classify()` reports FAILED before it looks for a crash,
+#    so a run where one binary crashed AND another genuinely failed is counted
+#    as a failure and the crash is invisible. Pass 1 of this study read 85 crashes
+#    and 26 failures in 120 runs -- 71% -- with every one of those 26 failures the
+#    same test, `bulk_import_is_atomic_per_chunk_not_overall`, made boundary-
+#    sensitive by 0.12.0's adaptive chunk loop (D-147). With it fixed, pass 2 read
+#    93%. The 71% was not a different session; it was this number with a bug
+#    standing in front of it.
+#
+# AND IT DOES NOT PREDICT THE CI RUNNER, which is the thing worth carrying away.
+# Six attempts at 93% would put the quarantined step red 65% of the time, and it
+# is not: ci.yml records 2 red in 9 runs on `main`, which implies p ~ 0.78 there.
+# So the published figures -- 45%, 60%, 75%, 78%, 93% -- are not competing
+# estimates of one constant. They are five machines under five loads, and the
+# rate is a property of the box, not of this crate. Quote the one you measured,
+# name the machine and the load beside it, and do not carry it anywhere.
+#
 # And the fault is effectively Windows-only in practice. CI run 30770381302, the
 # quarantined step: 46 s on macOS, 58 s on Ubuntu -- single attempts -- against
 # 4 m 30 s on Windows.

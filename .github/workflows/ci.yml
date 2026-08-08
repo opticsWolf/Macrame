@@ -207,6 +207,22 @@ jobs:
       # observed on `main` in runs 30706318073 and 30706474231, both doc-only
       # commits.
       #
+      # p≈0.6 was one binary, one session, n=15. Measured on this step as a
+      # whole at 0.12.0 — 93% per attempt, n=100, on a developer Windows box
+      # under sustained load (.cargo/config.toml, D-147). Six attempts at that
+      # rate is 65%, and this step plainly does not go red 65% of the time
+      # here, so the runner is NOT that machine and the two figures bracket it
+      # rather than contradict each other: the 2-in-9 observed above implies
+      # p≈0.78 on the runner, between 0.6 and 0.93.
+      #
+      # The honest summary is that this rate is a property of the machine and
+      # the load, not a constant of the crate, and no measurement taken
+      # anywhere else predicts the runner. The budget is deliberately NOT
+      # raised: at any of these rates no budget makes the step a gate, and more
+      # attempts only buy more chances to launder a real failure. What the step
+      # is for is running these binaries at all and reporting honestly when the
+      # engine wins.
+      #
       # Raising the budget was rejected while the loop existed, because more
       # attempts also meant more chances to launder a real failure into a pass.
       # The classifier removes that: a FAILED result returns on attempt 1 and is

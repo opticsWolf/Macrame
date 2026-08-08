@@ -464,16 +464,24 @@ def main() -> int:
     # nothing wrong. Telling the reader it must be real would train them to
     # disbelieve it.
     #
+    # **And 5% was optimistic by an order of magnitude** (0.12.0, D-147). The
+    # step itself was measured at 93% per attempt, n = 100, which puts six in a
+    # row at 65%. The reasoning above stands and its input did not: p ~ 0.6 came
+    # from one binary in one session at n = 15. The rate lives in
+    # .cargo/config.toml, including the caveats, and is not restated here.
+    #
     # So it says what to do instead, which is what .cargo/config.toml has always
     # advised: a binary that fails alone is a real failure, one that only fails
     # in the suite is almost certainly R15.
     print(
         f"::error::CRASH: {args.attempts} consecutive attempts died without a "
-        f"summary, every one of them R15's shape. That is unlikely but not "
-        f"rare -- expect it in roughly 1 run in 20 on the quarantined step. "
-        f"Before treating it as real, run the named binary on its own a few "
-        f"times: alone it should be clean, and exit 0xC0000005 there is still "
-        f"R15. See .cargo/config.toml."
+        f"summary, every one of them R15's shape. On the quarantined step this "
+        f"is the EXPECTED outcome more often than not -- measured at 93% per "
+        f"attempt, six in a row is about 65% of runs (.cargo/config.toml, "
+        f"D-147). This message said 'roughly 1 run in 20' until 0.12.0, from a "
+        f"rate nobody had measured on this step. Before treating it as real, "
+        f"run the named binary on its own a few times: alone it should be "
+        f"clean, and exit 0xC0000005 there is still R15."
     )
     return 1
 

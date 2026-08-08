@@ -289,7 +289,7 @@ criterion baselines, machine against itself. See [§9 of the architecture docs](
 
 | Risk | Mitigation |
 |---|---|
-| **R15: Concurrent open → access violation** (libSQL 0.9.30) | One open per database; R15 reproduces transparently through Python. **`--features property-tests` is run as its own step**, not folded into the suite: `integrity_property_tests` needs a database per case, and inside the full run it faults often enough that the classifier's three retries are routinely exhausted. Alone it is ~50/50 and green when it completes — measured 2026-08-07, and it is the engine rather than the tests |
+| **R15: Concurrent open → access violation** (libSQL 0.9.30) | One open per database; R15 reproduces transparently through Python. **`--features property-tests` is run as its own step**, not folded into the suite: `integrity_property_tests` needs a database per case, and inside the full run it faults often enough that the classifier's three retries are routinely exhausted. Alone it crashes on **93 of 100 attempts** and is green when it completes — measured 2026-08-08 under sustained load, and it is the engine rather than the tests. This row said *"~50/50"* until then, on no measurement of this quantity; `.cargo/config.toml` is where the rate lives and what to read before quoting it ([D-147](docs/architecture/s13-decision-register.md#d-147)) |
 | **Property test binaries fault mid-suite** | `property-tests` feature gate; serialised runs; CI classifies each run rather than counting failures, and retries only a crash |
 | **Covering index wins over selective** | `EXPLAIN QUERY PLAN` assertions on every index-sensitive query |
 | **Snapshot chain divergence** | `verify_snapshot_chain()` reports but does not repair (snapshots are disposable) |
