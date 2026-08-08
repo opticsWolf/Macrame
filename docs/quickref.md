@@ -751,6 +751,8 @@ The surface itself *is* pinned: `tests/doc_sync_tests.rs` fails the build when t
 
 **How to run it so the answer means something** (D-110). Use `python scripts/run_rust_suite.py --features metrics`, not bare `cargo test`. Under R15 a crashed target prints no `test result:` line while every other target prints its own, so the run comes back with a *smaller pass count and zero failures* — green to anything summing passes. The script classifies each run as `CRASH`, `FAILED`, `INCOMPLETE`, `TEARDOWN` or `BUILD` and retries only `CRASH`; a genuine failure is named on attempt 1. Both CI steps go through it, at three attempts for the main suite and six for the quarantined property step, which faults far more often. Same shape as `tests_py/run_suite.py` (D-107), deliberately not the same implementation.
 
+**The suite is not the whole gate, and one gap shipped** (0.11.0, [D-144](architecture/s13-decision-register.md#d-144)). CI also runs `cargo doc --no-deps --features metrics` under `RUSTDOCFLAGS: -D warnings`, and rustdoc's checks are **not tests**: a broken intra-doc link is a warning that flag escalates, so no `cargo test` run and no assertion this project could write will see it. 0.10.0 was tagged and released with one. Run it locally the same way as the suite: `python scripts/run_rust_suite.py --docs --features metrics`. Nothing is retried — rustdoc opens no database, so a failure there is always real.
+
 ---
 
 ## 9. Decision Reference

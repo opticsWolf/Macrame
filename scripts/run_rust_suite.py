@@ -67,6 +67,7 @@ distinction this file exists to draw is destroyed before it can be read.
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import subprocess
 import sys
@@ -366,6 +367,34 @@ def run_once(cargo_args: list[str]) -> Outcome:
     return classify(proc)
 
 
+def run_docs(features: str) -> int:
+    """`ci.yml`'s rustdoc gate, runnable locally.
+
+    It is here rather than in a test because rustdoc's checks are not tests:
+    a broken intra-doc link is a *warning* that `RUSTDOCFLAGS: -D warnings`
+    escalates, so it is invisible to `cargo test` and to any assertion this
+    project could write. That gap shipped one: `DbError`'s rustdoc linked to
+    `schema::migrations::verify`, which is private and therefore unresolvable,
+    and 0.10.0 was tagged and released before CI said so.
+
+    **Nothing is retried.** The R15 budget exists because a test binary opens
+    databases; rustdoc opens none, so a failure here is always real.
+    """
+    cmd = ["cargo", "doc", "--no-deps"]
+    if features:
+        cmd += ["--features", features]
+    print(f"::group::{' '.join(cmd)}  (RUSTDOCFLAGS=-D warnings)")
+    proc = subprocess.run(cmd, cwd=REPO, env={**os.environ, "RUSTDOCFLAGS": "-D warnings"})
+    print("::endgroup::")
+    if proc.returncode == 0:
+        print("PASSED: rustdoc is clean with -D warnings")
+        return 0
+    print("::error::DOCS: rustdoc failed under -D warnings. A broken intra-doc "
+          "link is the usual cause, and a link to a private item is the usual "
+          "broken link -- rustdoc documents public items only.")
+    return 1
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -384,6 +413,11 @@ def main() -> int:
         help="how many times to retry a CRASH (nothing else is retried)",
     )
     parser.add_argument(
+        "--docs",
+        action="store_true",
+        help="run ci.yml's rustdoc gate instead of the test suite; not retried",
+    )
+    parser.add_argument(
         "--self-test",
         action="store_true",
         help="classify fixed fixtures and exit; runs no cargo, compiles nothing",
@@ -395,6 +429,9 @@ def main() -> int:
 
     if args.self_test:
         return _self_test()
+
+    if args.docs:
+        return run_docs(args.features)
 
     cargo_args = ["--features", args.features] if args.features else []
     cargo_args += passthrough

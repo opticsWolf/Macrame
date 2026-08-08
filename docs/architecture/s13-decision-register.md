@@ -2155,3 +2155,36 @@ The fix that follows is not a number. It is for the chunk loop to stop on **elap
 `chunk_scaling`'s doc comment says *"Every size here is ≤ `CHUNK_ROWS`, so each measurement is exactly one chunk and one transaction."* That was true in 0.5.5, when `CHUNK_ROWS` was a single constant at 1,000. [D-058](s13-decision-register.md#d-058) replaced it with four per-path constants of 90 / 70 / 600 / 30 in the same release, and the sentence was not revisited: the group sweeps to 1,000, so on three of its four paths the larger points are several chunks and several transactions, measuring the chunked path rather than a chunk. Corrected in place. It is the same defect class as [D-136](s13-decision-register.md#d-136) — a sentence that stayed behind when the thing it described moved — found in the file that measures the constant it describes.
 
 **Rejected.** *Lowering `chunk_rows::EDGES` to 20* — above; a certain throughput cost on every bulk import for conformance at one population, on a path whose cost grows with a table that grows. *Raising the 3 ms bound to what the path actually costs* — the bound is a latency contract with the high-priority tier ([D-010](s13-decision-register.md#d-010), [D-011](s13-decision-register.md#d-011)), not an observation about the write path; moving it to fit the measurement would make it unfalsifiable. *Making the chunk loop time-based in this change* — the right fix, and a write-actor design decision that should not ride in on a measurement commit. *Re-deriving the other three constants upward on their headroom* — the sweeps stop at each constant because the public API chunks above it ([D-057](s13-decision-register.md#d-057) is why these three are measured through the API at all), so the data to raise them does not exist and inferring it from a linear fit is what [D-056](s13-decision-register.md#d-056) got wrong. *Reporting one shape because all four agreed* — the agreement **is** the result, and it is only a result because four were run; `dense_small` diverging by 2.4× above the crossing is what shows the agreement is not an artefact of measuring the same thing four times.
+---
+
+<a id="d-144"></a>D-144 — rustdoc is a gate this project could not see, and 0.10.0 shipped through it (0.11.0). [D-107](s13-decision-register.md#d-107), [D-110](s13-decision-register.md#d-110), [D-133](s13-decision-register.md#d-133), [D-139](s13-decision-register.md#d-139), [D-140](s13-decision-register.md#d-140), [§8](s6-s10-flows-to-dependencies.md#8-testing-strategy).
+
+> **A local suite that is green, a release note, and a signed tag — on a commit whose CI documentation job fails. The gap is not that the check was missing; it is that the check is not a test, and everything this project uses to decide "is it green" only knows about tests.**
+
+## What broke
+
+`DbError::ArchiveSessionLeaked`'s rustdoc linked to `` [`crate::schema::migrations::verify`] ``. That function exists — `migrations.rs:876` — and is **private**, so rustdoc cannot resolve a link to it: it documents public items, and an intra-doc link to anything else is `rustdoc::broken_intra_doc_links`.
+
+That lint is a **warning**. `ci.yml` sets `RUSTDOCFLAGS: -D warnings` on its doc step and the build fails there; locally, and in every `cargo test` and `cargo build` invocation this project runs, it does not appear at all. Written in 0.10.0's W2, shipped in 0.10.0, tagged as `v0.10.0`, and found by a human reading a CI log afterwards.
+
+## Why nothing caught it, stated precisely
+
+This project has a strong habit of inverting a missed check into a registry — [D-089](s13-decision-register.md#d-089) for index plans, [D-139](s13-decision-register.md#d-139) for performance claims, `doc_sync_tests` for the API surface. **None of that machinery could have caught this**, and the reason is worth naming rather than adding a fourth registry to.
+
+Every one of those gates is a `#[test]`. A test can assert anything it can compute — but a broken intra-doc link is not computable from inside the crate: resolving it *is* rustdoc's job, and rustdoc runs as a separate compiler pass whose output no test observes. The check already existed and was already correct. What was missing is that **"the suite is green" was being read as "the gates are green"**, and one gate was not in the suite.
+
+That is the same category error as [D-133](s13-decision-register.md#d-133) — a feature-gated target is not covered by "the suite passing" — and as [D-140](s13-decision-register.md#d-140)'s `--all-features` count. Third instance, so the pattern gets an entry rather than a third one-off fix.
+
+## The fix, and why it is not a test
+
+`scripts/run_rust_suite.py --docs` runs `ci.yml`'s exact command with its exact environment. The script was already the project's answer to "run it so the answer means something" ([D-110](s13-decision-register.md#d-110)), so the gate a contributor is told to run is now the gate CI runs, rather than a subset of it.
+
+**Nothing is retried.** The R15 attempt budget exists because a test binary opens databases; rustdoc opens none, so a failure there is always real and retrying it would only launder it. Same reasoning that keeps `CRASH` the only retried classification.
+
+Falsified before being trusted: the broken link was restored, the gate exited 1 and named the likely cause; the link was fixed, the gate exited 0. Documented in [quickref §8](../quickref.md#8-testing-strategy) beside the suite command, because a contributor who runs one and not the other is exactly the failure this entry is about.
+
+## What the link says now
+
+Not a link. `verify` is private and this is a *public* error type's documentation, so the honest form names the function and its file and says why it is not a link — a reader who wants it can find it, and nobody is tempted to restore a link that cannot resolve. Making `verify` public to satisfy the link would widen the API surface to fix a documentation defect, which is the tail wagging the dog.
+
+**Rejected.** *Making `verify` `pub`* — above; a public item exists for callers, not for rustdoc. *`#[allow(rustdoc::broken_intra_doc_links)]` on the variant* — it silences the class on that item forever to fix one instance, and the next broken link there would be invisible again. *A `#[test]` that greps rustdoc's output* — it would need rustdoc to have run, which is the thing that was not happening; the dependency is backwards. *Adding a fourth registry for doc links* — `doc_link_tests` already validates the **markdown** links between architecture files and could not have seen this one, because intra-doc links are a Rust construct resolved by a different tool; a registry would have to reimplement rustdoc's resolver. *Leaving it to CI* — CI did catch it, after a tag and a release note. A gate that only fires downstream of a release is a gate that reports history.
