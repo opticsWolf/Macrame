@@ -95,6 +95,12 @@ fn estimate_bulk_hold(edges: Vec<types::PyEdgeAssertion>) -> std::time::Duration
 /// an aspiration is `Database.metrics()`, whose counters are real in this wheel
 /// because it is built with `--features metrics` unconditionally (D-093):
 /// `metrics().violations()` is the list of kinds that exceeded this budget.
+///
+/// Since 0.12.0 it is also the number the actor **steers on** rather than one a
+/// row count approximates: the bulk paths measure each chunk and size the next
+/// from it against this budget (D-146). `violations()` is still the honest
+/// answer to whether it is being met, and on a populated `links` table it is
+/// still missed — by ~0.2 ms at the floor rather than by 3×.
 #[pyfunction]
 fn chunk_budget_ms() -> u64 {
     macrame::CHUNK_BUDGET.as_millis() as u64

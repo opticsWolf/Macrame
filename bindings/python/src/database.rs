@@ -421,6 +421,14 @@ impl PyDatabase {
     /// **Atomic per chunk, not overall**: a failure partway leaves earlier
     /// chunks committed. That is the trade for a bounded hold — use
     /// `write_bulk_atomic` when the batch must be all-or-nothing.
+    ///
+    /// **Where the chunks fall depends on the machine** (0.12.0). The loop
+    /// measures each chunk and sizes the next one from it, so the same edges
+    /// imported twice can land under a different number of `recorded_at`
+    /// stamps. Each chunk is still exactly one transaction under exactly one
+    /// stamp, and a reader mid-import still sees a prefix and never half a
+    /// chunk — what is not promised is that two identical calls stamp
+    /// identically. `write_bulk_atomic` is the escape hatch if you need that.
     fn bulk_import(&self, py: Python<'_>, edges: Vec<PyEdgeAssertion>) -> PyResult<usize> {
         let edges: Vec<EdgeAssertion> = edges.into_iter().map(|e| e.inner).collect();
         self.with_db(py, move |db| {

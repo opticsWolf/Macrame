@@ -126,7 +126,7 @@ recent log                detached on archive
 | `temporal` | `temporal/replay.rs`, `temporal/snapshot.rs`, `temporal/as_of.rs`, `temporal/archive.rs` | `reconstruct()`, `as_of()`, snapshot cadence/retention, archive, `archivable_concepts()`, `rehydrate()` |
 | `vector` | `vector/mod.rs`, `vector/registry.rs`, `vector/model.rs`, `vector/hybrid.rs` | Model registration, embedding upsert, DiskANN search, hybrid RRF fusion |
 | `integrity` | `integrity/shadow.rs`, `integrity/rebuild.rs` | `audit_current()`, `rebuild_current()` (atomic), `rebuild_current_chunked()` (shadow-swap), `ShadowStep`/`ShadowOutcome` |
-| `metrics` | `metrics.rs` | `ActorMetrics`, `HoldTimer`, `CommandKind`, `MetricsSnapshot` — feature-gated, zero-cost when off |
+| `metrics` | `metrics.rs` | `ActorMetrics`, `HoldTimer`, `CommandKind`, `MetricsSnapshot` — feature-gated and zero-cost when off, except `HoldTimer`, which the chunk loop needs in every build (0.12.0) |
 | `util` | `util/clock.rs`, `util/timestamp.rs`, `util/ids.rs`, `util/limits.rs` | `Clock` trait, timestamp normalization/parsing, ULID generation, `HYDRATE_CHUNK` (`CHUNK_BUDGET` is in `connection.rs`) |
 | `connection` | `connection.rs` | `Database` handle, Write Actor, priority channels, `low_chunked()`, `ActorShared` |
 | `error` | `error.rs` | `DbError` enum, error classification |
@@ -634,7 +634,7 @@ impl Database {
 }
 ```
 
-**`MetricsSnapshot`**: Queue depth (mean + high-water), per-kind hold histogram (bucket boundary at `CHUNK_BUDGET`), over-budget count, longest hold with command kind. Feature-gated — `HoldTimer` reads no clock when feature is off.
+**`MetricsSnapshot`**: Queue depth (mean + high-water), per-kind hold histogram (bucket boundary at `CHUNK_BUDGET`), over-budget count, longest hold with command kind. Feature-gated — `ActorMetrics` is an empty ZST and `record_hold` a no-op when the feature is off. `HoldTimer` is **not** gated since 0.12.0: its reading sizes the next chunk, so it is a control signal in every build ([D-146](architecture/s13-decision-register.md#d-146)).
 
 ### 5.9 Utility
 
@@ -678,7 +678,7 @@ pub fn estimated_bulk_hold(edges: &[EdgeAssertion]) -> Duration  // ~34 ms / 500
 
 ### 6.1 Chunking Constants (per path)
 
-| Path | Chunk Size | Measured at | Per-row cost |
+| Path | Ceiling (the size, before 0.12.0) | Measured at that size | Per-row cost |
 |---|---|---|---|
 | Edges (`bulk_import`) | 90 | ~2.39 ms | ~11 µs (empty db), ~135 µs at 8K edges |
 | Concepts (`write_concepts`) | 70 | ~2.35 ms | ~2.5 µs |

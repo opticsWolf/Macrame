@@ -77,11 +77,16 @@ let held: Duration = estimated_bulk_hold(&edges);   // ~34 ms / 500 rows, ~2.6 s
 if held > BULK_ATOMIC_WARN_HOLD { /* 250 ms; the call warns above this */ }
 
 db.write_bulk_atomic(edges).await?;    // one transaction, one stamp, one stall
-db.bulk_import(edges).await?;          // chunked at chunk_rows::EDGES, atomic per chunk
-db.write_concepts(concepts).await?;    // chunked at chunk_rows::CONCEPTS, atomic per chunk
+db.bulk_import(edges).await?;          // chunked up to chunk_rows::EDGES, atomic per chunk
+db.write_concepts(concepts).await?;    // chunked up to chunk_rows::CONCEPTS, atomic per chunk
 
-// The four chunk sizes are per-path and measured, not one shared number
-// (0.5.6, D-058): chunk_rows::{EDGES 90, CONCEPTS 70, ANNOTATIONS 600,
+// The four constants are per-path and measured, not one shared number
+// (0.5.6, D-058), and since 0.12.0 they are CEILINGS rather than sizes
+// (D-146): the loop starts there and sizes each chunk from the last one's
+// measured hold, down to a floor of 35 rows. So the boundaries -- and the
+// recorded_at stamps a bulk write produces -- depend on the machine, which
+// is §5.1.6's fidelity boundary and is stated there.
+// chunk_rows::{EDGES 90, CONCEPTS 70, ANNOTATIONS 600,
 // EMBEDDINGS 30}. util::limits::HYDRATE_CHUNK (400) is a different kind of
 // constant -- a bind-variable ceiling SQLite imposes, not a latency choice.
 

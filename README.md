@@ -199,6 +199,19 @@ reasons a table of 0.7.0 numbers would have been describing a different crate.
 | Rehydrate, 1 concept | ≤ 5 ms | — | n/a | 3.71 ms | 3.41 ms |
 | Rehydrate, per concept after the 1st | ≤ 300 µs | — | n/a | ~74 µs to n=1,000; **114 µs at n=10,000** | ~71 µs to n=1,000; **105 µs at n=10,000** |
 
+**There is no 0.11.0 or 0.12.0 column, and the second absence needs a word.** 0.11.0 changed no
+code that runs, so a column would have been a second measurement of the same crate. 0.12.0 does
+change one of these rows — **`bulk_import` no longer commits 90-row chunks.** 90 is now the
+ceiling it starts from and it settles at 35 within a chunk or two
+([D-146](docs/architecture/s13-decision-register.md#d-146)), so *"chunk commit, edges, 90 rows"*
+still names a real measurement of a real transaction and no longer names what that method does.
+A 0.12.0 column is not published rather than half-published: this table is a per-release series
+measured as a whole under one control, and adding one row measured in a different session is the
+practice [D-070](docs/architecture/s13-decision-register.md#d-070) and
+[D-145](docs/architecture/s13-decision-register.md#d-145) exist to prevent. What 0.12.0 measured
+instead is in [§5.1.5](docs/architecture/s5-modules.md#515-cooperative-chunking--the-golden-rule),
+against the fixed size rather than against previous releases.
+
 **0.10.0's column is a full re-measurement, median of three sessions, controls published below.**
 Every row is inside its budget. Eight of the ten are within ±8% of 0.9.0 — below the ~11%
 single-arm variance [D-134](docs/architecture/s13-decision-register.md#d-134) measured and far
