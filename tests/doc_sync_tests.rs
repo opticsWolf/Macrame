@@ -624,3 +624,218 @@ fn the_quoted_subgraph_surface_lists_every_public_method() {
          has."
     );
 }
+
+// ---------------------------------------------------------------------------
+// A document that says where a constant lives must be right about it
+//
+// `docs/quickref.md` credited `util/limits.rs` with "chunking and operational
+// constants" and listed five: `CHUNK_BUDGET`, `HYDRATE_CHUNK`,
+// `BULK_ATOMIC_WARN_HOLD`, `SAMPLE_LIMIT`, `MAX_ARCHIVE_SESSIONS`. That module
+// holds the second one and has never held any of the other four — they are in
+// `connection.rs` and `temporal/replay.rs`, and the module's own doc comment
+// draws exactly the line the quickref erased: what is here is a ceiling SQLite
+// imposes, what is elsewhere is a choice measurement can move.
+//
+// Nothing caught it. It was found by a reader passing through on unrelated
+// work, which is the D-133 / D-140 / D-144 shape for the fourth time: a claim
+// about layout that no test can see, so it drifts silently and is corrected by
+// accident. This is the executable form.
+//
+// # The rule, and why it is this rule
+//
+// Not "every constant must be documented" — the quickref is a selection, and a
+// gate that demanded completeness would be answered by deleting the section.
+// The rule is narrower and matches the failure: **a passage that places a
+// constant in a file must place it in the right file.** A passage that names no
+// file makes no location claim and is not checked; a passage that names a file
+// the constant is not in fails.
+//
+// Table rows are their own passage. A markdown table is one block of text, so
+// treating it as a paragraph would let a constant in one row be excused by a
+// file named three rows away — which is precisely the row that was also wrong
+// here (`util` credited with `CHUNK_BUDGET`).
+//
+// # It runs on the inventories and not on the prose, and §5.1 is why
+//
+// The first version ran on §5.1 too and failed on a passage that is correct:
+// *"`HYDRATE_CHUNK` … is not a latency budget — these are reads, and
+// `CHUNK_BUDGET` bounds what the writer holds"*. That names `util/limits.rs`
+// and mentions a constant declared elsewhere, and the mention is a **contrast**
+// — the sentence exists to say the two are different. No rule reading names and
+// proximity can tell that apart from a misplacement, and a rule that guesses
+// would be relaxed the first time it cried wolf, which is this file's own
+// standing warning.
+//
+// So the gate runs where a passage naming a file *is* an inventory: the
+// quickref's module table and constants section, README's summaries, and
+// Appendix A. §5.1 and the rest of the architecture set argue rather than
+// enumerate, and the register keeps history verbatim — an entry describing
+// where something lived in 0.6.0 is doing its job. Narrower than "every
+// document", and it covers every document where the failure could occur
+// unnoticed.
+// ---------------------------------------------------------------------------
+
+use std::collections::BTreeMap;
+
+const README_MD: &str = include_str!("../README.md");
+
+/// Every `const` declared under `src/`, by name, with the files declaring it.
+///
+/// Read from disk rather than `include_str!`: the point is to cover the whole
+/// tree, and a fixed list of includes is the same hand-maintained inventory
+/// this test exists to stop trusting.
+fn constants_by_file() -> BTreeMap<String, BTreeSet<String>> {
+    fn walk(dir: &std::path::Path, root: &std::path::Path, out: &mut BTreeMap<String, BTreeSet<String>>) {
+        for entry in std::fs::read_dir(dir).expect("src/ is readable") {
+            let path = entry.expect("readable entry").path();
+            if path.is_dir() {
+                walk(&path, root, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                let rel = path
+                    .strip_prefix(root)
+                    .expect("under the manifest dir")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                let text = std::fs::read_to_string(&path).expect("valid utf-8");
+                for line in text.lines() {
+                    if let Some(name) = declared_const(line) {
+                        out.entry(name).or_default().insert(rel.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut out = BTreeMap::new();
+    walk(&root.join("src"), root, &mut out);
+    out
+}
+
+/// `NAME` from a line declaring `const NAME:`, screaming-case only.
+///
+/// Deliberately not a parser. What is wanted is the set of names a document
+/// could plausibly be talking about, and a `const` line that this misses is a
+/// constant the quickref is then free to misplace — which is the pre-existing
+/// state, not a regression this introduces.
+fn declared_const(line: &str) -> Option<String> {
+    let rest = line.trim_start().strip_prefix("pub ").unwrap_or(line.trim_start());
+    let rest = rest.strip_prefix("const ")?;
+    let name: String = rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+    let screaming = !name.is_empty()
+        && name.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+        && name.chars().any(|c| c.is_ascii_uppercase());
+    screaming.then_some(name)
+}
+
+/// The passages of a markdown document, for the purpose above: a table row is
+/// one, and everything else is separated by blank lines.
+fn passages(doc: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    for line in doc.lines() {
+        let t = line.trim();
+        if t.starts_with('|') {
+            if !current.trim().is_empty() {
+                out.push(std::mem::take(&mut current));
+            }
+            out.push(line.to_string());
+        } else if t.is_empty() {
+            if !current.trim().is_empty() {
+                out.push(std::mem::take(&mut current));
+            }
+        } else {
+            current.push_str(line);
+            current.push(' ');
+        }
+    }
+    if !current.trim().is_empty() {
+        out.push(current);
+    }
+    out
+}
+
+/// Every `something.rs` path named in a passage.
+fn files_named(passage: &str) -> BTreeSet<String> {
+    let bytes: Vec<char> = passage.chars().collect();
+    let mut out = BTreeSet::new();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i].is_alphanumeric() || bytes[i] == '_' || bytes[i] == '/' || bytes[i] == '.' {
+            let start = i;
+            while i < bytes.len()
+                && (bytes[i].is_alphanumeric() || bytes[i] == '_' || bytes[i] == '/' || bytes[i] == '.')
+            {
+                i += 1;
+            }
+            let token: String = bytes[start..i].iter().collect();
+            if token.ends_with(".rs") {
+                out.insert(token);
+            }
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Backticked screaming-case identifiers in a passage.
+///
+/// Backticks required: prose sometimes shouts, and `WAL` or `NORMAL` in running
+/// text is not a claim about a constant.
+fn constants_named(passage: &str) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for (i, chunk) in passage.split('`').enumerate() {
+        if i % 2 == 1 && declared_const(&format!("const {chunk}:")).is_some() {
+            out.insert(chunk.to_string());
+        }
+    }
+    out
+}
+
+#[test]
+fn a_passage_that_places_a_constant_names_the_file_it_is_in() {
+    let defined = constants_by_file();
+    let mut wrong = Vec::new();
+
+    const DOCS: [(&str, &str); 3] = [
+        ("docs/quickref.md", QUICKREF),
+        ("README.md", README_MD),
+        ("docs/architecture/appendices.md", APPENDIX_A),
+    ];
+
+    for (doc_name, doc) in DOCS {
+        for passage in passages(doc) {
+            let files = files_named(&passage);
+            if files.is_empty() {
+                continue; // no location claim to be wrong about
+            }
+            for name in constants_named(&passage) {
+                let Some(homes) = defined.get(&name) else {
+                    continue; // not a constant of this crate
+                };
+                let credited = homes
+                    .iter()
+                    .any(|home| files.iter().any(|named| home.ends_with(named.as_str())));
+                if !credited {
+                    wrong.push(format!(
+                        "  {doc_name}: `{name}` is declared in {} — the passage names only {}\n    ...{}",
+                        homes.iter().cloned().collect::<Vec<_>>().join(", "),
+                        files.iter().cloned().collect::<Vec<_>>().join(", "),
+                        passage.chars().take(160).collect::<String>().trim_end()
+                    ));
+                }
+            }
+        }
+    }
+
+    assert!(
+        wrong.is_empty(),
+        "{} constant(s) are put in a file they are not in:\n{}\n\n\
+         A passage naming a source file is making a claim about where something \
+         lives, and this is the claim `util/limits.rs` carried wrongly for five \
+         releases. Correct the passage, or stop naming a file in it.",
+        wrong.len(),
+        wrong.join("\n")
+    );
+}
