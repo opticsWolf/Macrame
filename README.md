@@ -110,7 +110,7 @@ Every design decision derives from these invariants:
 - **One writer** — a dedicated Tokio task holds the sole write-capable connection
 - **Many readers** — WAL journaling; readers never block on writer
 - **Two-tier priority channels** — high-priority (user-driven) preempts low-priority (background)
-- **Cooperative chunking** — bounded to ~3 ms per chunk, four paths with different row counts (90 edges, 70 concepts, 600 annotations, 30 embeddings)
+- **Cooperative chunking** — bounded to ~3 ms per chunk, sized from each chunk's measured hold rather than from a constant, under four per-path ceilings (90 edges, 70 concepts, 600 annotations, 30 embeddings) and a 35-row floor
 
 ### Schema Versioning
 

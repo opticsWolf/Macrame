@@ -114,7 +114,7 @@ recent log                detached on archive
 - **One writer** — the Write Actor task holds the sole write-capable connection
 - **Many readers** — WAL journaling; readers never block on writer
 - **Two-tier priority channels** — high-priority (user-driven) preempts low-priority (background)
-- **Cooperative chunking** — low-priority transactions bounded to per-path constants (90 edges, 70 concepts, 600 annotations, 30 embeddings)
+- **Cooperative chunking** — low-priority transactions bounded to 3 ms, sized adaptively from each chunk's measured hold, under per-path ceilings (90 edges, 70 concepts, 600 annotations, 30 embeddings) and a 35-row floor
 - **`PRAGMA query_only = ON`** — read connection enforced at engine level (not just Rust ownership)
 
 ### 3.3 Module Map
@@ -237,7 +237,7 @@ impl Database {
 
 **`normalized()`**: Validates and normalizes the concept — edge types are uppercased alphanumeric, identifiers are validated, timestamps are canonicalized.
 
-**`write_concepts()`**: Low-priority chunked write for analytics write-back. Each chunk commits under its own `recorded_at`; not transaction-time atomic.
+**`write_concepts()`**: Low-priority chunked write for analytics write-back. Each chunk commits under its own `recorded_at`; not transaction-time atomic. Since 0.12.0 the chunk boundaries are machine-dependent, so the number of stamps is not reproducible across runs (§5.1.6).
 
 ### 5.3 Edges
 
@@ -266,7 +266,7 @@ impl Database {
 
 **`write_bulk_atomic()`**: One transaction, one stamp, one stall. Uncapped — the caller sizes it. Warns above `BULK_ATOMIC_WARN_HOLD` (250 ms). Use when the batch must be visible all-at-once or not at all.
 
-**`bulk_import()`**: Same as `write_bulk_atomic` but low-priority and chunked. Not transaction-time atomic overall.
+**`bulk_import()`**: Same as `write_bulk_atomic` but low-priority and chunked, at most `chunk_rows::EDGES` rows at a time. Not transaction-time atomic overall, and the boundaries — hence the `recorded_at` stamps — depend on how fast the machine was.
 
 ### 5.4 Traversal & Subgraph
 
@@ -685,7 +685,9 @@ pub fn estimated_bulk_hold(edges: &[EdgeAssertion]) -> Duration  // ~34 ms / 500
 
 **Bound**: 3 ms (`CHUNK_BUDGET`). Per-transaction overhead: ~0.8 ms (BEGIN, COMMIT, fsync). The four sizes are derived from measurement ([D-058](s13-decision-register.md#d-058)), not one shared constant. Two paths are superlinear in *table size* (edges via `trg_links_single_open`'s wrong index — fixed in v6 by `idx_lc_open_interval`; embeddings via DiskANN graph growth) — chunking costs throughput on every path.
 
-**`Database::low_chunked`** (D-086): The four bulk paths are one deduplicated function taking the chunks and a closure that names the command. Four copies of a yield-critical loop are four places for the yield to be lost.
+**The four sizes are ceilings as of 0.12.0, not sizes.** No row count can bound a duration on a path whose per-row cost grows with the table ([D-143](s13-decision-register.md#d-143)), so the loop stopped picking one ahead of time: the actor times its own transaction, and each chunk's measured hold sizes the next. Shrink proportionally when over budget, grow by a quarter when comfortably under, hold in between — fast off a bound you are exceeding, slow toward one you are not. `CHUNK_FLOOR` (35) stops the descent, at ≈4.1 ms populated and ≈1.6 ms empty: a knowing ~1.1 ms miss on populated tables, defended by the frame it protects (4.1 + 5 = 9.1 ms against 16.7 ms) rather than by the bound. Feedback, not preemption — the chunk in flight always commits in full, and a single-chunk batch gets no protection at all.
+
+**`Database::low_chunked`** (D-086): The four bulk paths are one deduplicated function, taking the whole batch, a ceiling and a closure that names the command. Four copies of a yield-critical loop are four places for the yield to be lost — and, since 0.12.0, four places to get the control law's clamps wrong.
 
 ### 6.2 Performance Budgets (§9)
 
@@ -767,8 +769,10 @@ The surface itself *is* pinned: `tests/doc_sync_tests.rs` fails the build when t
 | **`write_bulk_atomic` uncapped** | D-014 | Capping breaks the guarantee the method exists to provide |
 | **Archive windowing not default** | D-080 | Windowing costs more total work; only pays when backlog is large |
 | **Snapshot chain: report, don't repair** | D-092 | Under Doctrine VI a snapshot is disposable; repair evidence would be destroyed |
-| **Metrics feature-gated, zero cost when off** | D-079 | `HoldTimer` reads no clock; `ActorMetrics` is empty ZST |
+| **Metrics feature-gated, zero cost when off** | D-079 | `ActorMetrics` is an empty ZST and `record_hold` a no-op. `HoldTimer` left the gate in 0.12.0 — the reading is now a control signal, and `Duration::ZERO` reads as "under budget" |
 | **Four chunk sizes, not one** | D-058 | Per-row costs span 60×; one constant cannot express one duration across paths |
+| **The chunk size is measured, not chosen** | D-143 | No row count bounds a duration on a path whose per-row cost grows with the table; the constants become ceilings |
+| **A chunk floor that misses the bound** | 0.12.0 | Without one the loop shrinks until the import stops finishing; 35 rows is 9.1 ms worst case against a 16.7 ms frame |
 | **Chunking is ~11% slower as throughput** | D-059 | Smaller chunks buy latency and cost throughput on every path |
 | **`low_chunked` deduplicates four bulk loops** | D-086 | Four copies of a yield-critical loop are four places for the yield to be lost |
 | **`RebuildInterrupted` ≠ `RebuildFailed`** | D-082 | The repair *did not run* is not *the repair did not repair*; action is to retry |
