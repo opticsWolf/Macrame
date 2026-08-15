@@ -58,9 +58,12 @@ async fn seed(conn: &libsql::Connection, with_guard: bool) {
     if with_guard {
         conn.execute(GUARD, ()).await.unwrap();
     }
-    conn.execute("INSERT INTO concepts (id, title) VALUES ('a', 'A'), ('b', 'B')", ())
-        .await
-        .unwrap();
+    conn.execute(
+        "INSERT INTO concepts (id, title) VALUES ('a', 'A'), ('b', 'B')",
+        (),
+    )
+    .await
+    .unwrap();
     conn.execute(
         "INSERT INTO links (source_id, target_id, edge_type) VALUES ('a', 'b', 'CITES')",
         (),
@@ -193,8 +196,10 @@ async fn main() {
                 .await
                 .unwrap()
                 .and_then(|r| r.get(0).ok());
-            println!("    links DDL after rename:\n      {}",
-                sql.unwrap_or_default().replace('\n', "\n      "));
+            println!(
+                "    links DDL after rename:\n      {}",
+                sql.unwrap_or_default().replace('\n', "\n      ")
+            );
 
             let n: i64 = tx
                 .query("SELECT COUNT(*) FROM links", ())
@@ -316,9 +321,13 @@ async fn main() {
 
                     // The guard must still refuse an ad-hoc delete.
                     let guarded = conn.execute("DELETE FROM concepts WHERE id='a'", ()).await;
-                    println!("    ad-hoc DELETE after rung -> {}",
-                        match guarded { Ok(_) => "ACCEPTED (guard lost!)".into(),
-                                        Err(e) => format!("refused: {e}") });
+                    println!(
+                        "    ad-hoc DELETE after rung -> {}",
+                        match guarded {
+                            Ok(_) => "ACCEPTED (guard lost!)".into(),
+                            Err(e) => format!("refused: {e}"),
+                        }
+                    );
                 }
                 Err(e) => println!("    COMMIT failed: {e}"),
             }
@@ -350,7 +359,10 @@ async fn main() {
 
     println!("\n== 4d. rename-around: move the old table out of the way, never drop a parent ==");
     for legacy in [true, false] {
-        println!("    --- legacy_alter_table = {} ---", if legacy { "ON" } else { "OFF (default)" });
+        println!(
+            "    --- legacy_alter_table = {} ---",
+            if legacy { "ON" } else { "OFF (default)" }
+        );
         let (_d, conn) = fresh(true).await;
         let tx = conn
             .transaction_with_behavior(libsql::TransactionBehavior::Immediate)
@@ -359,7 +371,10 @@ async fn main() {
 
         let mut steps: Vec<(&str, String)> = Vec::new();
         if legacy {
-            steps.push(("legacy_alter_table", "PRAGMA legacy_alter_table = ON".into()));
+            steps.push((
+                "legacy_alter_table",
+                "PRAGMA legacy_alter_table = ON".into(),
+            ));
         }
         steps.extend([
             ("create concepts_v8", CONCEPTS_V8.to_string()),
@@ -369,9 +384,18 @@ async fn main() {
                  SELECT id, title, content FROM concepts ORDER BY rowid"
                     .into(),
             ),
-            ("drop guard", "DROP TRIGGER trg_concepts_guard_delete".into()),
-            ("rename old aside", "ALTER TABLE concepts RENAME TO concepts_old".into()),
-            ("rename new in", "ALTER TABLE concepts_v8 RENAME TO concepts".into()),
+            (
+                "drop guard",
+                "DROP TRIGGER trg_concepts_guard_delete".into(),
+            ),
+            (
+                "rename old aside",
+                "ALTER TABLE concepts RENAME TO concepts_old".into(),
+            ),
+            (
+                "rename new in",
+                "ALTER TABLE concepts_v8 RENAME TO concepts".into(),
+            ),
             ("drop the orphan", "DROP TABLE concepts_old".into()),
             ("recreate guard", GUARD.to_string()),
         ]);
@@ -394,7 +418,10 @@ async fn main() {
         }
 
         let links_ddl: Option<String> = tx
-            .query("SELECT sql FROM sqlite_master WHERE type='table' AND name='links'", ())
+            .query(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='links'",
+                (),
+            )
             .await
             .unwrap()
             .next()
@@ -409,30 +436,61 @@ async fn main() {
 
         match tx.commit().await {
             Ok(()) => {
-                let c: i64 = conn.query("SELECT COUNT(*) FROM concepts", ()).await.unwrap()
-                    .next().await.unwrap().and_then(|r| r.get(0).ok()).unwrap_or(-1);
-                let n: i64 = conn.query("SELECT COUNT(*) FROM links", ()).await.unwrap()
-                    .next().await.unwrap().and_then(|r| r.get(0).ok()).unwrap_or(-1);
-                let pk: i64 = conn.query("SELECT rowid_pk FROM concepts WHERE id='b'", ()).await.unwrap()
-                    .next().await.unwrap().and_then(|r| r.get(0).ok()).unwrap_or(-1);
+                let c: i64 = conn
+                    .query("SELECT COUNT(*) FROM concepts", ())
+                    .await
+                    .unwrap()
+                    .next()
+                    .await
+                    .unwrap()
+                    .and_then(|r| r.get(0).ok())
+                    .unwrap_or(-1);
+                let n: i64 = conn
+                    .query("SELECT COUNT(*) FROM links", ())
+                    .await
+                    .unwrap()
+                    .next()
+                    .await
+                    .unwrap()
+                    .and_then(|r| r.get(0).ok())
+                    .unwrap_or(-1);
+                let pk: i64 = conn
+                    .query("SELECT rowid_pk FROM concepts WHERE id='b'", ())
+                    .await
+                    .unwrap()
+                    .next()
+                    .await
+                    .unwrap()
+                    .and_then(|r| r.get(0).ok())
+                    .unwrap_or(-1);
                 println!("        COMMIT ok — {c} concepts, {n} links, b.rowid_pk = {pk}");
 
                 let mut rows = conn.query("PRAGMA foreign_key_check", ()).await.unwrap();
                 let mut v = 0;
-                while rows.next().await.unwrap().is_some() { v += 1; }
+                while rows.next().await.unwrap().is_some() {
+                    v += 1;
+                }
                 println!("        foreign_key_check after commit: {v} violations");
 
                 // The FK must still bite on a genuinely bad insert.
                 let bad = conn.execute(
                     "INSERT INTO links (source_id, target_id, edge_type) VALUES ('a','ghost','X')", ()).await;
-                println!("        insert referencing a missing concept -> {}",
-                    match bad { Ok(_) => "ACCEPTED (FK lost!)".to_string(),
-                                Err(e) => format!("refused: {e}") });
+                println!(
+                    "        insert referencing a missing concept -> {}",
+                    match bad {
+                        Ok(_) => "ACCEPTED (FK lost!)".to_string(),
+                        Err(e) => format!("refused: {e}"),
+                    }
+                );
 
                 let guarded = conn.execute("DELETE FROM concepts WHERE id='a'", ()).await;
-                println!("        ad-hoc DELETE -> {}",
-                    match guarded { Ok(_) => "ACCEPTED (guard lost!)".to_string(),
-                                    Err(e) => format!("refused: {e}") });
+                println!(
+                    "        ad-hoc DELETE -> {}",
+                    match guarded {
+                        Ok(_) => "ACCEPTED (guard lost!)".to_string(),
+                        Err(e) => format!("refused: {e}"),
+                    }
+                );
             }
             Err(e) => println!("        COMMIT failed: {e}"),
         }
@@ -494,27 +552,64 @@ async fn main() {
         conn.execute("PRAGMA foreign_keys = ON", ()).await.unwrap();
         fk_state(&conn, "after ON, outside tx").await;
 
-        let c: i64 = conn.query("SELECT COUNT(*) FROM concepts", ()).await.unwrap()
-            .next().await.unwrap().and_then(|r| r.get(0).ok()).unwrap_or(-1);
-        let n: i64 = conn.query("SELECT COUNT(*) FROM links", ()).await.unwrap()
-            .next().await.unwrap().and_then(|r| r.get(0).ok()).unwrap_or(-1);
-        let pk: i64 = conn.query("SELECT rowid_pk FROM concepts WHERE id='b'", ()).await.unwrap()
-            .next().await.unwrap().and_then(|r| r.get(0).ok()).unwrap_or(-1);
+        let c: i64 = conn
+            .query("SELECT COUNT(*) FROM concepts", ())
+            .await
+            .unwrap()
+            .next()
+            .await
+            .unwrap()
+            .and_then(|r| r.get(0).ok())
+            .unwrap_or(-1);
+        let n: i64 = conn
+            .query("SELECT COUNT(*) FROM links", ())
+            .await
+            .unwrap()
+            .next()
+            .await
+            .unwrap()
+            .and_then(|r| r.get(0).ok())
+            .unwrap_or(-1);
+        let pk: i64 = conn
+            .query("SELECT rowid_pk FROM concepts WHERE id='b'", ())
+            .await
+            .unwrap()
+            .next()
+            .await
+            .unwrap()
+            .and_then(|r| r.get(0).ok())
+            .unwrap_or(-1);
         println!("        result: {c} concepts, {n} links, b.rowid_pk = {pk}");
 
         let mut rows = conn.query("PRAGMA foreign_key_check", ()).await.unwrap();
         let mut v = 0;
-        while rows.next().await.unwrap().is_some() { v += 1; }
+        while rows.next().await.unwrap().is_some() {
+            v += 1;
+        }
         println!("        foreign_key_check after: {v} violations");
 
-        let bad = conn.execute(
-            "INSERT INTO links (source_id, target_id, edge_type) VALUES ('a','ghost','X')", ()).await;
-        println!("        insert referencing a missing concept -> {}",
-            match bad { Ok(_) => "ACCEPTED (FK lost!)".to_string(), Err(e) => format!("refused: {e}") });
+        let bad = conn
+            .execute(
+                "INSERT INTO links (source_id, target_id, edge_type) VALUES ('a','ghost','X')",
+                (),
+            )
+            .await;
+        println!(
+            "        insert referencing a missing concept -> {}",
+            match bad {
+                Ok(_) => "ACCEPTED (FK lost!)".to_string(),
+                Err(e) => format!("refused: {e}"),
+            }
+        );
 
         let guarded = conn.execute("DELETE FROM concepts WHERE id='a'", ()).await;
-        println!("        ad-hoc DELETE -> {}",
-            match guarded { Ok(_) => "ACCEPTED (guard lost!)".to_string(), Err(e) => format!("refused: {e}") });
+        println!(
+            "        ad-hoc DELETE -> {}",
+            match guarded {
+                Ok(_) => "ACCEPTED (guard lost!)".to_string(),
+                Err(e) => format!("refused: {e}"),
+            }
+        );
     }
 
     println!("\n== 5. does VACUUM preserve an explicit INTEGER PRIMARY KEY? ==");

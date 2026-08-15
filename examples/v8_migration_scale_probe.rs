@@ -262,7 +262,11 @@ async fn arm(dir: &Path, n_concepts: usize) -> Row {
         "the rung lost or duplicated concept rows"
     );
     assert_eq!(
-        scalar(&conn, "SELECT COUNT(*) FROM concepts WHERE rowid_pk IS NULL").await,
+        scalar(
+            &conn,
+            "SELECT COUNT(*) FROM concepts WHERE rowid_pk IS NULL"
+        )
+        .await,
         0,
         "a concept came out of the rung with no rowid_pk"
     );

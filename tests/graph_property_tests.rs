@@ -14,9 +14,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use macrame::graph::{
-    astar, dijkstra, k_core, louvain, modularity, scc, NodeData, Subgraph,
-};
+use macrame::graph::{astar, dijkstra, k_core, louvain, modularity, scc, NodeData, Subgraph};
 use proptest::prelude::*;
 
 const T0: &str = "2026-01-01T00:00:00.000000Z";

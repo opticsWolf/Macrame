@@ -46,20 +46,24 @@ async fn main() {
     // Four shapes, so the answer is not confounded by column count, by whether
     // a free page exists to reclaim, or by the file being a `:memory:` one.
     let cases: &[(&str, &str, &str)] = &[
-        ("one column, implicit rowid", "one_col", "id TEXT PRIMARY KEY"),
+        (
+            "one column, implicit rowid",
+            "one_col",
+            "id TEXT PRIMARY KEY",
+        ),
         (
             "several columns, implicit rowid",
             "multi_col",
             "id TEXT PRIMARY KEY, a TEXT, b INTEGER",
         ),
-        (
-            "no primary key at all",
-            "no_pk",
-            "id TEXT NOT NULL, a TEXT",
-        ),
+        ("no primary key at all", "no_pk", "id TEXT NOT NULL, a TEXT"),
         // These two separate "has a PRIMARY KEY" from "has any index at all",
         // which the first three cases confound.
-        ("UNIQUE but no primary key", "uniq_no_pk", "id TEXT UNIQUE, a TEXT"),
+        (
+            "UNIQUE but no primary key",
+            "uniq_no_pk",
+            "id TEXT UNIQUE, a TEXT",
+        ),
         (
             "no constraints, one secondary index",
             "sec_index",

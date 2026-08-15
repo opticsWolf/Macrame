@@ -288,7 +288,11 @@ fn the_budget_exemptions_and_their_documented_table_agree() {
              table. The two lists are the same fact written twice and must \
              agree — see the exemption's rustdoc for which one is wrong.\n\
              table:\n{table}",
-            if kind.exempt_from_budget() { "exempt" } else { "not exempt" },
+            if kind.exempt_from_budget() {
+                "exempt"
+            } else {
+                "not exempt"
+            },
             if named { "present" } else { "absent" },
         );
     }

@@ -338,8 +338,11 @@ impl PySubgraph {
         out.set_item("nodes", nodes)?;
 
         for (key, adj) in [
-            ("out_adj", Box::new(self.inner.out_adjacency())
-                as Box<dyn Iterator<Item = (&str, &[EdgeRef])>>),
+            (
+                "out_adj",
+                Box::new(self.inner.out_adjacency())
+                    as Box<dyn Iterator<Item = (&str, &[EdgeRef])>>,
+            ),
             ("in_adj", Box::new(self.inner.in_adjacency())),
         ] {
             let d = PyDict::new(py);

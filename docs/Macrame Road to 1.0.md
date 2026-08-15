@@ -641,6 +641,33 @@ an explicit checkpoint at the end, does `next_chunk_size` stop oscillating? The
 answer belongs in the docs either way, because it is the first documented case
 of an exogenous input to the 0.12.0 controller.
 
+> **Done, 0.12.14 (D-157). The answer is no, and the finding's framing is half
+> wrong.** Three rounds, 6,000 × 1 KB concepts through `write_concepts`:
+>
+> | | longest chunk hold | mean | over budget | wall |
+> |---|---|---|---|---|
+> | autocheckpoint on | **9.3–10.3 ms** | 2.40–2.44 ms | 24–28 | 304–321 ms |
+> | autocheckpoint off | **4.50 ms** | 2.08–2.20 ms | 18–27 | 298–339 ms |
+>
+> The tail is real: the longest hold halves and the >10 ms bucket is populated
+> only with the checkpointer on — that bucket *is* the checkpoint, charged to
+> whichever chunk it landed in. But `over_budget` overlaps and wall time is
+> identical, so **the controller does not stop oscillating**; it works near the
+> budget boundary either way, because of D-090's ~0.8 ms floor and D-146's
+> convergence cost. What disabling autocheckpoint removes is an outlier, not an
+> oscillation.
+>
+> And the cost is **deferred, not removed**: the explicit checkpoint at the end
+> moved 8,400–9,100 frames in **41–45 ms** with it off, against ~860 frames in
+> 5.5–6.2 ms with it on. Same work, relocated out of the bounded path into one
+> hold the caller timed. Good for a bulk importer, bad for an interactive
+> process — which is why the default stays at 1,000 pages.
+>
+> `WalCheckpointPolicy` rather than the `Option<u32>` specified above, for
+> D-155's reason: in a `Default` struct, a `None` that disables a mechanism
+> disables it for everyone who did not mention it — and this is the mechanism
+> that keeps the WAL bounded.
+
 **W5.4 — `cache_size`, split.** The writer and the read-only diagnostic
 connections have opposite profiles and share a default today. Two knobs, because
 one number cannot serve both.

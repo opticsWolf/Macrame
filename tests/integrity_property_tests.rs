@@ -285,8 +285,8 @@ struct ConceptSpec {
 /// be neither. The reasoning for each is on `ARCHIVE_NODES`.
 fn archive_assert_strategy() -> impl Strategy<Value = Assert> {
     (
-        0..NODES.len(),   // sources: c0, c1
-        0..UNREFERENCED,  // targets: c0, c1, c2 — never c3
+        0..NODES.len(),  // sources: c0, c1
+        0..UNREFERENCED, // targets: c0, c1, c2 — never c3
         0..TYPES.len(),
         0..3usize,
         prop::option::of(2..5usize),
@@ -311,16 +311,13 @@ fn archive_assert_strategy() -> impl Strategy<Value = Assert> {
 /// as before it. A predicate that ignored `valid_to` would still pass a
 /// generator that only ever proposed archivable rows.
 fn concept_strategy() -> impl Strategy<Value = ConceptSpec> {
-    (
-        any::<bool>(),
-        prop::option::of(0..TS.len()),
-        0..TS.len(),
-    )
-        .prop_map(|(retired, valid_to, recorded_at)| ConceptSpec {
+    (any::<bool>(), prop::option::of(0..TS.len()), 0..TS.len()).prop_map(
+        |(retired, valid_to, recorded_at)| ConceptSpec {
             retired,
             valid_to,
             recorded_at,
-        })
+        },
+    )
 }
 
 /// Deliberate damage to the derivative table. `audit_current` exists to notice

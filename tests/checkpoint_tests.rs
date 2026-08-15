@@ -32,7 +32,7 @@ async fn db(harness: &TestHarness) -> Database {
         &harness.db_path,
         Tuning {
             cadence: CadencePolicy::Disabled,
-            clock: None,
+            ..Default::default()
         },
     )
     .await
@@ -43,9 +43,11 @@ async fn db(harness: &TestHarness) -> Database {
 /// automatic checkpoint, which would do this test's work for it.
 async fn write_some(db: &Database) {
     for i in 0..40 {
-        db.upsert_concept(ConceptUpsert::new(format!("c{i}"), format!("Concept {i}")).valid_from(T1))
-            .await
-            .unwrap();
+        db.upsert_concept(
+            ConceptUpsert::new(format!("c{i}"), format!("Concept {i}")).valid_from(T1),
+        )
+        .await
+        .unwrap();
     }
 }
 

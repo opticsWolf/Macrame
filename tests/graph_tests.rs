@@ -18,9 +18,7 @@ fn graph_of(edges: &[(&str, &str, f64)]) -> Subgraph {
             if !g.contains_node(id) {
                 g.insert_node(
                     id.to_string(),
-                    macrame::graph::NodeData::new(id.to_string(), T0.to_string(),
-                        OPEN.to_string(),
-                    ),
+                    macrame::graph::NodeData::new(id.to_string(), T0.to_string(), OPEN.to_string()),
                 );
             }
         }
@@ -814,10 +812,7 @@ fn hand_built(order: impl Fn(&mut Vec<&'static str>)) -> (Subgraph, Vec<&'static
 
     let mut g = Subgraph::default();
     for id in &ids {
-        g.insert_node(
-            *id,
-            macrame::graph::NodeData::new(*id, T0, OPEN),
-        );
+        g.insert_node(*id, macrame::graph::NodeData::new(*id, T0, OPEN));
     }
     let mut edges: Vec<&(&str, &str, f64)> = DETERMINISM_EDGES.iter().collect();
     if ids.first() > ids.last() {
@@ -984,7 +979,10 @@ async fn graph_with_content(harness: &TestHarness, want_content: bool) -> Subgra
     let traversal = TraversalBuilder::new("c0000")
         .max_depth(6)
         .content(want_content);
-    let g = db.load_subgraph_with(&traversal, T0, 1 << 24).await.unwrap();
+    let g = db
+        .load_subgraph_with(&traversal, T0, 1 << 24)
+        .await
+        .unwrap();
     db.close().await.unwrap();
     g
 }
@@ -1011,7 +1009,10 @@ async fn content_is_absent_by_default_and_no_algorithm_notices() {
             "the default load fetched content for {id}"
         );
         assert!(
-            with.node(id).unwrap().content().is_some_and(|c| !c.is_empty()),
+            with.node(id)
+                .unwrap()
+                .content()
+                .is_some_and(|c| !c.is_empty()),
             "the requesting load did not fetch content for {id}"
         );
     }

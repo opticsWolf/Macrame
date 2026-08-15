@@ -138,9 +138,13 @@ async fn a_clock_injected_through_tuning_stamps_the_ledger() {
         &harness.db_path,
         Tuning {
             cadence: CadencePolicy::Disabled,
-            // Every field named, deliberately: this is the form that breaks
-            // when W5.3 adds a field, and it should break here first.
+            // Every field named, deliberately. D-155 says an exhaustive
+            // literal breaks when a field is added, with a compile error at the
+            // call site rather than a behaviour change — and W5.3 added
+            // `wal_autocheckpoint` one release later, breaking exactly here and
+            // nowhere else. Left exhaustive so it keeps demonstrating that.
             clock: Some(clock),
+            wal_autocheckpoint: WalCheckpointPolicy::Default,
         },
     )
     .await

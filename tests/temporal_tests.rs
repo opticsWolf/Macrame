@@ -864,7 +864,9 @@ async fn the_unreachable_archive_error_says_how_much_went_and_how_far_back_the_l
         report.log_entries_archived >= 2,
         "the fixture needs log rows to have actually moved: {report:?}"
     );
-    let horizon = report.horizon.expect("an archive that moved rows has a horizon");
+    let horizon = report
+        .horizon
+        .expect("an archive that moved rows has a horizon");
     db.close().await.unwrap();
 
     let archive_path = std::fs::read_dir(harness.temp_dir.path())
@@ -896,7 +898,10 @@ async fn the_unreachable_archive_error_says_how_much_went_and_how_far_back_the_l
     };
 
     assert!(
-        reason.contains(&format!("{} log rows have been archived", report.log_entries_archived)),
+        reason.contains(&format!(
+            "{} log rows have been archived",
+            report.log_entries_archived
+        )),
         "the hint's count disagrees with what the archive reported moving \
          ({}): {reason}",
         report.log_entries_archived
@@ -952,7 +957,9 @@ async fn a_rehydration_leaves_the_archive_hint_saying_exactly_what_it_said_befor
         "the fixture needs the concept itself to have gone cold: {report:?}"
     );
     assert!(report.log_entries_archived >= 2, "{report:?}");
-    let horizon = report.horizon.expect("an archive that moved rows has a horizon");
+    let horizon = report
+        .horizon
+        .expect("an archive that moved rows has a horizon");
 
     let rehydrated = db.rehydrate(&["c1"]).await.unwrap();
     assert_eq!(rehydrated.concepts_rehydrated, 1);

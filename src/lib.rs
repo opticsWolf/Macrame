@@ -13,14 +13,16 @@ pub mod vector;
 // to nothing, since the const lives in `connection`. The bound is the crate's
 // one cross-cutting number; the root is where a reader looks for it.
 pub use connection::{
-    Annotation, CadencePolicy, CheckpointReport, ConceptUpsert, Database, Tuning, CHUNK_BUDGET,
+    Annotation, CadencePolicy, CheckpointReport, ConceptUpsert, Database, Tuning,
+    WalCheckpointPolicy, CHUNK_BUDGET,
 };
 pub use error::{DbError, Overlap, Result};
 
 pub mod prelude {
     pub use crate::connection::{
-        chunk_rows, estimated_bulk_hold, Annotation, CadencePolicy, CheckpointReport, ConceptUpsert,
-        Database, Tuning, BULK_ATOMIC_WARN_HOLD, CHUNK_BUDGET, MAX_ARCHIVE_SESSIONS,
+        chunk_rows, estimated_bulk_hold, Annotation, CadencePolicy, CheckpointReport,
+        ConceptUpsert, Database, Tuning, WalCheckpointPolicy, BULK_ATOMIC_WARN_HOLD, CHUNK_BUDGET,
+        MAX_ARCHIVE_SESSIONS,
     };
     pub use crate::error::{DbError, Overlap, Result};
     pub use crate::graph::{

@@ -161,8 +161,7 @@ mod fx {
     pub const EMPTY: &str = "empty database (chunk_budget, concepts seeded, no links)";
     pub const SEEDED: &str = "8,000-edge table (chunk_budget's seeded arm, W4.13)";
     /// All four D-088 shapes at one population — the fixture *is* the plural.
-    pub const MATRIX: &str =
-        "all four D-088 shapes, each populated to 8,000 edges (chunk_matrix)";
+    pub const MATRIX: &str = "all four D-088 shapes, each populated to 8,000 edges (chunk_matrix)";
 }
 
 const LATENCY: &str = "latency, median, reference hardware";
@@ -185,8 +184,7 @@ const DERIVED_EDGES: &str =
     "20 rows on all four D-088 shapes, against a constant of 90 that is      deliberately not changed";
 
 /// The fact itself, named once: three documents state it three ways.
-const ATTRIBUTED: &str =
-    "89% of the growth is links_current secondary-index maintenance; the \r
+const ATTRIBUTED: &str = "89% of the growth is links_current secondary-index maintenance; the \r
      single-open guard contributes none";
 
 /// The floor's own cost, measured against the loop rather than extrapolated
@@ -888,7 +886,10 @@ fn contested_is_well_formed(c: &Claim, registry: &[Claim]) -> Result<(), String>
 /// across nine documents in three inconsistent states.
 #[test]
 fn the_registry_covers_the_claims_that_drifted() {
-    for (operation, least) in [("single edge assertion", 5), ("chunk commit, edges, 90 rows", 8)] {
+    for (operation, least) in [
+        ("single edge assertion", 5),
+        ("chunk commit, edges, 90 rows", 8),
+    ] {
         let n = REGISTRY.iter().filter(|c| c.operation == operation).count();
         assert!(
             n >= least,

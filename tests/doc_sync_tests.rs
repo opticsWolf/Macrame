@@ -314,7 +314,10 @@ fn version_at(rest: &str) -> Option<String> {
 fn entry_containing(text: &str, offset: usize) -> String {
     match text[..offset].rmatch_indices("<a id=\"d-").next() {
         Some((i, m)) => {
-            let id: String = text[i + m.len()..].chars().take_while(|c| *c != '"').collect();
+            let id: String = text[i + m.len()..]
+                .chars()
+                .take_while(|c| *c != '"')
+                .collect();
             format!("D-{id}")
         }
         None => "(no enclosing decision entry)".to_string(),
@@ -486,7 +489,10 @@ fn the_delivery_marker_is_what_settles_an_overdue_entry() {
 
     let missed = "<a id=\"d-999\"></a>D-999 - a thing. Scheduled for 0.1.0. \
                   **RESCHEDULED from 0.1.0** to 0.2.0.\n";
-    assert!(settled(missed, "0.1.0"), "a missed release is closed out too");
+    assert!(
+        settled(missed, "0.1.0"),
+        "a missed release is closed out too"
+    );
 
     // The property that keeps the tripwire armed: closing 0.1.0 must say
     // nothing about 0.2.0. Without it one marker would silence an entry
@@ -685,7 +691,11 @@ const README_MD: &str = include_str!("../README.md");
 /// tree, and a fixed list of includes is the same hand-maintained inventory
 /// this test exists to stop trusting.
 fn constants_by_file() -> BTreeMap<String, BTreeSet<String>> {
-    fn walk(dir: &std::path::Path, root: &std::path::Path, out: &mut BTreeMap<String, BTreeSet<String>>) {
+    fn walk(
+        dir: &std::path::Path,
+        root: &std::path::Path,
+        out: &mut BTreeMap<String, BTreeSet<String>>,
+    ) {
         for entry in std::fs::read_dir(dir).expect("src/ is readable") {
             let path = entry.expect("readable entry").path();
             if path.is_dir() {
@@ -719,11 +729,19 @@ fn constants_by_file() -> BTreeMap<String, BTreeSet<String>> {
 /// constant the quickref is then free to misplace — which is the pre-existing
 /// state, not a regression this introduces.
 fn declared_const(line: &str) -> Option<String> {
-    let rest = line.trim_start().strip_prefix("pub ").unwrap_or(line.trim_start());
+    let rest = line
+        .trim_start()
+        .strip_prefix("pub ")
+        .unwrap_or(line.trim_start());
     let rest = rest.strip_prefix("const ")?;
-    let name: String = rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+    let name: String = rest
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect();
     let screaming = !name.is_empty()
-        && name.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
         && name.chars().any(|c| c.is_ascii_uppercase());
     screaming.then_some(name)
 }
@@ -764,7 +782,10 @@ fn files_named(passage: &str) -> BTreeSet<String> {
         if bytes[i].is_alphanumeric() || bytes[i] == '_' || bytes[i] == '/' || bytes[i] == '.' {
             let start = i;
             while i < bytes.len()
-                && (bytes[i].is_alphanumeric() || bytes[i] == '_' || bytes[i] == '/' || bytes[i] == '.')
+                && (bytes[i].is_alphanumeric()
+                    || bytes[i] == '_'
+                    || bytes[i] == '/'
+                    || bytes[i] == '.')
             {
                 i += 1;
             }

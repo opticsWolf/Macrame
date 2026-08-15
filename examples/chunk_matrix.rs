@@ -210,7 +210,8 @@ async fn main() {
                 // bigger table than the one before it, and D-142 established
                 // that table size is exactly what this path is sensitive to —
                 // so the sweep would confound chunk size with population.
-                let (db, nodes) = populated(&dir, &format!("e{n}.db"), shape, SIZES.len() + n).await;
+                let (db, nodes) =
+                    populated(&dir, &format!("e{n}.db"), shape, SIZES.len() + n).await;
                 let batch = measured_chunk(n, nodes);
                 let t = Instant::now();
                 db.write_bulk_atomic(batch).await.unwrap();
@@ -347,7 +348,11 @@ async fn converge(dir: &tempfile::TempDir, shape: fixtures::Shape) {
     // own writes land under a different `CommandKind` and the counters below
     // describe the measured import alone rather than needing a baseline
     // subtracted from them.
-    async fn fixture(dir: &tempfile::TempDir, name: &str, shape: fixtures::Shape) -> (Database, usize) {
+    async fn fixture(
+        dir: &tempfile::TempDir,
+        name: &str,
+        shape: fixtures::Shape,
+    ) -> (Database, usize) {
         let nodes = nodes_for(shape, POPULATION);
         let db = Database::open_with_cadence(dir.path().join(name), None)
             .await
@@ -450,7 +455,10 @@ async fn converge(dir: &tempfile::TempDir, shape: fixtures::Shape) {
     db.close().await.unwrap();
 
     println!("\n  fixed at the ceiling ({} rows)", chunk_rows::EDGES);
-    println!("    chunks {n:>5}   hold mean {:>7.2} ms   longest {worst:>7.2} ms", fixed_total / n as f64);
+    println!(
+        "    chunks {n:>5}   hold mean {:>7.2} ms   longest {worst:>7.2} ms",
+        fixed_total / n as f64
+    );
     println!(
         "    total  {fixed_total:>8.2} ms   ({:.1} µs/edge)",
         fixed_total * 1e3 / BATCH as f64
@@ -460,7 +468,11 @@ async fn converge(dir: &tempfile::TempDir, shape: fixtures::Shape) {
     println!(
         "  latency  : longest hold {:.2}x {}",
         longest / worst,
-        if longest < worst { "-- the adaptive loop is the shorter stall" } else { "-- adapting did NOT shorten the worst stall" }
+        if longest < worst {
+            "-- the adaptive loop is the shorter stall"
+        } else {
+            "-- adapting did NOT shorten the worst stall"
+        }
     );
     println!(
         "  throughput: {:.2}x  {}",

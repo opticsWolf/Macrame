@@ -1442,7 +1442,10 @@ async fn vacuum_preserves_a_sparse_rowid_pk() {
     // The vacuity guard. If this ever holds, the fixture has silently become
     // the dense one and the test below proves nothing.
     assert!(
-        before.iter().enumerate().any(|(i, (r, _))| *r != i as i64 + 1),
+        before
+            .iter()
+            .enumerate()
+            .any(|(i, (r, _))| *r != i as i64 + 1),
         "the fixture is not sparse, so VACUUM's renumbering would be the \
          identity map and this test could not fail: {before:?}"
     );
@@ -1538,7 +1541,9 @@ async fn the_fts_delete_trigger_is_installed_and_fires_only_in_a_session() {
     // Outside a session the guard refuses first, so the trigger is unreachable
     // and the index is untouched.
     let conn = db.raw().connect().unwrap();
-    let refused = conn.execute("DELETE FROM concepts WHERE id = 'c0'", ()).await;
+    let refused = conn
+        .execute("DELETE FROM concepts WHERE id = 'c0'", ())
+        .await;
     assert!(
         refused.is_err(),
         "an ad-hoc concept delete must still be refused at v9"

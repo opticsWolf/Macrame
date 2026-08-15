@@ -775,7 +775,8 @@ async fn add_concepts_rowid_pk(conn: &libsql::Connection) -> Result<()> {
         conn.execute(&format!("DROP TRIGGER IF EXISTS {name}"), ())
             .await?;
     }
-    conn.execute("DROP TABLE IF EXISTS concepts_fts", ()).await?;
+    conn.execute("DROP TABLE IF EXISTS concepts_fts", ())
+        .await?;
 
     conn.execute(CONCEPTS_V8, ()).await?;
     conn.execute(
@@ -928,8 +929,7 @@ async fn verify(conn: &libsql::Connection) -> Result<()> {
     let mut present: Vec<(String, String)> = Vec::new();
     let mut bodies: Vec<(String, String)> = Vec::new();
     while let Some(row) = rows.next().await? {
-        let (kind, name, sql): (String, String, String) =
-            (row.get(0)?, row.get(1)?, row.get(2)?);
+        let (kind, name, sql): (String, String, String) = (row.get(0)?, row.get(1)?, row.get(2)?);
         if kind == "trigger" {
             bodies.push((name.clone(), sql));
         }
@@ -1169,7 +1169,10 @@ mod tests {
     // verification on, and that is what these two tests hold.
 
     async fn scratch() -> libsql::Connection {
-        let db = libsql::Builder::new_local(":memory:").build().await.unwrap();
+        let db = libsql::Builder::new_local(":memory:")
+            .build()
+            .await
+            .unwrap();
         let conn = db.connect().unwrap();
         conn.execute("PRAGMA foreign_keys = ON", ()).await.unwrap();
         conn.execute("CREATE TABLE parent (id TEXT PRIMARY KEY)", ())
@@ -1204,9 +1207,14 @@ mod tests {
             apply: |tx| {
                 Box::pin(async move {
                     tx.execute("CREATE TABLE parent_new (rowid_pk INTEGER PRIMARY KEY, id TEXT NOT NULL UNIQUE)", ()).await?;
-                    tx.execute("INSERT INTO parent_new (id) SELECT id FROM parent ORDER BY rowid", ()).await?;
+                    tx.execute(
+                        "INSERT INTO parent_new (id) SELECT id FROM parent ORDER BY rowid",
+                        (),
+                    )
+                    .await?;
                     tx.execute("DROP TABLE parent", ()).await?;
-                    tx.execute("ALTER TABLE parent_new RENAME TO parent", ()).await?;
+                    tx.execute("ALTER TABLE parent_new RENAME TO parent", ())
+                        .await?;
                     Ok(())
                 })
             },
@@ -1270,7 +1278,10 @@ mod tests {
             text.contains("suspended foreign keys and left a violation"),
             "the rung must fail at `foreign_key_check`, not merely fail: {text}"
         );
-        assert!(text.contains("test-orphan"), "the error should name the rung: {text}");
+        assert!(
+            text.contains("test-orphan"),
+            "the error should name the rung: {text}"
+        );
 
         // Rolled back, and enforcement restored despite the failure.
         let mut rows = conn.query("PRAGMA user_version", ()).await.unwrap();

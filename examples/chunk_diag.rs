@@ -471,13 +471,9 @@ async fn main() {
                                     // the first comparison.
                                     (k, k + 1)
                                 };
-                                EdgeAssertion::new(
-                                    format!("c{s:07}"),
-                                    format!("c{t:07}"),
-                                    "PRE",
-                                )
-                                .valid_from(TS)
-                                .valid_to(OPEN)
+                                EdgeAssertion::new(format!("c{s:07}"), format!("c{t:07}"), "PRE")
+                                    .valid_from(TS)
+                                    .valid_to(OPEN)
                             })
                             .collect();
                         db.write_bulk_atomic(batch).await.unwrap();
@@ -499,7 +495,11 @@ async fn main() {
                     let stmt = tx.prepare(INSERT_LINK_SQL).await.unwrap();
                     let t = Instant::now();
                     for k in 0..90usize {
-                        let (s, t_id) = if hub { (0, 8_100 + k) } else { (8_100 + k, 8_101 + k) };
+                        let (s, t_id) = if hub {
+                            (0, 8_100 + k)
+                        } else {
+                            (8_100 + k, 8_101 + k)
+                        };
                         stmt.reset();
                         stmt.execute(libsql::params![
                             format!("c{s:07}"),
@@ -522,7 +522,11 @@ async fn main() {
                 }
                 println!(
                     "  {:>18}  {:>11.2}  {:>11.2}  {:>9.2}x",
-                    if hub { "star (one source)" } else { "chain (8,000 srcs)" },
+                    if hub {
+                        "star (one source)"
+                    } else {
+                        "chain (8,000 srcs)"
+                    },
                     cells[0],
                     cells[1],
                     cells[0] / cells[1]

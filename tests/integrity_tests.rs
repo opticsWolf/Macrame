@@ -856,7 +856,10 @@ async fn an_aborted_archive_still_reopens_under_the_marker_check() {
     // carrying one column instead of eight.
     let cold_path = harness.temp_dir.path().join("test_macrame_archive.db");
     {
-        let cold = libsql::Builder::new_local(&cold_path).build().await.unwrap();
+        let cold = libsql::Builder::new_local(&cold_path)
+            .build()
+            .await
+            .unwrap();
         cold.connect()
             .unwrap()
             .execute("CREATE TABLE links (source_id TEXT)", ())

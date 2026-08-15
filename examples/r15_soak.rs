@@ -422,7 +422,11 @@ async fn open_round(dir: &std::path::Path, round: u64, args: &Args) -> u64 {
             // one being made, and a clean run under a wide lock would not say
             // which call needed it.
             let d = {
-                let _g = if serial { Some(gate.lock().await) } else { None };
+                let _g = if serial {
+                    Some(gate.lock().await)
+                } else {
+                    None
+                };
                 libsql::Builder::new_local(&p).build().await
             };
             let Ok(d) = d else { return None };
@@ -811,7 +815,10 @@ async fn soak(secs: u64, with_open_storm: bool) {
             };
             let mut round = 0u64;
             while Instant::now() < deadline {
-                opens.fetch_add(open_round(&storm_dir, round, &fixed).await, Ordering::Relaxed);
+                opens.fetch_add(
+                    open_round(&storm_dir, round, &fixed).await,
+                    Ordering::Relaxed,
+                );
                 round += 1;
             }
         }));

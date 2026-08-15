@@ -732,11 +732,7 @@ impl PyDatabase {
     /// because the search index dominates there (§9, D-132). It is one
     /// transaction with no window boundaries, deliberately: a rehydration cannot
     /// half-happen.
-    fn rehydrate(
-        &self,
-        py: Python<'_>,
-        ids: Vec<String>,
-    ) -> PyResult<temporal::PyRehydrateReport> {
+    fn rehydrate(&self, py: Python<'_>, ids: Vec<String>) -> PyResult<temporal::PyRehydrateReport> {
         let inner = self.with_db(py, move |db| {
             let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
             runtime().block_on(db.rehydrate(&refs)).map_err(to_py)

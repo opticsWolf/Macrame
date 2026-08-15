@@ -397,10 +397,7 @@ fn main() {
             q2 - q1,
             distinct(&crate_answer),
             distinct(&full),
-            describe(
-                versus_truth(&crate_answer, &truth),
-                distinct(&crate_answer)
-            ),
+            describe(versus_truth(&crate_answer, &truth), distinct(&crate_answer)),
             describe(versus_truth(&full, &truth), distinct(&full)),
         );
     }

@@ -1442,13 +1442,17 @@ fn rehydrate_matrix(c: &mut Criterion) {
     group.sample_size(10);
 
     for &shape in ALL_SHAPES {
-        group.bench_with_input(BenchmarkId::new("rehydrate_100", shape.name()), &n, |b, &n| {
-            b.iter_batched(
-                || rt.block_on(archived(n, Some(shape), nodes)),
-                |fx| rt.block_on(rehydrate_all(&fx, n)),
-                BatchSize::PerIteration,
-            )
-        });
+        group.bench_with_input(
+            BenchmarkId::new("rehydrate_100", shape.name()),
+            &n,
+            |b, &n| {
+                b.iter_batched(
+                    || rt.block_on(archived(n, Some(shape), nodes)),
+                    |fx| rt.block_on(rehydrate_all(&fx, n)),
+                    BatchSize::PerIteration,
+                )
+            },
+        );
     }
 
     group.finish();

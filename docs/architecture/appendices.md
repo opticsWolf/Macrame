@@ -32,6 +32,10 @@ let db = Database::open_with_clock(path, None, Arc::new(FakeClock::new(t0))).awa
 // struct whose default silently stops writing anchors is a trap.
 let db = Database::open_tuned(path, Tuning {
     cadence: CadencePolicy::Disabled,
+    // Applied to the write connection, the only one that commits (0.12.14,
+    // D-157). Disabled is only correct paired with an explicit checkpoint();
+    // the default stays at SQLite's 1,000 pages.
+    wal_autocheckpoint: WalCheckpointPolicy::Disabled,
     ..Default::default()
 }).await?;
 

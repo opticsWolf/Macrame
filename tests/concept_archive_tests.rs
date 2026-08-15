@@ -162,7 +162,9 @@ async fn the_cold_row_carries_every_column_the_hot_row_had() {
             .await
             .unwrap();
         let row = rows.next().await.unwrap().unwrap();
-        (0..7).map(|i| format!("{:?}", row.get_value(i).unwrap())).collect()
+        (0..7)
+            .map(|i| format!("{:?}", row.get_value(i).unwrap()))
+            .collect()
     };
 
     db.archive(CUTOFF).await.unwrap();
@@ -188,7 +190,9 @@ async fn the_cold_row_carries_every_column_the_hot_row_had() {
             .await
             .unwrap()
             .expect("the archived concept should be in cold.concepts");
-        (0..7).map(|i| format!("{:?}", row.get_value(i).unwrap())).collect()
+        (0..7)
+            .map(|i| format!("{:?}", row.get_value(i).unwrap()))
+            .collect()
     };
     conn.execute("DETACH DATABASE cold", ()).await.unwrap();
 
@@ -339,7 +343,10 @@ async fn vacuum_after_an_archive_leaves_the_sparse_numbering_and_the_index_alone
     }
 
     let report = db.archive(CUTOFF).await.unwrap();
-    assert_eq!(report.concepts_archived, 4, "four concepts should have left");
+    assert_eq!(
+        report.concepts_archived, 4,
+        "four concepts should have left"
+    );
 
     let survivors = |db: &Database| {
         let conn = db.read_conn().clone();

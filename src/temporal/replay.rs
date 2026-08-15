@@ -229,7 +229,8 @@ pub async fn reconstruct(
         HotLogReach::Covers => {
             if let Some(base) = snapshot_anchor(snapshots_dir, ts) {
                 let anchor = base.seq_anchor;
-                let delta = fold_delta(conn, ANCHORED_HOT_FOLD, libsql::params![ts, anchor]).await?;
+                let delta =
+                    fold_delta(conn, ANCHORED_HOT_FOLD, libsql::params![ts, anchor]).await?;
                 return Ok(delta.apply_to(base, ts));
             }
             return fold(conn, ts, HOT_FOLD).await;

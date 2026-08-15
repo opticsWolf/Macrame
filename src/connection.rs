@@ -753,6 +753,90 @@ impl CadencePolicy {
     }
 }
 
+/// When SQLite should checkpoint the WAL on its own, for
+/// [`Tuning::wal_autocheckpoint`] (0.12.14, W5.3, D-157).
+///
+/// # Why this is not `Option<u32>`
+///
+/// The same reason [`CadencePolicy`] is not `Option<SnapshotCadence>`, and the
+/// plan for this wave specified `Option<u32>` here too. In a struct that derives
+/// `Default`, a field whose `None` means *turn the mechanism off* is a field
+/// that turns the mechanism off for everyone who did not mention it. Absence
+/// means "leave it alone" everywhere in [`Tuning`], and disabling the automatic
+/// checkpointer — which is not safe without an explicit
+/// [`Database::checkpoint`] to replace it — has to be asked for by name.
+///
+/// **The default does not change.** 1,000 pages is SQLite's default and stays
+/// SQLite's default; F-30 is a control-loop perturbation, not a correctness bug,
+/// and changing a default is a behaviour change for every existing caller.
+///
+/// # What disabling it actually buys, measured (0.12.14, W5.3, D-157)
+///
+/// F-30 says the automatic checkpointer is an unbudgeted hold *inside* 0.12.0's
+/// adaptive chunk controller: a checkpoint firing during a chunk transaction is
+/// charged to that chunk, and since D-146 made the measured hold the input to
+/// `next_chunk_size`, the controller shrinks in response to work the chunk did
+/// not do. Three rounds, 6,000 concepts of 1 KB each through `write_concepts`,
+/// release build:
+///
+/// | | longest chunk hold | mean | chunks | over budget | wall |
+/// |---|---|---|---|---|---|
+/// | autocheckpoint on (default) | **9.3–10.3 ms** | 2.40–2.44 ms | 125–130 | 24–28 | 304–321 ms |
+/// | autocheckpoint off | **4.50 ms** | 2.08–2.20 ms | 142–153 | 18–27 | 298–339 ms |
+///
+/// **The tail is the finding, and it is real and reproducible.** The longest
+/// hold roughly halves, and the >10 ms histogram bucket is populated only with
+/// the checkpointer on — that bucket is the checkpoint, landing inside somebody
+/// else's transaction and being charged to it. Every round agrees.
+///
+/// **What it does not buy is a calmer controller.** `over_budget` overlaps
+/// between the arms, and total wall time is the same within noise. The
+/// controller works near the budget boundary either way, because
+/// [D-090](../docs/architecture/s13-decision-register.md)'s ~0.8 ms
+/// per-transaction floor and the convergence cost do not go anywhere. So the
+/// honest statement is that disabling autocheckpoint removes an outlier, not an
+/// oscillation.
+///
+/// **And the cost is deferred, not removed.** The explicit
+/// [`Database::checkpoint`] at the end of the same fixture moved **8,400–9,100
+/// frames in 41–45 ms** with the checkpointer off, against **~860 frames in
+/// 5.5–6.2 ms** with it on. That is the whole trade in one line: the same work,
+/// moved out of the latency-bounded path and into one hold the caller chose the
+/// moment for. It is a good trade for a bulk importer and a bad one for an
+/// interactive process, which is why this is a knob and not a new default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum WalCheckpointPolicy {
+    /// SQLite's own default: checkpoint once the WAL passes 1,000 pages.
+    #[default]
+    Default,
+    /// No automatic checkpointing.
+    ///
+    /// **Only correct if you call [`Database::checkpoint`] yourself.** Without
+    /// one, the WAL grows for the life of the process and the database file is
+    /// never brought up to date.
+    Disabled,
+    /// Checkpoint once the WAL passes this many pages.
+    ///
+    /// `0` is not special-cased to [`Self::Disabled`] even though SQLite treats
+    /// it that way, because a caller who computed a threshold and got zero has
+    /// a bug, and inheriting SQLite's overload would turn it into a silently
+    /// unbounded WAL.
+    EveryPages(u32),
+}
+
+impl WalCheckpointPolicy {
+    /// The pragma to run, or `None` to leave the connection at SQLite's
+    /// default.
+    fn pragma(self) -> Option<String> {
+        match self {
+            Self::Default => None,
+            Self::Disabled => Some("PRAGMA wal_autocheckpoint = 0".to_string()),
+            Self::EveryPages(pages) => Some(format!("PRAGMA wal_autocheckpoint = {pages}")),
+        }
+    }
+}
+
 /// Everything [`Database::open_tuned`] can be told, in one growable struct
 /// (0.12.12, W5.1, D-155).
 ///
@@ -820,6 +904,13 @@ pub struct Tuning {
     /// [`Database::open_with_clock`] describes — read that before injecting
     /// one against a non-empty file.
     pub clock: Option<Arc<dyn Clock>>,
+    /// When SQLite checkpoints the WAL on its own (0.12.14, W5.3, F-30).
+    ///
+    /// Applied to the **write connection**, which is the only connection in
+    /// this crate that commits, and therefore the only one whose autocheckpoint
+    /// setting can ever fire. Pair [`WalCheckpointPolicy::Disabled`] with an
+    /// explicit [`Database::checkpoint`] or the WAL grows without bound.
+    pub wal_autocheckpoint: WalCheckpointPolicy,
 }
 
 // `Clock` is not `Debug` — it is a behavioural trait with two methods and
@@ -837,6 +928,7 @@ impl Tuning {
                 None => CadencePolicy::Disabled,
             },
             clock,
+            wal_autocheckpoint: WalCheckpointPolicy::default(),
         }
     }
 }
@@ -846,6 +938,7 @@ impl std::fmt::Debug for Tuning {
         f.debug_struct("Tuning")
             .field("cadence", &self.cadence)
             .field("clock", &self.clock.as_ref().map(|_| "<injected>"))
+            .field("wal_autocheckpoint", &self.wal_autocheckpoint)
             .finish()
     }
 }
@@ -912,10 +1005,20 @@ impl Database {
     }
 
     async fn open_inner(path: &Path, tuning: Tuning) -> Result<Self> {
-        let Tuning { cadence, clock: injected } = tuning;
+        let Tuning {
+            cadence,
+            clock: injected,
+            wal_autocheckpoint,
+        } = tuning;
         let cadence = cadence.resolve();
         let db = libsql::Builder::new_local(path).build().await?;
         let write_conn = configure(db.connect()?).await?;
+        // The writer is the only connection that commits, so it is the only one
+        // whose `wal_autocheckpoint` can ever fire. Setting it on the readers
+        // would be a pragma with no path to running (0.12.14, W5.3, D-157).
+        if let Some(pragma) = wal_autocheckpoint.pragma() {
+            let _ = write_conn.query(&pragma, ()).await?;
+        }
         let read_conn = configure(db.connect()?).await?;
 
         // PRAGMA query_only = ON on reader connection (§5.1.2)
@@ -3496,7 +3599,10 @@ mod tests {
         const CEILING: usize = chunk_rows::ANNOTATIONS;
         let (per_row_us, overhead_ms) = (20.0, 0.05);
         let held = |n: usize| overhead_ms + per_row_us * n as f64 / 1000.0;
-        assert!(held(CEILING) > 4.0 * 3.0, "the start is not far over budget");
+        assert!(
+            held(CEILING) > 4.0 * 3.0,
+            "the start is not far over budget"
+        );
 
         let trace = converge(CEILING, per_row_us, overhead_ms, CEILING, 4);
         let first_in_budget = trace

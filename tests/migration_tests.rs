@@ -4,10 +4,10 @@ mod harness;
 mod v7_schema;
 
 use harness::TestHarness;
-use v7_schema::seeded_v7;
 use macrame::error::DbError;
 use macrame::schema::ddl;
 use macrame::schema::migrations::{self, SCHEMA_VERSION};
+use v7_schema::seeded_v7;
 
 const TS: &str = "2026-01-01T00:00:00.000000Z";
 
@@ -708,8 +708,7 @@ async fn a_v7_database_with_a_pre_existing_orphan_is_refused() {
 
     let reason = refusal_reason(migrations::run(&conn).await.unwrap_err());
     assert!(
-        reason.contains("suspended foreign keys and left a violation")
-            && reason.contains("links"),
+        reason.contains("suspended foreign keys and left a violation") && reason.contains("links"),
         "the refusal should name the check and the table, not merely fail: {reason}"
     );
     assert_eq!(
@@ -1283,8 +1282,13 @@ async fn a_v7_database_climbs_all_the_way_to_the_top_with_a_working_guard() {
     migrations::run(&conn).await.unwrap();
     assert_eq!(user_version(&conn).await, SCHEMA_VERSION);
 
-    let res = conn.execute("DELETE FROM concepts WHERE id = 'c1'", ()).await;
-    assert!(res.is_err(), "an ad-hoc concept delete must still be refused");
+    let res = conn
+        .execute("DELETE FROM concepts WHERE id = 'c1'", ())
+        .await;
+    assert!(
+        res.is_err(),
+        "an ad-hoc concept delete must still be refused"
+    );
 
     // Inside a declared archive session the same delete is legal — which is the
     // capability the rung exists to grant, and the thing v8 could not do.
@@ -1298,9 +1302,12 @@ async fn a_v7_database_climbs_all_the_way_to_the_top_with_a_working_guard() {
     // concept while that edge is hot fails on the foreign key rather than on the
     // guard — which is precisely the downstream relationship C1's predicate
     // describes (D-128), reached here from the schema side.
-    conn.execute("DELETE FROM links WHERE source_id = 'c1' OR target_id = 'c1'", ())
-        .await
-        .unwrap();
+    conn.execute(
+        "DELETE FROM links WHERE source_id = 'c1' OR target_id = 'c1'",
+        (),
+    )
+    .await
+    .unwrap();
     conn.execute("DELETE FROM concepts WHERE id = 'c1'", ())
         .await
         .expect("a concept delete inside an archive session must be permitted at v9");
@@ -1360,7 +1367,9 @@ async fn a_v9_database_climbs_to_v10_and_the_insert_log_becomes_marker_gated() {
     conn.execute("PRAGMA user_version = 9", ()).await.unwrap();
 
     assert!(
-        !log_insert_sql(&conn).await.contains(ddl::ARCHIVE_SESSION_MARKER),
+        !log_insert_sql(&conn)
+            .await
+            .contains(ddl::ARCHIVE_SESSION_MARKER),
         "the fixture did not start from the v9 trigger"
     );
 
@@ -1368,7 +1377,9 @@ async fn a_v9_database_climbs_to_v10_and_the_insert_log_becomes_marker_gated() {
 
     assert_eq!(user_version(&conn).await, SCHEMA_VERSION);
     assert!(
-        log_insert_sql(&conn).await.contains(ddl::ARCHIVE_SESSION_MARKER),
+        log_insert_sql(&conn)
+            .await
+            .contains(ddl::ARCHIVE_SESSION_MARKER),
         "the insert log trigger is not marker-gated after the rung"
     );
 }

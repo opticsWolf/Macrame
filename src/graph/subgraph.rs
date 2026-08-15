@@ -362,12 +362,16 @@ impl Subgraph {
     /// For one node prefer [`Self::out_edges`]. This exists for callers that
     /// must walk the whole index — the Python `to_dict`, and the diagnostics.
     pub fn out_adjacency(&self) -> impl Iterator<Item = (&str, &[EdgeRef])> + '_ {
-        self.out_adj.iter().map(|(id, e)| (id.as_str(), e.as_slice()))
+        self.out_adj
+            .iter()
+            .map(|(id, e)| (id.as_str(), e.as_slice()))
     }
 
     /// The incoming index. See [`Self::out_adjacency`].
     pub fn in_adjacency(&self) -> impl Iterator<Item = (&str, &[EdgeRef])> + '_ {
-        self.in_adj.iter().map(|(id, e)| (id.as_str(), e.as_slice()))
+        self.in_adj
+            .iter()
+            .map(|(id, e)| (id.as_str(), e.as_slice()))
     }
 
     /// Add or replace a node, returning what was there before.
@@ -510,20 +514,26 @@ impl Subgraph {
         let (to, b5) = self.pool.intern(valid_to);
         let pooled = b1 + b2 + b3 + b4 + b5;
 
-        self.out_adj.entry(source.to_string()).or_default().push(EdgeRef {
-            node: tgt,
-            edge_type: ty,
-            weight,
-            valid_from: from,
-            valid_to: to,
-        });
-        self.in_adj.entry(target.to_string()).or_default().push(EdgeRef {
-            node: src,
-            edge_type: ty,
-            weight,
-            valid_from: from,
-            valid_to: to,
-        });
+        self.out_adj
+            .entry(source.to_string())
+            .or_default()
+            .push(EdgeRef {
+                node: tgt,
+                edge_type: ty,
+                weight,
+                valid_from: from,
+                valid_to: to,
+            });
+        self.in_adj
+            .entry(target.to_string())
+            .or_default()
+            .push(EdgeRef {
+                node: src,
+                edge_type: ty,
+                weight,
+                valid_from: from,
+                valid_to: to,
+            });
         2 * std::mem::size_of::<EdgeRef>() + pooled
     }
 
@@ -861,7 +871,15 @@ ORDER BY l.source_id, l.target_id, l.edge_type
         ids.sort();
         ids.dedup();
 
-        hydrate(conn, &mut graph, &ids, bytes, byte_budget, traversal.content).await?;
+        hydrate(
+            conn,
+            &mut graph,
+            &ids,
+            bytes,
+            byte_budget,
+            traversal.content,
+        )
+        .await?;
         graph.drop_dangling_adjacency();
         Ok(graph)
     }
@@ -939,7 +957,14 @@ mod tests {
     #[test]
     fn adding_an_edge_indexes_it_in_both_directions() {
         let mut g = Subgraph::default();
-        g.add_edge("A", "B", "KNOWS", 0.5, "2026-01-01T00:00:00.000000Z", "9999-12-31T23:59:59.999999Z");
+        g.add_edge(
+            "A",
+            "B",
+            "KNOWS",
+            0.5,
+            "2026-01-01T00:00:00.000000Z",
+            "9999-12-31T23:59:59.999999Z",
+        );
 
         assert_eq!(g.out_edges("A").len(), 1);
         assert_eq!(g.out_edges("A")[0].node(&g), "B");
