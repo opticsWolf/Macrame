@@ -1657,14 +1657,20 @@ impl Database {
             .await
     }
 
-    /// Rebuild `links_current` from `links` and verify zero drift (§5.8).
     /// Move the WAL back into the main database file (§4.5, F-30, 0.12.13,
     /// W5.2, D-156).
     ///
-    /// Runs `PRAGMA wal_checkpoint(TRUNCATE)` on the write connection, as an
-    /// actor turn, and returns what SQLite reported. **Read
+    /// Runs `PRAGMA wal_checkpoint(FULL)` and then `(TRUNCATE)` on the write
+    /// connection, as one actor turn, and returns what SQLite reported. **Read
     /// [`CheckpointReport::busy`]** — a checkpoint that could not run is an
     /// `Ok` whose WAL is still there.
+    ///
+    /// Two passes rather than one because **a truncating checkpoint cannot
+    /// report its own work**: the counts describe the WAL *after* the
+    /// operation, and after a truncation there is nothing left to describe, so
+    /// `TRUNCATE` alone answers `busy=0, log=0, checkpointed=0` on success —
+    /// indistinguishable from having done nothing. `FULL` supplies the frame
+    /// count and `TRUNCATE` resets the file; `busy` is the union of the two.
     ///
     /// # When a caller needs this
     ///
@@ -1696,6 +1702,19 @@ impl Database {
             .await
     }
 
+    /// Rebuild `links_current` from `links` and verify zero drift (§5.8).
+    ///
+    /// One transaction holding the write lock for its whole duration, because
+    /// [D-023] will not let the `DELETE` and the `INSERT` be split: a reader
+    /// landing between them would see a graph with no edges and no error.
+    /// [`Self::rebuild_current_chunked`] is the same result with a different
+    /// latency profile, and is what a populated database wants.
+    ///
+    /// The report's `drift_after` is the audit run inside the same transaction,
+    /// so a repair that did not converge is reported by the call that made it
+    /// rather than by the next one to look.
+    ///
+    /// [D-023]: ../docs/architecture/s13-decision-register.md#d-023
     pub async fn rebuild_current(&self) -> Result<RebuildReport> {
         self.high(|responder| HighPriCommand::RebuildCurrent { responder })
             .await

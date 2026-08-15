@@ -124,6 +124,86 @@ async fn an_explicit_threshold_bounds_the_wal_below_the_default() {
     db.close().await.unwrap();
 }
 
+/// **The bulk-import recipe, end to end** (§8 acceptance item 10).
+///
+/// The arm above pairs `Disabled` with an explicit checkpoint over
+/// `write_concepts`. This is the same pairing over `bulk_import`, which is the
+/// path the acceptance item names and the one the recipe is actually for — a
+/// long edge load is where deferring every checkpoint to the end is worth the
+/// WAL it costs.
+///
+/// # What this asserts that the concept arm does not
+///
+/// **That the rows survive the reclaim.** Growing a WAL and then truncating it
+/// is a file-size assertion; it says nothing about whether the frames reached
+/// the main database or were merely discarded. Reading the edges back *after*
+/// the checkpoint, through a handle that has to consult the main file rather
+/// than a WAL that no longer exists, is the half that would catch a checkpoint
+/// which reclaimed space by losing data.
+///
+/// The count is taken through `links_current`, so it also exercises the
+/// projection the triggers maintain rather than only the base table.
+#[tokio::test]
+async fn a_bulk_import_with_the_checkpointer_off_reclaims_and_keeps_its_rows() {
+    const EDGES: usize = 3_000;
+    let harness = TestHarness::new();
+    let db = open(&harness, WalCheckpointPolicy::Disabled).await;
+
+    let concepts: Vec<_> = (0..=EDGES)
+        .map(|i| ConceptUpsert::new(format!("c{i}"), format!("C{i}")).valid_from(T1))
+        .collect();
+    db.write_concepts(concepts).await.unwrap();
+
+    let edges: Vec<_> = (0..EDGES)
+        .map(|i| {
+            EdgeAssertion::new(format!("c{i}"), format!("c{}", i + 1), "LINKS")
+                .valid_from(T1)
+                .valid_to("9999-12-31T23:59:59.999999Z")
+        })
+        .collect();
+    let written = db.bulk_import(edges).await.unwrap();
+    assert_eq!(written, EDGES);
+
+    let grown = wal_bytes(&harness);
+    assert!(
+        grown > DEFAULT_THRESHOLD_BYTES,
+        "the WAL is {grown} bytes after a {EDGES}-edge import with the \
+         checkpointer disabled — something is still checkpointing, so this \
+         test is not measuring the deferred-cost path it claims to"
+    );
+
+    let report = db.checkpoint().await.unwrap();
+    assert!(!report.busy, "the checkpoint gave up: {report:?}");
+    assert!(
+        report.checkpointed_frames > 0,
+        "no frames moved: {report:?}"
+    );
+    assert!(report.is_complete(), "{report:?}");
+    assert_eq!(wal_bytes(&harness), 0);
+
+    // The half a file-size assertion cannot make: the frames went *into* the
+    // database rather than away.
+    let conn = db.diagnostic_conn().await.unwrap();
+    let surviving: i64 = conn
+        .query("SELECT COUNT(*) FROM links_current", ())
+        .await
+        .unwrap()
+        .next()
+        .await
+        .unwrap()
+        .unwrap()
+        .get(0)
+        .unwrap();
+    assert_eq!(
+        surviving,
+        EDGES as i64,
+        "the WAL was reclaimed and {} of {EDGES} edges went with it",
+        EDGES as i64 - surviving
+    );
+
+    db.close().await.unwrap();
+}
+
 /// **Zero is not silently the same as `Disabled`.**
 ///
 /// SQLite treats `PRAGMA wal_autocheckpoint = 0` as "off", and this crate does

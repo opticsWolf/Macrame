@@ -860,3 +860,99 @@ fn a_passage_that_places_a_constant_names_the_file_it_is_in() {
         wrong.join("\n")
     );
 }
+
+/// **Every public method on the handle carries its own rustdoc.**
+///
+/// # The failure this caught, which the appendix check could not
+///
+/// `Database::rebuild_current` lost its doc comment in 0.12.13. W5.2 inserted
+/// `checkpoint` immediately above it, and the single `///` line that had
+/// described `rebuild_current` ended up at the *head* of `checkpoint`'s block —
+/// so `cargo doc` rendered `checkpoint`'s summary, the one line shown in the
+/// method index, as *"Rebuild `links_current` from `links` and verify zero
+/// drift"*. Two methods wrong from one edit, and nothing failed.
+///
+/// [`every_public_database_method_appears_in_appendix_a`] could not see it:
+/// `rebuild_current` was still *named* in Appendix A, which is all that check
+/// asks. Presence in a document and presence of a doc comment are different
+/// facts, and only the first was guarded.
+///
+/// # Why this and not `#![warn(missing_docs)]`
+///
+/// The crate has 266 undocumented public items, so turning that lint on is a
+/// project rather than a gate, and one nobody would land in the commit that
+/// found this. This is scoped to the surface that already has a normative
+/// document behind it — the handle's methods — where the standard is already
+/// "documented" and the only thing missing was something to enforce it.
+///
+/// Shallow on purpose, in this file's own idiom: it asks whether the line
+/// above is a doc line, not whether the prose is any good.
+#[test]
+fn every_public_database_method_has_a_doc_comment() {
+    // Same exemptions as the appendix check, for the same stated reasons —
+    // a method that is deliberately not in the normative surface is not
+    // required to carry rustdoc for it either.
+    const EXEMPT: &[&str] = &["raw", "shadow_step"];
+
+    let lines: Vec<&str> = CONNECTION_RS.lines().collect();
+    let mut undocumented = Vec::new();
+
+    // Only methods inside `impl Database`, which is where the handle's surface
+    // lives; free functions and other impls in this file are out of scope.
+    let mut in_impl = false;
+    for (i, line) in lines.iter().enumerate() {
+        if line.starts_with("impl Database {") {
+            in_impl = true;
+            continue;
+        }
+        if in_impl && line.starts_with('}') {
+            in_impl = false;
+            continue;
+        }
+        if !in_impl {
+            continue;
+        }
+
+        let t = line.trim_start();
+        let Some(name) = ["pub async fn ", "pub fn "].iter().find_map(|p| {
+            t.strip_prefix(p).map(|rest| {
+                rest.chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect::<String>()
+            })
+        }) else {
+            continue;
+        };
+        if name.is_empty() || EXEMPT.contains(&name.as_str()) {
+            continue;
+        }
+
+        // Walk back over attributes: `#[...]` between the doc and the fn is
+        // ordinary, and treating it as "no doc" would make the test wrong
+        // about every method that has one.
+        let mut j = i;
+        while j > 0 {
+            let prev = lines[j - 1].trim_start();
+            if prev.starts_with("#[") || prev.starts_with("#!") {
+                j -= 1;
+                continue;
+            }
+            break;
+        }
+        if j == 0 || !lines[j - 1].trim_start().starts_with("///") {
+            undocumented.push(format!("{name} (line {})", i + 1));
+        }
+    }
+
+    assert!(
+        undocumented.is_empty(),
+        "public methods on `Database` with no rustdoc: {undocumented:?}\n\n\
+         A method that loses its doc comment does not merely become \
+         undocumented — if the line above it belongs to a *neighbouring* \
+         method, that method's summary in `cargo doc` is now a description of \
+         this one. That is how `rebuild_current` and `checkpoint` were both \
+         wrong from 0.12.13 to 0.12.24.\n\n\
+         Appendix A naming the method is not this check: being listed in a \
+         document and having a doc comment are different facts."
+    );
+}

@@ -940,6 +940,31 @@ contributor deciding this stands somewhere that tells them.
    compile unchanged for existing callers.
 10. `checkpoint()` returns frame counts, and disabling autocheckpoint plus an
     explicit checkpoint is a documented, tested bulk-import path.
+
+    > **Met, 0.12.24.** Frame counts: `tests/checkpoint_tests.rs`. The pairing
+    > was already tested over `write_concepts`
+    > (`a_disabled_autocheckpoint_lets_the_wal_grow`); what this item names is
+    > the **bulk-import** path, so
+    > `a_bulk_import_with_the_checkpointer_off_reclaims_and_keeps_its_rows`
+    > runs it over `bulk_import` and adds the assertion a file-size check
+    > cannot make — that the 3,000 edges are still readable *after* the WAL is
+    > truncated. Growing a WAL and reclaiming it says nothing about whether the
+    > frames reached the database or were discarded.
+    >
+    > **Reading the rustdoc to check "documented" found it wrong** (D-167).
+    > `checkpoint`'s summary line was *"Rebuild `links_current` from `links`…"*
+    > — W5.2 inserted the method above `rebuild_current` in 0.12.13 and the
+    > one-line doc stayed put, so `rebuild_current` had no documentation and
+    > `checkpoint`'s index entry described a different operation. Eleven
+    > releases. The appendix gate could not see it: it asks whether a method is
+    > *named* in Appendix A, and `rebuild_current` still was.
+    >
+    > `every_public_database_method_has_a_doc_comment` now closes that,
+    > verified by injection. Scoped to the handle rather than
+    > `#![warn(missing_docs)]`, which reports 266 items crate-wide. The same
+    > rustdoc also still claimed `TRUNCATE` alone where the method has run
+    > `FULL` then `TRUNCATE` since it shipped — D-156 had it right and the
+    > method's own docs did not.
 11. Every 0.13.0 addition is reachable from Python.
 12. D-148 … D-154 in the register.
 
