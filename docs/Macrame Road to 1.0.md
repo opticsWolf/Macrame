@@ -867,6 +867,28 @@ sentinel in `lib.rs`'s convention block
 either is fine. Silence is what is not, and that block exists precisely so a
 contributor deciding this stands somewhere that tells them.
 
+> **Done, 0.12.22 — recorded as not exposed** (D-165). Unlike `raw()`, this is a
+> judgement rather than an invariant: `shadow_step` is public and safe in Rust.
+> What does not cross is its *obligation* — the `epoch` from
+> `ShadowOutcome::Started` must return to `ShadowStep::Swap`, and losing it
+> swaps a stale projection over a live one **silently**, because the swap
+> succeeds. In Rust two types the caller cannot fabricate carry that; across
+> this boundary they become two `#[pyclass]`es whose only job is to be handed
+> back correctly, which converts an enforced obligation into a convention.
+> `rebuild_current_chunked` is the loop, is exposed, and cannot get the epoch
+> wrong, and nobody has yet brought the between-steps use to this surface.
+>
+> **Also made enforceable rather than merely written.** The convention block
+> was a comment, and a comment stops a contributor who reads it and not a
+> `#[pymethods]` block added a year later for a plausible reason.
+> `test_packaging.py` now asserts all three absences — `raw`, `read_conn`,
+> `shadow_step` — each with its own argument in the message, so adding one
+> means answering the register rather than deleting a line. 381 Python passed.
+>
+> If a caller appears, the epoch should cross as an opaque handle rather than
+> an integer. Waiting is not caution: a type invented for a hypothetical caller
+> is a type nobody can check against a real use.
+
 ---
 
 ## 8. Acceptance for 0.13.0

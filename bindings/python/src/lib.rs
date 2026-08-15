@@ -129,6 +129,26 @@ fn _macrame(m: &Bound<'_, PyModule>) -> PyResult<()> {
     //
     // The supported diagnostic path is `diagnostic_query` / `explain`, which
     // open `SQLITE_OPEN_READ_ONLY` per call (D-091) and serialise (D-138).
+    //
+    // convention (D-165, 0.12.22, W6.5): `Database::shadow_step` is likewise NOT
+    // exposed, and unlike `raw()` this one is a judgement rather than an
+    // invariant. It is public in Rust and safe there; what does not cross well
+    // is its *obligation*. The `epoch` from `ShadowOutcome::Started` must be
+    // handed back to `ShadowStep::Swap`, and a caller who loses it defeats the
+    // archive interlock and can swap a stale projection over a live one —
+    // silently, since the swap succeeds. In Rust that obligation is carried by
+    // two types the caller cannot fabricate; across this boundary they would
+    // become two more `#[pyclass]`es whose only purpose is to be passed back
+    // correctly, which is the obligation restated as a convention rather than
+    // enforced.
+    //
+    // `rebuild_current_chunked` is the loop, it is exposed, and it cannot get
+    // the epoch wrong. The seam `shadow_step` exists for — pacing steps against
+    // a frame budget, abandoning a long rebuild, provoking the interlock in a
+    // test — has no Python caller today. Expose it when one appears, with the
+    // epoch as an opaque handle rather than an integer; the reason for waiting
+    // is that a type invented for a hypothetical caller is a type nobody can
+    // check against a real use.
 
     m.add_function(wrap_pyfunction!(engine_linked, m)?)?;
     m.add_function(wrap_pyfunction!(chunk_budget_ms, m)?)?;

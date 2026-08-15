@@ -335,3 +335,35 @@ def test_the_declared_python_floor_is_the_one_ci_actually_runs():
         f"Either add it to the matrix in python.yml or raise the floor."
     )
 
+
+
+def test_what_is_deliberately_not_exposed_is_still_not_exposed():
+    """The `lib.rs` convention block, made enforceable (W6.5, D-165).
+
+    Three methods are absent from this surface on purpose, and until now the
+    only thing holding them off was a comment. A comment stops a contributor
+    who reads it; it does not stop a `#[pymethods]` block that adds the name
+    for a plausible reason a year later.
+
+    Each has its own argument and they are not the same strength.
+    `raw()` is an invariant — it hands back a write-capable connection the
+    write actor does not own, which dissolves the single-writer property
+    (D-068/D-091). `read_conn()` hands back a *shared* connection, so a long
+    reporting query would compete with every traversal in the process.
+    `shadow_step` is a judgement (D-165): safe in Rust, but its epoch
+    obligation would cross as a convention rather than as a type, and losing
+    the epoch swaps a stale projection over a live one without erroring.
+
+    Adding any of them should mean answering the argument in the register, not
+    deleting a line here.
+    """
+    for name, why in [
+        ("raw", "D-068/D-091: a write-capable connection the write actor does not own"),
+        ("read_conn", "a shared connection every traversal in the process competes with"),
+        ("shadow_step", "D-165: the epoch obligation crosses as a convention, not a type"),
+    ]:
+        assert not hasattr(macrame.Database, name), (
+            f"`Database.{name}` is on the Python surface and is documented as "
+            f"deliberately absent — {why}. If exposing it is right, the "
+            f"decision register is where that is argued."
+        )
