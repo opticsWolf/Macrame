@@ -696,6 +696,10 @@ pub struct Database {
     archive_path: PathBuf,
     snapshots_dir: PathBuf,
     schema_version: u32,
+    /// Kept so [`Database::diagnostic_conn`] can configure the connections it
+    /// mints the same way `open()` configured the internal readers (0.12.16,
+    /// W5.5, D-159). Before that split, each one ran with SQLite's defaults.
+    reader_cache_size: Option<i32>,
     writer: Option<tokio::task::JoinHandle<Result<()>>>,
     /// Stops the snapshot cadence. Dropping it stops the task too, which is what
     /// keeps a `Database` that is dropped rather than closed from leaving a task
@@ -1141,6 +1145,7 @@ impl Database {
             archive_path,
             snapshots_dir,
             schema_version: migrations::current_version(),
+            reader_cache_size,
             writer: Some(writer),
             cadence_stop,
             cadence,
@@ -1328,7 +1333,16 @@ impl Database {
             .build()
             .await
             .map_err(|e| fail(e.to_string()))?;
-        db.connect().map_err(|e| fail(e.to_string()))
+        let conn = db.connect().map_err(|e| fail(e.to_string()))?;
+        // Configured since 0.12.16 (W5.5, D-159). Until then this connection
+        // ran with SQLite's defaults while every other connection in the
+        // process ran with the crate's — most consequentially a `busy_timeout`
+        // of 0 against everyone else's 5 s, on the one surface whose job is to
+        // answer questions when the typed path is already suspect. Only the
+        // common half: `SQLITE_OPEN_READ_ONLY` cannot set `journal_mode`, and
+        // the rest govern writes this connection cannot make.
+        configure_common(&conn, self.reader_cache_size).await?;
+        Ok(conn)
     }
 
     /// Cross-check the snapshot chain against a fold from genesis (§5.5, T5.3,
@@ -2546,16 +2560,48 @@ async fn run_checkpoint(conn: &libsql::Connection) -> Result<CheckpointReport> {
     })
 }
 
-/// Identical pragma configuration on every connection.
-async fn configure(
-    conn: libsql::Connection,
-    cache_size: Option<i32>,
-) -> Result<libsql::Connection> {
-    // NOTE: `journal_mode` and `busy_timeout` return their resulting value as a
-    // row, and libsql's `execute()` rejects any statement that yields rows
-    // ("Execute returned rows"). They must be issued through `query()`.
-    let _ = conn.query("PRAGMA journal_mode = WAL", ()).await?;
+/// Pragmas that mean something on **any** connection, including one opened
+/// `SQLITE_OPEN_READ_ONLY` (0.12.16, W5.5, D-159).
+///
+/// Both of these are per-connection state that a reader is subject to just as a
+/// writer is. `busy_timeout` is the one that made this a finding:
+/// [`Database::diagnostic_conn`] ran with SQLite's default of **0** — return
+/// `SQLITE_BUSY` immediately — while every other connection in the process
+/// waited 5 s, so the one surface whose job is to answer questions when the
+/// typed path is already suspect was also the one most likely to fail with
+/// "database is locked" under exactly the contention that prompted the
+/// question.
+async fn configure_common(conn: &libsql::Connection, cache_size: Option<i32>) -> Result<()> {
+    // NOTE: `busy_timeout` returns its resulting value as a row, and libsql's
+    // `execute()` rejects any statement that yields rows ("Execute returned
+    // rows"). It must be issued through `query()`.
     let _ = conn.query("PRAGMA busy_timeout = 5000", ()).await?;
+    // Per-connection, and split writer from reader since 0.12.15 (W5.4,
+    // D-158). `None` runs no pragma at all rather than restating SQLite's
+    // default, so the default remains SQLite's to change.
+    if let Some(pages) = cache_size {
+        conn.execute(&format!("PRAGMA cache_size = {pages}"), ())
+            .await?;
+    }
+    Ok(())
+}
+
+/// Pragmas that only mean anything where writes can happen (0.12.16, W5.5).
+///
+/// Not run on [`Database::diagnostic_conn`], and the reason is not tidiness:
+/// `journal_mode = WAL` is a change to the *database file*, which a connection
+/// opened `SQLITE_OPEN_READ_ONLY` cannot make. The rest —
+/// `synchronous`, `foreign_keys`, `recursive_triggers`, and the `ANALYZE`
+/// bound — govern how writes behave, and a connection that cannot write is not
+/// governed by them.
+///
+/// The write connection and the two internal readers all still get these. The
+/// internal readers are opened from the same read-write `libsql::Database`, so
+/// the pragmas apply; leaving them out would be a behaviour change made for
+/// symmetry, which is not a reason.
+async fn configure_writable(conn: &libsql::Connection) -> Result<()> {
+    // Returns its resulting value as a row — see the note in `configure_common`.
+    let _ = conn.query("PRAGMA journal_mode = WAL", ()).await?;
     conn.execute("PRAGMA synchronous = NORMAL", ()).await?;
     conn.execute("PRAGMA foreign_keys = ON", ()).await?;
     conn.execute("PRAGMA recursive_triggers = OFF", ()).await?;
@@ -2565,13 +2611,16 @@ async fn configure(
     // runs with nobody watching. Returns the previous limit as a row, so it goes
     // through `query()` for the reason the note above gives.
     let _ = conn.query(crate::schema::ddl::ANALYSIS_LIMIT, ()).await?;
-    // Per-connection, and split writer from reader since 0.12.15 (W5.4,
-    // D-158). `None` runs no pragma at all rather than restating SQLite's
-    // default, so the default remains SQLite's to change.
-    if let Some(pages) = cache_size {
-        conn.execute(&format!("PRAGMA cache_size = {pages}"), ())
-            .await?;
-    }
+    Ok(())
+}
+
+/// Full pragma configuration, for a connection that can write.
+async fn configure(
+    conn: libsql::Connection,
+    cache_size: Option<i32>,
+) -> Result<libsql::Connection> {
+    configure_writable(&conn).await?;
+    configure_common(&conn, cache_size).await?;
     Ok(conn)
 }
 

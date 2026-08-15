@@ -64,6 +64,10 @@ let report = db.checkpoint().await?;       // CheckpointReport { busy, log_frame
 // is an OS-level boundary; read_conn()'s PRAGMA is a guardrail its holder can
 // turn off in one statement, and it is *shared*, so a long reporting query there
 // competes with every traversal in the process.
+// Configured since 0.12.16 (D-159): busy_timeout and the reader cache size,
+// i.e. the half of configure() a read-only connection can use. Until then it
+// ran with SQLite's defaults, including busy_timeout=0 against every other
+// connection's 5 s.
 let conn = db.diagnostic_conn().await?;
 
 // Actor latency counters, behind --features metrics (0.6.0, D-079). **On by

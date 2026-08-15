@@ -692,6 +692,25 @@ different `busy_timeout` and cache size than every other connection in the
 process. Split `configure()` into the parts that apply to any connection and the
 parts that are writer-only, and call the first from both.
 
+> **Done, 0.12.16 (D-159).** `configure_common` (`busy_timeout`, `cache_size`)
+> and `configure_writable` (`journal_mode`, `synchronous`, `foreign_keys`,
+> `recursive_triggers`, `analysis_limit`); `diagnostic_conn` calls the first.
+> The line is not tidiness — `journal_mode = WAL` is a change to the file, which
+> a read-only connection cannot make, and the rest govern writes it cannot
+> perform.
+>
+> The consequential omission was **`busy_timeout`, which defaults to 0** against
+> every other connection's 5 s: the shortest fuse in the process, on the surface
+> whose stated job is to answer questions when the typed path is already
+> suspect, and a direct contributor to the `database is locked` mode R15
+> recorded.
+>
+> **It does not rescue `analyze_tests`**, whose comment named W5.5 as the fix.
+> `ANALYZE` is a write, so `analysis_limit` is in the writable half and no
+> reachable connection has it. That test now reads `configure_writable` and says
+> why its reasoning is unchanged — a scheduled fix that lands and does not fix
+> what it was cited for is how a stale comment becomes a wrong one.
+
 **W5.6 — Document the `as_of` axis mix.** Partial close of §3.1. `as_of` on
 `TraversalBuilder` conflates valid time and transaction time — Doctrine II says
 the two clocks are never mixed, and here they are. 0.13.0 states precisely what

@@ -156,25 +156,33 @@ async fn analyze_creates_statistics_that_did_not_exist() {
 /// `include_str!` the module and look for the fragment. Compile-time, no API
 /// widened, and it goes red when the line moves.
 ///
-/// **`diagnostic_conn()` skipping `configure()` is a real finding and not this
-/// test's business** — it means diagnostic reads run with a different
-/// `busy_timeout` than every other connection in the process. It is W5.5 in the
-/// road map and it is left there.
+/// **`diagnostic_conn()` skipping `configure()` was a real finding**, closed in
+/// 0.12.16 (W5.5, D-159): it now runs the half of the configuration that
+/// applies to a read-only connection, which is `busy_timeout` and `cache_size`.
+/// That does **not** rescue this test. `analysis_limit` bounds `ANALYZE`, which
+/// is a write, so it is in the writable half and no reachable connection has
+/// it — the reasoning above is unchanged and the source check stays.
 #[test]
 fn the_analysis_limit_is_applied_where_connections_are_configured() {
     let source = include_str!("../src/connection.rs");
-    let configure = source
-        .split("async fn configure(")
-        .nth(1)
-        .expect("`configure` has moved or been renamed");
-    let body = configure
-        .split("\n}")
-        .next()
-        .expect("`configure` body did not terminate");
+    // `configure` split into a common half and a writable half in 0.12.16
+    // (W5.5, D-159); `ANALYZE` is a write, so the bound belongs to the second.
+    // Read line by line rather than split on a literal containing a newline —
+    // see D-152's addendum for what that costs on a CRLF checkout.
+    let body: String = source
+        .lines()
+        .skip_while(|l| !l.starts_with("async fn configure_writable("))
+        .take_while(|l| !l.starts_with('}'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !body.is_empty(),
+        "`configure_writable` has moved or been renamed"
+    );
 
     assert!(
         body.contains("ANALYSIS_LIMIT"),
-        "`configure` no longer applies ddl::ANALYSIS_LIMIT. Without it ANALYZE \
+        "`configure_writable` no longer applies ddl::ANALYSIS_LIMIT. Without it ANALYZE \
          scans every index in full, which is a write-lock hold proportional to \
          the table rather than to the index count — the thing D-149 exists to \
          make schedulable."

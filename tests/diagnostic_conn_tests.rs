@@ -242,3 +242,96 @@ async fn a_diagnostic_connection_opened_after_a_write_sees_it() {
 
     db.close().await.unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// It is configured now, which it was not until 0.12.16 (W5.5, D-159)
+// ---------------------------------------------------------------------------
+
+/// **A diagnostic connection waits like every other connection in the process.**
+///
+/// Until 0.12.16 this method opened a connection and returned it untouched, so
+/// it ran with SQLite's default `busy_timeout` of **0** — fail immediately with
+/// `SQLITE_BUSY` — while the writer, the shared reader and the cadence
+/// connection all waited 5 s. That put the shortest fuse in the process on the
+/// one surface whose stated job is to answer questions when the typed path is
+/// already suspect, and it failed under precisely the contention that would
+/// prompt someone to reach for it.
+///
+/// Asserted on the pragma rather than by racing a lock, because the value *is*
+/// the behaviour and a contention test for a 5 s timeout is a 5 s test.
+#[tokio::test]
+async fn a_diagnostic_connection_carries_the_crates_busy_timeout() {
+    let harness = TestHarness::new();
+    let db = db(&harness).await;
+
+    let conn = db.diagnostic_conn().await.unwrap();
+    let mut rows = conn.query("PRAGMA busy_timeout", ()).await.unwrap();
+    let timeout: i64 = rows.next().await.unwrap().unwrap().get(0).unwrap();
+    assert_eq!(
+        timeout, 5000,
+        "a diagnostic connection reports busy_timeout={timeout}; 0 means it is \
+         being returned unconfigured again, which is the W5.5 finding"
+    );
+
+    db.close().await.unwrap();
+}
+
+/// **And it carries the reader's cache size, not the writer's.**
+///
+/// `diagnostic_conn` mints a connection per call, so it is on the plural side
+/// of W5.4's split (D-158) — a caller opening several must not be multiplying
+/// the writer's cache.
+#[tokio::test]
+async fn a_diagnostic_connection_carries_the_reader_cache_size() {
+    let harness = TestHarness::new();
+    let db = Database::open_tuned(
+        &harness.db_path,
+        Tuning {
+            cadence: CadencePolicy::Disabled,
+            writer_cache_size: Some(-64_000),
+            reader_cache_size: Some(-8_000),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let conn = db.diagnostic_conn().await.unwrap();
+    let mut rows = conn.query("PRAGMA cache_size", ()).await.unwrap();
+    let size: i64 = rows.next().await.unwrap().unwrap().get(0).unwrap();
+    assert_eq!(
+        size, -8_000,
+        "a diagnostic connection reports cache_size={size}; -64000 is the \
+         writer's and -2000 means it was never configured"
+    );
+
+    db.close().await.unwrap();
+}
+
+/// **It still cannot write**, which is the property the configuration must not
+/// have widened.
+///
+/// The whole value of this method over `read_conn()` is that
+/// `SQLITE_OPEN_READ_ONLY` is an OS-level boundary rather than a pragma its
+/// holder can turn off. Running pragmas on it is exactly the kind of change
+/// that could quietly reopen it read-write, so the refusal is re-asserted here
+/// beside the configuration rather than left to the tests above.
+#[tokio::test]
+async fn configuring_it_did_not_make_it_writable() {
+    let harness = TestHarness::new();
+    let db = db(&harness).await;
+    let conn = db.diagnostic_conn().await.unwrap();
+
+    assert!(
+        conn.execute(INSERT, ()).await.is_err(),
+        "a configured diagnostic connection accepted a write"
+    );
+    let _ = conn.query("PRAGMA query_only = OFF", ()).await;
+    assert!(
+        conn.execute(INSERT, ()).await.is_err(),
+        "turning query_only off rescued the write, so the connection is not \
+         actually read-only at the OS level"
+    );
+
+    db.close().await.unwrap();
+}
