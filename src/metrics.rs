@@ -92,6 +92,25 @@ pub enum CommandKind {
     /// `PRAGMA analysis_limit` and that one is bounded by the size of the
     /// concept table, so averaging their holds together would describe neither.
     Analyze,
+    /// Moving archived rows back into the hot file (0.12.9, W4.3, D-152).
+    ///
+    /// Its own kind at last. Through 0.12.8 this reported as
+    /// [`CommandKind::Archive`], on the stated ground that rehydration is the
+    /// archive path run backwards and shares its budget — true of the *budget*
+    /// and false of the *attribution*, which is what a metrics surface is for.
+    /// An operator reading a long `archive` hold could not tell whether the
+    /// database had archived anything at all, and the two move rows in opposite
+    /// directions.
+    ///
+    /// The real reason it stayed folded was that adding a variant was a
+    /// breaking change. `#[non_exhaustive]` (W4.2) is what removed that
+    /// obstacle, and this variant is the first thing it bought — which is also
+    /// the evidence that the attribute was worth adding rather than a
+    /// precaution against a hypothetical.
+    ///
+    /// **Appended at the end**, per [`CommandKind::index`]: the position of
+    /// every existing variant is a persisted contract in two languages.
+    Rehydrate,
 }
 
 impl CommandKind {
@@ -114,6 +133,7 @@ impl CommandKind {
         CommandKind::RebuildFts,
         CommandKind::ShadowRebuild,
         CommandKind::Analyze,
+        CommandKind::Rehydrate,
     ];
 
     pub const COUNT: usize = CommandKind::ALL.len();
@@ -160,26 +180,51 @@ impl CommandKind {
             CommandKind::RebuildFts => "rebuild_fts",
             CommandKind::ShadowRebuild => "shadow_rebuild",
             CommandKind::Analyze => "analyze",
+            CommandKind::Rehydrate => "rehydrate",
         }
     }
 
     /// Whether this kind is exempt from [`crate::CHUNK_BUDGET`] by contract.
     ///
-    /// The three exemptions are the table in `CHUNK_BUDGET`'s own rustdoc, and
-    /// they are carried here so a dashboard can separate "the budget is being
+    /// The exemptions are the table in `CHUNK_BUDGET`'s own rustdoc, and they
+    /// are carried here so a dashboard can separate "the budget is being
     /// broken" from "the budget does not apply and never claimed to". Counting
     /// an `archive` as a budget violation would make the violation count useless
     /// on any database that archives.
+    ///
+    /// The two lists must agree. There is no test tying them together, which is
+    /// worth knowing before adding a fifth: the table is prose and this is code.
     ///
     /// [`CommandKind::ShadowRebuild`] is deliberately **not** exempt. Its fill
     /// chunks are meant to fit the budget and its swap turn is not going to —
     /// the swap rebuilds three indexes under the lock, which is the residual
     /// cost T1.2 could not remove. Both facts are worth seeing, and exempting
     /// the kind would hide the first to excuse the second.
+    ///
+    /// # `Rehydrate` is exempt, and splitting it out is what made that a
+    /// decision rather than an accident (0.12.9, W4.3, D-152)
+    ///
+    /// Until 0.12.8 rehydration reported as [`CommandKind::Archive`] and was
+    /// therefore exempt **by inheritance** — nobody had decided it, it fell out
+    /// of the borrowed kind. Giving it its own variant would have silently
+    /// flipped it to non-exempt, and since a rehydrate is one unchunked
+    /// transaction moving rows back across the file boundary, every single one
+    /// would have counted as a budget violation. The violation count would then
+    /// have become useless on any database that rehydrates, which is precisely
+    /// the failure the `Archive` exemption exists to prevent, arriving by the
+    /// back door of a change made for attribution.
+    ///
+    /// So it is exempt, on the merits and now on the record: rehydration is the
+    /// archive path run backwards and makes the same claim about its hold —
+    /// that it is bulk movement with no latency bound, and that the caller asked
+    /// for it explicitly.
     pub const fn exempt_from_budget(self) -> bool {
         matches!(
             self,
-            CommandKind::WriteBulkAtomic | CommandKind::Archive | CommandKind::RebuildCurrent
+            CommandKind::WriteBulkAtomic
+                | CommandKind::Archive
+                | CommandKind::RebuildCurrent
+                | CommandKind::Rehydrate
         )
     }
 }

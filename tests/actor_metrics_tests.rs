@@ -18,6 +18,8 @@ use macrame::{ConceptUpsert, Database};
 
 const T0: &str = "2026-01-01T00:00:00.000000Z";
 const OPEN: &str = "9999-12-31T23:59:59.999999Z";
+/// A valid-time close behind every cutoff these tests use.
+const T1: &str = "2026-01-01T00:30:00.000000Z";
 
 fn turns_for(snap: &macrame::metrics::MetricsSnapshot, kind: CommandKind) -> u64 {
     snap.kinds.iter().find(|k| k.kind == kind).unwrap().turns
@@ -249,4 +251,101 @@ async fn a_backlog_shows_up_in_the_queue_depth() {
         .close()
         .await
         .unwrap();
+}
+
+/// Every budget-exempt kind has a row in `CHUNK_BUDGET`'s table, and no other
+/// kind does (0.12.9, W4.3, D-152).
+///
+/// The exemption list exists twice: as `CommandKind::exempt_from_budget` in
+/// code, and as the "Path / Bound / Why it cannot be chunked" table in
+/// `CHUNK_BUDGET`'s rustdoc, which is where a reader looks for its scope (§8.6).
+/// Two copies of one fact is the drift D-035 exists to prevent, and W4.3 found
+/// them one row apart: `rehydrate` was exempt in code — by inheriting
+/// `Archive`'s kind — and absent from the table, so the documented scope of the
+/// budget was narrower than the enforced one and had been for three releases.
+///
+/// **Both directions are asserted.** A missing row is a documented budget that
+/// silently does not apply; an extra row is a documented exemption the code does
+/// not grant, which is worse — it tells a caller their unbounded write is
+/// expected when the violation counter is about to disagree.
+#[test]
+fn the_budget_exemptions_and_their_documented_table_agree() {
+    let source = include_str!("../src/connection.rs");
+    let table = source
+        .split("/// | Path | Bound | Why it cannot be chunked |")
+        .nth(1)
+        .expect("CHUNK_BUDGET's exemption table has moved or been renamed")
+        .split("\n///\n")
+        .next()
+        .expect("the exemption table did not terminate");
+
+    for kind in CommandKind::ALL {
+        let named = table.contains(kind.as_str());
+        assert_eq!(
+            named,
+            kind.exempt_from_budget(),
+            "`{kind}` is {} by `exempt_from_budget` and {} in CHUNK_BUDGET's \
+             table. The two lists are the same fact written twice and must \
+             agree — see the exemption's rustdoc for which one is wrong.\n\
+             table:\n{table}",
+            if kind.exempt_from_budget() { "exempt" } else { "not exempt" },
+            if named { "present" } else { "absent" },
+        );
+    }
+}
+
+/// A rehydrate is attributed to `Rehydrate`, and `Archive` does not move
+/// (0.12.9, W4.3, D-152).
+///
+/// This is the regression W4.3 exists to close, asserted in the form the defect
+/// took: from 0.9.0 to 0.12.8 `LowPriCommand::Rehydrate` mapped to
+/// `CommandKind::Archive`, so an operator reading a long `archive` hold could
+/// not tell whether the database had archived anything at all — the two move
+/// rows in opposite directions across the same file boundary.
+///
+/// The `Archive` half is the load-bearing one. Asserting only that `Rehydrate`
+/// counted would pass in a world where the command was counted twice.
+#[tokio::test]
+async fn a_rehydrate_is_counted_as_rehydrate_and_not_as_archive() {
+    let harness = TestHarness::new();
+    let db = harness.db_with_fake_clock().await;
+
+    // A retired concept with both clocks behind the cutoff and no link naming
+    // it, which is what `CONCEPTS_ARCHIVABLE` admits. The archive has to run
+    // first for a real reason and not as setup ceremony: `rehydrate` reads
+    // `cold.concepts`, so without a prior archive there is no cold file and the
+    // command fails before it is ever counted.
+    db.write_concepts(vec![ConceptUpsert::new("c000", "n")
+        .valid_from(T0)
+        .valid_to(T1)
+        .retired(true)])
+        .await
+        .unwrap();
+    harness.advance(std::time::Duration::from_secs(7_200));
+
+    let cutoff = harness.clock.peek();
+    db.archive(&cutoff).await.unwrap();
+
+    // Taken *after* the archive, so the assertion below is "Archive did not
+    // move across the rehydrate" rather than "Archive is zero" — which is the
+    // claim that has teeth, since both commands are now live in this test.
+    let before = turns_for(&db.metrics(), CommandKind::Archive);
+    assert!(before > 0, "the fixture did not archive anything");
+
+    db.rehydrate(&["c000"]).await.unwrap();
+
+    let snap = db.metrics();
+    assert_eq!(
+        turns_for(&snap, CommandKind::Rehydrate),
+        1,
+        "the rehydrate took an actor turn that was not attributed to Rehydrate"
+    );
+    assert_eq!(
+        turns_for(&snap, CommandKind::Archive),
+        before,
+        "the Archive counter moved on a rehydrate. That is the 0.9.0-0.12.8 \
+         behaviour W4.3 removed (D-152)."
+    );
+
+    db.close().await.unwrap();
 }

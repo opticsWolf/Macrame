@@ -295,6 +295,7 @@ fn next_chunk_size(
 /// | [`Database::write_bulk_atomic`] | none — caller-sized `Vec` | D-014: the batch is *one act* under one stamp. Splitting it is the thing the method exists not to do |
 /// | [`Database::archive`] | measured **26.8 ms** for 2,000 archivable edges; see [`Database::archive_windowed`] | D-012: copy-then-delete must be atomic, or a crash between the phases duplicates or loses rows |
 /// | `rebuild_current` | measured **24.6 / 104 / 318 ms** at 4K / 16K / 40K rows in `links` (was "~50 s per 10M edges", which nothing had measured) | D-023: the window between `DELETE` and `INSERT` is the whole of current belief; a reader landing in it sees a graph with no edges and no error |
+/// | [`Database::rehydrate`] | unmeasured; a function of how many rows the caller named | D-012 backwards: the same copy-then-delete atomicity, in the other direction. **A row here since 0.12.9 only because it was previously invisible** — rehydration reported as `archive` and inherited its exemption without anyone deciding on it (W4.3, D-152) |
 ///
 /// The `archive` figure is end-to-end through this method, so it **includes**
 /// the re-derivation `archive()` runs inside its transaction — but it does not
@@ -2465,10 +2466,13 @@ impl LowPriCommand {
             LowPriCommand::UpsertEmbeddingChunk { .. } => K::UpsertEmbeddingChunk,
             LowPriCommand::BulkImportChunk { .. } => K::BulkImportChunk,
             LowPriCommand::Archive { .. } => K::Archive,
-            // No counter of its own: rehydration is the archive path run
-            // backwards and shares its budget, and a `CommandKind` variant is a
-            // public enum addition (D-036 periphery, but still a break).
-            LowPriCommand::Rehydrate { .. } => K::Archive,
+            // Its own counter since 0.12.9 (W4.3, D-152). It reported as
+            // `K::Archive` from 0.9.0 to 0.12.8 — the budget really is shared,
+            // but attribution is not budget, and an operator reading a long
+            // `archive` hold could not tell whether anything had been archived.
+            // What kept it folded was that a `CommandKind` variant was a
+            // breaking addition; `#[non_exhaustive]` (W4.2) removed that.
+            LowPriCommand::Rehydrate { .. } => K::Rehydrate,
             LowPriCommand::RebuildFts { .. } => K::RebuildFts,
             LowPriCommand::Analyze { .. } => K::Analyze,
             LowPriCommand::ShadowRebuild { .. } => K::ShadowRebuild,

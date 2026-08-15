@@ -454,6 +454,26 @@ both languages today. Additive for Python, where `kind` is already a string.
 This is the evidence that §4.4 is a real constraint and not a hypothetical: the
 codebase has already paid it once.
 
+> **Done, 0.12.9.** The variant is appended at the end per W4.2's rule, and
+> `as_str()` gives Python `"rehydrate"` with no binding change — the end-to-end
+> Python assertion is a subset check, so it needed no edit.
+>
+> **Splitting it out would have silently broken the violation counter.**
+> `Rehydrate` inherited `Archive`'s budget *exemption* along with its kind, so
+> nobody had ever decided it; on its own variant it would have become
+> non-exempt, and since a rehydrate is one unchunked transaction moving rows
+> back across the file boundary, every one would have counted as a violation —
+> making `violations()` useless on any database that rehydrates, which is the
+> exact failure the `Archive` exemption exists to prevent, arriving through a
+> change made for attribution. It is exempt, now on the merits and on the record.
+>
+> That in turn exposed the exemption list existing **twice** — in
+> `exempt_from_budget` and in `CHUNK_BUDGET`'s rustdoc table — and being one row
+> apart, with the documented scope narrower than the enforced one for three
+> releases. `the_budget_exemptions_and_their_documented_table_agree` now asserts
+> both directions. Plus `a_rehydrate_is_counted_as_rehydrate_and_not_as_archive`,
+> whose `Archive` half is the load-bearing one.
+
 **W4.4 — The starvation counter.** Closes §4.1. The actor's `biased` select
 ([connection.rs:2035](../src/connection.rs:2035)) has no floor: sustained
 high-priority traffic can starve low-priority work indefinitely. Count
