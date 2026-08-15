@@ -29,7 +29,7 @@ Two things worth stating before the findings.
 
 | # | Finding | Class | Severity |
 |---|---|---|---|
-| 2.1 | `links` has no explicit index; five hot queries full-scan it | Performance | **High** |
+| 2.1 | `links` has no explicit index; four hot queries full-scan it (was five — see the correction in §2.1) | Performance | **High** |
 | 2.2 | `CONCEPTS_ARCHIVABLE` is O(concepts × links) | Performance | **High** |
 | 2.3 | Per-transaction overhead is the write floor, and no API states it | Performance | Medium |
 | 2.4 | Snapshot serialize/compress/IO runs on a tokio worker | Performance | Medium |
@@ -76,7 +76,7 @@ contains the columns, not because it discriminates"*.
 
 ## 2. Performance
 
-### 2.1 `links` carries no explicit index — five hot queries scan it · **High**
+### 2.1 `links` carries no explicit index — four hot queries scan it · **High**
 
 `ddl::CREATE_INDICES` ([ddl.rs:479](../src/schema/ddl.rs:479)) declares exactly four indexes: two on `links_current`, two on `transaction_log`. `migrations.rs` adds none. So `links` — the ledger's largest table, the one that only grows — has one usable index: the implicit PK autoindex over `(source_id, target_id, edge_type, valid_from, recorded_at)`.
 
@@ -91,6 +91,12 @@ That autoindex serves seeks led by `source_id`. It serves nothing else. These qu
 | [archive.rs:204](../src/temporal/archive.rs:204) | `SELECT 1 FROM links WHERE … OR target_id = …` | see 2.2 |
 
 The `open()` one is the most consequential because it is unconditional and on the startup path. Every process that opens the database pays a full scan of `links` before the actor starts, and the cost grows with the ledger forever. On a 10M-row `links` this is seconds of startup, with no way for a caller to opt out — `SystemClock::new` calls `recorded_at_floor` internally.
+
+> **Correction (0.12.5, W2.3). The `open()` row above is wrong, and it was the headline.** Measured with `EXPLAIN QUERY PLAN` against a populated, analysed fixture, `recorded_at_floor`'s query plans as `SEARCH links USING COVERING INDEX sqlite_autoindex_links_1` — **not** a scan. SQLite serves the bare `MAX(recorded_at)` from the primary key's covering index without traversing the table, so there is no unbounded startup cost to close and no seconds-of-startup claim to defend.
+>
+> This was asserted from reading the schema — `recorded_at` is the fifth PK column, therefore `MAX()` cannot seek — and never run. The query-keyed registry added in W2.3 runs it, which is the entire argument for having built that registry: §5.2 says a one-directional gate cannot see a reader with no index, and the first thing the other direction found was that one of the readers this section named did not need one.
+>
+> The other four rows stand and were confirmed the same way: the archive predicates do scan. **W3.1's index must therefore justify itself on those**, and `tests/index_plan_tests.rs` carries the measured plan for each so the claim is checkable rather than restated. D-089 exists because an index bought on a believed benefit is an index write per insert, forever.
 
 **Fix.** One index closes four of the five rows:
 

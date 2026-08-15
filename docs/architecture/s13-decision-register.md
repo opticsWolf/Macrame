@@ -2446,3 +2446,49 @@ And no rung is needed. `verify` checks presence by name and its doc comment alre
 `the_analysis_limit_is_applied_where_connections_are_configured` reads the source rather than querying the database, because **the only connection a test can reach is the wrong one**: `diagnostic_conn()` does not call `configure()` at all and reports `analysis_limit = 0`. Harmless for `ANALYZE` — a read-only connection cannot analyse — but it means diagnostic reads run with a different `busy_timeout` than every other connection in the process. Recorded here, scheduled as W5.5 in the [road map](../Macrame%20Road%20to%201.0.md), and deliberately not fixed out of order.
 
 **Rejected.** *Running `ANALYZE` inside `open()`* — it would put an unbudgeted write on the open path of every process, to fix statistics that are usually already fine. *Skipping `analysis_limit` for "accurate" statistics* — accuracy is not the constraint; a bounded hold is, and 400 rows per index answers the only question being asked. *Making `close()` fail on a failed `optimize()`* — above. *A background timer that analyses periodically* — a second scheduler beside the snapshot cadence, for work `close()` and an explicit call already cover; if a long-lived process needs it, it can call `optimize()` on its own cadence and say when. *Claiming this fixes the D-042/D-059/D-064 bug class* — it removes the blindness that generates it, and the plan-pinning registry still has to catch the instances.
+
+---
+
+<a id="d-150"></a>D-150 — Plan pinning needs **two fixtures and both directions**, and the direction that was missing found the review wrong on its own headline (0.12.5). [D-042](s13-decision-register.md#d-042), [D-059](s13-decision-register.md#d-059), [D-064](s13-decision-register.md#d-064), [D-088](s13-decision-register.md#d-088), [D-089](s13-decision-register.md#d-089), [D-118](s13-decision-register.md#d-118), [D-149](s13-decision-register.md#d-149), [§8](s6-s10-flows-to-dependencies.md#8-testing-strategy).
+
+> **A gate that stops testing what it names does not go red. It goes quiet, and stays green, and that is worse than not having it.**
+
+**Fixture: `tests/index_plan_tests.rs`, two of them.** `migrated` is the empty, unanalysed database this file has always used. `populated_and_analysed` is new: 260 concepts, one 150-edge hub against 60 single-edge leaves, `PRAGMA analysis_limit = 400`, then `ANALYZE`.
+
+## Why a second fixture became necessary the moment D-149 shipped
+
+Through 0.12.3 every assertion here ran against an empty database, and that was **faithful** — production had no statistics either, so both sides costed plans against SQLite's built-in defaults.
+
+[D-149](s13-decision-register.md#d-149) ended that silently. The empty fixture still passes, still asserts a plan, and no longer asserts anything about the planner callers actually get. Nothing goes red; the gate simply stops describing production.
+
+Both fixtures are kept and both are asserted, each named for the planner it describes. The empty one is not a leftover: **a fresh database before its first `ANALYZE` is a real state** — every process is in it between `open()` and the first `optimize()` — and the plans it gets are plans a caller runs.
+
+**The skew is load-bearing, not decoration.** Uniform data is precisely where measured statistics and default guesses agree, so a uniform fixture would pass whether or not `ANALYZE` had ever run and would prove nothing about either. It is also what a code graph is, and what D-059's 4.4 ms → 1.06 s spread was measured on ([D-088](s13-decision-register.md#d-088)'s argument, applied to statistics rather than to shape).
+
+`every_justified_index_is_the_one_the_planner_picks_with_statistics` guards its own fixture by asserting `sqlite_stat1` is non-empty first. Without that, an `ANALYZE` that silently did nothing would leave every assertion below it passing under a name claiming otherwise.
+
+**Result worth recording: all four pinned plans survive the addition of statistics.** The declared indices discriminate, they do not merely match structurally — which is the D-042/D-059/D-064 property nobody had been in a position to check.
+
+## The other direction, and what it caught immediately
+
+[D-089](s13-decision-register.md#d-089) built this registry keyed by **index**, which catches an index no query reads. §5.2 of the [review](../Macrame%20Codebase%20Review%20v0.12.0.md) names the inverse hole: it cannot catch *a query that quietly leaves its index*, for any query no entry happens to name, because there is nothing to hang an assertion on. `QUERY_REGISTRY` is that direction — keyed by query, recording the plan each is **measured** to get.
+
+It was wrong on its first run, and the entry that was wrong was mine.
+
+The review's §2.1 lists five queries that scan `links` and leads with the one on every `open()`: `recorded_at_floor`'s `MAX(recorded_at)`. That was reasoned from the schema — `recorded_at` is the fifth primary-key column, so `MAX()` cannot seek — and never executed. Measured, it plans as:
+
+```text
+... | UNION ALL | SEARCH links USING COVERING INDEX sqlite_autoindex_links_1 | ...
+```
+
+**`SEARCH`, not `SCAN`.** SQLite serves the bare `MAX()` from the primary key's covering index without traversing the table. There is no unbounded startup cost to close, and the "seconds of startup on a 10M-row `links`" claim has nothing behind it.
+
+The other four rows were confirmed the same way and do scan. So the finding survives at four queries instead of five, and **W3.1's index has to justify itself on those** — [D-089](s13-decision-register.md#d-089) exists because an index bought on a believed benefit is an index write per insert, forever.
+
+## Recording a defect rather than asserting the fix
+
+Two `QUERY_REGISTRY` entries record a **scan**, with the review section that names it. That is deliberate and is not an endorsement: it puts the defect where a change has to walk past it, and it means W3 **cannot land quietly** — the indices it adds turn those rows red and the commit adding them has to come here and state the new plan. An entry that already expected the good plan would go green on its own and nobody would review the improvement.
+
+`fragment` is a substring rather than whole-plan equality, because pinning the entire `EXPLAIN QUERY PLAN` string would go red on any SQLite wording change and train people to re-bless it without reading.
+
+**Rejected.** *Replacing the empty fixture rather than adding to it* — an unanalysed database is a real state and its plans are real; dropping it trades one blind spot for another. *Pinning whole plan strings* — above. *Asserting the seek W3 will produce, so the tests are "ready"* — a test that passes before the work and after it distinguishes nothing, and the whole value here is that the improvement gets read. *Quietly editing §2.1's five to four* — the review is a dated artefact and the correction is more instructive than the corrected text; it is annotated in place with what was measured and how. *Treating the `MAX()` result as evidence that W3.1 should be dropped* — four queries still scan, and one of them is the quadratic concept-archival predicate; what changed is which query justifies the index, not whether one is justified.

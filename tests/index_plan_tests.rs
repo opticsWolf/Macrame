@@ -127,6 +127,74 @@ async fn migrated(harness: &TestHarness) -> libsql::Connection {
     conn
 }
 
+/// A fixture with rows and statistics — the shape production has since D-149.
+///
+/// # Why this had to exist the moment `ANALYZE` shipped
+///
+/// Through 0.12.3 every test here ran against [`migrated`]: a freshly migrated,
+/// entirely **empty** database. That was *faithful*, because production had no
+/// statistics either — nothing in the crate ran `ANALYZE`, so `sqlite_stat1`
+/// existed nowhere and SQLite costed every plan against built-in defaults on
+/// both sides.
+///
+/// D-149 ended that, and it ends it **silently**: the empty fixture still
+/// passes, still asserts a plan, and no longer asserts anything about the
+/// planner that actually runs. A gate that quietly stops testing the thing it
+/// names is worse than no gate, which is the argument this whole file is built
+/// on one level up.
+///
+/// # The skew is the point
+///
+/// One hub with 150 edges against 60 single-edge leaves. Uniform data is
+/// precisely where measured statistics and SQLite's default guesses agree, so a
+/// uniform fixture would pass whether or not `ANALYZE` had ever run and would
+/// prove nothing about either. Skew is also what a code graph actually is, and
+/// what D-059's 4.4 ms → 1.06 s spread was measured on.
+async fn populated_and_analysed(harness: &TestHarness) -> libsql::Connection {
+    let conn = migrated(harness).await;
+
+    // Matches `Database::configure`. A fixture analysed without the limit would
+    // hold statistics production never computes.
+    let _ = conn.query(ddl::ANALYSIS_LIMIT, ()).await.unwrap();
+
+    conn.execute("BEGIN", ()).await.unwrap();
+    for i in 0..260 {
+        conn.execute(
+            "INSERT INTO concepts (id, title, content, valid_from, valid_to, \
+             recorded_at, retired) VALUES (?1, ?2, '', ?3, ?4, ?3, 0)",
+            libsql::params![format!("c{i:04}"), format!("C{i}"), TS, OPEN],
+        )
+        .await
+        .unwrap();
+    }
+    // The hub.
+    for i in 1..151 {
+        insert_edge(&conn, "c0000", &format!("c{i:04}")).await;
+    }
+    // The leaves.
+    for i in 151..211 {
+        insert_edge(&conn, &format!("c{i:04}"), &format!("c{:04}", i + 1)).await;
+    }
+    conn.execute("COMMIT", ()).await.unwrap();
+
+    let _ = conn.query(ddl::ANALYZE, ()).await.unwrap();
+    conn
+}
+
+async fn insert_edge(conn: &libsql::Connection, source: &str, target: &str) {
+    conn.execute(
+        "INSERT INTO links (source_id, target_id, edge_type, valid_from, \
+         valid_to, weight, properties, recorded_at) \
+         VALUES (?1, ?2, 'LINKS', ?3, ?4, 1.0, '{}', ?3)",
+        libsql::params![source, target, TS, OPEN],
+    )
+    .await
+    .unwrap();
+}
+
+const TS: &str = "2026-01-01T00:00:00.000000Z";
+const OPEN: &str = "9999-12-31T23:59:59.999999Z";
+
 async fn plan_of(conn: &libsql::Connection, sql: &str) -> String {
     let mut rows = conn
         .query(&format!("EXPLAIN QUERY PLAN {sql}"), ())
@@ -172,9 +240,155 @@ fn every_index_is_justified() {
     assert_eq!(declared.len(), REGISTRY.len());
 }
 
-/// Each justified index is the one its query actually gets.
+/// Each justified index is the one its query actually gets, **on a database
+/// that has rows and statistics** — which is what production has since D-149.
+///
+/// This is the arm that matters. Before D-149 the empty fixture below was the
+/// only one and was faithful; the moment `ANALYZE` shipped, a planner with
+/// `sqlite_stat1` became the one callers get, and pinning plans against a
+/// planner nobody runs is a gate that has quietly stopped gating.
 #[tokio::test]
-async fn every_justified_index_is_the_one_the_planner_picks() {
+async fn every_justified_index_is_the_one_the_planner_picks_with_statistics() {
+    let harness = TestHarness::new();
+    let conn = populated_and_analysed(&harness).await;
+
+    // Guard the fixture itself. If `ANALYZE` silently did nothing, every
+    // assertion below would still pass and would be testing the empty-database
+    // planner under a name claiming otherwise.
+    let mut rows = conn
+        .query("SELECT COUNT(*) FROM sqlite_stat1", ())
+        .await
+        .expect("sqlite_stat1 missing: ANALYZE did not run on this fixture");
+    let stats: i64 = rows.next().await.unwrap().unwrap().get(0).unwrap();
+    assert!(
+        stats > 0,
+        "the fixture analysed to zero statistics rows, so this test is the \
+         empty-database case wearing the populated one's name (D-150)"
+    );
+
+    for (name, j) in REGISTRY {
+        let Query { label, sql, .. } = j else {
+            continue;
+        };
+        let plan = plan_of(&conn, sql).await;
+        assert!(
+            plan.contains(name),
+            "{label}: expected {name} on a populated, analysed database — \
+             planner chose: {plan}"
+        );
+    }
+}
+
+/// The registry's other direction: queries that must not silently start
+/// scanning (W2.3, D-150).
+///
+/// # The hole this closes
+///
+/// [`REGISTRY`] is keyed by **index**, and that catches an index nothing reads.
+/// It cannot catch the inverse — *a query that quietly leaves its index* — for
+/// any query no entry happens to name, because there is nothing to write an
+/// assertion against. Both halves are needed and neither implies the other.
+///
+/// # A `Scan` expectation is a recorded defect, not an endorsement
+///
+/// Two of these rows expect a scan today. That is [§2.1 and §2.2 of the codebase
+/// review](../docs/Macrame%20Codebase%20Review%20v0.12.0.md) written down where a
+/// change has to walk past it: `links` carries a primary key and nothing else, so
+/// the archive predicates and the clock floor have nothing to seek on.
+///
+/// Recording the defect rather than asserting the fix means W3 **cannot land
+/// quietly** — the indexes it adds turn these rows red, and the commit that adds
+/// them has to come here and say so. A test that already expected the good plan
+/// would go green on its own and nobody would see the improvement.
+const QUERY_REGISTRY: &[(&str, &str, Expect)] = &[
+    (
+        "the concept-archival predicate's link check",
+        "SELECT id FROM concepts WHERE retired = 1 AND recorded_at < ?1          AND valid_to < ?1 AND NOT EXISTS (              SELECT 1 FROM links WHERE links.source_id = concepts.id                 OR links.target_id = concepts.id)",
+        Expect {
+            // SCAN concepts | CORRELATED SCALAR SUBQUERY 1
+            //   | SCAN links USING COVERING INDEX sqlite_autoindex_links_1
+            fragment: "CORRELATED SCALAR SUBQUERY",
+            note: "**Defect, review §2.2.** A correlated subquery that SCANs                    `links` once per candidate concept: the `OR target_id` arm                    has nothing to seek on, so this is O(concepts × links). W3.2                    is the index that should remove the correlation.",
+        },
+    ),
+    (
+        "the link-archival supersession probe",
+        "SELECT rowid FROM links WHERE recorded_at < ?1 AND EXISTS (              SELECT 1 FROM links newer              WHERE newer.source_id = links.source_id                AND newer.target_id = links.target_id                AND newer.edge_type = links.edge_type                AND newer.valid_from = links.valid_from                AND newer.recorded_at > links.recorded_at)",
+        Expect {
+            // SCAN links USING COVERING INDEX sqlite_autoindex_links_1
+            //   | CORRELATED SCALAR SUBQUERY 1 | SEARCH newer ... (full PK prefix)
+            //
+            // The inner probe is fine — it binds the whole primary-key prefix.
+            // It is the OUTER `recorded_at <` that has nothing to seek on.
+            fragment: "SCAN links",
+            note: "**Defect, review §2.1.** The outer `recorded_at <` filter                    scans every row of `links`. The inner probe is already served                    by the primary key and is not the problem.",
+        },
+    ),
+    (
+        "the clock floor read on every open()",
+        "SELECT MAX(recorded_at) FROM (              SELECT MAX(recorded_at) AS recorded_at FROM concepts              UNION ALL              SELECT MAX(recorded_at) AS recorded_at FROM links)",
+        Expect {
+            // ... | UNION ALL | SEARCH links USING COVERING INDEX
+            //         sqlite_autoindex_links_1 | ...
+            //
+            // **NOT a scan, and this contradicts review §2.1**, which counted
+            // this among the "four full scans" an index on `links.recorded_at`
+            // would close. The planner already serves the bare `MAX()` from the
+            // primary key's covering index without traversing the table.
+            //
+            // Recorded as measured rather than as predicted. W3.1 must show this
+            // query actually improves before citing it as justification —
+            // `the_unread_index_set_is_empty` and D-089 exist because an index
+            // bought on a believed benefit is an index write per insert forever.
+            fragment: "SEARCH links USING COVERING INDEX",
+            note: "Already served from the primary key's covering index.                    Contradicts review §2.1's claim that this is a full scan;                    W3.1's justification must not rest on it.",
+        },
+    ),
+];
+
+/// The plan a registered query is **measured** to get, with what that means.
+///
+/// `fragment` is deliberately a substring rather than a whole-plan equality:
+/// pinning the entire `EXPLAIN QUERY PLAN` string would go red on any SQLite
+/// wording change and teach people to re-bless it without reading.
+struct Expect {
+    fragment: &'static str,
+    note: &'static str,
+}
+
+/// Every query-keyed entry gets the plan it is recorded as getting.
+///
+/// Run against the populated, analysed fixture: a scan and a seek are only
+/// distinguishable once there are rows and statistics to choose between them.
+#[tokio::test]
+async fn every_registered_query_gets_the_plan_it_is_recorded_as_getting() {
+    let harness = TestHarness::new();
+    let conn = populated_and_analysed(&harness).await;
+
+    for (label, sql, expect) in QUERY_REGISTRY {
+        let plan = plan_of(&conn, sql).await;
+        assert!(
+            plan.contains(expect.fragment),
+            "{label}: expected the plan to contain {:?}
+             note: {}
+             planner chose: {plan}
+
+             If an index you just added changed this, that is the point of this              test — update the entry and say what the new plan is.",
+            expect.fragment,
+            expect.note
+        );
+    }
+}
+
+/// The same assertions on an **empty, unanalysed** database.
+///
+/// Kept deliberately, and not as a leftover. A fresh database before its first
+/// `ANALYZE` is a real state Macrame is in — every process is in it between
+/// `open()` and the first `optimize()` — and the plans it gets are real plans a
+/// caller runs. Two fixtures, both asserted, each labelled with which planner it
+/// is describing.
+#[tokio::test]
+async fn every_justified_index_is_the_one_the_planner_picks_when_empty() {
     let harness = TestHarness::new();
     let conn = migrated(&harness).await;
 
@@ -185,7 +399,7 @@ async fn every_justified_index_is_the_one_the_planner_picks() {
         let plan = plan_of(&conn, sql).await;
         assert!(
             plan.contains(name),
-            "{label}: expected {name}, planner chose: {plan}"
+            "{label}: expected {name} on an empty database — planner chose: {plan}"
         );
     }
 }
