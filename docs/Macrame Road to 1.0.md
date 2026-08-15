@@ -718,7 +718,40 @@ the parameter does today, in the rustdoc and in the temporal spec. **The fix is
 W7.1**, and it is a break, which is why it needs its semantics written down and
 agreed one release ahead rather than argued in the commit that changes them.
 
+> **Done, 0.12.17 (D-160).** The mix is sharper than "conflates valid and
+> transaction time": the topology compares `ts` to `links.valid_from/valid_to`
+> (valid time, current belief — Doctrine VIII met), `AttributeMode::AtTime`
+> compares the *same* `ts` to `transaction_log.recorded_at` (transaction time,
+> which is `reconstruct`'s axis), and `Current` compares it to nothing at all.
+>
+> Concretely: a title corrected today to fix a 2020 typo does **not** appear in
+> `as_of("2020-06-01") + AtTime`, because the correction was recorded after
+> `ts`. Right answer to "what did we believe in 2020", wrong answer to "what was
+> true in 2020" — and the name promises the second.
+>
+> **What no combination gives today** is the thing `as_of` is named for applied
+> to attributes: what was true at `t` as best we now know. There is no
+> valid-time read of concept attributes anywhere, because concepts are versioned
+> in the log rather than as intervals. So W7.1 is a design decision, not a
+> predicate change — which is the argument for the release of notice.
+>
+> Written into the `as_of` rustdoc and into §5.2 of the module spec, both as
+> tables, plus D-160.
+
 **W5.7 — Record D-150, D-151 and D-154.**
+
+> **Done, 0.12.17.** All three were written when the work landed rather than
+> batched here — D-150 in 0.12.5, D-151 in 0.12.6, D-154 in 0.12.11 — so this
+> item carried no work of its own and rides W5.6's bump.
+>
+> The wave shipped **six** decisions the plan did not name: D-155 (`Tuning`),
+> D-156 (`checkpoint`), D-157 (`wal_autocheckpoint`), D-158 (split cache),
+> D-159 (`diagnostic_conn`), D-160 (the `as_of` axis mix). Worth noting as a
+> pattern rather than an accident: a wave item that says "record D-nnn" is
+> planning for the decisions already foreseen, and every wave so far has
+> produced more decisions than it predicted — which is the argument for writing
+> them at the commit rather than at a checkpoint item, since the checkpoint
+> item's list is written before the work.
 
 ---
 

@@ -155,6 +155,50 @@ impl TraversalBuilder {
     /// A traversal with no `as_of` is a query about now, where `Current` and
     /// `AtTime` agree about which text to return, so the default stands and no
     /// caller has to change.
+    ///
+    /// # `ts` is read on two different clocks, and that is a defect (0.12.17, W5.6, D-160)
+    ///
+    /// [Doctrine VIII](../docs/architecture/s0-s3-foundations.md#doctrine-viii)
+    /// says `as_of(ts)` means **valid time under current belief** and returns
+    /// exactly that, and that queries mixing axes say so in their signatures.
+    /// This one does not. Precisely what the single `ts` is compared against
+    /// today:
+    ///
+    /// | half of the answer | the column `ts` is compared to | the axis that is |
+    /// |---|---|---|
+    /// | topology (which edges exist) | `links.valid_from` / `links.valid_to` | **valid time**, under current belief — Doctrine VIII's contract, met |
+    /// | attributes, [`AttributeMode::AtTime`] | `transaction_log.recorded_at` | **transaction time** — belief *as of* `ts`, which is `reconstruct`'s axis |
+    /// | attributes, [`AttributeMode::Current`] | nothing — `concepts WHERE retired = 0` | valid time **now**, belief now |
+    ///
+    /// So `as_of(t).attribute_mode(AtTime)` — the combination the example above
+    /// calls "usually what was meant" — answers **"the edges that were valid at
+    /// `t`, labelled with what we believed at `t`"**. Both halves are
+    /// defensible; the pairing is two questions under one timestamp, which is
+    /// the conflation [§3.1](../docs/architecture/s0-s3-foundations.md) names.
+    ///
+    /// **What that costs a caller, concretely.** Suppose a concept's title is
+    /// corrected today, fixing a typo made in 2020. `as_of("2020-06-01")` with
+    /// `AtTime` returns the **uncorrected** title, because the correction was
+    /// *recorded* after `ts`. That is the right answer to "what did we believe
+    /// in 2020" and the wrong one to "what was true in 2020", and `as_of`'s name
+    /// promises the second.
+    ///
+    /// A second, smaller mismatch in the same direction: `AtTime` hydration
+    /// filters on `recorded_at` and on the payload's `retired` flag, and never
+    /// consults the concept's **own valid interval**. A concept whose validity
+    /// had ended before `ts` still hydrates, so the two halves of the answer do
+    /// not even agree about what "existed at `ts`" means.
+    ///
+    /// **This is stated and not fixed, deliberately.** Changing it changes
+    /// answers callers already depend on, so it is a break and belongs to a
+    /// release that is allowed to make one — W7.1, in 0.14.0. Writing the
+    /// semantics down one release early is what makes that change reviewable
+    /// against a stated position instead of argued in the commit that makes it.
+    ///
+    /// Until then: if you want *belief as of `t`*, that operation exists and is
+    /// named for it — [`crate::temporal::reconstruct`]. If you want *what was
+    /// true at `t`, as best we now know*, no combination here gives it, because
+    /// no attribute mode reads concept attributes on the valid-time axis.
     pub fn as_of(mut self, ts: impl Into<String>) -> Self {
         self.as_of = Some(ts.into());
         self
