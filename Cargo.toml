@@ -4,7 +4,7 @@
 # keeps the import path `use macrame::…` unchanged, so this is a registry name
 # and not a rename of the crate anyone writes against.
 name = "macrame-db"
-version = "0.12.7"
+version = "0.12.8"
 edition = "2021"
 # Measured, not declared: `cargo +1.88.0 check --all-features --all-targets`
 # passes and 1.85 does not.
@@ -123,12 +123,35 @@ property-tests = []
 
 # Write-actor latency counters (T1.4, D-079). Off by default.
 #
-# Off is the right default because the crate's contract is a latency bound and
-# the instrumentation is not free of *risk* even where it is free of cost — but
-# it is close to free of cost: with the feature off `HoldTimer` reads no clock
-# and `ActorMetrics` is a ZST whose methods are empty, so the actor loop compiles
-# to what it compiled to before. See `src/metrics.rs` for why that is arranged as
-# two impls of one type rather than `#[cfg]` inside the loop.
+# CORRECTED 0.12.8 (W4.1, review §6.2). This paragraph used to read:
+#
+#   > with the feature off `HoldTimer` reads no clock and `ActorMetrics` is a
+#   > ZST whose methods are empty, so the actor loop compiles to what it
+#   > compiled to before
+#
+# The first half has been false since 0.12.0. W1 made the clock UNCONDITIONAL —
+# `src/metrics.rs` says so at length — because `next_chunk_size` sizes each
+# chunk from the previous chunk's measured hold, so the reading is a control
+# input in every build rather than an observation in some of them. Left gated,
+# a default build would have sized its chunks off `Duration::ZERO`, which reads
+# as "comfortably under budget", and grown every chunk to the ceiling in
+# exactly the builds nobody was measuring.
+#
+# What is actually gated, and what it actually costs:
+#
+#   always, feature or not   one `Instant::now()` pair per actor turn
+#   gated behind `metrics`   the histogram — `record_hold` and the counters
+#                            around it are no-ops without the feature
+#
+# So the honest statement of the default is: the *clock* is paid unconditionally
+# and the *counters* are what the feature buys. `ActorMetrics` is still a ZST
+# with empty methods when off, and `src/metrics.rs` explains why that is two
+# impls of one type rather than `#[cfg]` inside the loop.
+#
+# This correction is deliberately kept rather than quietly rewritten, because
+# the false half was the stated justification for the off-by-default decision
+# and W4.5 revisits that decision. A justification that was wrong for six
+# releases should be visible to whoever re-examines it.
 #
 #     cargo test --features metrics
 metrics = []

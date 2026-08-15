@@ -419,6 +419,14 @@ currently reads:
 stated justification for the off-by-default decision, and it is false. Fix it
 before deciding anything that leans on it.
 
+> **Done, 0.12.8.** Corrected in place with the old text quoted, rather than
+> rewritten silently: the false half was the stated justification for the
+> off-by-default decision that **W4.5 is about to re-examine**, and a
+> justification that stood wrong for six releases should be visible to whoever
+> re-opens it. The honest split is now stated as a two-row table — the clock is
+> paid unconditionally in every build, and the histogram is what the feature
+> buys.
+
 **W4.2 — `#[non_exhaustive]` and a private `buckets`.** Four lines and one:
 `#[non_exhaustive]` on `CommandKind`, `MetricsSnapshot`, `KindSnapshot`; and
 `pub buckets: [u64; BUCKET_COUNT]` becomes `pub fn buckets(&self) -> &[u64]`,
