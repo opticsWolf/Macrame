@@ -217,10 +217,65 @@ impl PyMetricsSnapshot {
     }
 }
 
+/// What a `checkpoint()` did (W6.4, D-156).
+///
+/// A struct rather than a tuple because the three numbers are not
+/// interchangeable and two of them are easy to swap: `log_frames` is what is
+/// *left*, `checkpointed_frames` is what was *moved*.
+#[pyclass(name = "CheckpointReport", module = "macrame", frozen)]
+pub(crate) struct PyCheckpointReport {
+    pub(crate) inner: macrame::CheckpointReport,
+}
+
+#[pymethods]
+impl PyCheckpointReport {
+    /// True when SQLite gave up waiting for a reader or writer.
+    ///
+    /// **Not an error, and not ignorable.** A busy checkpoint may still have
+    /// moved frames, so the main file is not yet self-contained — which is
+    /// precisely what a caller checkpointing before copying the file needs to
+    /// know.
+    #[getter]
+    fn busy(&self) -> bool {
+        self.inner.busy
+    }
+
+    /// Frames left in the WAL afterwards. `0` when the checkpoint completed.
+    #[getter]
+    fn log_frames(&self) -> u64 {
+        self.inner.log_frames
+    }
+
+    /// Frames moved back into the database file.
+    ///
+    /// Read from a `FULL` pass, because a `TRUNCATE` checkpoint reports zeros
+    /// on success — the counts describe the WAL *after* the operation, and
+    /// after a truncation there is nothing left to describe.
+    #[getter]
+    fn checkpointed_frames(&self) -> u64 {
+        self.inner.checkpointed_frames
+    }
+
+    /// True when the WAL was fully reclaimed: not busy, and nothing left.
+    fn is_complete(&self) -> bool {
+        self.inner.is_complete()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "CheckpointReport(busy={}, log_frames={}, checkpointed_frames={})",
+            if self.inner.busy { "True" } else { "False" },
+            self.inner.log_frames,
+            self.inner.checkpointed_frames
+        )
+    }
+}
+
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyRebuildReport>()?;
     m.add_class::<PyKindMetrics>()?;
     m.add_class::<PyMetricsSnapshot>()?;
+    m.add_class::<PyCheckpointReport>()?;
     // The histogram's edges, in microseconds. Exposed so a caller plotting
     // `KindMetrics.buckets` can label the axis without hard-coding it — and so
     // the off-by-one (one more bucket than bound, for the overflow) is checkable

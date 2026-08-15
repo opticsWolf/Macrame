@@ -511,6 +511,35 @@ class KindMetrics:
 
     def __repr__(self) -> str: ...
 
+class CheckpointReport:
+    """What a `checkpoint()` did (D-156).
+
+    Named fields rather than a tuple because two of the three are easy to swap:
+    `log_frames` is what is *left* in the WAL, `checkpointed_frames` is what was
+    *moved* out of it.
+    """
+
+    @property
+    def busy(self) -> bool:
+        """SQLite gave up waiting for a reader or writer.
+
+        Not an error, and not ignorable: frames may still have moved, so the
+        main file is not yet self-contained.
+        """
+
+    @property
+    def log_frames(self) -> int:
+        """Frames left in the WAL. `0` when the checkpoint completed."""
+
+    @property
+    def checkpointed_frames(self) -> int:
+        """Frames moved back into the database file."""
+
+    def is_complete(self) -> bool:
+        """Not busy, and nothing left in the WAL."""
+
+    def __repr__(self) -> str: ...
+
 class MetricsSnapshot:
     """The write actor's counters at one instant.
 
@@ -576,7 +605,24 @@ class Database:
         *,
         snapshot_every_entries: int | None = ...,
         snapshot_poll_seconds: float = 5.0,
-    ) -> Database: ...
+        wal_autocheckpoint: int | str | None = None,
+        writer_cache_size: int | None = None,
+        reader_cache_size: int | None = None,
+    ) -> Database:
+        """Open a ledger, running migrations and starting the write actor.
+
+        Every tuning keyword defaults to *leave it alone*, and none of them
+        spells that as "off". `wal_autocheckpoint` takes `None` (SQLite's own
+        1,000-page default), the string `"disabled"`, or a positive page count
+        — `0` is refused rather than read as SQLite's disable overload, since a
+        computed threshold that came out zero is a bug and the overload would
+        turn it into a WAL that grows for the life of the process.
+
+        The two cache sizes are SQLite `cache_size` units: negative is KiB,
+        positive is pages. They are separate because the writer is one
+        connection and the readers are several.
+        """
+
     def close(self) -> None:
         """Shut down the write actor and write the final snapshot.
 
@@ -708,6 +754,31 @@ class Database:
         """
 
     def verify_snapshot_chain(self, ts: Timestamp) -> ChainCheck: ...
+
+    # -- maintenance -----------------------------------------------------------
+    def analyze(self) -> None:
+        """Refresh the planner's statistics unconditionally (`ANALYZE`).
+
+        Bounded by `PRAGMA analysis_limit`, so the hold scales with the index
+        count rather than with the table. Call after a bulk import; prefer
+        `optimize()` for routine upkeep.
+        """
+
+    def optimize(self) -> None:
+        """Re-analyse only what has gone stale (`PRAGMA optimize`).
+
+        A no-op on an idle database, which is what makes it safe on a schedule.
+        `close()` already runs it.
+        """
+
+    def checkpoint(self) -> CheckpointReport:
+        """Move WAL frames back into the main database file.
+
+        Check `busy` before treating the file as self-contained: a busy
+        checkpoint gave up waiting for a reader and may have moved only some
+        frames.
+        """
+
 
     # -- vector ----------------------------------------------------------------
     def register_model(self, model: str, dim: int) -> None: ...

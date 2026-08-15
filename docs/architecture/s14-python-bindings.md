@@ -72,6 +72,44 @@ so the extraction failed and the fallback then failed to read a `timedelta` as a
 the caller typed it. Both now raise `ValueError` about the sign. The existing window test
 covered only the numeric spellings, which is why neither showed.
 
+**0.13.0's own additions crossed in the release that made them** (W6.4, 0.12.21).
+`analyze()`, `optimize()`, `checkpoint()` with a `CheckpointReport`, and the three tuning
+knobs. The argument for doing it here rather than in 0.14.0 is that a gap opened in the
+release that created the feature is the one that never becomes a convention — the earlier
+constants (§14.16's first item) had been missing for eight releases because nothing made
+them anyone's next task.
+
+**`Tuning` does not cross as a type.** Rust needs the struct because a growing set of
+options cannot be added to a function signature without breaking callers; Python has
+keyword arguments for exactly that, so the knobs arrive as keywords on `open` and there is
+one fewer name to import and construct. What does cross is the *shape of the defaults*:
+each knob's absent state leaves the mechanism alone, and none of them spells that as
+`None`-means-off — [D-155](s13-decision-register.md#d-155)'s lesson, which was learned
+twice on the Rust side and is easier to get wrong here, where a keyword's default is
+invisible at the call site.
+
+`wal_autocheckpoint` takes `None`, `"disabled"`, or a positive page count, and **refuses
+`0`** rather than inheriting SQLite's disable overload
+([D-157](s13-decision-register.md#d-157)). A string for the third state rather than a
+sentinel integer is the Python spelling of the tri-state enum: it cannot be produced by
+arithmetic, which is the failure mode being refused.
+
+**Two of the three knobs are not observable through this binding, and the tests say so
+rather than pretending otherwise.** `wal_autocheckpoint` and `writer_cache_size` are
+applied to the write connection, which no Python caller can reach; `diagnostic_conn` opens
+its own and reports SQLite's defaults regardless. The test that would read `== 64` there
+passes for the wrong reason on any release that stops applying the pragma at all, so it
+asserts the default it actually sees and names `tests/wal_policy_tests.rs` as the holder
+of the positive half. `reader_cache_size` *is* visible, because
+[D-159](s13-decision-register.md#d-159) put `cache_size` in the read-only half of
+`configure`.
+
+**Verified rather than re-added**: the new `CommandKind` variants and the starvation
+counter's getters already crossed in W4.3/W4.4. `KindMetrics.kind` reads
+`CommandKind::as_str()` through the crate, so a new variant arrives with its own string
+without a binding change — which is a property worth an assertion, and
+`test_maintenance.py` makes one for `"checkpoint"`.
+
 <!--nav-->
 ← [previous](s13-decision-register.md) · [index](README.md) · [next](appendices.md) →
 <!--/nav-->

@@ -83,6 +83,7 @@ from ._macrame import (
     AttributeModeUnstatedError,
     BudgetError,
     ChainCheck,
+    CheckpointReport,
     ConceptUpsert,
     CurrentDriftError,
     Database,
@@ -164,6 +165,7 @@ __all__ = [
     # integrity and metrics (P4.5, P4.6)
     "RebuildReport",
     "MetricsSnapshot",
+    "CheckpointReport",
     "KindMetrics",
     "BUCKET_BOUNDS_MICROS",
     # write-path budgeting

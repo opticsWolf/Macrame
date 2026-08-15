@@ -835,6 +835,32 @@ new `CommandKind` variants, the starvation counter's `#[getter]`. A binding gap
 opened in the same release that created it is a gap that never gets a chance to
 become a convention.
 
+> **Done, 0.12.21.** `analyze()`, `optimize()`, `checkpoint()` returning a
+> `CheckpointReport`, and the three tuning knobs as keyword arguments on
+> `open`.
+>
+> **`Tuning` does not cross as a type** (D-164). It exists in Rust to solve a
+> problem Python does not have — a growing option set that cannot go into a
+> signature without breaking callers — and Python has keyword defaults for
+> exactly that. What crosses is the *shape of the defaults*: absent leaves the
+> mechanism alone, never disables it, which is D-155's lesson at a boundary
+> where it is easier to get wrong, since a keyword default is invisible at the
+> call site. `wal_autocheckpoint` takes `None` / `"disabled"` / a positive page
+> count and refuses `0`, a string for the third state because a string cannot
+> be produced by the arithmetic mistake D-157 refuses.
+>
+> **Two of the three knobs are not observable from Python**, and the tests say
+> so rather than asserting something false: `wal_autocheckpoint` and
+> `writer_cache_size` are applied to the write connection, which no Python
+> caller can reach. A `== 64` assertion through `diagnostic_query` would be
+> wrong *and* would keep passing after the feature broke.
+>
+> **Verified rather than re-added**, as the plan's own note anticipated: the
+> new `CommandKind` variants and the starvation getters shipped in W4.3/W4.4.
+> `KindMetrics.kind` reads `CommandKind::as_str()` through the crate, so a new
+> variant arrives with its own string without a binding change — asserted for
+> `"checkpoint"`. 380 Python passed.
+
 **W6.5 — Record `shadow_step`'s omission as a decision.** Beside the `raw()`
 sentinel in `lib.rs`'s convention block
 ([lib.rs:122](../bindings/python/src/lib.rs:122)). Expose it or record why not —

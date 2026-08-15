@@ -183,21 +183,71 @@ impl PyDatabase {
     ///
     /// **Prefer the context manager.** See [`PyDatabase::close`] for what a
     /// handle that is merely dropped loses.
+    ///
+    /// # The tuning knobs (0.13.0, W5, W6.4)
+    ///
+    /// Rust takes these as a `Tuning` struct, which exists so the set can grow
+    /// without breaking callers. Python has keyword arguments for that, so they
+    /// arrive as keywords here rather than as a value type to import and
+    /// construct — the same information, one fewer name.
+    ///
+    /// **Every one of them defaults to "leave it alone", and none of them
+    /// spells that `None`-means-off.** That is [D-155](../../../docs/architecture/s13-decision-register.md)'s
+    /// lesson repeated at this boundary: a default that silently *disables* a
+    /// mechanism is the failure mode, and it reaches every caller who did not
+    /// know the knob existed.
+    ///
+    /// - `wal_autocheckpoint`: `None` leaves SQLite's own default (1,000
+    ///   pages); `"disabled"` turns automatic checkpointing off, which is only
+    ///   correct if you call `checkpoint()` yourself; a positive integer is a
+    ///   page threshold. `0` is **refused** rather than read as SQLite's
+    ///   "disabled" overload, because a caller who computed a threshold and got
+    ///   zero has a bug, and inheriting the overload turns it into an unbounded
+    ///   WAL ([D-157](../../../docs/architecture/s13-decision-register.md)).
+    /// - `writer_cache_size` / `reader_cache_size`: SQLite `cache_size` units —
+    ///   negative is KiB, positive is pages. Split because the writer is one
+    ///   connection and the readers are several
+    ///   ([D-158](../../../docs/architecture/s13-decision-register.md)), so one
+    ///   number would mean either starving the writer or multiplying the
+    ///   readers' footprint.
     #[staticmethod]
-    #[pyo3(signature = (path, *, snapshot_every_entries = Some(10_000), snapshot_poll_seconds = 5.0))]
+    #[pyo3(signature = (
+        path,
+        *,
+        snapshot_every_entries = Some(10_000),
+        snapshot_poll_seconds = 5.0,
+        wal_autocheckpoint = None,
+        writer_cache_size = None,
+        reader_cache_size = None,
+    ))]
     fn open(
         py: Python<'_>,
         path: PathBuf,
         snapshot_every_entries: Option<i64>,
         snapshot_poll_seconds: f64,
+        wal_autocheckpoint: Option<&Bound<'_, PyAny>>,
+        writer_cache_size: Option<i32>,
+        reader_cache_size: Option<i32>,
     ) -> PyResult<Self> {
         let cadence = to_cadence(snapshot_every_entries, snapshot_poll_seconds)?;
+        let tuning = macrame::Tuning {
+            cadence: match cadence {
+                Some(c) => macrame::CadencePolicy::Every(c),
+                None => macrame::CadencePolicy::Disabled,
+            },
+            wal_autocheckpoint: to_wal_policy(wal_autocheckpoint)?,
+            writer_cache_size,
+            reader_cache_size,
+            ..Default::default()
+        };
 
         let owned = path.clone();
-        let db = crate::runtime::block_on(py, async move {
-            Database::open_with_cadence(&owned, cadence).await
-        })?
-        .map_err(to_py)?;
+        let db =
+            crate::runtime::block_on(
+                py,
+                async move { Database::open_tuned(&owned, tuning).await },
+            )?
+            .map_err(to_py)?;
 
         Ok(Self {
             inner: RwLock::new(Some(db)),
@@ -1077,6 +1127,57 @@ impl PyDatabase {
         ))
     }
 
+    // -- maintenance (W6.4) ---------------------------------------------------
+
+    /// Refresh the query planner's statistics (D-149).
+    ///
+    /// Runs `ANALYZE`, which writes `sqlite_stat1`. Before 0.12.4 nothing in
+    /// the crate ever did, so the planner costed every query against SQLite's
+    /// built-in guesses — an estimate that depends on how many columns a query
+    /// binds rather than on what the table holds.
+    ///
+    /// Low priority and bounded: `PRAGMA analysis_limit` caps the rows examined
+    /// per index, so the hold scales with the index count and not with the size
+    /// of `links_current`.
+    ///
+    /// Call it after a bulk import, or after anything that changes a table's
+    /// shape by an order of magnitude. Prefer `optimize()` for routine upkeep —
+    /// this does the work unconditionally.
+    fn analyze(&self, py: Python<'_>) -> PyResult<()> {
+        self.with_db(py, |db| runtime().block_on(db.analyze()).map_err(to_py))
+    }
+
+    /// Re-analyse only what has gone stale (D-149).
+    ///
+    /// `PRAGMA optimize`: a no-op on an idle database and the full cost of
+    /// `analyze()` on one that has changed completely. That property is what
+    /// makes it safe to call on a schedule. `close()` already runs it, so a
+    /// process that opens, works and closes keeps its statistics current
+    /// without anybody arranging it.
+    fn optimize(&self, py: Python<'_>) -> PyResult<()> {
+        self.with_db(py, |db| runtime().block_on(db.optimize()).map_err(to_py))
+    }
+
+    /// Move WAL frames back into the main database file (D-156).
+    ///
+    /// Runs a `FULL` pass for the frame counts and then a `TRUNCATE` to reset
+    /// the WAL, and reports what happened — a checkpoint that did nothing and
+    /// one that reclaimed a 400 MB WAL are otherwise indistinguishable, and the
+    /// difference is the reason a caller asked.
+    ///
+    /// **Read `busy` before treating the file as self-contained.** A busy
+    /// checkpoint gave up waiting for a reader and may have moved only some
+    /// frames, which matters exactly when this is being called before copying
+    /// the database somewhere.
+    ///
+    /// High priority: a caller asking for a checkpoint is asking for it *now*,
+    /// usually at the end of a bulk load, and queueing it behind the background
+    /// work it was meant to follow inverts the intent.
+    fn checkpoint(&self, py: Python<'_>) -> PyResult<observe::PyCheckpointReport> {
+        let inner = self.with_db(py, |db| runtime().block_on(db.checkpoint()).map_err(to_py))?;
+        Ok(observe::PyCheckpointReport { inner })
+    }
+
     // -- integrity (P4.5) -----------------------------------------------------
 
     /// How many rows `links_current` disagrees with `links` about (§5.8).
@@ -1339,4 +1440,49 @@ fn to_cadence(
         every_entries: n,
         poll_interval: std::time::Duration::from_secs_f64(snapshot_poll_seconds),
     }))
+}
+
+/// `None` / `"disabled"` / a positive page count → a [`WalCheckpointPolicy`].
+///
+/// Three states, spelled so that the *absent* one means "leave SQLite alone"
+/// rather than "turn it off" — see [`PyDatabase::open`] for why that ordering
+/// is the whole point of the type (D-155, D-157).
+///
+/// `0` is refused. SQLite reads it as *disable*, and inheriting that overload
+/// would turn a caller's arithmetic mistake into a WAL that grows for the life
+/// of the process, reported nowhere.
+fn to_wal_policy(obj: Option<&Bound<'_, PyAny>>) -> PyResult<macrame::WalCheckpointPolicy> {
+    let Some(obj) = obj else {
+        return Ok(macrame::WalCheckpointPolicy::Default);
+    };
+    if obj.is_none() {
+        return Ok(macrame::WalCheckpointPolicy::Default);
+    }
+    if let Ok(s) = obj.extract::<String>() {
+        return match s.as_str() {
+            "disabled" => Ok(macrame::WalCheckpointPolicy::Disabled),
+            other => Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "wal_autocheckpoint accepts None, \"disabled\", or a positive \
+                 number of pages; got {other:?}"
+            ))),
+        };
+    }
+    let pages: i64 = obj.extract().map_err(|_| {
+        pyo3::exceptions::PyTypeError::new_err(
+            "wal_autocheckpoint accepts None, \"disabled\", or a positive number of pages",
+        )
+    })?;
+    if pages <= 0 {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "wal_autocheckpoint must be positive, got {pages}. Pass \"disabled\" \
+             to turn automatic checkpointing off — and then call checkpoint() \
+             yourself, or the WAL grows without bound."
+        )));
+    }
+    let pages = u32::try_from(pages).map_err(|_| {
+        pyo3::exceptions::PyValueError::new_err(format!(
+            "wal_autocheckpoint must fit in 32 bits, got {pages}"
+        ))
+    })?;
+    Ok(macrame::WalCheckpointPolicy::EveryPages(pages))
 }
