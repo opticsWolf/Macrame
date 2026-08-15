@@ -524,6 +524,24 @@ class MetricsSnapshot:
     def low_depth_mean(self) -> float: ...
     @property
     def low_depth_max(self) -> int: ...
+    @property
+    def low_starved_turns(self) -> int:
+        """Turns taken on high-priority work while low-priority work was queued.
+
+        The actor's select is biased and has no floor. This rising is not by
+        itself a problem -- a busy database should prefer interactive writes --
+        so read it beside `low_starved_run_max` (0.12.10, D-153).
+        """
+
+    @property
+    def low_starved_run_max(self) -> int:
+        """The most turns any single low-priority command has waited.
+
+        The number that distinguishes "prioritised" from "starved". There is
+        deliberately no forced-yield policy behind it: whether one is needed is
+        the question this number exists to answer (0.12.10, D-153).
+        """
+
     def __repr__(self) -> str: ...
 
 # ----------------------------------------------------------------- the handle ---

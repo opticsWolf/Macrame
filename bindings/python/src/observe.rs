@@ -189,6 +189,25 @@ impl PyMetricsSnapshot {
         self.inner.low_depth_max
     }
 
+    /// Turns spent on high-priority work while low-priority work was queued.
+    ///
+    /// The actor's `select!` is biased and has no floor. This rising is not by
+    /// itself a problem — a busy database should prefer interactive writes —
+    /// so read it beside `low_starved_run_max`.
+    #[getter]
+    fn low_starved_turns(&self) -> u64 {
+        self.inner.low_starved_turns
+    }
+    /// The most turns any single low-priority command has waited.
+    ///
+    /// This is the one that distinguishes "prioritised" from "starved". There
+    /// is deliberately no forced-yield policy behind it: whether one is needed
+    /// is the question this number exists to answer.
+    #[getter]
+    fn low_starved_run_max(&self) -> u64 {
+        self.inner.low_starved_run_max
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "<macrame.MetricsSnapshot turns={} violations={}>",

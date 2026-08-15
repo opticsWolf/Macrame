@@ -2164,6 +2164,20 @@ fn derive_archive_path(path: &Path) -> PathBuf {
 ///
 /// Queue depth is sampled *before* the `select!`, so it is the backlog the turn
 /// found on arrival rather than the one it left behind.
+///
+/// # `biased` has no floor, and since 0.12.10 that is measured (W4.4, D-153)
+///
+/// `biased` makes the arms poll in declaration order, so high-priority work is
+/// taken whenever any is ready. Nothing bounds how long that can continue:
+/// sustained interactive traffic can hold the low tier off indefinitely, and
+/// through 0.12.9 nothing in the crate could say whether it ever did.
+/// `record_priority_choice` counts the turns where the choice went against
+/// queued low-priority work, and the longest unbroken run of them, which is the
+/// half that distinguishes "prioritised" from "starved".
+///
+/// **No forced yield is added here.** Whether one is needed is the question the
+/// counter answers, and adding a policy now would be fixing a bound nobody has
+/// observed being hit — the same mistake D-124 was retracted for.
 async fn run_writer_actor(
     conn: libsql::Connection,
     clock: Arc<dyn Clock>,
@@ -2172,17 +2186,21 @@ async fn run_writer_actor(
     shared: Arc<ActorShared>,
 ) -> Result<()> {
     loop {
-        shared
-            .metrics
-            .record_turn(highpri_rx.len(), lowpri_rx.len());
+        // Read once and reused by both the depth sample and the starvation
+        // counter, so the two cannot disagree about what was queued when this
+        // turn went looking (W4.4, D-153).
+        let low_queued = lowpri_rx.len();
+        shared.metrics.record_turn(highpri_rx.len(), low_queued);
 
         let ctl = tokio::select! {
             biased;
             Some(cmd) = highpri_rx.recv() => {
+                shared.metrics.record_priority_choice(true, low_queued);
                 let turn = Turn::start(cmd.kind(), &shared);
                 cmd.execute(&conn, &*clock, &turn).await
             }
             Some(cmd) = lowpri_rx.recv() => {
+                shared.metrics.record_priority_choice(false, low_queued);
                 let turn = Turn::start(cmd.kind(), &shared);
                 cmd.execute(&conn, &*clock, &turn).await
             }

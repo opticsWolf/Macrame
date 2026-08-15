@@ -370,6 +370,31 @@ mod imp {
         high_depth_max: AtomicU64,
         low_depth_sum: AtomicU64,
         low_depth_max: AtomicU64,
+        /// Turns where the actor took high-priority work while low-priority
+        /// work was already queued (0.12.10, W4.4, D-153).
+        ///
+        /// The `biased` `select!` in `run_writer_actor` has **no floor**:
+        /// sustained high-priority traffic can hold the low tier off
+        /// indefinitely, and nothing has ever said whether that happens. This
+        /// is the numerator of that question — how often the choice went
+        /// against the low tier at all.
+        low_starved_turns: AtomicU64,
+        /// The current unbroken run of such turns. Reset to zero the moment
+        /// low-priority work is taken.
+        ///
+        /// Not exposed; it is the state [`Self::low_starved_run_max`] is a
+        /// high-water mark of. A live value would be read at an arbitrary point
+        /// in a run and mean nothing.
+        low_starved_run: AtomicU64,
+        /// The longest such run since open, which is the number that answers the
+        /// question.
+        ///
+        /// A large `low_starved_turns` on a busy database is unremarkable — it
+        /// says the high tier is being used, which is what the tier is for. A
+        /// large *run* says one specific low-priority command waited that many
+        /// turns, and it is the only one of the two that can distinguish
+        /// "prioritised" from "starved".
+        low_starved_run_max: AtomicU64,
     }
 
     const MICROS_SHIFT: u32 = 8;
@@ -396,6 +421,29 @@ mod imp {
             ] {
                 sum.fetch_add(depth, Ordering::Relaxed);
                 max.fetch_max(depth, Ordering::Relaxed);
+            }
+        }
+
+        /// Record which tier the `select!` chose, and what was waiting.
+        ///
+        /// `low_queued` is the depth sampled *before* the `select!`, so it is
+        /// the backlog the turn found on arrival. By the time a high-priority
+        /// arm fires the low queue may have grown; using the pre-select reading
+        /// keeps this consistent with every other depth figure in this module
+        /// and makes the counter conservative — it never invents starvation
+        /// from work that arrived after the choice was made.
+        ///
+        /// A low-priority turn resets the run rather than decrementing it: the
+        /// question is "how many turns did one low-priority command wait", and
+        /// that is a run length, not a balance.
+        #[inline]
+        pub fn record_priority_choice(&self, took_high: bool, low_queued: usize) {
+            if took_high && low_queued > 0 {
+                self.low_starved_turns.fetch_add(1, Ordering::Relaxed);
+                let run = self.low_starved_run.fetch_add(1, Ordering::Relaxed) + 1;
+                self.low_starved_run_max.fetch_max(run, Ordering::Relaxed);
+            } else if !took_high {
+                self.low_starved_run.store(0, Ordering::Relaxed);
             }
         }
 
@@ -470,6 +518,8 @@ mod imp {
                 high_depth_max: self.high_depth_max.load(Ordering::Relaxed),
                 low_depth_mean: mean(&self.low_depth_sum),
                 low_depth_max: self.low_depth_max.load(Ordering::Relaxed),
+                low_starved_turns: self.low_starved_turns.load(Ordering::Relaxed),
+                low_starved_run_max: self.low_starved_run_max.load(Ordering::Relaxed),
                 longest,
                 kinds,
             }
@@ -496,6 +546,8 @@ mod imp {
         }
         #[inline]
         pub fn record_turn(&self, _high_depth: usize, _low_depth: usize) {}
+        #[inline]
+        pub fn record_priority_choice(&self, _took_high: bool, _low_queued: usize) {}
         #[inline]
         pub fn record_hold(&self, _kind: CommandKind, _held: Duration) {}
     }
@@ -577,6 +629,27 @@ pub struct MetricsSnapshot {
     /// turn, and — honestly — also when every turn so far took under a
     /// microsecond, which on this path does not happen.
     pub longest: Option<(CommandKind, Duration)>,
+    /// Turns spent on high-priority work while low-priority work was already
+    /// queued (0.12.10, W4.4, D-153).
+    ///
+    /// The actor's `select!` is `biased` and has **no floor**, so this is the
+    /// measurement of a bound the design has always had and never observed.
+    /// On its own it is not alarming: a busy database *should* prefer
+    /// interactive writes, and this counter rising is that working. Read it
+    /// beside [`Self::low_starved_run_max`], which is the number with teeth.
+    pub low_starved_turns: u64,
+    /// The longest unbroken run of the above — i.e. the most turns any single
+    /// low-priority command has waited (0.12.10, W4.4, D-153).
+    ///
+    /// This is the one that answers "can low-priority work be starved". A large
+    /// `low_starved_turns` spread over a long session says the tiers are doing
+    /// their job; a large *run* says one specific chunk, rebuild or archive sat
+    /// behind that many interactive writes in a row.
+    ///
+    /// **There is deliberately no forced-yield policy attached to this.**
+    /// Adding one now would be fixing a bound nobody has observed being hit,
+    /// and the counter exists precisely to find out whether it is. See D-153.
+    pub low_starved_run_max: u64,
     pub kinds: Vec<KindSnapshot>,
 }
 

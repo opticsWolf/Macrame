@@ -484,6 +484,24 @@ it as a new `MetricsSnapshot` field plus one `#[getter]` in `observe.rs`.
 question the counter answers; adding one now would be fixing a bound nobody has
 observed being hit.
 
+> **Done, 0.12.10 (D-153) — and the first measurement hits the bound completely.**
+> A 39-edge chunked `bulk_import` raced by 64 concurrent `upsert_concept` calls:
+> `starved_turns=63`, `run_max=63`, `turns=70`, identical across five runs. The
+> run **equals** the total — the bulk import sat behind every single queued
+> high-priority write, with no interleaving at all. The run length is bounded by
+> nothing in the crate, only by how much high-priority work the caller offers.
+>
+> The quiet half is asserted too: a sequential caller queues nothing and reports
+> `run_max == 0`, which is what stops the counter reporting starvation on every
+> database forever.
+>
+> **This falsifies the stated premise of §16's rejection of the forced-yield
+> policy** — "whether the bound is ever hit in practice is a measurement nobody
+> has taken". It has now been taken. What remains open is a judgement rather
+> than a measurement: whether a synthetic 64-task burst is evidence about
+> production or only about the mechanism. No policy is added here, per this
+> wave's own instruction; see §16, which is annotated rather than rewritten.
+
 **W4.5 — `metrics` becomes a default feature.** Closes §4.3, and only now. The
 cost is 10–11 relaxed atomics per turn, about 0.01% of the 0.8 ms
 per-transaction floor, and ~1.6 KB of counters. The argument is not that it is
@@ -879,3 +897,12 @@ default for every existing caller to address it is not.
 the policy. Whether the bound is ever hit in practice is a measurement nobody has
 taken, and a fairness mechanism added on a hypothesis is a scheduling change with
 no evidence behind it.
+
+> **Annotated 0.12.10 — the premise above is no longer true (D-153).** The
+> measurement has been taken and the bound is hit totally: `run_max=63` out of
+> 63 starved turns, deterministic across five runs. The second sentence's
+> reasoning still stands on its own terms — a fairness mechanism needs evidence
+> — but it can no longer claim there is none. Re-read this rejection rather than
+> inheriting it; what is genuinely still open is whether a 64-task synthetic
+> burst is evidence about production workloads or only about the mechanism, and
+> that is a judgement for the maintainer.

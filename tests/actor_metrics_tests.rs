@@ -349,3 +349,102 @@ async fn a_rehydrate_is_counted_as_rehydrate_and_not_as_archive() {
 
     db.close().await.unwrap();
 }
+
+/// The starvation counter sees a low-priority command waiting behind
+/// high-priority work, and reports zero when nothing waits (0.12.10, W4.4,
+/// D-153).
+///
+/// The actor's `select!` is `biased`, which means it takes high-priority work
+/// whenever any is ready and nothing bounds how long that can continue. Whether
+/// it ever does is the question this counter exists to answer, so the first
+/// thing to establish is that the counter can answer it at all.
+///
+/// **The quiet half is the load-bearing one.** A counter that only ever goes up
+/// would pass a test that merely asserts it went up, and would then report
+/// starvation on every database forever. So this asserts both: an idle-ish
+/// sequence leaves it at zero, and a deliberately contended one moves it.
+#[tokio::test]
+async fn the_starvation_counter_distinguishes_a_backlog_from_a_quiet_actor() {
+    use std::sync::Arc;
+
+    let harness = TestHarness::new();
+    let db = Arc::new(harness.db_with_fake_clock().await);
+
+    // Sequential writes: each command is taken and finished before the next is
+    // sent, so the low queue is empty every time the actor looks.
+    for i in 0..4 {
+        db.upsert_concept(ConceptUpsert::new(format!("q{i}"), "n").valid_from(T0))
+            .await
+            .unwrap();
+    }
+    let quiet = db.metrics();
+    assert_eq!(
+        quiet.low_starved_run_max, 0,
+        "an actor that never had low-priority work queued reported a starvation \
+         run of {}",
+        quiet.low_starved_run_max
+    );
+
+    // Now contend deliberately. A chunked bulk write is low-priority; a burst of
+    // concept upserts is high-priority. Firing them concurrently is what puts
+    // low-priority work in the queue while the biased select keeps choosing the
+    // other arm.
+    let ids: Vec<String> = (0..40).map(|i| format!("c{i:03}")).collect();
+    db.write_concepts(
+        ids.iter()
+            .map(|id| ConceptUpsert::new(id, "n").valid_from(T0))
+            .collect(),
+    )
+    .await
+    .unwrap();
+
+    let bulk = {
+        let db = Arc::clone(&db);
+        let edges: Vec<_> = (0..39)
+            .map(|k| {
+                EdgeAssertion::new(&ids[k], &ids[k + 1], "LINKS")
+                    .valid_from(T0)
+                    .valid_to(OPEN)
+            })
+            .collect();
+        tokio::spawn(async move { db.bulk_import(edges).await })
+    };
+
+    let mut hot = Vec::new();
+    for i in 0..64 {
+        let db = Arc::clone(&db);
+        hot.push(tokio::spawn(async move {
+            db.upsert_concept(ConceptUpsert::new(format!("h{i:03}"), "n").valid_from(T0))
+                .await
+        }));
+    }
+    for t in hot {
+        t.await.unwrap().unwrap();
+    }
+    bulk.await.unwrap().unwrap();
+
+    // Measured on this fixture, identically across five runs: starved_turns=63,
+    // run_max=63, turns=70. The run equals the total, i.e. the bulk import sat
+    // behind *every* queued high-priority write with no interleaving at all.
+    // The assertions below stay loose (> 0) rather than pinning 63, because the
+    // number is a property of the machine and the scheduler; what is being
+    // asserted is that the counter can see the condition. D-153 records the
+    // measurement, which is the part that matters.
+    let snap = db.metrics();
+    assert!(
+        snap.low_starved_turns > 0,
+        "64 concurrent high-priority writes raced a chunked bulk import and the \
+         actor never once took high-priority work with low-priority work queued. \
+         Either the biased select is not biased, or the counter is not wired to \
+         the arm that takes the choice."
+    );
+    assert!(
+        snap.low_starved_run_max > 0 && snap.low_starved_run_max <= snap.low_starved_turns,
+        "run_max {} is not a run of the {} starved turns — a run cannot exceed \
+         the total it is drawn from",
+        snap.low_starved_run_max,
+        snap.low_starved_turns
+    );
+
+    Arc::into_inner(db).unwrap().close().await.unwrap();
+}

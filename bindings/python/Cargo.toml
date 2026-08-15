@@ -1,10 +1,18 @@
 [package]
 name = "macrame-py"
-# Tracks the wheel, which tracks `macrame-db`. Kept in step by hand for now;
-# `tests/packaging_tests.rs` asserts the two agree, because a wheel reporting a
-# version the ledger underneath it does not have is the kind of drift nobody
-# notices until a bug report cites the wrong one.
-version = "0.12.5"
+# Tracks the wheel, which tracks `macrame-db`. Kept in step by hand for now.
+#
+# The check is `tests_py/test_packaging.py::test_the_binding_tracks_the_ledger_
+# version` -- **not** `tests/packaging_tests.rs`, which this comment named
+# through 0.12.9 and which provably cannot host it: that file's own module doc
+# explains that `bindings/python/Cargo.toml` is excluded from the crate tarball,
+# so an `include_str!` of it compiles here and breaks for anyone installing from
+# crates.io, and `cargo publish --dry-run` does not catch that.
+#
+# So the gate is real and lives in the Python suite, which means `cargo test`
+# alone will not tell you this has drifted. It had, from 0.12.6 to 0.12.9 --
+# found by reading the comment and going to look (0.12.10, W4.4).
+version = "0.12.10"
 edition = "2021"
 # Not the root's floor restated. pyo3 0.29 declares 1.83, which is *under*
 # `macrame-db`'s 1.88, so the binding adds no MSRV pressure — the floor is
