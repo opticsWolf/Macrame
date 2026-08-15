@@ -237,6 +237,42 @@ impl CommandKind {
     /// archive path run backwards and makes the same claim about its hold —
     /// that it is bulk movement with no latency bound, and that the caller asked
     /// for it explicitly.
+    ///
+    /// # [`CommandKind::Analyze`] is **not** exempt, and that is a decision
+    /// (0.12.25, D-168)
+    ///
+    /// It looks like it belongs here. `ANALYZE` is one indivisible statement —
+    /// there is no smaller unit to chunk into — and its cost is set by data
+    /// volume, so it cannot meet the budget on a populated ledger. Measured
+    /// (`examples/analyze_hold.rs`): **5.26 ms at 10,000 edges, 19.1 ms at
+    /// 40,000**, against 3 ms. Every call is a violation and always will be.
+    ///
+    /// It stays counted for two reasons.
+    ///
+    /// **The table has a `Bound` column, and this kind cannot fill it in.**
+    /// `Checkpoint`'s bound is frames accumulated since the last one;
+    /// `Archive`'s is the session's row count. The honest entry here would be
+    /// "the size of the table, damped 3–4× by `analysis_limit`", which is not a
+    /// bound but the absence of one. A row that cannot state its bound is this
+    /// table admitting the thing it exists to prevent.
+    ///
+    /// **And this kind is two callers wearing one name.** `Analyze` covers
+    /// [`crate::Database::optimize`] as well as [`crate::Database::analyze`],
+    /// and `close()` calls `optimize()` unconditionally. Exempting the kind
+    /// would silence the *automatic* path — every handle close on a large
+    /// ledger holding ~19 ms with nothing reporting it — which is exactly the
+    /// call nobody chose to make. That is [`CommandKind::Rehydrate`]'s lesson
+    /// above, arriving from the other direction: there, a shared kind granted
+    /// an exemption nobody had decided; here, a shared kind would launder one.
+    ///
+    /// **So the violation is expected, permanent, and must not be "fixed" by
+    /// lowering [`crate::schema::ddl::ANALYSIS_LIMIT`].** That would buy the
+    /// number by sampling too little to separate the two `source_id`-leading
+    /// indices, which is the entire purpose of having statistics
+    /// ([D-149](../docs/architecture/s13-decision-register.md#d-149)).
+    ///
+    /// Splitting the kind is scheduled as **W10.5, 0.14.0**; the exemption
+    /// question is answerable per-caller once it is split, and not before.
     pub const fn exempt_from_budget(self) -> bool {
         matches!(
             self,

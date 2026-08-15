@@ -1113,6 +1113,53 @@ that order:
 would ship the fix, so a before/after taken with it alone measures the fix
 against itself. That is why this is a 0.14.0 wave and not a 0.13.0 one.
 
+**W10.5 — Split `CommandKind::Analyze`, then decide the budget exemption.**
+Added 0.12.25, after §8's acceptance measured `ANALYZE`'s hold and found
+[D-149](architecture/s13-decision-register.md#d-149) had overstated its bound
+([D-166](architecture/s13-decision-register.md#d-166),
+[D-168](architecture/s13-decision-register.md#d-168)).
+
+`analyze()` misses `CHUNK_BUDGET` by ~6× on a populated ledger — 19.1 ms at
+40,000 edges against 3 ms, measured — and will always miss it: `ANALYZE` is one
+indivisible statement whose cost tracks the data, and `analysis_limit` damps it
+3–4× without changing the shape. So `budget_violations()` names `analyze` after
+every call, forever, which is the noise that teaches people to stop reading the
+list.
+
+**The exemption cannot be decided while the kind is shared.** `Analyze` covers
+`optimize()` as well as `analyze()`, and `close()` calls `optimize()`
+unconditionally. Exempting the kind silences the automatic path — a ~19 ms hold
+on every handle close, reported nowhere — and that is the call nobody chose to
+make. This is [D-152](architecture/s13-decision-register.md#d-152)'s lesson
+arriving from the other side: there a shared kind *granted* an exemption nobody
+had decided; here a shared kind would *launder* one.
+
+So, in order:
+
+1. **Split the kind** into `Analyze` and `Optimize`. `CommandKind` is
+   `#[non_exhaustive]`, but `ALL`, `as_str()`, the exemption table and the
+   Python string surface all move together — and D-152's own finding was that a
+   split silently flips the new variant's exemption, so both must be stated
+   explicitly at the split rather than inherited.
+2. **Then decide each on its merits.** The explicit call is a caller asking for
+   it, which is what every current exemption has in common. The one `close()`
+   makes is not.
+3. **Whichever way it goes, the table needs a `Bound` the kind can state.**
+   Every existing row has one — frames accumulated, session row count. "The
+   size of the table, damped 3–4×" is not a bound, and a row that cannot fill
+   that column is the table admitting what it exists to prevent. If no honest
+   bound exists, that is an argument against exempting rather than a formatting
+   problem.
+
+**Not deferred for caution.** Leaving it counted is the conservative option and
+is what 0.13.0 ships: a permanent, documented, expected violation is worse noise
+but better information than a silence nobody decided.
+`analyze_is_not_budget_exempt_and_that_is_deliberate` pins it so the exemption
+has to be argued rather than typed, and `ANALYSIS_LIMIT`'s rustdoc says why
+lowering the limit is not the fix — that would buy the number by sampling too
+little to separate the two `source_id`-leading indices, which is the whole
+reason for having statistics.
+
 **W10.3 — `Subgraph` interior, if measurement justifies it.** Closes §2.5.
 String-keyed adjacency; index-based would be faster. **Benchmark first, and be
 prepared to close this as "not worth it".** A `Subgraph` big enough for this to

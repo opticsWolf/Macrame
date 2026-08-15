@@ -472,3 +472,48 @@ async fn the_starvation_counter_distinguishes_a_backlog_from_a_quiet_actor() {
 
     Arc::into_inner(db).unwrap().close().await.unwrap();
 }
+
+/// **`Analyze` is deliberately not budget-exempt, and this pins that** (D-168).
+///
+/// It is the strongest candidate for the exemption list that is not on it.
+/// `ANALYZE` is one indivisible statement whose cost tracks the data, so it
+/// cannot meet the 3 ms budget on a populated ledger — measured at **19.1 ms
+/// for 40,000 edges** (`examples/analyze_hold.rs`). Every call counts as a
+/// violation, permanently.
+///
+/// The temptation, on seeing `analyze` in `budget_violations()` forever, is to
+/// make it go away. Two ways to do that are wrong and this test blocks one of
+/// them outright:
+///
+/// - **Exempting the kind** hides the automatic path. `Analyze` covers
+///   `optimize()` too, and `close()` calls that unconditionally — so the
+///   exemption would silence a ~19 ms hold on every handle close, which is the
+///   one call nobody chose to make.
+/// - **Lowering `analysis_limit`** buys the number by sampling too little to
+///   separate the two `source_id`-leading indices, which is the whole purpose
+///   of having statistics (D-149). Not checkable here; named so the reader of
+///   this test meets it.
+///
+/// Splitting the kind so each caller can be judged on its own is scheduled as
+/// W10.5, 0.14.0. Until then, exempting `Analyze` means editing this test, and
+/// the message is the argument it has to answer.
+#[test]
+fn analyze_is_not_budget_exempt_and_that_is_deliberate() {
+    assert!(
+        !CommandKind::Analyze.exempt_from_budget(),
+        "`Analyze` was added to the budget exemptions. That silences \
+         `optimize()` as well as `analyze()` — and `close()` calls `optimize()` \
+         unconditionally, so a ~19 ms hold on every handle close would stop \
+         being reported. If the exemption is right, it is right *after* the \
+         kind is split (W10.5, 0.14.0), not before, and the exemption table \
+         needs a `Bound` this kind can honestly state."
+    );
+
+    // The exemption list is a judgement per kind, so the sibling that shares
+    // the argument is pinned beside it rather than left to inference.
+    assert!(
+        !CommandKind::ShadowRebuild.exempt_from_budget(),
+        "`ShadowRebuild` was exempted; its fill chunks are meant to fit the \
+         budget, and exempting the kind hides that to excuse the swap turn"
+    );
+}
