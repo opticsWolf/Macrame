@@ -69,6 +69,14 @@ let concept = ConceptUpsert::new(id, title)
     .retired(false);
 db.upsert_concept(concept).await?;
 
+// Both singular writes above are one transaction each, and each pays the
+// ~0.8 ms per-transaction floor whole (0.12.7, W3.4, D-090). Correct for one
+// row; wrong in a loop, where a thousand rows spend ~0.8 s in transaction
+// overhead alone and mint a thousand distinct recorded_at stamps for what is
+// probably one act. The bulk forms below are not a fast path with caveats --
+// they are what the loop is trying to be. Neither singular form is deprecated:
+// only the caller knows whether their thousand rows are one act (Doctrine III).
+
 // -- Bulk writes: the fidelity boundary of §5.1.6 --
 // write_bulk_atomic is the one write with no latency bound. Ask first
 // (0.6.0, D-081): the batch is one act under one stamp and cannot be chunked,

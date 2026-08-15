@@ -379,6 +379,15 @@ one row. Documentation, not deprecation: the singular forms are the correct API
 for a caller who genuinely has one row, and CodeRadar's original assessment
 reached for a new bulk API precisely because it did not find the existing one.
 
+> **Done, 0.12.7.** `assert_edge` and `upsert_concept` now state the floor and
+> name their bulk equivalents; Appendix A carries the same note at the point the
+> singular calls appear. Writing it turned up a distinction worth having made
+> explicit: **`bulk_import` is chunked and `write_bulk_atomic` is not**, and the
+> first draft of the `assert_edge` note attributed the unbounded hold to
+> `bulk_import`. A caller told only "use the bulk one" can pick the stalling one
+> for a batch that had no atomicity requirement, so the note names both and says
+> which is which.
+
 **W3.5 — Registry entries for both.** Not optional, and not a follow-up:
 `every_index_is_justified` fails if an index is declared without one. The gate
 already forces this.

@@ -1179,6 +1179,32 @@ impl Database {
     // the actor reaches it.
 
     /// Assert an edge (Doctrine III: a new row, never an update).
+    ///
+    /// # One row costs a transaction, so N rows cost N transactions
+    ///
+    /// This is the correct method for a caller who genuinely has one edge, and
+    /// it is the wrong one in a loop. Each call is its own transaction and pays
+    /// the ~0.8 ms per-transaction floor (D-090) whole, so a thousand edges
+    /// asserted one at a time spend roughly **0.8 s in transaction overhead
+    /// alone** — before any of the work — and mint a thousand distinct
+    /// `recorded_at` stamps for what the caller probably means as one act.
+    ///
+    /// There are two bulk forms and the difference between them is the one to
+    /// get right:
+    ///
+    /// - [`Self::bulk_import`] is **chunked** against [`CHUNK_BUDGET`] and
+    ///   atomic per chunk. It amortises the transaction floor across the batch
+    ///   while still yielding to interactive work at every chunk boundary. This
+    ///   is the one a loop should almost always become.
+    /// - [`Self::write_bulk_atomic`] is one transaction under one stamp and is
+    ///   **the one write with no latency bound** — the hold is a function of
+    ///   `edges.len()`, tabulated in its own docs, and is time every other
+    ///   writer spends waiting. Reach for it when the batch is genuinely one
+    ///   act that must not be observable half-applied, not for speed.
+    ///
+    /// The choice is the caller's and neither form is deprecated. Doctrine III
+    /// makes "one act, one stamp" a semantic claim rather than a performance
+    /// one, and only the caller knows whether their thousand edges are one act.
     pub async fn assert_edge(&self, edge: EdgeAssertion) -> Result<()> {
         let edge = edge.normalized()?;
         self.high(|responder| HighPriCommand::AssertEdge { edge, responder })
@@ -1212,6 +1238,19 @@ impl Database {
     }
 
     /// Insert or update a concept.
+    ///
+    /// # One row costs a transaction
+    ///
+    /// The same trade [`Self::assert_edge`] describes, for the same reason and
+    /// with the same ~0.8 ms floor (D-090): correct for one concept, wrong in a
+    /// loop. [`Self::write_concepts`] takes a `Vec` and commits it as one
+    /// transaction under one stamp.
+    ///
+    /// There is no atomic-across-chunks concept path and none is needed to make
+    /// the choice: `write_concepts` is chunked against [`CHUNK_BUDGET`] and
+    /// atomic per chunk, so a large `Vec` is cooperative rather than a stall.
+    /// The responsiveness argument for writing one row at a time therefore does
+    /// not apply — the bulk form already yields at every chunk boundary.
     pub async fn upsert_concept(&self, concept: ConceptUpsert) -> Result<()> {
         let concept = concept.normalized()?;
         self.high(|responder| HighPriCommand::UpsertConcept { concept, responder })
