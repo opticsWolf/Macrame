@@ -106,7 +106,7 @@ impl PyKindMetrics {
     /// numbers.
     #[getter]
     fn buckets(&self) -> Vec<u64> {
-        self.inner.buckets.to_vec()
+        self.inner.buckets().to_vec()
     }
     fn __repr__(&self) -> String {
         format!(

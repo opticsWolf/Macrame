@@ -50,8 +50,22 @@ use std::time::Duration;
 /// this exists to answer is "which command broke the budget", and a reader
 /// looking at a 400 ms hold does not first want to know which queue it came off.
 /// Priority is a property of scheduling; kind is a property of cost.
+///
+/// # `#[non_exhaustive]`, added while it was still free (0.12.8, W4.2)
+///
+/// Adding a variant here is a **breaking change** without this attribute,
+/// because a downstream `match` on `CommandKind` would stop compiling. That is
+/// not hypothetical for this enum: [`crate::metrics::CommandKind::Rehydrate`]
+/// did not exist until 0.12.9 precisely because adding it was a break, and
+/// rehydration reported as `Archive` for several releases as a result. The
+/// codebase has already paid this cost once, which is the argument for paying
+/// the attribute now rather than deciding it at 1.0 when the cost is permanent.
+///
+/// Callers must therefore include a `_ =>` arm. In exchange, this enum can grow
+/// a variant for a command kind that does not exist yet without a major version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(u8)]
+#[non_exhaustive]
 pub enum CommandKind {
     AssertEdge,
     RetireEdge,
@@ -104,6 +118,27 @@ impl CommandKind {
 
     pub const COUNT: usize = CommandKind::ALL.len();
 
+    /// This kind's slot in the per-kind arrays.
+    ///
+    /// # Declaration order is a persisted contract (0.12.8, W4.2)
+    ///
+    /// `self as usize` means the **order of the variants above** is the order of
+    /// every per-kind array in this module, and the compiler cannot catch a
+    /// change to it. Reordering the enum silently reassigns every counter to a
+    /// different command: the code compiles, the tests pass, and a histogram
+    /// read after the change attributes `archive`'s holds to `rebuild_fts`.
+    ///
+    /// **New variants go at the end**, always — including at the end of
+    /// [`CommandKind::ALL`], whose order is what `as_str()` and the Python
+    /// surface enumerate. This binds Python too: `BUCKET_BOUNDS_MICROS` is a
+    /// module constant there and `KindMetrics` is built by position, so a
+    /// reorder here relabels axes in a language the Rust compiler is not
+    /// looking at.
+    ///
+    /// `#[repr(u8)]` is on the enum for the same reason — it pins the
+    /// discriminants to the declaration order rather than leaving them to the
+    /// compiler — but it pins them to whatever the order *is*, so it does not
+    /// make a reorder safe. Only this rule does.
     pub const fn index(self) -> usize {
         self as usize
     }
@@ -439,6 +474,7 @@ const MICROS_CEILING: u64 = (1u64 << 56) - 1;
 /// One command kind's holds, as of the moment [`ActorMetrics::snapshot`] read it.
 #[cfg(feature = "metrics")]
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct KindSnapshot {
     pub kind: CommandKind,
     /// Turns spent on this kind.
@@ -452,12 +488,32 @@ pub struct KindSnapshot {
     /// whichever kind is slowest overall.
     pub longest: Duration,
     /// Counts per [`BUCKET_BOUNDS_MICROS`], plus a final overflow bucket.
-    pub buckets: [u64; BUCKET_COUNT],
+    ///
+    /// Private behind [`Self::buckets`] since 0.12.8 (W4.2). A public array
+    /// field publishes `BUCKET_COUNT` as part of the type's shape, so adding a
+    /// bucket bound would break every caller that named the length — and the
+    /// bounds are exactly the thing a latency histogram is likely to want to
+    /// re-cut. The accessor returns a slice and the length becomes an
+    /// observation rather than a signature. Python already did it this way.
+    buckets: [u64; BUCKET_COUNT],
+}
+
+#[cfg(feature = "metrics")]
+impl KindSnapshot {
+    /// Counts per [`BUCKET_BOUNDS_MICROS`], plus a final overflow bucket.
+    ///
+    /// Pair it with `BUCKET_BOUNDS_MICROS` to label the axis rather than
+    /// hard-coding the bounds; the slice is one longer than that constant,
+    /// and the extra trailing element is the overflow bucket.
+    pub fn buckets(&self) -> &[u64] {
+        &self.buckets
+    }
 }
 
 /// What the actor has done since the database was opened.
 #[cfg(feature = "metrics")]
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct MetricsSnapshot {
     /// Commands executed, i.e. the sum of [`KindSnapshot::turns`]. The two agree
     /// by construction rather than by coincidence.

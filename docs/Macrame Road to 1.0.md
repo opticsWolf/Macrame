@@ -437,6 +437,15 @@ Python too, since `BUCKET_BOUNDS_MICROS` is a module constant there.
 
 Free today. Impossible after 1.0. Everything else in this wave depends on it.
 
+> **Done, 0.12.8.** All three types carry `#[non_exhaustive]`; `buckets` is
+> private behind `KindSnapshot::buckets(&self) -> &[u64]`, with the Python
+> getter switched to the accessor — it was the field's only external reader.
+> The `index()` note states the rule that makes the contract keepable rather
+> than only naming it: **new variants go at the end**, of the enum and of
+> `ALL`. `#[repr(u8)]` pins the discriminants to the declaration order but
+> pins them to whatever that order *is*, so it does not make a reorder safe.
+> 362 passed across 49 targets with `--features metrics`.
+
 **W4.3 — `Rehydrate` gets its own `CommandKind`.** Closes the live
 mis-attribution. [connection.rs:2325](../src/connection.rs:2325) states the
 compromise outright — rehydration reports as `Archive` because a variant
