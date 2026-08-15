@@ -48,7 +48,7 @@ traversals and `reconstruct()` are unaffected.
 
 ```toml
 [dependencies]
-macrame-db = "0.12"
+macrame-db = "0.13"
 ```
 
 ```rust
@@ -178,7 +178,7 @@ v8 is the last rung that could change a *primary key* before the 1.0 freeze: `ro
 | Runtime | tokio async, single process |
 | Engine | libSQL 0.9.30 (MIT, unmodified) |
 | Schema version | 11 |
-| Test suite | 391 Rust · 377 with `--no-default-features` · 381 Python — all green (measured 2026-08-15, 0.12.26). `metrics` is a **default** feature since 0.12.11, so the first figure is a plain `cargo test`; the second is the same suite with the counters compiled out, and the 14-test gap is `actor_metrics_tests`. The three `property-tests` binaries (23 tests) are **run as their own step** — see below. **`--all-features` is not a supported configuration**, see below. Regenerate rather than trust this line: `python scripts/run_rust_suite.py` |
+| Test suite | 391 Rust · 377 with `--no-default-features` · 381 Python — all green (measured 2026-08-15, 0.13.0). `metrics` is a **default** feature since 0.12.11, so the first figure is a plain `cargo test`; the second is the same suite with the counters compiled out, and the 14-test gap is `actor_metrics_tests`. The three `property-tests` binaries (23 tests) are **run as their own step** — see below. **`--all-features` is not a supported configuration**, see below. Regenerate rather than trust this line: `python scripts/run_rust_suite.py` |
 | Dependencies | tokio, serde, bincode, zstd, thiserror, tracing, ulid |
 
 ### Module Map
@@ -195,7 +195,7 @@ v8 is the last rung that could change a *primary key* before the 1.0 freeze: `ro
 
 ---
 
-## Python Bindings (v0.12.26)
+## Python Bindings (v0.13.0)
 
 | Detail | Value |
 |---|---|

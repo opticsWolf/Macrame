@@ -893,6 +893,29 @@ contributor deciding this stands somewhere that tells them.
 
 ## 8. Acceptance for 0.13.0
 
+> **Closed, and the version bumped to 0.13.0 on 2026-08-15.** All twelve items
+> resolved. Two of them resolved as *corrections rather than confirmations*, and
+> those are the ones worth carrying forward:
+>
+> - **Item 2** asked for `analysis_limit`'s bound *measured, not asserted*, and
+>   the measurement refuted the claim it was checking
+>   ([D-166](architecture/s13-decision-register.md#d-166)). The pragma is in
+>   force and worth 3–4×, but `analyze()` holds the write lock **19.1 ms at
+>   40,000 edges** against a 3 ms budget, and `budget_violations()` had been
+>   reporting it all along. The instrument worked; nobody had read it.
+> - **Item 4** miscounts its own spec — W2.3 names three queries plus two
+>   indexes, not four queries. All are covered.
+>
+> Item 10 also turned up a rustdoc that had described the wrong method since
+> 0.12.13 ([D-167](architecture/s13-decision-register.md#d-167)), and closing
+> the wave surfaced a feature-off build broken for two releases by an example
+> added during it ([D-169](architecture/s13-decision-register.md#d-169)) — a
+> checklist item verified once, then invalidated by later work in the same wave.
+>
+> Final state: **391 Rust across 34 targets, 377 with `--no-default-features`,
+> 381 Python**, clippy clean under `--all-features`, schema v11, decisions
+> D-001…D-169.
+
 1. `cargo clippy --all-targets --all-features` clean. `cargo test` green on two
    consecutive full runs, R15 notwithstanding — and if R15 still makes that
    impossible, W1.4's decision says so in writing.
