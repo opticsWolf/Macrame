@@ -115,9 +115,46 @@ const REGISTRY: &[(&str, Justification)] = &[
             )),
         },
     ),
+    (
+        "idx_links_recorded_at",
+        Query {
+            label: "the archive cutoff on the links ledger",
+            sql: "SELECT source_id, target_id FROM links WHERE recorded_at < ?1 AND ( \
+                    EXISTS ( \
+                      SELECT 1 FROM links newer \
+                      WHERE newer.source_id = links.source_id \
+                        AND newer.target_id = links.target_id \
+                        AND newer.edge_type = links.edge_type \
+                        AND newer.valid_from = links.valid_from \
+                        AND newer.recorded_at > links.recorded_at) \
+                    OR (valid_to <> '9999-12-31T23:59:59.999999Z' AND valid_to <= ?1))",
+            source: Some((
+                include_str!("../src/temporal/archive.rs"),
+                "recorded_at < :cutoff AND (",
+            )),
+        },
+    ),
+    (
+        "idx_links_target",
+        Query {
+            label: "the concept-archival reverse-reachability arm",
+            sql: "SELECT id FROM concepts WHERE retired = 1 AND recorded_at < ?1 \
+                  AND valid_to < ?1 AND NOT EXISTS ( \
+                    SELECT 1 FROM links WHERE links.source_id = concepts.id \
+                       OR links.target_id = concepts.id)",
+            source: Some((
+                include_str!("../src/temporal/archive.rs"),
+                "OR links.target_id = concepts.id",
+            )),
+        },
+    ),
     // `idx_annotations_label` and `idx_lc_tgt_active` were the two `NoReader`
     // entries this registry found (D-089). The v7 → v8 rung dropped them both
     // (D-118), so they are gone from `CREATE_INDICES` and gone from here.
+    //
+    // `idx_links_target` above is **not** `idx_lc_tgt_active` readmitted — it is
+    // on `links`, not `links_current`, and it has the named seeking query D-089
+    // asks for. `ddl::CREATE_INDICES` states the distinction at length.
 ];
 
 async fn migrated(harness: &TestHarness) -> libsql::Connection {
@@ -305,23 +342,45 @@ const QUERY_REGISTRY: &[(&str, &str, Expect)] = &[
         "the concept-archival predicate's link check",
         "SELECT id FROM concepts WHERE retired = 1 AND recorded_at < ?1          AND valid_to < ?1 AND NOT EXISTS (              SELECT 1 FROM links WHERE links.source_id = concepts.id                 OR links.target_id = concepts.id)",
         Expect {
-            // SCAN concepts | CORRELATED SCALAR SUBQUERY 1
-            //   | SCAN links USING COVERING INDEX sqlite_autoindex_links_1
-            fragment: "CORRELATED SCALAR SUBQUERY",
-            note: "**Defect, review §2.2.** A correlated subquery that SCANs                    `links` once per candidate concept: the `OR target_id` arm                    has nothing to seek on, so this is O(concepts × links). W3.2                    is the index that should remove the correlation.",
+            // Was, through 0.12.5:
+            //   SCAN concepts | CORRELATED SCALAR SUBQUERY 1
+            //     | SCAN links USING COVERING INDEX sqlite_autoindex_links_1
+            //
+            // Now, with idx_links_target (0.12.6, W3.2, D-151):
+            //   SCAN concepts USING INDEX sqlite_autoindex_concepts_1
+            //     | CORRELATED SCALAR SUBQUERY 1 | MULTI-INDEX OR
+            //     | INDEX 1 | SEARCH links USING COVERING INDEX
+            //                  sqlite_autoindex_links_1 (source_id=?)
+            //     | INDEX 2 | SEARCH links USING INDEX idx_links_target
+            //                  (target_id=?)
+            //
+            // The correlation is still there and is *supposed* to be — the
+            // subquery is per-concept by construction. What changed is what it
+            // costs: both arms of the `OR` now seek instead of the right one
+            // scanning. So the fragment moved off `CORRELATED SCALAR SUBQUERY`,
+            // which was true before and after and therefore proved nothing, and
+            // onto the plan shape that is actually the fix.
+            fragment: "MULTI-INDEX OR",
+            note: "Review §2.2, closed in 0.12.6 by `idx_links_target`. If this                    reverts to a bare `SCAN links` inside the subquery, concept                    archival is O(concepts × links) again.",
         },
     ),
     (
         "the link-archival supersession probe",
         "SELECT rowid FROM links WHERE recorded_at < ?1 AND EXISTS (              SELECT 1 FROM links newer              WHERE newer.source_id = links.source_id                AND newer.target_id = links.target_id                AND newer.edge_type = links.edge_type                AND newer.valid_from = links.valid_from                AND newer.recorded_at > links.recorded_at)",
         Expect {
-            // SCAN links USING COVERING INDEX sqlite_autoindex_links_1
-            //   | CORRELATED SCALAR SUBQUERY 1 | SEARCH newer ... (full PK prefix)
+            // Was, through 0.12.5:
+            //   SCAN links | CORRELATED SCALAR SUBQUERY 1
+            //     | SEARCH newer ... (full PK prefix)
             //
-            // The inner probe is fine — it binds the whole primary-key prefix.
-            // It is the OUTER `recorded_at <` that has nothing to seek on.
-            fragment: "SCAN links",
-            note: "**Defect, review §2.1.** The outer `recorded_at <` filter                    scans every row of `links`. The inner probe is already served                    by the primary key and is not the problem.",
+            // Now, with idx_links_recorded_at (0.12.6, W3.1, D-151):
+            //   SEARCH links USING INDEX idx_links_recorded_at (recorded_at<?)
+            //     | CORRELATED SCALAR SUBQUERY 1 | SEARCH newer ...
+            //
+            // The inner probe was always fine — it binds the whole primary-key
+            // prefix. It was the OUTER `recorded_at <` that had nothing to seek
+            // on, because the primary key leads on `source_id`.
+            fragment: "SEARCH links USING INDEX idx_links_recorded_at",
+            note: "Review §2.1, closed in 0.12.6 by `idx_links_recorded_at`.                    The outer `recorded_at <` filter used to scan every row of                    `links`; it now seeks. The inner probe was always served by                    the primary key and was never the problem.",
         },
     ),
     (
@@ -336,12 +395,22 @@ const QUERY_REGISTRY: &[(&str, &str, Expect)] = &[
             // would close. The planner already serves the bare `MAX()` from the
             // primary key's covering index without traversing the table.
             //
-            // Recorded as measured rather than as predicted. W3.1 must show this
-            // query actually improves before citing it as justification —
-            // `the_unread_index_set_is_empty` and D-089 exist because an index
-            // bought on a believed benefit is an index write per insert forever.
+            // **W3.1 landed and this query did not improve, as predicted here.**
+            // With `idx_links_recorded_at` in the schema the plan reads
+            // `SEARCH links USING COVERING INDEX idx_links_recorded_at` — the
+            // planner swapped which covering index answers the bare `MAX()`, and
+            // a covering-index seek it already had is what it already had. The
+            // entry is kept unnamed on purpose: pinning the index *name* here
+            // would assert that the new index serves this query, which is the
+            // claim the entry exists to deny.
+            //
+            // So `idx_links_recorded_at` is justified on the two archive queries
+            // and on nothing else, and this row is the record of that scope.
+            // D-089 exists because an index bought on a believed benefit is an
+            // index write per insert forever; this is the belief being checked
+            // before the purchase rather than after it.
             fragment: "SEARCH links USING COVERING INDEX",
-            note: "Already served from the primary key's covering index.                    Contradicts review §2.1's claim that this is a full scan;                    W3.1's justification must not rest on it.",
+            note: "Served from a covering index before and after W3.1 — no                    traversal of the table either way. Contradicts review                    §2.1's claim that this is a full scan closed by                    `idx_links_recorded_at`; that index is justified on the                    archive path alone (D-150, D-151).",
         },
     ),
 ];

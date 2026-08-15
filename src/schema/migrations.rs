@@ -13,7 +13,7 @@ use crate::schema::ddl::*;
 /// guarantee D-029 buys would be void on it while `user_version` insisted all
 /// was well. Reserving 1 as a value this build refuses by name is what makes
 /// "no legacy support" an enforced property instead of a README sentence.
-pub const SCHEMA_VERSION: u32 = 10;
+pub const SCHEMA_VERSION: u32 = 11;
 
 type StepFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
 
@@ -144,6 +144,16 @@ const STEPS: &[Step] = &[
         // involved here at all.
         suspends_foreign_keys: false,
         apply: |conn| Box::pin(gate_concepts_guard_on_marker(conn)),
+    },
+    Step {
+        from: 10,
+        to: 11,
+        name: "links-archive-indices",
+        // Two `CREATE INDEX`es on an existing table. No row moves and no table
+        // is rebuilt, so the inbound foreign keys that forced the flag on the
+        // v7 -> v8 rung are not involved.
+        suspends_foreign_keys: false,
+        apply: |conn| Box::pin(add_links_archive_indices(conn)),
     },
 ];
 
@@ -410,6 +420,39 @@ async fn add_concepts_fts(conn: &libsql::Connection) -> Result<()> {
 /// recovery, and recomputing is what this table exists to make cheap.
 async fn add_analytics_annotations(conn: &libsql::Connection) -> Result<()> {
     conn.execute(CREATE_ANALYTICS_ANNOTATIONS_TABLE, ()).await?;
+    for index_ddl in CREATE_INDICES {
+        conn.execute(index_ddl, ()).await?;
+    }
+    Ok(())
+}
+
+/// v10 → v11: index the archive cutoff and the reverse-reachability arm
+/// (0.12.6, W3.1/W3.2, D-151).
+///
+/// # The first rung to index a frozen table, which is the case D-036 named
+///
+/// Every index rung before this one landed on `links_current`, a derivative
+/// table [D-036](../../docs/architecture/s13-decision-register.md#d-036) gives
+/// no stability guarantee at all. These two land on **`links`**, which is a
+/// normative ledger table and frozen. That is not an exception being taken:
+/// D-036's freeze restricts post-1.0 change on the core to *additive*
+/// operations and names `ADD COLUMN` and **new indexes** as the two that
+/// qualify. An index adds no column, moves no row, and changes no bitemporal
+/// semantics — `CREATE INDEX` reads the table and writes a b-tree beside it. A
+/// v10 database and a v11 database hold identical `links` rows.
+///
+/// So this rung is doing the thing the freeze was drafted to permit, and it is
+/// worth saying once, here, because the *next* one to touch `links` may not be.
+///
+/// # Cost
+///
+/// Two b-trees built from an existing table, so proportional to the row count
+/// and nothing else, with nothing to backfill. The standing cost is two extra
+/// index writes per ledger insert, forever, which is what
+/// [`ddl::CREATE_INDICES`](crate::schema::ddl::CREATE_INDICES) records the
+/// measured before/after plans for and what
+/// `tests/index_plan_tests.rs` holds registry entries against.
+async fn add_links_archive_indices(conn: &libsql::Connection) -> Result<()> {
     for index_ddl in CREATE_INDICES {
         conn.execute(index_ddl, ()).await?;
     }

@@ -124,7 +124,8 @@ Every design decision derives from these invariants:
 | v7 | `CHECK (weight >= 0.0)` on `links.weight` |
 | v8 | `concepts.rowid_pk`, the third FTS trigger, and the two unread indices dropped |
 | v9 | `trg_concepts_guard_delete` becomes conditional on an archive session, so concepts can be archived (D-129) |
-| v10 | `trg_concepts_log_insert` becomes conditional on the same marker, so rehydration mints no transaction-time facts (D-131) — **current** |
+| v10 | `trg_concepts_log_insert` becomes conditional on the same marker, so rehydration mints no transaction-time facts (D-131) |
+| v11 | `idx_links_recorded_at` and `idx_links_target` on the `links` ledger, so neither archive predicate scans it (D-151) — **current** |
 
 v8 is the last rung that could change a *primary key* before the 1.0 freeze: `rowid_pk INTEGER PRIMARY KEY` costs `id` the primary key, and D-036 forbids a primary-key change after 1.0 (D-119). It also drops `idx_annotations_label` and `idx_lc_tgt_active`, which shipped in the v7 baseline with no query that seeks on them — measured at −7.9% off `assert_edge` (D-089, D-118).
 

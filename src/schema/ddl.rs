@@ -527,6 +527,20 @@ pub const ANALYSIS_LIMIT: &str = "PRAGMA analysis_limit = 400";
 /// `tests/index_plan_tests.rs` now requires the unread set to be **empty**,
 /// which turns "these two are known bad" into "an index with no reader is a red
 /// test". That is the guarantee this list is kept short by.
+///
+/// # `idx_links_target` is not `idx_lc_tgt_active` coming back
+///
+/// The two look like the same index and are not, which is worth stating because
+/// the resemblance is the trap. `idx_lc_tgt_active` was `(target_id, valid_to)`
+/// on **`links_current`**, the materialized projection, and it was dropped
+/// because *nothing in the crate seeks on it* — no reader, pure write cost.
+/// `idx_links_target` is `(target_id)` on **`links`**, the ledger, and it exists
+/// because `CONCEPTS_ARCHIVABLE` seeks on exactly that column and the plan is
+/// measured before and after.
+///
+/// D-089's rule was never "no index on a target column". It was "an index needs
+/// a named query that seeks on it", and the registry is what enforces the
+/// difference rather than this paragraph.
 pub const CREATE_INDICES: &[&str] = &[
     // Covering index for the traversal CTE (§5.2, D-042).
     //
@@ -576,6 +590,60 @@ pub const CREATE_INDICES: &[&str] = &[
      (source_id, target_id, edge_type, valid_to, valid_from);",
     "CREATE INDEX IF NOT EXISTS idx_txlog_time ON transaction_log (recorded_at);",
     "CREATE INDEX IF NOT EXISTS idx_txlog_entity ON transaction_log (entity_id);",
+    // The archive cutoff's seek column on the ledger table (0.12.6, W3.1,
+    // D-151, review §2.1, shipped v10 -> v11).
+    //
+    // `links` carried a primary key and nothing else. `LINKS_ARCHIVABLE` opens
+    // with `recorded_at < :cutoff`, and the primary key leads on `source_id`, so
+    // there was nothing for that bound to seek on: both the archiving SELECT and
+    // the archiving DELETE scanned the entire ledger. Measured on the
+    // populated-and-analysed fixture in `tests/index_plan_tests.rs`:
+    //
+    //   before   SCAN links | CORRELATED SCALAR SUBQUERY 1 | SEARCH newer ...
+    //   after    SEARCH links USING INDEX idx_links_recorded_at (recorded_at<?)
+    //
+    // The inner supersession probe was never the problem — it binds the whole
+    // primary-key prefix and always did.
+    //
+    // **This index is justified on those two queries and not on the clock
+    // floor.** Review §2.1 led with `recorded_at_floor`, the `MAX(recorded_at)`
+    // read on every `open()`, and counted it among the scans this would close.
+    // It is not one: SQLite already served the bare `MAX()` from the primary
+    // key's covering index without traversing the table, and after this index it
+    // does the same thing through a different covering index. The startup cost
+    // the review predicted did not exist, so the justification rests entirely on
+    // the archive path — see D-150 for how that was caught, and D-089 for why an
+    // index bought on a believed benefit is the failure mode being avoided.
+    "CREATE INDEX IF NOT EXISTS idx_links_recorded_at ON links (recorded_at);",
+    // The other half of the concept-archival reachability check (0.12.6, W3.2,
+    // D-151, review §2.2, shipped v10 -> v11).
+    //
+    // `CONCEPTS_ARCHIVABLE` asks whether any surviving link mentions a concept
+    // *in either direction*: `links.source_id = concepts.id OR links.target_id =
+    // concepts.id`. The primary key serves the left arm. Nothing served the
+    // right one, and an `OR` is only as seekable as its worst arm, so the whole
+    // correlated subquery degraded to a scan of `links` **once per candidate
+    // concept** — O(concepts x links).
+    //
+    //   before   CORRELATED SCALAR SUBQUERY 1
+    //              | SCAN links USING COVERING INDEX sqlite_autoindex_links_1
+    //   after    CORRELATED SCALAR SUBQUERY 1 | MULTI-INDEX OR
+    //              | INDEX 1 | SEARCH links USING COVERING INDEX
+    //                           sqlite_autoindex_links_1 (source_id=?)
+    //              | INDEX 2 | SEARCH links USING INDEX
+    //                           idx_links_target (target_id=?)
+    //
+    // `MULTI-INDEX OR` is SQLite deciding to run both arms as seeks and union
+    // the rowids, which is exactly the plan the index was added to make
+    // available. Both the SELECT and the DELETE form pick it up.
+    //
+    // A single-column index on the ledger's hottest write path needs the
+    // strongest justification available, and it has one beyond the plan shape:
+    // *before* this index the planner was building `AUTOMATIC COVERING INDEX
+    // (target_id=?)` at query time to answer the same question. It had already
+    // concluded the index was worth having and was paying to construct a
+    // throwaway copy per statement.
+    "CREATE INDEX IF NOT EXISTS idx_links_target ON links (target_id);",
 ];
 
 /// Every trigger the schema declares.

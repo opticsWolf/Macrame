@@ -101,6 +101,37 @@ CREATE TABLE links (
     PRIMARY KEY (source_id, target_id, edge_type, valid_from, recorded_at)
 );
 
+-- The two archive indexes (0.12.6, D-151, v10 -> v11). Through 0.12.5 `links`
+-- carried the primary key and nothing else, which is fine for the write path
+-- and wrong for the archive path: the PK leads on source_id, and both archive
+-- predicates seek on something else.
+--
+--   idx_links_recorded_at serves `recorded_at < :cutoff`, the opening clause of
+--     LINKS_ARCHIVABLE. Both the archiving SELECT and the archiving DELETE
+--     scanned the whole ledger for it; measured before and after:
+--       SCAN links  ->  SEARCH links USING INDEX idx_links_recorded_at
+--
+--   idx_links_target serves the right arm of CONCEPTS_ARCHIVABLE's
+--     `links.source_id = concepts.id OR links.target_id = concepts.id`. An OR
+--     is only as seekable as its worst arm, so the whole correlated subquery
+--     degraded to a scan of `links` once per candidate concept -- O(concepts x
+--     links). With the index SQLite takes both arms as seeks:
+--       SCAN links USING COVERING INDEX  ->  MULTI-INDEX OR (both arms SEARCH)
+--     Before the index the planner was already building an AUTOMATIC COVERING
+--     INDEX on target_id per statement, i.e. paying for a throwaway copy of it.
+--
+-- These are the first indexes this schema puts on a *frozen* ledger table.
+-- That is the case D-036 named: the freeze restricts the core to additive
+-- operations and lists ADD COLUMN and new indexes as the two that qualify. No
+-- row moves and no bitemporal semantics change.
+--
+-- The clock floor (`SELECT MAX(recorded_at) FROM links`, read on every open())
+-- is NOT among the queries these justify, despite the review having led with
+-- it: SQLite already served the bare MAX() from the PK's covering index without
+-- traversing the table, and still does (D-150).
+CREATE INDEX idx_links_recorded_at ON links (recorded_at);
+CREATE INDEX idx_links_target      ON links (target_id);
+
 -- Materialized current belief: the latest assertion per interval.
 -- Traversals read ONLY this table.
 --

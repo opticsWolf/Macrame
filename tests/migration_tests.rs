@@ -342,6 +342,85 @@ async fn a_v5_database_climbs_to_v6_and_gains_the_open_interval_index() {
     assert_eq!(found, 1, "the rung must create idx_lc_open_interval");
 }
 
+/// v10 → v11: the two archive indexes on `links`, and the plan they buy.
+///
+/// Presence is asserted, but presence alone is the weak form the gate on
+/// [`a_version_bump_must_bring_its_own_rung_test`] warns against — a rung that
+/// creates an index nothing seeks on passes it, and that is exactly D-089's
+/// failure. So the plan is asserted too: the archiving read must go from a full
+/// scan of the ledger to a seek, in the same test that stamps the version.
+///
+/// This is the first rung to index a **frozen** table (D-036, D-151). See
+/// `add_links_archive_indices` for why that is the permitted additive case
+/// rather than an exception.
+#[tokio::test]
+async fn a_v10_database_climbs_to_v11_and_the_archive_read_stops_scanning_links() {
+    let harness = TestHarness::new();
+    let conn = connect(&harness).await;
+
+    migrations::run(&conn).await.unwrap();
+    conn.execute("DROP INDEX idx_links_recorded_at", ())
+        .await
+        .unwrap();
+    conn.execute("DROP INDEX idx_links_target", ())
+        .await
+        .unwrap();
+    conn.execute("PRAGMA user_version = 10", ()).await.unwrap();
+
+    // The archiving SELECT, reproduced from `LINKS_ARCHIVABLE`. Bounded against
+    // drift by `index_plan_tests`, which holds the same query with an
+    // `include_str!` check on `archive.rs`; this copy exists because the rung
+    // has to be measured on both sides of itself and the registry only sees the
+    // finished schema.
+    const ARCHIVING_READ: &str = "SELECT source_id FROM links WHERE recorded_at < ?1          AND (valid_to <> '9999-12-31T23:59:59.999999Z' AND valid_to <= ?1)";
+
+    let before = plan_string(&conn, ARCHIVING_READ).await;
+    assert!(
+        before.contains("SCAN links"),
+        "the fixture is not starting from the v10 plan — expected a full scan          of `links`, got: {before}"
+    );
+
+    migrations::run(&conn).await.unwrap();
+
+    assert_eq!(user_version(&conn).await, SCHEMA_VERSION);
+
+    for name in ["idx_links_recorded_at", "idx_links_target"] {
+        let found: i64 = conn
+            .query(
+                "SELECT COUNT(*) FROM sqlite_master                  WHERE type = 'index' AND name = ?1",
+                libsql::params![name],
+            )
+            .await
+            .unwrap()
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get(0)
+            .unwrap();
+        assert_eq!(found, 1, "the rung must create {name}");
+    }
+
+    let after = plan_string(&conn, ARCHIVING_READ).await;
+    assert!(
+        after.contains("SEARCH links USING INDEX idx_links_recorded_at"),
+        "the rung created the index and the planner did not take it. An index          with no reader is an index write per ledger insert, forever (D-089).          Plan: {after}"
+    );
+}
+
+/// `EXPLAIN QUERY PLAN` for `sql`, joined into one line.
+async fn plan_string(conn: &libsql::Connection, sql: &str) -> String {
+    let mut rows = conn
+        .query(&format!("EXPLAIN QUERY PLAN {sql}"), ())
+        .await
+        .unwrap();
+    let mut lines = Vec::new();
+    while let Some(r) = rows.next().await.unwrap() {
+        lines.push(r.get::<String>(3).unwrap_or_default());
+    }
+    lines.join(" | ")
+}
+
 /// The ladder's top, asserted once rather than inside whichever rung test was
 /// written last.
 ///
@@ -352,7 +431,7 @@ async fn a_v5_database_climbs_to_v6_and_gains_the_open_interval_index() {
 #[test]
 fn a_version_bump_must_bring_its_own_rung_test() {
     assert_eq!(
-        SCHEMA_VERSION, 10,
+        SCHEMA_VERSION, 11,
         "SCHEMA_VERSION moved. Add a test for the new rung — one that starts \
          from a database at the previous version and asserts what the rung is \
          *for*, not merely that `run` reached the top."

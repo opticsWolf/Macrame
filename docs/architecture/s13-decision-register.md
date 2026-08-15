@@ -2492,3 +2492,38 @@ Two `QUERY_REGISTRY` entries record a **scan**, with the review section that nam
 `fragment` is a substring rather than whole-plan equality, because pinning the entire `EXPLAIN QUERY PLAN` string would go red on any SQLite wording change and train people to re-bless it without reading.
 
 **Rejected.** *Replacing the empty fixture rather than adding to it* — an unanalysed database is a real state and its plans are real; dropping it trades one blind spot for another. *Pinning whole plan strings* — above. *Asserting the seek W3 will produce, so the tests are "ready"* — a test that passes before the work and after it distinguishes nothing, and the whole value here is that the improvement gets read. *Quietly editing §2.1's five to four* — the review is a dated artefact and the correction is more instructive than the corrected text; it is annotated in place with what was measured and how. *Treating the `MAX()` result as evidence that W3.1 should be dropped* — four queries still scan, and one of them is the quadratic concept-archival predicate; what changed is which query justifies the index, not whether one is justified.
+
+<a id="d-151"></a>D-151 — The two archive indexes on `links`, justified on the queries that measured as scans rather than the one the review led with (0.12.6, W3.1/W3.2/W3.3/W3.5). [D-036](s13-decision-register.md#d-036), [D-089](s13-decision-register.md#d-089), [D-150](s13-decision-register.md#d-150), review §2.1/§2.2, [§4.2](s4-schema.md#42-links-assertion-history-and-current-belief-materialization). Shipped as the `v10 -> v11` rung `links-archive-indices`.
+
+`links` carried a primary key and nothing else. The PK leads on `source_id`, and neither archive predicate seeks on `source_id`, so both scanned the ledger. Measured on the populated-and-analysed fixture, before and after, in one run of the same probe:
+
+```text
+LINKS_ARCHIVABLE (SELECT and DELETE, identical plans)
+  before   SCAN links | CORRELATED SCALAR SUBQUERY 1 | SEARCH newer ...
+  after    SEARCH links USING INDEX idx_links_recorded_at (recorded_at<?)
+             | CORRELATED SCALAR SUBQUERY 1 | SEARCH newer ...
+
+CONCEPTS_ARCHIVABLE (SELECT and DELETE)
+  before   CORRELATED SCALAR SUBQUERY 1
+             | SCAN links USING COVERING INDEX sqlite_autoindex_links_1
+  after    CORRELATED SCALAR SUBQUERY 1 | MULTI-INDEX OR
+             | INDEX 1 | SEARCH links USING COVERING INDEX
+                          sqlite_autoindex_links_1 (source_id=?)
+             | INDEX 2 | SEARCH links USING INDEX idx_links_target (target_id=?)
+```
+
+The inner supersession probe was never the problem — it binds the whole primary-key prefix and always did. It was the outer `recorded_at <` that had nothing to seek on, which is worth stating because the subquery is the part that *looks* expensive.
+
+**W3.3 is answered by measurement and the rewrite is not taken.** The plan anticipated that SQLite might decline to use two indexes for an `OR` inside a correlated subquery, and scheduled a `UNION`-of-two-seekable-halves rewrite if so. It does not decline: `MULTI-INDEX OR` runs both arms as seeks and unions the rowids. The rewrite was measured anyway rather than assumed unnecessary, and it is **not better** — it produces a `COMPOUND QUERY` whose right half, before the index existed, SQLite served by building an `AUTOMATIC COVERING INDEX (target_id=?)` at query time. That last detail is the strongest single argument for `idx_links_target`: the planner had already concluded the index was worth having and was paying to construct a throwaway copy of it per statement. So the predicate in `archive.rs` is unchanged, which also keeps a predicate whose prose justification ([`CONCEPTS_ARCHIVABLE`](../../src/temporal/archive.rs)) is long and load-bearing from being rewritten for a benefit that does not exist.
+
+**What justifies `idx_links_recorded_at` is not what the review said justified it.** Review §2.1 led with `recorded_at_floor`, the `MAX(recorded_at)` read on every `open()`, and predicted seconds of startup on a large ledger. [D-150](s13-decision-register.md#d-150) measured that as a covering-index seek, not a scan, and this release confirms the other side: with the new index the clock floor reads `SEARCH links USING COVERING INDEX idx_links_recorded_at` — the planner swapped which covering index answers it and the cost did not move. The index is justified on the two archive queries and on nothing else, and `QUERY_REGISTRY`'s clock-floor entry is deliberately kept pinned to the *unnamed* fragment `SEARCH links USING COVERING INDEX` so that it cannot be read as a claim that the new index serves it.
+
+**First rung to index a frozen table, and that is the permitted case rather than an exception.** Every index rung before this one landed on `links_current`, which [D-036](s13-decision-register.md#d-036) gives no stability guarantee at all. These land on `links`, a normative ledger table. D-036 restricts post-1.0 change on the core to additive operations and names `ADD COLUMN` and **new indexes** as the two that qualify: an index adds no column, moves no row, and changes no bitemporal semantics, and a v10 and a v11 database hold identical `links` rows. Said explicitly in `add_links_archive_indices` because the next rung to touch `links` may not have the same answer.
+
+**`idx_links_target` is not `idx_lc_tgt_active` readmitted**, and the resemblance is the trap. The dropped one was `(target_id, valid_to)` on `links_current`, the materialization, and it was dropped because nothing sought on it. This one is `(target_id)` on `links`, the ledger, and `CONCEPTS_ARCHIVABLE` seeks on exactly that column. D-089's rule was never "no index on a target column"; it was "an index needs a named query that seeks on it", and the registry enforces the difference — the `Justification::Query` entry carries the reproduced SQL plus an `include_str!` check that the original still exists in `archive.rs`.
+
+**The cost being accepted**, stated plainly: two extra index writes per insert into the crate's ledger table, forever, on a write path that already takes several. That is the D-089 trade, taken with the before/after in hand rather than on a believed benefit.
+
+**The rung test asserts the plan, not the index.** `a_version_bump_must_bring_its_own_rung_test` asks each rung to assert what it is *for*, and presence-only is the weak form — a rung creating an index nothing seeks on passes it, which is precisely the D-089 failure. So the v10 -> v11 test drops both indexes, stamps the database back to v10, asserts the plan is a scan, migrates, and asserts the seek. It fails if the index exists and the planner declines it.
+
+Rejected: *the `UNION` rewrite of `CONCEPTS_ARCHIVABLE`* (measured, unnecessary, and structurally worse — see above); *citing the clock floor as justification* (measured false twice, D-150 and here); *a composite `(target_id, valid_to)` on `links` mirroring the dropped `links_current` index* (`CONCEPTS_ARCHIVABLE` binds `target_id` alone and the extra column is payload nothing reads — the exact shape D-089 dropped); *deferring these to 0.14.0 with the rest of the performance work* (the concept-archival predicate is quadratic, and a quadratic on the archive path is a correctness-adjacent defect once a ledger is large enough that anyone runs the archive); *presence-only rung test* (above).

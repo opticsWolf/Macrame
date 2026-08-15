@@ -342,16 +342,36 @@ moves up by one. The register is the authority, not this plan.
 has a primary key and nothing else; its archive and clock queries both seek on
 `recorded_at`.
 
+> **Done, 0.12.6 (D-151), and the justification is narrower than written above.**
+> The clock floor is **not** one of the scans — D-150 measured it as a covering
+> index seek before this index and it stays one after, so the paragraph's lead
+> example was wrong and is corrected in the review §2.1 in place. What the index
+> does close is the archiving `SELECT` and `DELETE`, both of which went
+> `SCAN links` → `SEARCH links USING INDEX idx_links_recorded_at`.
+
 **W3.2 — `CREATE INDEX idx_links_target ON links (target_id)`.** Closes §2.2.
 `CONCEPTS_ARCHIVABLE` ([archive.rs:199](../src/temporal/archive.rs:199)) carries
 `OR links.target_id = concepts.id` with nothing to seek on, which is a scan of
 `links` per candidate concept.
+
+> **Done, 0.12.6 (D-151).** `SCAN links USING COVERING INDEX` → `MULTI-INDEX OR`
+> with both arms seeking, on the `SELECT` and the `DELETE` alike. Shipped with
+> W3.1 as the `v10 → v11` rung `links-archive-indices` — the first rung to index
+> a frozen ledger table, which is the additive case D-036 named.
 
 **W3.3 — Re-examine the `OR` after measuring.** An index makes each side
 seekable; SQLite may still decline to use two indexes for an `OR` inside a
 correlated subquery. If `EXPLAIN QUERY PLAN` still shows a scan after W3.2,
 rewrite as a `UNION` of two seekable halves. **Measure before rewriting** — the
 rewrite is only justified if the index alone did not do it.
+
+> **Done, 0.12.6 — measured, and the rewrite is not taken (D-151).** SQLite does
+> not decline: with `idx_links_target` the subquery plans as `MULTI-INDEX OR`
+> with both arms seeking. The `UNION` form was measured anyway rather than
+> assumed unnecessary, and it is worse-shaped — before the index existed its
+> right half made SQLite build an `AUTOMATIC COVERING INDEX (target_id=?)` at
+> query time, which is the planner saying it wanted this index all along.
+> `CONCEPTS_ARCHIVABLE` is unchanged.
 
 **W3.4 — Point the singular paths at the bulk ones.** Closes §2.3.
 `upsert_concept` and `assert_edge` each pay the ~0.8 ms per-transaction floor for
@@ -362,6 +382,14 @@ reached for a new bulk API precisely because it did not find the existing one.
 **W3.5 — Registry entries for both.** Not optional, and not a follow-up:
 `every_index_is_justified` fails if an index is declared without one. The gate
 already forces this.
+
+> **Done, 0.12.6.** Both carry `Justification::Query` with the reproduced SQL and
+> an `include_str!` bound against `archive.rs`. The three `QUERY_REGISTRY`
+> entries 0.12.5 left recording defects were updated with the measured new plans,
+> which is the review step they existed to force. A second gate fired as
+> designed: `a_version_bump_must_bring_its_own_rung_test` went red on the
+> `SCHEMA_VERSION` bump, and the rung test written for it asserts the *plan*
+> rather than the index's presence.
 
 ---
 
