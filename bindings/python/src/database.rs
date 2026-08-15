@@ -191,37 +191,65 @@ impl PyDatabase {
         snapshot_every_entries: Option<i64>,
         snapshot_poll_seconds: f64,
     ) -> PyResult<Self> {
-        let cadence = match snapshot_every_entries {
-            None => None,
-            Some(n) => {
-                // Refused rather than clamped. A zero or negative threshold
-                // would anchor on every poll, which is not what any caller
-                // means by it, and a silent repair here becomes a mystery about
-                // snapshot volume later.
-                if n <= 0 {
-                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                        "snapshot_every_entries must be positive, got {n}. \
-                         Pass None to run without a snapshot cadence."
-                    )));
-                }
-                if !(snapshot_poll_seconds.is_finite() && snapshot_poll_seconds > 0.0) {
-                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                        "snapshot_poll_seconds must be a positive, finite number, \
-                         got {snapshot_poll_seconds}"
-                    )));
-                }
-                Some(SnapshotCadence {
-                    every_entries: n,
-                    poll_interval: std::time::Duration::from_secs_f64(snapshot_poll_seconds),
-                })
-            }
-        };
+        let cadence = to_cadence(snapshot_every_entries, snapshot_poll_seconds)?;
 
         let owned = path.clone();
         let db = crate::runtime::block_on(py, async move {
             Database::open_with_cadence(&owned, cadence).await
         })?
         .map_err(to_py)?;
+
+        Ok(Self {
+            inner: RwLock::new(Some(db)),
+            path,
+            diagnostic_open: Mutex::new(()),
+        })
+    }
+
+    /// Open against an injected [`crate::testing::PyFakeClock`] (W6.3).
+    ///
+    /// **A test hook, and underscore-prefixed for the reason §14.6 gives**: a
+    /// clock injected into a production ledger writes a `recorded_at` axis that
+    /// no longer records anything. What it takes is a `_FakeClock`, not a
+    /// `Clock` implementation — a caller cannot supply their own, so "inject
+    /// arbitrary time into a real database" is not reachable from here at all.
+    ///
+    /// What it buys is the capability the suite did not have: `recorded_at` is
+    /// the transaction-time axis, and every Python assertion about it was
+    /// previously impossible rather than merely awkward. That is defect K's
+    /// shape on the side that never got D-062's fix.
+    ///
+    /// Stamps are exact only on a **fresh** file. Opening a populated one
+    /// raises the clock to the newest stored `recorded_at` before the actor
+    /// starts, because the alternative is aborting the first write on
+    /// `trg_concepts_monotonic_ra`.
+    #[staticmethod]
+    #[pyo3(name = "_open_with_clock")]
+    #[pyo3(signature = (path, clock, *, snapshot_every_entries = Some(10_000), snapshot_poll_seconds = 5.0))]
+    fn open_with_clock(
+        py: Python<'_>,
+        path: PathBuf,
+        clock: PyRef<'_, crate::testing::PyFakeClock>,
+        snapshot_every_entries: Option<i64>,
+        snapshot_poll_seconds: f64,
+    ) -> PyResult<Self> {
+        let cadence = to_cadence(snapshot_every_entries, snapshot_poll_seconds)?;
+        let tuning = macrame::Tuning {
+            cadence: match cadence {
+                Some(c) => macrame::CadencePolicy::Every(c),
+                None => macrame::CadencePolicy::Disabled,
+            },
+            clock: Some(clock.inner.clone()),
+            ..Default::default()
+        };
+
+        let owned = path.clone();
+        let db =
+            crate::runtime::block_on(
+                py,
+                async move { Database::open_tuned(&owned, tuning).await },
+            )?
+            .map_err(to_py)?;
 
         Ok(Self {
             inner: RwLock::new(Some(db)),
@@ -1236,9 +1264,24 @@ impl Drop for PyDatabase {
 /// zero, which is what `Duration::from_secs_f64` would do — and a zero window
 /// reaches `ArchiveWindowError` with a message about session counts, which is
 /// a true statement about the wrong problem.
-fn to_duration(obj: &Bound<'_, PyAny>) -> PyResult<std::time::Duration> {
-    if let Ok(d) = obj.extract::<std::time::Duration>() {
-        return Ok(d);
+///
+/// **A negative `timedelta` used to arrive as a `TypeError`** (0.12.20, W6.3).
+/// `Duration` cannot represent one, so the extraction fails and the fallback
+/// then fails to read a `timedelta` as a float — reporting "expected a
+/// datetime.timedelta" to a caller holding one. The instance check below is
+/// what makes the sign the complaint, matching the float arm beside it.
+pub(crate) fn to_duration(obj: &Bound<'_, PyAny>) -> PyResult<std::time::Duration> {
+    if obj.is_instance_of::<pyo3::types::PyDelta>() {
+        // Zero is refused here as well as below. `Duration` *can* hold it, so
+        // it would otherwise pass on this arm and be refused on the float one,
+        // which is one rule with two answers depending on how it was typed.
+        return match obj.extract::<std::time::Duration>() {
+            Ok(d) if !d.is_zero() => Ok(d),
+            _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "expected a positive duration, got {}",
+                obj.repr()?
+            ))),
+        };
     }
     let secs: f64 = obj.extract().map_err(|_| {
         pyo3::exceptions::PyTypeError::new_err(
@@ -1262,4 +1305,38 @@ fn to_pathlib<'py>(py: Python<'py>, path: &std::path::Path) -> PyResult<Bound<'p
     let pathlib = py.import("pathlib")?;
     let cls: Bound<'py, PyType> = pathlib.getattr("Path")?.cast_into()?;
     cls.call1((path,))
+}
+
+/// `snapshot_every_entries` / `snapshot_poll_seconds` → a [`SnapshotCadence`].
+///
+/// Shared by `open` and `_open_with_clock` rather than duplicated: the two
+/// refusals below are the whole of the validation, and a second copy of them is
+/// a second chance to drift.
+///
+/// Both are refusals rather than clamps. A zero or negative threshold would
+/// anchor on every poll, which is not what any caller means by it, and a silent
+/// repair here becomes a mystery about snapshot volume later.
+fn to_cadence(
+    snapshot_every_entries: Option<i64>,
+    snapshot_poll_seconds: f64,
+) -> PyResult<Option<SnapshotCadence>> {
+    let Some(n) = snapshot_every_entries else {
+        return Ok(None);
+    };
+    if n <= 0 {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "snapshot_every_entries must be positive, got {n}. \
+             Pass None to run without a snapshot cadence."
+        )));
+    }
+    if !(snapshot_poll_seconds.is_finite() && snapshot_poll_seconds > 0.0) {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "snapshot_poll_seconds must be a positive, finite number, \
+             got {snapshot_poll_seconds}"
+        )));
+    }
+    Ok(Some(SnapshotCadence {
+        every_entries: n,
+        poll_interval: std::time::Duration::from_secs_f64(snapshot_poll_seconds),
+    }))
 }

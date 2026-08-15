@@ -43,6 +43,35 @@ matching the Rust side. The Python-specific reason is sharper than symmetry: the
 use is allocating a buffer of that many floats, and `None` there produces a zero-length
 one without an error.
 
+**The transaction-time axis became assertable** (W6.3, 0.12.20). `tests_py` could not
+influence `recorded_at`, so every Python assertion about it was *this is a timestamp* and
+*this one is after that one* — defect K's shape on the half that never received
+[D-062](s13-decision-register.md#d-062)'s fix. `macrame._macrame._FakeClock` and
+`Database._open_with_clock` close it on this module's existing terms: underscore-prefixed,
+absent from `__all__` and from the stub's public surface, shipped in the wheel because a
+`testing` feature would mean the tested wheel is not the published one
+([§14.8](s14-python-bindings.md#148-testing-topology)).
+
+**§14.6's entry against `open_with_clock` is qualified rather than reversed**, and the
+distinction is what is accepted: a `_FakeClock`, not a `Clock` implementation. A caller
+cannot supply their own, so *arbitrary time injected into a production ledger* — the thing
+that row objects to — has no expression here. `test_clock.py` asserts the seam stays
+private, so a later widening has to argue rather than inherit.
+
+**It is not fully deterministic, and the test suite says so out loud.** On a populated
+file `open_tuned` raises the clock to the newest stored `recorded_at` before the actor
+starts, because a fake set behind the ledger aborts the first write on
+`trg_concepts_monotonic_ra`. A test wanting exact stamps starts from an empty file.
+
+**One defect found by writing the tests, in shared code.** `to_duration` — which
+`archive_windowed`'s window also goes through — reported a *`TypeError` naming
+`timedelta`* to a caller holding a negative `timedelta`: `Duration` cannot represent one,
+so the extraction failed and the fallback then failed to read a `timedelta` as a float.
+`timedelta(0)` was the inverse and worse, since `Duration` *can* hold zero: it passed as a
+`timedelta` and was refused as the number `0`, one rule with two answers depending on how
+the caller typed it. Both now raise `ValueError` about the sign. The existing window test
+covered only the numeric spellings, which is why neither showed.
+
 <!--nav-->
 ← [previous](s13-decision-register.md) · [index](README.md) · [next](appendices.md) →
 <!--/nav-->
@@ -322,7 +351,7 @@ and that is a design constraint rather than an accident:
 | `Database::raw()` | `#[doc(hidden)]` since [D-091](s13-decision-register.md#d-091), and invariant 2's named hole. A Python escape hatch into `libsql::Database` would export it to a much larger audience with much less context. |
 | `Database::read_conn()` | Hands back a *shared* connection, so a long reporting query would compete with every traversal and fold in the process. `diagnostic_conn()` exists precisely because that need is real and this is the wrong way to serve it. |
 | the free `register_model` / `upsert_embedding` | Also `#[doc(hidden)]`, also invariant-2 holes. `Database::register_model` is the exposed path. |
-| `open_with_clock` | `FakeClock` is a test seam, and `recorded_at` is the transaction-time axis. Exposing it invites injecting a clock into a production ledger. |
+| `open_with_clock` | `FakeClock` is a test seam, and `recorded_at` is the transaction-time axis. Exposing it invites injecting a clock into a production ledger. **Qualified in 0.12.20** ([D-163](s13-decision-register.md#d-163)): the *supported* surface still has no clock parameter, and `Database._open_with_clock` takes a `_FakeClock` rather than a `Clock`, so what this row objects to — arbitrary time injected into a real ledger — is still not reachable. |
 
 **`diagnostic_conn()` is exposed as queries, never as a connection.** `diagnostic_query()`
 and `explain()` each open the file `SQLITE_OPEN_READ_ONLY`, run the statement, and drop

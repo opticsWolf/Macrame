@@ -808,6 +808,28 @@ defect K's exact shape on the side that never received D-062's fix. Needs a
 `#[pyclass]` over `FakeClock` with `advance()`, wired through `open_tuned`'s
 `clock` field.
 
+> **Done, 0.12.20.** `_FakeClock` with `advance()` / `peek()`, and
+> `Database._open_with_clock(path, clock, ...)` going through `open_tuned`'s
+> `clock` field as specified.
+>
+> **One deviation, and it is the shape rather than the substance.** §14.6
+> already recorded `open_with_clock` as deliberately not exposed, so shipping
+> it as the plan describes would have silently reversed a decision. It is a
+> `testing.rs` hook instead: underscore-prefixed, out of `__all__` and out of
+> the stub, taking a `_FakeClock` rather than a `Clock` — so *arbitrary time in
+> a production ledger*, which is what §14.6 objects to, is still not reachable,
+> while *a known stamp in a test ledger* now is. The entry is qualified in
+> place and a test asserts the seam stays private (D-163).
+>
+> **A defect in shared code, found by writing the tests.** `to_duration`, which
+> `archive_windowed`'s window also uses, answered a negative `timedelta` with a
+> `TypeError` saying a `timedelta` was expected, and accepted `timedelta(0)`
+> while refusing `0`. Both now raise `ValueError` about the sign. The existing
+> refusal test enumerated `0, -1, nan, inf` and no `timedelta` at all, which is
+> why it survived four releases.
+>
+> 368 Python passed.
+
 **W6.4 — Everything 0.13.0 added.** `analyze()`, `checkpoint()`, `Tuning`, the
 new `CommandKind` variants, the starvation counter's `#[getter]`. A binding gap
 opened in the same release that created it is a gap that never gets a chance to

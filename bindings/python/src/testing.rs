@@ -184,3 +184,68 @@ fn sample(name: &str) -> Option<DbError> {
         _ => return None,
     })
 }
+
+// -- the injectable clock (W6.3) ---------------------------------------------
+
+/// A [`macrame::prelude::FakeClock`], reachable from Python for tests only.
+///
+/// # Why this is here and not on the supported surface
+///
+/// §14.6 lists `open_with_clock` among the things the binding deliberately does
+/// not expose, and that entry stands: a clock injected into a production ledger
+/// writes a `recorded_at` axis that no longer records anything. What the entry
+/// did *not* weigh is the cost on the other side — `tests_py` could not assert
+/// on `recorded_at` at all, which is defect K's exact shape on the half that
+/// never received D-062's fix.
+///
+/// The resolution is the same one this module already applies to
+/// `_raise_db_error`: underscore-prefixed, absent from `macrame.__all__` and
+/// from the stub's public surface, shipped in the wheel because a `testing`
+/// feature would mean the tested wheel is not the published one. What is
+/// exposed is a **fake**, not the `Clock` trait — a caller cannot supply their
+/// own implementation, so the objection's subject does not exist here.
+///
+/// # It is not fully deterministic, and that is the crate's contract
+///
+/// On a database that already holds rows, `open_tuned` raises the clock to
+/// their newest `recorded_at` before the actor starts ([`Clock::raise_floor`]).
+/// Reopening a populated file with a clock set to the epoch would otherwise
+/// abort the first concept write on `trg_concepts_monotonic_ra`. Tests wanting
+/// exact stamps start from an empty file.
+#[pyclass(name = "_FakeClock", module = "macrame")]
+pub(crate) struct PyFakeClock {
+    pub(crate) inner: std::sync::Arc<macrame::prelude::FakeClock>,
+}
+
+#[pymethods]
+impl PyFakeClock {
+    /// `initial` is a canonical string or an aware `datetime`, as everywhere.
+    #[new]
+    fn new(initial: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let canonical = crate::timestamps::to_canonical(Some(initial))?;
+        let at =
+            macrame::util::clock::parse_iso8601_utc(&canonical).map_err(crate::errors::to_py)?;
+        Ok(Self {
+            inner: std::sync::Arc::new(macrame::prelude::FakeClock::new(at)),
+        })
+    }
+
+    /// Move the clock forward by a `timedelta` or a number of seconds.
+    ///
+    /// Forward only. A fake that can go backwards would let a test set up a
+    /// state the monotonic triggers exist to make unreachable, and then assert
+    /// something about it.
+    fn advance(&self, by: &Bound<'_, PyAny>) -> PyResult<()> {
+        self.inner.advance(crate::database::to_duration(by)?);
+        Ok(())
+    }
+
+    /// The stamp this clock would issue next, without issuing it.
+    fn peek<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        crate::timestamps::from_canonical(py, &self.inner.peek())
+    }
+
+    fn __repr__(&self) -> String {
+        format!("_FakeClock(next={})", self.inner.peek())
+    }
+}

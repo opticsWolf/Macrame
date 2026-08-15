@@ -165,6 +165,17 @@ def test_a_window_that_does_not_advance_is_refused_not_clamped(db):
         with pytest.raises(ValueError):
             db.archive_windowed(T1, bad)
 
+    # The same rule stated as a timedelta. Until 0.12.20 these two took a
+    # different path and gave a different answer: `Duration` cannot hold a
+    # negative, so the extraction failed and the fallback then failed to read
+    # the timedelta as a float — reporting "expected a datetime.timedelta" to a
+    # caller who was holding one. `timedelta(0)` was worse: `Duration` *can*
+    # hold zero, so it passed here and was refused as `0`, which is one rule
+    # with two answers depending on how the caller typed it (W6.3).
+    for bad in (dt.timedelta(0), dt.timedelta(seconds=-1), dt.timedelta(days=-30)):
+        with pytest.raises(ValueError, match="positive"):
+            db.archive_windowed(T1, bad)
+
 
 def test_a_window_of_the_wrong_type_is_a_type_error(db):
     with pytest.raises(TypeError, match="timedelta"):

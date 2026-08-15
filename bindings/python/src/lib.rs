@@ -166,6 +166,7 @@ fn _macrame(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?;
     m.add_function(wrap_pyfunction!(runtime::_block_for_testing, m)?)?;
     m.add_function(wrap_pyfunction!(runtime::_mark_forked, m)?)?;
+    m.add_class::<testing::PyFakeClock>()?;
     m.add_function(wrap_pyfunction!(testing::_db_error_variants, m)?)?;
     m.add_function(wrap_pyfunction!(testing::_raise_db_error, m)?)?;
     m.add_function(wrap_pyfunction!(timestamps::_coerce_timestamp, m)?)?;
