@@ -304,6 +304,42 @@ def test_the_warn_threshold_is_exposed_as_a_timedelta():
     assert macrame.BULK_ATOMIC_WARN_HOLD == dt.timedelta(milliseconds=250)
 
 
+def test_the_chunk_ceilings_are_reachable_and_match_the_ledger(db):
+    """The four `chunk_rows` constants, exposed as ceilings (W6.1, D-143/D-146).
+
+    Values are pinned because the point of exposing them is that a caller can
+    reason about a batch without reading Rust; a constant that drifts silently
+    is worse than one that is absent, since the caller has no way to notice.
+
+    They are **ceilings**, which is what the second half asserts in the only way
+    Python can: a chunk larger than the ceiling is never asked for, so a batch
+    smaller than the smallest ceiling is one chunk at most, whatever the
+    controller decides.
+    """
+    assert macrame.CHUNK_ROWS_EDGES == 90
+    assert macrame.CHUNK_ROWS_CONCEPTS == 70
+    assert macrame.CHUNK_ROWS_ANNOTATIONS == 600
+    assert macrame.CHUNK_ROWS_EMBEDDINGS == 30
+
+    # Under the ceiling, so it cannot be more than one chunk — and the point of
+    # the constant is that a caller can determine that in advance.
+    n = macrame.CHUNK_ROWS_CONCEPTS - 1
+    written = db.write_concepts(
+        [macrame.ConceptUpsert(f"c{i:03}", f"C{i}", valid_from=T0) for i in range(n)]
+    )
+    assert written == n
+
+
+def test_the_archive_session_ceiling_is_reachable():
+    """`archive_windowed` refuses above it, so a caller can check first (W6.1).
+
+    Exposed for the pre-flight: span divided by window against this number is a
+    computation the caller can do, and the alternative is discovering the
+    refusal by catching `ArchiveWindowError` after the call has been made.
+    """
+    assert macrame.MAX_ARCHIVE_SESSIONS == 4096
+
+
 # --------------------------------------------------------------------------
 # The diagnostic read
 # --------------------------------------------------------------------------

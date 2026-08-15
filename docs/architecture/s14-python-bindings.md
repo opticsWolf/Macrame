@@ -1,3 +1,31 @@
+<a id="1416-parity-with-0130"></a>
+### 14.16 Parity with 0.13.0 (W6)
+
+The binding's gaps were never features declined — §14.6 is the list of those, and it is
+short and argued. These were omissions, which is a different failure: nothing records
+them, so nothing goes red, and the surface diverges one release at a time.
+
+**The three missing constants** (W6.1, 0.12.18). `MAX_ARCHIVE_SESSIONS` and the four
+`chunk_rows` ceilings, following `BULK_ATOMIC_WARN_HOLD`'s precedent — a constant the
+caller must reason *against* belongs on the caller's side of the boundary. The archive
+ceiling is a refusal rather than a clamp ([D-080](s13-decision-register.md#d-080)), so
+without it a caller computing a window from a span learns the limit by catching
+`ArchiveWindowError`; with it the check is arithmetic done before the call.
+
+**The `chunk_rows` docstrings carry a correction, not just a number.** Since 0.12.0 they
+are **ceilings rather than sizes** ([D-143](s13-decision-register.md#d-143),
+[D-146](s13-decision-register.md#d-146)): the bulk loops time each chunk and size the next
+from its measured hold, so a populated database converges *below* the constant and a
+caller dividing a batch by one of them to predict transaction count is reading a 0.11.0
+fact. Exposing the number without that sentence would have shipped the stale reading
+rather than merely leaving it unavailable — which is why this item is four lines of
+registration and a paragraph of prose.
+
+They are flat names — `CHUNK_ROWS_EDGES` and its three siblings — rather than a namespace
+object or a dict. Rust's `chunk_rows` module has no Python equivalent that a type checker
+reads: a submodule would need its own `.pyi`, and a dict loses `Final[int]` and with it
+the only mechanism (`test_stubs.py`) that keeps the surface honest.
+
 <!--nav-->
 ← [previous](s13-decision-register.md) · [index](README.md) · [next](appendices.md) →
 <!--/nav-->

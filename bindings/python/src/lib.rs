@@ -139,6 +139,31 @@ fn _macrame(m: &Bound<'_, PyModule>) -> PyResult<()> {
         "BULK_ATOMIC_WARN_HOLD",
         macrame::prelude::BULK_ATOMIC_WARN_HOLD,
     )?;
+    // The refusal threshold on `archive_windowed`'s session count. Exposed so a
+    // caller computing a window from a span can check it before the call rather
+    // than catching `ArchiveWindowError` after it.
+    m.add(
+        "MAX_ARCHIVE_SESSIONS",
+        macrame::connection::MAX_ARCHIVE_SESSIONS,
+    )?;
+    // The four chunk ceilings. **Ceilings, not sizes** — since 0.12.0 the bulk
+    // loops time each chunk and size the next from its measured hold (D-143,
+    // D-146), so these are the largest a chunk will ever be and a populated
+    // database converges below them. A Python caller dividing a batch by one of
+    // these to predict transaction count is reading a 0.11.0 fact.
+    m.add("CHUNK_ROWS_EDGES", macrame::connection::chunk_rows::EDGES)?;
+    m.add(
+        "CHUNK_ROWS_CONCEPTS",
+        macrame::connection::chunk_rows::CONCEPTS,
+    )?;
+    m.add(
+        "CHUNK_ROWS_ANNOTATIONS",
+        macrame::connection::chunk_rows::ANNOTATIONS,
+    )?;
+    m.add(
+        "CHUNK_ROWS_EMBEDDINGS",
+        macrame::connection::chunk_rows::EMBEDDINGS,
+    )?;
     m.add_function(wrap_pyfunction!(runtime::_block_for_testing, m)?)?;
     m.add_function(wrap_pyfunction!(runtime::_mark_forked, m)?)?;
     m.add_function(wrap_pyfunction!(testing::_db_error_variants, m)?)?;

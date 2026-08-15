@@ -58,6 +58,20 @@ BULK_ATOMIC_WARN_HOLD: Final[timedelta]
 BUCKET_BOUNDS_MICROS: Final[list[int]]
 #: How many disagreements `ChainCheck` collects before it truncates.
 CHAIN_CHECK_SAMPLE_LIMIT: Final[int]
+#: Most sessions one `archive_windowed` call will run. Above this it refuses
+#: rather than clamping (`ArchiveWindowError`) — a window that implies more than
+#: this many sessions is a caller who meant a wider window.
+MAX_ARCHIVE_SESSIONS: Final[int]
+#: The largest chunk each bulk path will ever ask for.
+#:
+#: **Ceilings, not sizes.** Since 0.12.0 the bulk loops time each chunk and size
+#: the next one from its measured hold (D-143, D-146); these bound that search
+#: from above. A populated database converges *below* them, so dividing a batch
+#: by one of these predicts a transaction count that is a lower bound at best.
+CHUNK_ROWS_EDGES: Final[int]
+CHUNK_ROWS_CONCEPTS: Final[int]
+CHUNK_ROWS_ANNOTATIONS: Final[int]
+CHUNK_ROWS_EMBEDDINGS: Final[int]
 
 # ---------------------------------------------------------------- functions ---
 

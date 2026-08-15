@@ -767,6 +767,25 @@ Closes §4.6. Six gaps, plus everything 0.13.0 introduces.
 docstrings must say so — a Python caller reading them as fixed chunk sizes is
 reading a 0.11.0 fact.
 
+> **Done, 0.12.18.** Six constants, not three: `MAX_ARCHIVE_SESSIONS` plus the
+> four `chunk_rows` ceilings, flat rather than as a namespace (D-161). A
+> `chunk_rows` submodule would need its own `.pyi` and its own entry in
+> `test_stubs.py`; a dict would lose `Final[int]`, which is what `mypy --strict`
+> reads — so the two gates that already keep this surface honest only work on
+> flat `Final` names. The ceiling-not-size correction is in the Rust
+> registration comment and repeated in the stub.
+>
+> **The dev install was shadowed and the suite had been testing a 0.12.0
+> extension.** `site-packages` held a non-editable `macrame-db 0.12.0` whose
+> real `macrame/` directory won over the editable path entry, so
+> `macrame.__version__` read 0.12.0 against a source tree at 0.12.17. Nothing
+> caught it because `test_packaging`'s version check compares the *installed*
+> wheel to the *installed* binding — both stale, and agreeing. Removed and
+> reinstalled with `maturin develop` from the repo root (the root `pyproject`
+> is the maturin project; `bindings/python` has no `pyproject` and installing
+> from there produces a `macrame_py` distribution that ships only `_macrame`).
+> 357 passed, 2 skipped.
+
 **W6.2 — `registered_models()` and `declared_dimension()`.** Closes the
 write-without-read asymmetry on the vector surface: Python can register a model
 and cannot enumerate what is registered.

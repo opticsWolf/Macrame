@@ -66,6 +66,11 @@ from ._macrame import (
     BUCKET_BOUNDS_MICROS,
     BULK_ATOMIC_WARN_HOLD,
     CHAIN_CHECK_SAMPLE_LIMIT,
+    CHUNK_ROWS_ANNOTATIONS,
+    CHUNK_ROWS_CONCEPTS,
+    CHUNK_ROWS_EDGES,
+    CHUNK_ROWS_EMBEDDINGS,
+    MAX_ARCHIVE_SESSIONS,
     OPEN,
     RRF_K,
     Annotation,
@@ -164,6 +169,11 @@ __all__ = [
     # write-path budgeting
     "estimate_bulk_hold",
     "BULK_ATOMIC_WARN_HOLD",
+    "CHUNK_ROWS_EDGES",
+    "CHUNK_ROWS_CONCEPTS",
+    "CHUNK_ROWS_ANNOTATIONS",
+    "CHUNK_ROWS_EMBEDDINGS",
+    "MAX_ARCHIVE_SESSIONS",
     # base and groups
     "MacrameError",
     "MacrameClosedError",
