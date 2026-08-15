@@ -1,11 +1,12 @@
 # Test-harness settings for R15 (see the risk register in docs/).
 #
-# libSQL faults with STATUS_ACCESS_VIOLATION (0xc0000005) when local databases
-# are opened *concurrently* in one process. It is not a Macrame defect: it
-# reproduces with no Macrame types in the loop, it is not confined to any one
-# test binary -- storage_boundary, vector_filter, replay_snapshot, write_path
-# and the property binaries have all died mid-run -- and upgrading the
-# dependency 0.6.0 -> 0.9.30 did not change it.
+# libSQL faults with STATUS_ACCESS_VIOLATION (0xc0000005) once a process has
+# opened enough distinct local databases. NOT concurrently -- that was the
+# diagnosis here from 0.6.0 to 0.12.0 and it is wrong; see below. It is not a
+# Macrame defect: it reproduces with no Macrame types in the loop, it is not
+# confined to any one test binary -- storage_boundary, vector_filter,
+# replay_snapshot, write_path and the property binaries have all died mid-run --
+# and upgrading the dependency 0.6.0 -> 0.9.30 did not change it.
 #
 # ---------------------------------------------------------------------------
 # If you are here because the build went red, read this paragraph first.
@@ -49,7 +50,8 @@
 #
 # One task, one OS thread, open -> connect -> query -> drop in a loop, nothing
 # overlapping anything. It still faults. 500 sequential opens is 0/10 because
-# 500 is simply under the threshold, not because sequential is safe.
+# 500 is far too few to have hit it -- W1.2a below puts the odds at roughly 1 in
+# 20,000-25,000 per connect() -- and not because sequential is safe.
 #
 # The rest of the matrix (debug, --secs 2, n = 6-8 -- read as eliminated / not
 # eliminated, NEVER as rates; see the noise-band note further down):
@@ -72,12 +74,36 @@
 # binary does. And it is why serialising anything, including RUST_TEST_THREADS,
 # reduces a rate without removing a fault. Serialising does not lower the total.
 #
-# STILL OPEN (W1.2a): whether the threshold is a fixed cumulative count or a
-# per-connect() probability. Clean runs above passed 10,416 opens while others
-# died earlier, which looks probabilistic rather than like a hard ceiling.
-# Settling it needs the running total printed as it goes and n large enough to
-# clear the noise band. That is what would make this reportable upstream as a
-# leak with a number attached.
+# SETTLED (W1.2a): there is NO threshold. With the running total recorded
+# durably before each round, fault positions pooled over n = 20 span 2,144 to
+# 40,416 while the three clean runs stopped only because the time limit hit.
+# That is a per-connect() probability -- very roughly 1 in 20,000-25,000 on this
+# box -- not a leak with a ceiling. So there is no number to send upstream and
+# the reproducer is the deliverable.
+#
+#   NEAR-MISS, recorded because it nearly shipped as a finding: in the first
+#   session 8 of 11 faults landed on EXACTLY 17,536, which reads as a hard
+#   threshold. Re-running the identical configuration gave it once in eight.
+#   It did not replicate. This instrument can manufacture a convincing exact
+#   constant, which is the noise-band lesson above in a new coordinate, and the
+#   only thing that caught it was running the same config twice.
+#
+# REFINED (W1.3): distinct databases, not merely calls. Every arm above opened a
+# fresh file per iteration, so cumulative connect() and cumulative distinct
+# databases moved together. Holding one path and reopening it (--same-file):
+#
+#     fresh file per open                        6/8   faults from 2,272
+#     one file reopened                          1/8   7 clean runs at 40,352-43,360
+#
+# Read the counts, not the rates. At ~40,000 reconnections to ONE database seven
+# runs in eight are fine; against distinct databases the process is usually dead
+# well before 20,000. So the dominant variable is distinct databases, with
+# connect() as the call that pays for them -- and reopening one file is safer
+# but not immune.
+#
+# Which puts this crate's production shape at the SAFEST point on both axes at
+# once, and the test suite -- a temporary database per case -- at the worst on
+# both. The upstream report is docs/libsql-issue.md.
 #
 # ---------------------------------------------------------------------------
 # What this setting does, and what it does not

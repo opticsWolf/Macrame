@@ -2347,6 +2347,21 @@ The last row is the one that carries the entry. One task, one OS thread, `build 
 
 The only row that eliminates the fault does so by never calling `connect()`, and it survives ~880,000 `build()` calls per run — a 100× volume margin over the arms that die. That is the whole finding: **what the fault counts is cumulative `connect()`.**
 
+## Refined once more: distinct databases, not just calls
+
+Every arm above opened a fresh file per iteration, so *cumulative `connect()`* and *cumulative distinct databases* moved together. `--same-file` separates them (n = 8, same configuration otherwise):
+
+| | faults | how far runs got |
+|---|---|---|
+| a fresh file per open | 6/8 | faults from 2,272 |
+| **one file reopened** | **1/8** | 7 clean runs reached **40,352–43,360** |
+
+Read the counts rather than the rates — they are the robust half, and they do not depend on distinguishing 1/8 from 6/8. At ~40,000 reconnections to one database seven runs in eight are fine; against distinct databases the process is usually dead well before 20,000.
+
+**So the dominant variable is distinct databases, with `connect()` as the call that pays for them.** Reopening one file is not immune, so this refines the volume reading rather than replacing it.
+
+It also sharpens who is exposed, in the direction that matters: **this crate's production shape — one file, a bounded set of connections opened once — is the safest point on both axes at once.** The suite, which creates a temporary database per case, is the worst on both.
+
 ## What this explains that the old diagnosis could not
 
 `.cargo/config.toml` has carried an unexplained anomaly since 0.5.6: every test binary is 0/15 **alone** while the serialised suite running those same binaries is 5/10. It was recorded as "the suite-level runs are finding concurrency that per-binary runs do not, and this data does not say where", with `Database::open`'s three connections named as the suspect and explicitly marked as not evidence.
@@ -2363,8 +2378,21 @@ It also retires the standing untested candidate. The multi-thread runtime was su
 
 **The production claim gets stronger, not weaker.** *One process, one file, a bounded set of connections opened once and never churned* is precisely the shape that never accumulates `connect()` calls, and the 500-sequential-clean figure now reads as confirmation rather than as the boundary of what was tested. The exposed party is, and always was, the test suite.
 
-## Still open (W1.2a)
+## Settled (W1.2a): there is no threshold, and the near-miss is the lesson
 
-Whether the threshold is a **fixed cumulative count** or a **per-`connect()` probability**. Clean release runs passed 10,416 opens while others died earlier, which looks probabilistic rather than like a hard ceiling. Settling it needs the running total printed as the child goes, several `--opens`/`--secs` combinations, and n large enough to clear the noise band. **That is the difference between this being a diagnosis and being an upstream bug report with a number in it**, which is what [R15](s11-s12-milestones-and-risks.md#r15) has wanted since 0.5.4.
+`--progress-file` makes the child record its running total once per round, durable *before* the fault rather than reported after it. Pooled n = 20 at one configuration:
+
+```text
+faults (17):  2144  2272  2272  6544 10176 10928 17536 ×8  19520 33856 40416
+clean  (3):  42416 44864 46384   <- all three stopped on the time limit
+```
+
+**Not a fixed count.** Positions span an order of magnitude and the clean runs stopped only because time ran out — the shape of a per-`connect()` probability, very roughly 1 in 20,000–25,000 here. **So there is no number to send upstream, and the reproducer is the deliverable instead.**
+
+**Now read the 17,536 column.** In the first session 8 of 11 faults landed on that exact value — not what noise looks like, and it reads as a hard threshold. Re-running the *identical* configuration produced it once in eight against a spread of 2,272–40,416. **It did not replicate**, and it is left in the table rather than dropped because an instrument that manufactures a convincing exact constant is worth knowing about. This is [D-124](s13-decision-register.md#d-124)'s noise band arriving in a new coordinate, and the only thing that caught it was running the same configuration twice before believing it.
+
+## W1.3: the report is written
+
+[`docs/libsql-issue.md`](../libsql-issue.md) replaces the 2026-07-31 report, whose stated trigger — concurrent open — this entry refutes. It carries a ~15-line single-threaded reproducer, the elimination table, the distinct-file comparison, and the non-threshold data, and it asks three specific questions rather than for a fix. **Sending it is the maintainer's action; nothing here does it.**
 
 **Rejected.** *Putting a process-wide mutex in `open()`* — the [road map](../Macrame%20Road%20to%201.0.md) specified measuring before implementing precisely here, and the measurement refutes it: `--serial-opens` and `--serial-connect` both still fault. *Lifting the `property-tests` quarantine* — nothing here lowers the rate, and the volume reading says that step is the worst-exposed by construction. *Republishing the rate figures as a comparison between arms* — n = 6–10 against a ~30-point noise band, which is the error [D-124](s13-decision-register.md#d-124) retracted; the arms carry a boolean and the 100× margin on `--first-use build`, nothing finer. *Rewriting the six-release history of this row* — the concurrency sweep was correctly measured and correctly reported, and reading it as sloppiness rather than as an under-sampled control would lose the actual lesson, which is that a one-row arm is not a control.

@@ -94,14 +94,65 @@
 //!   — 500 is simply well under the threshold. What is exposed is the test
 //!   suite, which opens thousands of databases per run.
 //!
-//! **Next, and not yet done (W1.2a).** Whether the threshold is a fixed
-//! cumulative count or a rate. The clean `--sequential --current-thread` runs
-//! above reached 6,048–6,768 opens without faulting, so it is not a hard ceiling
-//! at 6,000; it looks probabilistic per `connect()`. Settling it needs runs at
-//! several `--opens` and `--secs` with the cumulative count printed as it goes,
-//! and enough n to survive the noise band this section opens by warning about.
-//! That distinction is what decides whether this is reportable upstream as a
-//! leak with a number attached.
+//! # W1.2a — there is no threshold, and the near-miss is the lesson
+//!
+//! `--progress-file` makes the child record its running `connect()` total once
+//! per round, so a faulting run reports where it died. The fault kills the
+//! process, so the count has to be durable *before* the fault rather than
+//! reported after it.
+//!
+//! Pooled over n = 20 at `--opens 16 --secs 15 --sequential --current-thread`,
+//! release, in two sessions:
+//!
+//! ```text
+//! faults (17):  2144  2272  2272  6544 10176 10928 17536 17536 17536
+//!              17536 17536 17536 17536 17536 19520 33856 40416
+//! clean  (3):  42416 44864 46384   <- all three hit the 15 s deadline
+//! ```
+//!
+//! **Not a fixed cumulative count.** Fault positions span an order of magnitude
+//! and the three clean runs stopped only because time ran out. That is the shape
+//! of a **per-`connect()` probability** — very roughly 1 in 20,000–25,000 on this
+//! machine — and not of a leak with a ceiling. So there is no magic number to
+//! send upstream, and the reproducer is the deliverable instead.
+//!
+//! **Now read the 17,536 column, because it nearly went into a bug report.** In
+//! the first session 8 of 11 faults landed on that exact value, which is not
+//! what noise looks like and reads as a hard threshold. Re-running the
+//! *identical* configuration produced it once in eight, against a spread of
+//! 2,272–40,416. **The cluster did not replicate.** It is left in the table above
+//! rather than dropped, because an instrument that manufactures a convincing
+//! exact constant is worth knowing about — this is [D-124]'s noise-band finding
+//! arriving in a new coordinate, and the only thing that caught it was running
+//! the same configuration twice before believing it.
+//!
+//! [D-124]: ../docs/architecture/s13-decision-register.md#d-124
+//!
+//! # W1.3 — distinct databases, not just `connect()` calls
+//!
+//! Every arm above opened a fresh file per iteration, so *cumulative
+//! `connect()`* and *cumulative distinct databases* moved together and neither
+//! could be separated from the other. `--same-file` holds one path and reopens
+//! it. Same config otherwise, `--opens 16 --secs 15 --sequential
+//! --current-thread`, release, n = 8:
+//!
+//! | | faults | where the run got to |
+//! |---|---|---|
+//! | distinct file per open | 6/8 | faults from 2,272; clean runs 42,416–44,864 |
+//! | **`--same-file`** | **1/8** | one fault at 30,448; 7 clean runs **40,352–43,360** |
+//!
+//! Read the *counts*, not the rates — they are the robust half. At ~40,000
+//! reconnections to one database, seven runs in eight are fine; against distinct
+//! databases the process is usually dead well before 20,000, sometimes by 2,272.
+//!
+//! **So the dominant variable is distinct databases, and `connect()` is the call
+//! that pays for them.** Reopening one file is not immune (1/8), so this refines
+//! the volume finding rather than replacing it.
+//!
+//! It also sharpens who is exposed, in the direction that matters here: this
+//! crate's production shape — one file, a bounded set of connections opened once
+//! — is the *safest* point on both axes at once. The test suite, which creates a
+//! fresh temporary database per case, is the worst on both.
 //!
 //! # Running it
 //!
@@ -120,6 +171,10 @@
 //! # The arm that rules out concurrency outright
 //! cargo run --release --example r15_soak -- --arm storm --runs 8 \
 //!     --sequential --current-thread
+//!
+//! # W1.2a — where the fault lands. Run it TWICE before believing a cluster.
+//! cargo run --release --example r15_soak -- --arm storm --runs 12 --secs 15 \
+//!     --opens 16 --sequential --current-thread
 //! ```
 //!
 //! Every comparison here is against the default `storm` run at the **same**
@@ -188,6 +243,21 @@ struct Args {
     /// since 0.8.0. `--sequential --current-thread` is the arm that separates
     /// them: one task, one thread, no migration, no overlap.
     current_thread: bool,
+    /// Reopen one file instead of a fresh file per open (W1.3).
+    ///
+    /// Distinguishes *cumulative `connect()`* from *cumulative distinct
+    /// databases*, which every arm so far has varied together. It also decides
+    /// how simple the upstream reproducer can be, and it bears directly on this
+    /// crate's own exposure claim: a caller who reopens one database in a loop
+    /// is in a different regime from a test suite that makes thousands.
+    same_file: bool,
+    /// Where the child records its running `connect()` total (W1.2a).
+    ///
+    /// The fault kills the process, so the child's own summary line never
+    /// prints on the runs that matter — the count has to be *durable before*
+    /// the fault, not reported after it. Rewritten once per round, which is
+    /// cheap next to a round of opens and gives resolution of `--opens`.
+    progress_file: Option<String>,
     /// How far each opener goes: `build`, `connect`, or `query`.
     ///
     /// Three steps, because the first measurement showed they are not one thing:
@@ -210,6 +280,8 @@ fn parse() -> Args {
         hold: false,
         sequential: false,
         current_thread: false,
+        same_file: false,
+        progress_file: None,
         first_use: "query".into(),
     };
     let argv: Vec<String> = std::env::args().skip(1).collect();
@@ -265,6 +337,14 @@ fn parse() -> Args {
                 a.first_use = "build".into();
                 i += 1;
             }
+            "--same-file" => {
+                a.same_file = true;
+                i += 1;
+            }
+            "--progress-file" => {
+                a.progress_file = Some(argv[i + 1].clone());
+                i += 2;
+            }
             "--child" => {
                 a.child = true;
                 i += 1;
@@ -273,6 +353,19 @@ fn parse() -> Args {
         }
     }
     a
+}
+
+/// The file this opener touches.
+///
+/// Under `--same-file` every opener in every round uses one path, which turns
+/// "cumulative connect()" and "cumulative distinct databases" from one variable
+/// into two.
+fn storm_path(dir: &std::path::Path, round: u64, i: usize, same: bool) -> std::path::PathBuf {
+    if same {
+        dir.join("storm-single.db")
+    } else {
+        dir.join(format!("storm-{round}-{i}.db"))
+    }
 }
 
 /// One round of concurrent opens, with the three variables W1.1 separates.
@@ -293,7 +386,7 @@ async fn open_round(dir: &std::path::Path, round: u64, args: &Args) -> u64 {
     if args.sequential {
         let mut held = Vec::new();
         for i in 0..args.opens {
-            let p = dir.join(format!("storm-{round}-{i}.db"));
+            let p = storm_path(dir, round, i, args.same_file);
             let Ok(d) = libsql::Builder::new_local(&p).build().await else {
                 continue;
             };
@@ -317,7 +410,7 @@ async fn open_round(dir: &std::path::Path, round: u64, args: &Args) -> u64 {
 
     let mut batch = Vec::new();
     for i in 0..args.opens {
-        let p = dir.join(format!("storm-{round}-{i}.db"));
+        let p = storm_path(dir, round, i, args.same_file);
         let gate = Arc::clone(&gate);
         let serial = args.serial_opens;
         let serial_connect = args.serial_connect;
@@ -410,9 +503,17 @@ fn supervise(args: &Args) {
 
     let mut faults = 0usize;
     let mut other = 0usize;
+    // W1.2a: cumulative `connect()` counts. A constant total across different
+    // `--opens` says leak or handle-table exhaustion; a spread says a
+    // per-call probability. Nothing else here distinguishes those.
+    let mut fault_counts: Vec<u64> = Vec::new();
+    let mut clean_counts: Vec<u64> = Vec::new();
+    let progress = std::env::temp_dir().join(format!("r15-progress-{}", std::process::id()));
     for run in 1..=args.runs {
         let t = Instant::now();
+        let _ = std::fs::remove_file(&progress);
         let mut child = std::process::Command::new(&exe);
+        child.args(["--progress-file", &progress.to_string_lossy()]);
         child.args([
             "--child",
             "--arm",
@@ -437,6 +538,9 @@ fn supervise(args: &Args) {
         if args.current_thread {
             child.arg("--current-thread");
         }
+        if args.same_file {
+            child.arg("--same-file");
+        }
         child.args(["--first-use", &args.first_use]);
         let status = child.status().expect("spawn child");
         let code = status.code();
@@ -452,20 +556,46 @@ fn supervise(args: &Args) {
                 "other failure"
             }
         };
+        // Read before the next run wipes it. A faulting child leaves the last
+        // round boundary it got past, so this is a floor on where the fault
+        // landed, accurate to within `--opens`.
+        let reached: Option<u64> = std::fs::read_to_string(&progress)
+            .ok()
+            .and_then(|t| t.trim().parse().ok());
+        match (code, reached) {
+            (Some(5) | Some(-1073741819), Some(n)) => fault_counts.push(n),
+            (Some(0), Some(n)) => clean_counts.push(n),
+            _ => {}
+        }
         println!(
-            "  run {run:>3}/{:<3}  {:>6.1}s  exit {:>12}  {verdict}",
+            "  run {run:>3}/{:<3}  {:>6.1}s  exit {:>12}  connects {:>8}  {verdict}",
             args.runs,
             t.elapsed().as_secs_f64(),
             code.map(|c| c.to_string())
-                .unwrap_or_else(|| "signal".into())
+                .unwrap_or_else(|| "signal".into()),
+            reached.map(|n| n.to_string()).unwrap_or_else(|| "-".into())
         );
     }
+    let _ = std::fs::remove_file(&progress);
 
     println!("\n{}", "-".repeat(60));
     println!(
         "arm={}  faults {}/{}  other failures {}",
         args.arm, faults, args.runs, other
     );
+    let summarise = |label: &str, v: &[u64]| {
+        if v.is_empty() {
+            return;
+        }
+        let (lo, hi) = (v.iter().min().unwrap(), v.iter().max().unwrap());
+        let mean = v.iter().sum::<u64>() / v.len() as u64;
+        println!(
+            "  {label:<21} n={:<3} min={lo:<8} mean={mean:<8} max={hi}",
+            v.len()
+        );
+    };
+    summarise("connects at fault", &fault_counts);
+    summarise("connects when clean", &clean_counts);
     match (args.arm.as_str(), faults) {
         ("claim", 0) => println!(
             "\nThe claim survives this load: one process, one file, a bounded set \n\
@@ -561,6 +691,12 @@ async fn storm(args: &Args) {
     while Instant::now() < deadline {
         opened += open_round(dir.path(), round, args).await;
         round += 1;
+        // Durable before the next round, because the fault takes the process
+        // and with it anything still sitting in a buffer. Truncate-and-write
+        // rather than append: the parent wants the last value, not a log.
+        if let Some(path) = &args.progress_file {
+            let _ = std::fs::write(path, opened.to_string());
+        }
     }
     eprintln!(
         "  [child] rounds={round} opens={opened} per_round={} serial_build={} serial_connect={} first_use={}",
@@ -669,6 +805,8 @@ async fn soak(secs: u64, with_open_storm: bool) {
                 hold: false,
                 sequential: false,
                 current_thread: false,
+                same_file: false,
+                progress_file: None,
                 first_use: "query".into(),
             };
             let mut round = 0u64;
