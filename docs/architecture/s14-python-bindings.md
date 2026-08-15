@@ -26,6 +26,23 @@ object or a dict. Rust's `chunk_rows` module has no Python equivalent that a typ
 reads: a submodule would need its own `.pyi`, and a dict loses `Final[int]` and with it
 the only mechanism (`test_stubs.py`) that keeps the surface honest.
 
+**The vector registry became readable** (W6.2, 0.12.19). `registered_models()` and
+`declared_dimension()` close a write-without-read asymmetry: Python could create a model's
+table and could not enumerate what existed, so *is this model already set up?* was
+answerable only by calling `register_model` again and reading whether it raised — a write
+issued to ask a question, and one that succeeds silently in the case you were checking for.
+
+Both read the schema rather than a registry ([D-037](s13-decision-register.md#d-037)), so
+neither can drift: `sqlite_master` for the set, `PRAGMA table_info` for the width, with
+`F32_BLOB(n)` in the column type as the declaration itself. That is why the dimension is
+worth exposing separately from the list — membership is a list, and the number a caller
+sizes a buffer against is the one storage enforces, not a copy of it.
+
+`declared_dimension` **raises** on an unregistered model rather than returning `None`,
+matching the Rust side. The Python-specific reason is sharper than symmetry: the common
+use is allocating a buffer of that many floats, and `None` there produces a zero-length
+one without an error.
+
 <!--nav-->
 ← [previous](s13-decision-register.md) · [index](README.md) · [next](appendices.md) →
 <!--/nav-->

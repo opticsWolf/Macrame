@@ -811,6 +811,46 @@ impl PyDatabase {
         })
     }
 
+    /// Every model registered in this database, in name order (W6.2).
+    ///
+    /// Read from `sqlite_master` rather than from a registry this crate keeps,
+    /// so it cannot drift from what actually exists (D-037). libSQL's own
+    /// `*_shadow` tables are filtered out, and a table matching the naming
+    /// pattern but not the naming *rule* is skipped rather than returned under
+    /// a name `register_model` would refuse to take back.
+    ///
+    /// The write side has been here since P4.4 and the read side had not, so a
+    /// Python caller could register a model and not enumerate what was
+    /// registered — which made "is this model already set up?" a question
+    /// answerable only by registering it again and reading the exception.
+    fn registered_models(&self, py: Python<'_>) -> PyResult<Vec<String>> {
+        self.with_db(py, move |db| {
+            runtime()
+                .block_on(macrame::vector::registered_models(db.read_conn()))
+                .map(|models| models.into_iter().map(|m| m.to_string()).collect())
+                .map_err(to_py)
+        })
+    }
+
+    /// The dimension `model`'s table declares (W6.2).
+    ///
+    /// `F32_BLOB(768)` in the column type *is* the declaration — this reads it
+    /// back with `PRAGMA table_info` rather than consulting a cache, so the
+    /// number a caller sizes a vector against and the number storage enforces
+    /// are the same number (D-037).
+    ///
+    /// Raises `ModelNotRegisteredError` for a model with no table. That is the
+    /// distinction against `registered_models()`: membership is a list, and
+    /// this is the fact you need before allocating.
+    fn declared_dimension(&self, py: Python<'_>, model: &str) -> PyResult<usize> {
+        let model = vector::model_name(model)?;
+        self.with_db(py, move |db| {
+            runtime()
+                .block_on(macrame::vector::declared_dimension(db.read_conn(), &model))
+                .map_err(to_py)
+        })
+    }
+
     /// Store embeddings, chunked (D-011).
     ///
     /// `rows` is a sequence of `(concept_id, embedding)`. Each embedding may be

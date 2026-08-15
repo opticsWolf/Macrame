@@ -790,6 +790,18 @@ reading a 0.11.0 fact.
 write-without-read asymmetry on the vector surface: Python can register a model
 and cannot enumerate what is registered.
 
+> **Done, 0.12.19.** `registered_models()` and `declared_dimension()` on
+> `Database`, both reading the schema rather than a cache (D-037), both
+> returning names `register_model` takes back. The dimension **raises** on an
+> unknown model rather than answering `None` — the value's use is allocating a
+> buffer of that many floats, and `None` there is a zero-length buffer plus a
+> failure somewhere else (D-162).
+>
+> The asymmetry's cost was more specific than "inconvenient": the only way to
+> ask *is this model registered?* was `register_model` again, which is a write
+> issued as a question and which **succeeds** in the case being checked for.
+> 361 Python passed.
+
 **W6.3 — Clock injection.** The one gap that costs test *capability* rather than
 convenience: `tests_py` cannot assert on `recorded_at` at all today, which is
 defect K's exact shape on the side that never received D-062's fix. Needs a

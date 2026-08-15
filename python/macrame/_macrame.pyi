@@ -711,6 +711,22 @@ class Database:
 
     # -- vector ----------------------------------------------------------------
     def register_model(self, model: str, dim: int) -> None: ...
+    def registered_models(self) -> list[str]:
+        """Every model registered in this database, in name order.
+
+        Read from the schema, not from a registry — so it cannot drift from
+        what exists. Returns names, not tables: each is a string
+        `register_model` and `search_vector` accept back.
+        """
+
+    def declared_dimension(self, model: str) -> int:
+        """The dimension `model`'s table declares.
+
+        Raises `ModelNotRegisteredError` if the model has no table — which is
+        the difference from `registered_models()`: that answers membership,
+        this answers the number you size a vector against.
+        """
+
     def upsert_embeddings(
         self, model: str, rows: Sequence[tuple[str, Embedding]]
     ) -> int: ...

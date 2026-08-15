@@ -80,6 +80,61 @@ def test_searching_an_unregistered_model_raises(db):
         db.search_vector("nosuch", [1.0, 0.0, 0.0, 0.0])
 
 
+def test_the_registry_can_be_read_back_and_not_only_written_to(db):
+    """W6.2 closes the write-without-read asymmetry on this surface.
+
+    Until 0.12.19 Python could register a model and not enumerate what was
+    registered, so "is this already set up?" was answerable only by registering
+    it again and reading the exception — which works, and is a write issued to
+    ask a question.
+    """
+    assert db.registered_models() == ["mini"]
+
+    db.register_model("other", DIM + 3)
+    # Name order, and the names are the ones `register_model` takes back.
+    assert db.registered_models() == ["mini", "other"]
+    for name in db.registered_models():
+        db.register_model(name, db.declared_dimension(name))
+
+
+def test_the_declared_dimension_is_the_one_storage_enforces(db):
+    """Read from the column type, so there is only one number (D-037).
+
+    Asserted against the enforcement rather than against `DIM`: a cached
+    registry would also return 4 here, and the point is that this *is* the
+    schema's declaration, so a vector of that length is accepted and one of
+    that length plus a byte is not.
+    """
+    dim = db.declared_dimension("mini")
+    assert dim == DIM
+
+    db.upsert_embeddings("mini", [("a", [0.5] * dim)])
+    with pytest.raises(macrame.DimMismatchError):
+        db.upsert_embeddings("mini", [("a", [0.5] * (dim + 1))])
+
+
+def test_the_dimension_of_an_unregistered_model_raises(db):
+    """A list answers membership; this answers a number, so absence is an error.
+
+    Returning `None` would make the common use — allocate a buffer of this many
+    floats — silently produce a zero-length one.
+    """
+    with pytest.raises(macrame.ModelNotRegisteredError):
+        db.declared_dimension("nosuch")
+
+
+def test_the_shadow_tables_libsql_creates_are_not_reported_as_models(db):
+    """DiskANN's own tables live in `main` and match nothing a caller registered.
+
+    The filter is in the crate; this asserts it survives the crossing, because
+    a caller iterating `registered_models()` and calling `declared_dimension()`
+    on each would otherwise hit a table with no `embedding` column.
+    """
+    for name in db.registered_models():
+        assert not name.endswith("_shadow")
+        db.declared_dimension(name)
+
+
 # --------------------------------------------------------------------------
 # Embeddings
 # --------------------------------------------------------------------------
