@@ -4,7 +4,7 @@
 # keeps the import path `use macrame::…` unchanged, so this is a registry name
 # and not a rename of the crate anyone writes against.
 name = "macrame-db"
-version = "0.12.10"
+version = "0.12.11"
 edition = "2021"
 # Measured, not declared: `cargo +1.88.0 check --all-features --all-targets`
 # passes and 1.85 does not.
@@ -96,7 +96,9 @@ criterion = { version = "0.5", default-features = false, features = [
 ] }
 
 [features]
-default = []
+# `metrics` is on by default since 0.12.11 (W4.5, D-154). See its own paragraph
+# below for the cost and for the argument, which is not that the cost is small.
+default = ["metrics"]
 
 # The generated-history test binaries. Off by default, as the second half of
 # the R15 mitigation — the first half is `RUST_TEST_THREADS = "1"` in
@@ -121,7 +123,19 @@ default = []
 #     cargo test --features property-tests
 property-tests = []
 
-# Write-actor latency counters (T1.4, D-079). Off by default.
+# Write-actor latency counters (T1.4, D-079). **On by default since 0.12.11**
+# (W4.5, D-154), having been off from 0.6.0 to 0.12.10.
+#
+# The argument is not that the cost is small. It is that a crate organised
+# entirely around a latency bound must not ship a default build that cannot
+# report whether the bound is met. `violations()` is the answer to the only
+# question this design asks about itself, and through 0.12.10 the default build
+# could not answer it. D-093 made exactly this argument for the Python wheel --
+# where a caller cannot rebuild the extension -- and won it; the Rust default
+# was left on the other side of the same reasoning for six releases.
+#
+# Turn it off with `--no-default-features` if the counters are genuinely not
+# wanted. That path is still built and tested.
 #
 # CORRECTED 0.12.8 (W4.1, review §6.2). This paragraph used to read:
 #

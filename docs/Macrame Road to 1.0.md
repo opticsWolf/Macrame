@@ -516,6 +516,30 @@ under D-070's ~29% session noise — **and treat that as the result**: a cost th
 cannot be distinguished from noise by the crate's own benchmark harness is not a
 cost worth defaulting off for.
 
+> **Done, 0.12.11 (D-154). The prediction held, but only after the naive
+> experiment gave the opposite answer.** One run per arm reported metrics-off as
+> 9.0% faster on `assert_edge` and 16.0% faster on `upsert_concept`, both
+> `p < 0.05`, with criterion printing *"Performance has improved."* Re-run
+> alternating — three rounds under load, then six rounds each on a settled
+> machine — **the sign flips between rounds on every row**, every effect is under
+> 0.3 sd, and the two write paths are indistinguishable from `control/select_1`,
+> which runs no metrics code at all. Quiet-machine bound: **under 0.2% of a
+> write, ~0.4 µs on a 246 µs `assert_edge`, consistent with zero**, agreeing with
+> the arithmetic that 14 relaxed atomics is ~0.01%. Unresolvable, as predicted —
+> and now bounded, which is better.
+>
+> The atomic count is **11–14 per turn**, not the 10–11 written above: W4.4's
+> counter landed in between.
+>
+> The methodological half is recorded in D-154 because it will recur: criterion's
+> `change:` compares against the last *saved* baseline, i.e. a different session,
+> and its p-value is computed from within-session variance — so it is
+> structurally blind to the between-session confound and will happily certify
+> drift as an improvement. This is D-124's retraction arriving from the other
+> direction, where the noise argued *for* the decision, which is the harder case
+> to notice. Any A/B across a rebuild must alternate arms and read the control
+> row first.
+
 **W4.6 — Record D-152 and D-153.**
 
 > **Done, 0.12.10.** Both written. D-152 was nearly missed: seven references to

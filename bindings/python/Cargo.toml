@@ -44,12 +44,19 @@ name = "_macrame"
 crate-type = ["cdylib"]
 
 [dependencies]
-# `metrics` is on deliberately (D-093). It is off by default in Rust because a
-# Rust consumer can turn it on; a Python consumer cannot — a feature flag does
-# not survive into a binary wheel, so anything omitted here is unavailable
-# downstream permanently. T1.4/D-079's argument was that an unobservable
-# CHUNK_BUDGET is an aspiration, and the wheel is the one binding that could
-# not opt in later.
+# `metrics` is on deliberately (D-093). The reasoning was that a Rust consumer
+# can turn it on and a Python consumer cannot — a feature flag does not survive
+# into a binary wheel, so anything omitted here is unavailable downstream
+# permanently. T1.4/D-079's argument was that an unobservable CHUNK_BUDGET is an
+# aspiration, and the wheel was the one binding that could not opt in later.
+#
+# **Redundant since 0.12.11, and kept anyway** (W4.5, D-154). `metrics` is now a
+# default feature of `macrame-db` — D-093's argument was finally applied to the
+# Rust side too — so this line no longer changes what is built. Dropping it
+# would make the wheel's counters a consequence of the crate's default rather
+# than of a decision about the wheel, and D-093 is a decision about the wheel.
+# It stays explicit so that turning the default back off cannot silently ship a
+# blind wheel.
 macrame-db = { path = "../..", features = ["metrics"] }
 
 # Already in the graph through macrame-db, so this costs nothing to build; it
