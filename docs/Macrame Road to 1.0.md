@@ -518,6 +518,13 @@ cost worth defaulting off for.
 
 **W4.6 — Record D-152 and D-153.**
 
+> **Done, 0.12.10.** Both written. D-152 was nearly missed: seven references to
+> it existed across `metrics.rs`, `connection.rs` and `actor_metrics_tests.rs`
+> from W4.3's commit, pointing at an entry that had never been written. Nothing
+> catches that — `doc_link_tests` checks anchors *between documents* and a
+> `D-nnn` in a Rust comment is not a link. Worth knowing: the register can be
+> referenced into existence by code and stay empty.
+
 ---
 
 ## 6. W5 — Tuning, checkpoints, and the WAL
