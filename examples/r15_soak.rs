@@ -36,12 +36,76 @@
 //! as — is **one process, one file, a bounded set of connections opened once and
 //! never churned**. The `claim` arm is built to be exactly that and nothing more.
 //!
+//! # The `storm` arm, and what it found (W1.1)
+//!
+//! `control` answers *"does this harness provoke anything?"* and it answers it
+//! by varying everything at once: 48 concurrent opens, a first query on each,
+//! and a saturated soak database beside them. That is the right shape for its
+//! own question and the wrong shape for the next one, which is **which of those
+//! is load-bearing**.
+//!
+//! `storm` runs the open storm alone — no soak database, no readers, no actor —
+//! and puts each candidate variable behind its own flag. Measured on the
+//! reference machine, debug build, `--opens 48 --secs 2 --runs 6`:
+//!
+//! | configuration | faults | what it rules out |
+//! |---|---|---|
+//! | `--first-use build` | **0/6** | `build()` alone, at ~880,000 opens per run |
+//! | `--first-use connect` | 6/6 | — the fault needs `connect()` |
+//! | `--first-use query` (default) | 6/6 | the query is not required |
+//! | `--serial-opens` | 6/6 | serialising `build()` |
+//! | `--serial-connect` | 5/6 | serialising `connect()` |
+//! | `--hold` | 6/6 | concurrent teardown |
+//! | `--sequential` | **4/6** | **concurrency, entirely** |
+//!
+//! # The conclusion, which is not the one the mitigation was built on
+//!
+//! **R15 is not a concurrency bug.** `--sequential` runs one task with no
+//! overlap anywhere — open, connect, query, drop, repeat — and still faults 4/6,
+//! at roughly 6,000 cycles before the fault. Serialising `build()`, serialising
+//! `connect()`, and serialising teardown each leave it untouched.
+//!
+//! What survives every arm is **cumulative volume of `connect()`**. `build()`
+//! alone is clean at 880,000 per run; add `connect()` and it dies at ~6,000
+//! regardless of timing.
+//!
+//! Two consequences, both uncomfortable and both load-bearing:
+//!
+//! * **`RUST_TEST_THREADS = "1"` cannot be the mitigation it is documented as.**
+//!   It serialises, and serialising does not help. That it reduced the observed
+//!   rate is real, but the mechanism recorded for it is wrong — most likely it
+//!   slows the suite enough to lower connections-per-run, not enough to reach
+//!   zero. `.cargo/config.toml`'s 93/100 for the quarantined step is consistent
+//!   with a volume threshold, not with a race.
+//! * **The production claim gets *stronger*, not weaker.** "One process, one
+//!   file, a bounded set of connections opened once and never churned" is
+//!   precisely the shape that never accumulates `connect()` calls. The exposure
+//!   is the test suite, which opens thousands of databases per run — the one
+//!   regime this measurement says is dangerous.
+//!
+//! **Next, and not yet done:** find whether the fault sits at a fixed cumulative
+//! `connect()` count (a leak or a handle-table exhaustion) or at a rate. Run
+//! `--sequential` at several `--opens` and `--secs` and look for a constant
+//! total rather than a constant duration. That distinction decides whether this
+//! is reportable upstream as a leak with a number attached.
+//!
 //! # Running it
 //!
 //! ```text
 //! cargo run --release --example r15_soak -- --arm claim   --secs 20 --runs 10
 //! cargo run --release --example r15_soak -- --arm control --secs 20 --runs 10
+//!
+//! # W1.1 — walk the variables. Change ONE thing between any two runs.
+//! cargo run --release --example r15_soak -- --arm storm --runs 6 --first-use build
+//! cargo run --release --example r15_soak -- --arm storm --runs 6 --first-use connect
+//! cargo run --release --example r15_soak -- --arm storm --runs 6 --serial-opens
+//! cargo run --release --example r15_soak -- --arm storm --runs 6 --serial-connect
+//! cargo run --release --example r15_soak -- --arm storm --runs 6 --hold
+//! cargo run --release --example r15_soak -- --arm storm --runs 6 --sequential
 //! ```
+//!
+//! Every comparison here is against the default `storm` run at the **same**
+//! `--opens`. Two flags at once measures nothing.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -65,6 +129,43 @@ struct Args {
     secs: u64,
     runs: usize,
     child: bool,
+    /// Concurrent opens per round in the `storm` arm. `control` keeps
+    /// [`CONTROL_OPENS`], because its threshold argument is calibrated on it.
+    opens: usize,
+    /// Serialise the `build()` call through a mutex — W1.2's hypothesis as
+    /// written, and measured to make no difference (6/6 faults either way).
+    serial_opens: bool,
+    /// Serialise `connect()` instead. W1.2's hypothesis *corrected* by W1.1:
+    /// `--first-use build` never faults and `--first-use connect` always does,
+    /// so `connect` looked like where a serialising mitigation would have to go.
+    /// Measured at 5/6 — no better than nothing, which is what motivated
+    /// [`Args::hold`].
+    serial_connect: bool,
+    /// Keep every handle alive until the round ends, then drop them one at a
+    /// time in the parent.
+    ///
+    /// The variable neither serialising flag controls. Each opener drops its
+    /// `Connection` and `Database` at the end of its own task, so **teardown is
+    /// concurrent no matter which call is serialised** — which is the one
+    /// explanation consistent with `--serial-connect` still faulting at 5/6
+    /// while `--first-use build` never faults at ~880,000 opens per run.
+    hold: bool,
+    /// No concurrency at all: one task, open→connect→query→drop in a loop.
+    ///
+    /// The last variable W1.1 names — *open count regardless of timing*. Every
+    /// other flag serialises one call while leaving the rest concurrent; this
+    /// removes concurrency entirely at the same per-round count, so a clean run
+    /// says the fault needs simultaneity and a faulting run says it needs only
+    /// volume. Nothing else here distinguishes those two.
+    sequential: bool,
+    /// How far each opener goes: `build`, `connect`, or `query`.
+    ///
+    /// Three steps, because the first measurement showed they are not one thing:
+    /// `build` alone runs ~880,000 times in two seconds without faulting, which
+    /// is fast enough to suspect it of being lazy rather than safe. Splitting
+    /// `connect` out is what distinguishes "opening is fine" from "`build` does
+    /// nothing until you connect".
+    first_use: String,
 }
 
 fn parse() -> Args {
@@ -73,6 +174,12 @@ fn parse() -> Args {
         secs: 20,
         runs: 1,
         child: false,
+        opens: CONTROL_OPENS,
+        serial_opens: false,
+        serial_connect: false,
+        hold: false,
+        sequential: false,
+        first_use: "query".into(),
     };
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -90,6 +197,39 @@ fn parse() -> Args {
                 a.runs = argv[i + 1].parse().unwrap();
                 i += 2;
             }
+            "--opens" => {
+                a.opens = argv[i + 1].parse().unwrap();
+                i += 2;
+            }
+            "--serial-opens" => {
+                a.serial_opens = true;
+                i += 1;
+            }
+            "--serial-connect" => {
+                a.serial_connect = true;
+                i += 1;
+            }
+            "--hold" => {
+                a.hold = true;
+                i += 1;
+            }
+            "--sequential" => {
+                a.sequential = true;
+                i += 1;
+            }
+            "--first-use" => {
+                a.first_use = argv[i + 1].clone();
+                assert!(
+                    matches!(a.first_use.as_str(), "build" | "connect" | "query"),
+                    "--first-use must be build, connect or query"
+                );
+                i += 2;
+            }
+            // Kept as sugar for the original two-way split.
+            "--no-first-query" => {
+                a.first_use = "build".into();
+                i += 1;
+            }
             "--child" => {
                 a.child = true;
                 i += 1;
@@ -100,10 +240,105 @@ fn parse() -> Args {
     a
 }
 
+/// One round of concurrent opens, with the three variables W1.1 separates.
+///
+/// Returns how many opens completed. Errors are swallowed deliberately: R15 is a
+/// process fault, so anything that comes back as a `Result` is by definition not
+/// the thing being measured, and failing the round on it would turn an unrelated
+/// I/O error into a false R15 signal.
+async fn open_round(dir: &std::path::Path, round: u64, args: &Args) -> u64 {
+    // `tokio::sync::Mutex` rather than `std`: it is held across `.build()`,
+    // which is an await point.
+    let gate = Arc::new(tokio::sync::Mutex::new(()));
+
+    // The no-concurrency arm short-circuits the whole spawn/join machinery
+    // rather than driving it with a width of one: a single task that still goes
+    // through `tokio::spawn` is not the same process state as a task that never
+    // spawned, and the difference is exactly what is under test here.
+    if args.sequential {
+        let mut held = Vec::new();
+        for i in 0..args.opens {
+            let p = dir.join(format!("storm-{round}-{i}.db"));
+            let Ok(d) = libsql::Builder::new_local(&p).build().await else {
+                continue;
+            };
+            if args.first_use == "build" {
+                if args.hold {
+                    held.push((d, None));
+                }
+                continue;
+            }
+            let Ok(c) = d.connect() else { continue };
+            if args.first_use == "query" {
+                let _ = c.query("SELECT 1", ()).await;
+            }
+            if args.hold {
+                held.push((d, Some(c)));
+            }
+        }
+        drop(held);
+        return args.opens as u64;
+    }
+
+    let mut batch = Vec::new();
+    for i in 0..args.opens {
+        let p = dir.join(format!("storm-{round}-{i}.db"));
+        let gate = Arc::clone(&gate);
+        let serial = args.serial_opens;
+        let serial_connect = args.serial_connect;
+        let first_use = args.first_use.clone();
+        let hold = args.hold;
+        batch.push(tokio::spawn(async move {
+            // Each guard covers exactly one call and nothing after it. Widening
+            // either to cover the rest would test a much stronger claim than the
+            // one being made, and a clean run under a wide lock would not say
+            // which call needed it.
+            let d = {
+                let _g = if serial { Some(gate.lock().await) } else { None };
+                libsql::Builder::new_local(&p).build().await
+            };
+            let Ok(d) = d else { return None };
+            if first_use == "build" {
+                return hold.then_some((d, None));
+            }
+            let c = {
+                let _g = if serial_connect {
+                    Some(gate.lock().await)
+                } else {
+                    None
+                };
+                d.connect()
+            };
+            let Ok(c) = c else { return None };
+            if first_use == "query" {
+                let _ = c.query("SELECT 1", ()).await;
+            }
+            // Under `--hold` the handles travel back to the parent and are
+            // dropped there, one at a time, after every task has joined. Without
+            // it they drop here, concurrently with 47 other teardowns.
+            hold.then_some((d, Some(c)))
+        }));
+    }
+    let mut held = Vec::new();
+    for h in batch {
+        if let Ok(Some(handles)) = h.await {
+            held.push(handles);
+        }
+    }
+    // Sequential, and explicitly so: `Vec::drop` would also be sequential, but
+    // writing it out is the difference between the property being tested and the
+    // property being incidental to a container's implementation.
+    for (d, c) in held.drain(..) {
+        drop(c);
+        drop(d);
+    }
+    args.opens as u64
+}
+
 fn main() {
     let args = parse();
     if args.child || args.runs <= 1 {
-        run_arm(&args.arm, args.secs);
+        run_arm(&args);
     } else {
         supervise(&args);
     }
@@ -116,8 +351,21 @@ fn main() {
 /// read as a bug rather than as R15.
 fn supervise(args: &Args) {
     let exe = std::env::current_exe().expect("current_exe");
+    let shape = if args.arm == "storm" {
+        format!(
+            " opens={} serial_build={} serial_connect={} hold={} seq={} first_use={}",
+            args.opens,
+            args.serial_opens,
+            args.serial_connect,
+            args.hold,
+            args.sequential,
+            args.first_use
+        )
+    } else {
+        String::new()
+    };
     println!(
-        "R15 soak: arm={} secs={} runs={}\n{}\n",
+        "R15 soak: arm={} secs={} runs={}{shape}\n{}\n",
         args.arm,
         args.secs,
         args.runs,
@@ -128,16 +376,30 @@ fn supervise(args: &Args) {
     let mut other = 0usize;
     for run in 1..=args.runs {
         let t = Instant::now();
-        let status = std::process::Command::new(&exe)
-            .args([
-                "--child",
-                "--arm",
-                &args.arm,
-                "--secs",
-                &args.secs.to_string(),
-            ])
-            .status()
-            .expect("spawn child");
+        let mut child = std::process::Command::new(&exe);
+        child.args([
+            "--child",
+            "--arm",
+            &args.arm,
+            "--secs",
+            &args.secs.to_string(),
+            "--opens",
+            &args.opens.to_string(),
+        ]);
+        if args.serial_opens {
+            child.arg("--serial-opens");
+        }
+        if args.serial_connect {
+            child.arg("--serial-connect");
+        }
+        if args.hold {
+            child.arg("--hold");
+        }
+        if args.sequential {
+            child.arg("--sequential");
+        }
+        child.args(["--first-use", &args.first_use]);
+        let status = child.status().expect("spawn child");
         let code = status.code();
         let verdict = match code {
             Some(0) => "clean",
@@ -187,23 +449,77 @@ fn supervise(args: &Args) {
             "\nThe control faulted {n} times, so the harness does provoke R15 and \n\
              a clean claim arm is a real negative."
         ),
+        ("storm", 0) if args.serial_opens => println!(
+            "\nSerialised opens: 0/{} faults at opens={}. This is the result W1.2 \n\
+             is looking for, and it is only evidence when read against a NON-serial \n\
+             run at the same --opens that DID fault. Run that comparison before \n\
+             putting a mutex anywhere near `open()`.",
+            args.runs, args.opens
+        ),
+        ("storm", n) if args.serial_opens => println!(
+            "\nSerialised opens still faulted {n}/{} at opens={}. The open is not \n\
+             the whole story and a process-wide open mutex is not the mitigation. \n\
+             Vary --no-first-query next: the fault may be in first use, not open.",
+            args.runs, args.opens
+        ),
+        ("storm", 0) => println!(
+            "\nStorm alone did not fault at opens={} in {} runs. If `control` faults \n\
+             at the same count, the opens are not sufficient on their own and the \n\
+             concurrent load is part of the trigger — which would make a mutex on \n\
+             `open()` the wrong fix regardless of what --serial-opens shows.",
+            args.opens, args.runs
+        ),
+        ("storm", n) => println!(
+            "\nStorm alone faulted {n}/{} at opens={} with first_use={} seq={}. \n\
+             The measured picture (see the module docs) is that this is driven by \n\
+             cumulative connect() volume and NOT by concurrency: --sequential \n\
+             faults too. If you are looking for a mitigation, a lock is not it. \n\
+             The open question is whether the threshold is a fixed total or a rate.",
+            args.runs, args.opens, args.first_use, args.sequential
+        ),
         _ => {}
     }
     std::process::exit(if other > 0 { 1 } else { 0 });
 }
 
-fn run_arm(arm: &str, secs: u64) {
+fn run_arm(args: &Args) {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .unwrap();
     rt.block_on(async move {
-        match arm {
-            "claim" => soak(secs, false).await,
-            "control" => soak(secs, true).await,
+        match args.arm.as_str() {
+            "claim" => soak(args.secs, false).await,
+            "control" => soak(args.secs, true).await,
+            "storm" => storm(args).await,
             other => panic!("unknown arm {other}"),
         }
     });
+}
+
+/// The open storm with nothing else running (W1.1).
+///
+/// No soak database, no readers, no actor. Everything `control` holds constant
+/// is simply absent, so a fault here is attributable to the opens and a clean
+/// run at the same `--opens` that `control` faults at is itself a finding: it
+/// would mean the storm needs the concurrent *load* to provoke anything, and the
+/// variable is not the open count at all.
+///
+/// Runs rounds until `--secs` elapses, so it is comparable to the other arms on
+/// duration rather than on round count.
+async fn storm(args: &Args) {
+    let dir = tempfile::TempDir::new().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(args.secs);
+    let mut round = 0u64;
+    let mut opened = 0u64;
+    while Instant::now() < deadline {
+        opened += open_round(dir.path(), round, args).await;
+        round += 1;
+    }
+    eprintln!(
+        "  [child] rounds={round} opens={opened} per_round={} serial_build={} serial_connect={} first_use={}",
+        args.opens, args.serial_opens, args.serial_connect, args.first_use
+    );
 }
 
 /// One long-lived `Database` under load, optionally alongside the open storm.
@@ -289,21 +605,28 @@ async fn soak(secs: u64, with_open_storm: bool) {
         let storm_dir = dir.path().to_path_buf();
         let opens = Arc::clone(&opens);
         tasks.push(tokio::spawn(async move {
+            // Built here rather than taken from the command line, and that is
+            // deliberate: `control`'s job is to be a *fixed* probe whose
+            // threshold argument (see `CONTROL_OPENS`) stays true across runs.
+            // Letting `--opens` or `--serial-opens` reach it would make a clean
+            // control arm mean something different from run to run, and the
+            // claim arm's verdict reads "the control provoked something" as a
+            // constant. Vary the storm in the `storm` arm, which exists for it.
+            let fixed = Args {
+                arm: "control".into(),
+                secs: 0,
+                runs: 1,
+                child: true,
+                opens: CONTROL_OPENS,
+                serial_opens: false,
+                serial_connect: false,
+                hold: false,
+                sequential: false,
+                first_use: "query".into(),
+            };
             let mut round = 0u64;
             while Instant::now() < deadline {
-                let mut batch = Vec::new();
-                for i in 0..CONTROL_OPENS {
-                    let p = storm_dir.join(format!("storm-{round}-{i}.db"));
-                    batch.push(tokio::spawn(async move {
-                        let d = libsql::Builder::new_local(&p).build().await.unwrap();
-                        let c = d.connect().unwrap();
-                        let _ = c.query("SELECT 1", ()).await;
-                    }));
-                }
-                for h in batch {
-                    let _ = h.await;
-                }
-                opens.fetch_add(CONTROL_OPENS as u64, Ordering::Relaxed);
+                opens.fetch_add(open_round(&storm_dir, round, &fixed).await, Ordering::Relaxed);
                 round += 1;
             }
         }));

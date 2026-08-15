@@ -189,18 +189,50 @@ as a gate — and `.cargo/config.toml` records a 93/100 crash rate for the
 quarantined step under sustained load. D-147 established that a flaky test had
 been biasing that rate downward.
 
-**W1.1 — Reproduce under control.** A standalone harness, outside the test
-runner, that opens N libSQL connections to the same file with configurable
-concurrency and open ordering. The question it must answer is narrow: is the
-access violation a function of *concurrent opens*, of *concurrent open plus
-first write*, or of open count regardless of timing? The suite cannot answer
-this because it varies everything at once.
+**W1.1 — Reproduce under control. (done, 0.12.1)** Rather than a new harness,
+`examples/r15_soak.rs` gained a third arm: `storm` runs the open storm alone —
+no soak database, no readers, no actor — with each candidate variable behind its
+own flag. Measured at `--opens 48 --secs 2 --runs 6`, debug, reference machine:
 
-**W1.2 — Test the sequential-open hypothesis.** If a process-wide open mutex —
-serialising `Builder::new_local(...).build()` and nothing after it — takes the
-crash rate to zero, the mitigation is a dozen lines and the quarantine ends.
-Measure it at the harness level first. Do not put a mutex in `open()` on a
-hypothesis.
+| configuration | faults | rules out |
+|---|---|---|
+| `--first-use build` | **0/6** | `build()` alone, at ~880,000 opens per run |
+| `--first-use connect` | 6/6 | — the fault needs `connect()` |
+| `--first-use query` | 6/6 | the query |
+| `--serial-opens` | 6/6 | serialising `build()` |
+| `--serial-connect` | 5/6 | serialising `connect()` |
+| `--hold` | 6/6 | concurrent teardown |
+| `--sequential` | **4/6** | **concurrency, entirely** |
+
+**W1.2 — The sequential-open hypothesis is refuted. (done, 0.12.1)** The plan
+said to measure it at harness level and not to put a mutex in `open()` on a
+hypothesis. That instruction paid for itself immediately: serialising `build()`
+changes nothing (6/6), serialising `connect()` changes nothing worth having
+(5/6), and **`--sequential` — one task, no overlap anywhere — still faults 4/6**
+at roughly 6,000 cycles.
+
+**R15 is not a concurrency bug.** What survives every arm is cumulative
+`connect()` volume: `build()` alone is clean at 880,000 per run, and adding
+`connect()` kills the process at ~6,000 regardless of timing.
+
+Two consequences, both load-bearing:
+
+- **`RUST_TEST_THREADS = "1"` is not the mechanism it is documented as.** It
+  serialises, and serialising does not help. It plausibly lowers
+  connections-per-run enough to reduce the rate, which is a different claim from
+  the one `.cargo/config.toml` makes, and the 93/100 figure is consistent with a
+  volume threshold rather than a race.
+- **The production claim gets stronger.** "One process, one file, a bounded set
+  of connections opened once and never churned" is exactly the shape that never
+  accumulates `connect()` calls. The exposed party is the test suite, which
+  opens thousands of databases per run.
+
+**W1.2a — Fixed total, or a rate?** The one question the matrix does not settle,
+and the one that decides whether this is reportable upstream as a leak with a
+number attached. Run `--sequential` across several `--opens` and `--secs` and
+look for a constant cumulative `connect()` count rather than a constant
+duration. Cheap, and it is now the only thing standing between this and a
+minimal upstream reproducer.
 
 **W1.3 — Report upstream regardless of outcome.** An access violation in libSQL
 0.9.30 is upstream's bug whether or not Macrame can route around it. A minimal
