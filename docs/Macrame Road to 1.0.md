@@ -145,7 +145,7 @@ into a feedback-loop input.
 | 3.5 | `run_writer_actor` cannot return `Err` | Low | W7.3 | 0.14.0 |
 | 3.6 | `write_annotations_atomic` bypasses `classify` | Med | W7.2 | 0.14.0 |
 | 3.7 | Snapshot rename atomic but not durable | Med | W8.3 | 0.14.0 |
-| 4.1 | No anti-starvation floor on low-priority work | Med | W4.4 | 0.13.0 |
+| 4.1 | No anti-starvation floor on low-priority work | Med | W4.4 (counter), W10.4 (the floor itself) | 0.13.0 / 0.14.0 |
 | 4.2 | No cancellation or progress on bulk paths | Med | W7.6 | 0.14.0 |
 | 4.3 | `metrics` off by default | High | W4.5 | 0.13.0 |
 | 4.4 | Metrics surface frozen by accident | High | W4.2, W4.3 | 0.13.0 |
@@ -770,6 +770,36 @@ D-055; it observes that D-055's reasoning was about timings specifically.
 **W10.2 — `PRAGMA optimize` gets a scheduled call site.** Whatever W2.2's
 measurement recommended, made real and tested.
 
+**W10.4 — Decide the low-priority fairness floor, on evidence that is not a
+synthetic burst.** Added 0.12.10, after W4.4's counter falsified the premise
+§16 rejected this on ([D-153](architecture/s13-decision-register.md#d-153)).
+
+W4.4 established the mechanism is unbounded and trivially reachable:
+`run_max=63` out of 63 starved turns, deterministic, a background `bulk_import`
+sitting behind *every* queued interactive write. What it did not establish is
+that any real workload does that — 64 tasks spawned at once is a burst nobody
+has claimed is representative, and a caller writing sequentially queues nothing
+at all.
+
+So this wave is **a measurement first and a policy only if it earns one**, in
+that order:
+
+1. **Get a realistic reading.** Drive `low_starved_run_max` from a workload
+   shaped like use rather than like a stress test — the shapes already in
+   `benches/budgets.rs` and the `*_diag` examples are the candidates, since they
+   exist to model real paths. A run length in the low single digits is the tiers
+   working; a run that tracks offered load is the defect.
+2. **Only then, if the reading justifies it, add the floor.** The obvious form
+   is "after N consecutive starved turns, take one low-priority command", which
+   costs one branch per turn and bounds the run at N by construction.
+3. **Whatever the answer, record it and close §16's entry properly.** The
+   rejection currently stands annotated rather than resolved, and inheriting it
+   unread is the failure this wave exists to prevent.
+
+**The counter must not be the only evidence.** It was added in the release that
+would ship the fix, so a before/after taken with it alone measures the fix
+against itself. That is why this is a 0.14.0 wave and not a 0.13.0 one.
+
 **W10.3 — `Subgraph` interior, if measurement justifies it.** Closes §2.5.
 String-keyed adjacency; index-based would be faster. **Benchmark first, and be
 prepared to close this as "not worth it".** A `Subgraph` big enough for this to
@@ -906,3 +936,9 @@ no evidence behind it.
 > inheriting it; what is genuinely still open is whether a 64-task synthetic
 > burst is evidence about production workloads or only about the mechanism, and
 > that is a judgement for the maintainer.
+>
+> **Resolved as scheduled, not as taken: this is now W10.4 in 0.14.0.** The
+> policy is neither shipped blind nor dropped — W10.4 gets a realistic reading
+> first, precisely because the counter was added in the release that would carry
+> the fix, and a before/after taken with it alone measures the fix against
+> itself.
