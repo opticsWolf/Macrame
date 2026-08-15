@@ -4,7 +4,7 @@
 # keeps the import path `use macrame::…` unchanged, so this is a registry name
 # and not a rename of the crate anyone writes against.
 name = "macrame-db"
-version = "0.12.1"
+version = "0.12.2"
 edition = "2021"
 # Measured, not declared: `cargo +1.88.0 check --all-features --all-targets`
 # passes and 1.85 does not.
@@ -100,15 +100,19 @@ default = []
 
 # The generated-history test binaries. Off by default, as the second half of
 # the R15 mitigation — the first half is `RUST_TEST_THREADS = "1"` in
-# .cargo/config.toml, which alone takes the rest of the suite to 0 bad runs in
-# 30. These do not follow it there: a property case needs its own database, and
-# `doctrine_property_tests` still faults often enough serialised to be unusable
-# as a gate on Windows. The rate is recorded in one place only, .cargo/config.toml
-# — this comment carried a stale `~3/25` from 0.5.4 long after that file had
-# moved on, and in 0.8.0 the gap between the two was briefly misread as a
-# regression. A suite that fails for reasons unrelated to the code under test
-# trains people to ignore red, so the residue is quarantined rather than
-# tolerated.
+# .cargo/config.toml. These do not follow it there: a property case needs its
+# own database, and `doctrine_property_tests` still faults often enough
+# serialised to be unusable as a gate on Windows. The rate is recorded in one
+# place only, .cargo/config.toml — this comment carried a stale `~3/25` from
+# 0.5.4 long after that file had moved on, and in 0.8.0 the gap between the two
+# was briefly misread as a regression, so no figure is restated here. A suite
+# that fails for reasons unrelated to the code under test trains people to
+# ignore red, so the residue is quarantined rather than tolerated.
+#
+# D-148 sharpened *why* this set is the residue rather than bad luck: R15 counts
+# cumulative `connect()`, and a database per generated case is the highest-volume
+# shape in the repo. Serialising cannot help it, because serialising does not
+# lower the total.
 #
 # Quarantined, not silenced. These are the tests that found D-035, they run as
 # their own step, and `.proptest-regressions` replays every failure ever found

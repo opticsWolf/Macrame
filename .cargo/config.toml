@@ -28,9 +28,9 @@
 # What is known, and what was believed here and is not true
 # ---------------------------------------------------------------------------
 #
-# The trigger is CONCURRENT OPEN. A standalone reproducer separates the two
-# candidate variables directly (libsql 0.9.30, Windows, release, tokio
-# multi-thread, one file per task):
+# The trigger was recorded here as CONCURRENT OPEN from 0.6.0 to 0.12.0, on a
+# standalone reproducer (libsql 0.9.30, Windows, release, tokio multi-thread,
+# one file per task):
 #
 #     500 opens, sequential, one process         0/10
 #     4 / 8 / 16 concurrent opens                0/10 each
@@ -38,17 +38,46 @@
 #     128 concurrent opens                       5/12
 #     128 concurrent, nothing dropped until end  3/12
 #
-# The threshold sits between 16 and 32 concurrent opens on this machine. The
-# last row is the sharp one: holding every handle alive until the end still
-# faults, so this is concurrent *open*, not an open/drop race and not teardown.
+# THAT DIAGNOSIS IS WRONG, and the reason it held for six releases is that the
+# sequential row stopped at 500. Re-measured 2026-08-15 (0.12.1, D-148) with
+# `examples/r15_soak.rs --arm storm`, which runs the open storm with no soak
+# database, no readers and no actor, and puts each variable behind its own flag
+# (libsql 0.9.30, Windows, RELEASE, --opens 48 --secs 3 --runs 10):
 #
-# REFUTED, and it was written here as the diagnosis until 0.6.0: that the
-# correlate is database open/drop CHURN. The suite data reads that way -- the
-# property binaries open one database per generated case and fault ~3/4 alone,
-# where an ordinary 20-test binary is 0/15 -- but 500 sequential opens in one
-# process is 0/10. Churn is not sufficient; concurrency is. The suite table
-# cannot distinguish the two, and no inference of that kind should be drawn
-# from it.
+#     sequential, CURRENT-THREAD runtime         2/10   <- no overlap, no migration
+#       clean runs reached 9,792-10,416 opens
+#
+# One task, one OS thread, open -> connect -> query -> drop in a loop, nothing
+# overlapping anything. It still faults. 500 sequential opens is 0/10 because
+# 500 is simply under the threshold, not because sequential is safe.
+#
+# The rest of the matrix (debug, --secs 2, n = 6-8 -- read as eliminated / not
+# eliminated, NEVER as rates; see the noise-band note further down):
+#
+#     --first-use build (no connect() at all)    0/6    <- ~880,000 opens per run
+#     --first-use connect (no query)             6/6
+#     --serial-opens   (build() under a mutex)   6/6
+#     --serial-connect (connect() under a mutex) 5/6
+#     --hold (every handle dropped in parent)    6/6
+#     --sequential (multi-thread runtime)        4/6
+#
+# So it is not simultaneity, not thread migration, and not teardown. What
+# survives every arm is CUMULATIVE connect() VOLUME: build() alone is clean
+# through ~880,000 opens per run, and adding connect() kills the process within
+# a few thousand however they are spread across threads and time.
+#
+# This also resolves the anomaly flagged below as unexplained -- every binary
+# 0/15 alone while the serialised suite is 5/10. No hidden concurrency is
+# needed: the suite performs far more cumulative connect() calls than any one
+# binary does. And it is why serialising anything, including RUST_TEST_THREADS,
+# reduces a rate without removing a fault. Serialising does not lower the total.
+#
+# STILL OPEN (W1.2a): whether the threshold is a fixed cumulative count or a
+# per-connect() probability. Clean runs above passed 10,416 opens while others
+# died earlier, which looks probabilistic rather than like a hard ceiling.
+# Settling it needs the running total printed as it goes and n large enough to
+# clear the noise band. That is what would make this reportable upstream as a
+# leak with a number attached.
 #
 # ---------------------------------------------------------------------------
 # What this setting does, and what it does not
@@ -66,12 +95,17 @@
 # the original 0/30 was a lucky streak. Read 0/30 as a data point, not as a
 # guarantee this file provides.
 #
-# One thing this does not explain, flagged rather than guessed at: every binary
-# is 0/15 alone while the suite that runs those same binaries serially is 5/10,
-# all under RUST_TEST_THREADS = "1". If concurrent opens are required, the
-# suite-level runs are finding concurrency that per-binary runs do not, and this
-# data does not say where. `Database::open` taking three connections (four with
-# the cadence) is the obvious suspect and is not evidence.
+# One thing this did not explain, and D-148 now does: every binary is 0/15 alone
+# while the suite that runs those same binaries serially is 5/10, all under
+# RUST_TEST_THREADS = "1". That was recorded here as "the suite-level runs are
+# finding concurrency that per-binary runs do not, and this data does not say
+# where", with `Database::open`'s three connections named as the suspect.
+#
+# There is no hidden concurrency. The suite makes far more cumulative connect()
+# calls than any single binary does, and cumulative connect() is what the fault
+# counts. A serialised suite is still a high-volume suite -- which is also why
+# this setting reduces the rate without removing the fault, and why the three
+# figures above (1/20, 0/30, 5/10) track suite SIZE rather than thread count.
 #
 # `[env]` does not override a value already in the environment, so setting
 # RUST_TEST_THREADS yourself still works -- which is how you reproduce the fault
@@ -119,13 +153,18 @@
 # n <= 20 is uninformative about arm differences, and there is no 0.8.0
 # regression: the binary built at v0.7.0 faults at the same rate as HEAD's.
 #
-# Untested candidate, recorded so it is not re-hypothesised from scratch: this
-# binary drives everything through `Builder::new_multi_thread()`, and three
-# connections per `Database::open` can overlap on different workers even with
-# libtest serialised -- which is the concurrency this file notes it could not
-# locate. A current-thread build scored 10/20 against 15/20 for multi-thread at
-# n = 20. That is inside the noise band above and settles nothing; resolving it
-# needs n in the hundreds.
+# That candidate is now TESTED and is not the mechanism (0.12.1, D-148). It was
+# recorded here as: this binary drives everything through
+# `Builder::new_multi_thread()`, and three connections per `Database::open` can
+# overlap on different workers even with libtest serialised -- which is the
+# concurrency this file could not locate. A current-thread build scored 10/20
+# against 15/20 at n = 20, inside the noise band, settling nothing.
+#
+# `r15_soak --arm storm --sequential --current-thread` settles it directly: one
+# task on a current-thread runtime, no overlap and no worker migration anywhere,
+# faults 2/10 in release. The multi-thread runtime is not the trigger, and
+# neither is any other arrangement of the same work in time. See the volume
+# finding at the top of this file.
 #
 # Re-measured at 0.12.0, on the QUARANTINED STEP AS A WHOLE rather than on one
 # binary, because that is the quantity README and ci.yml were both quoting and

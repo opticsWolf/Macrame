@@ -2312,3 +2312,59 @@ Corrected to `committed < edge_count` — a prefix committed and not the whole b
 **The study's own instrument lied too, and it is recorded because it cost two rounds.** The harness attributed failures to `archive_window_tests` and `compat_contract_tests`, neither of which had failed: the classifier's FAILED detail names no binary, so the parser scraped the tail of the log and returned whichever binary printed last. Two flakes were hunted that did not exist. It now reads the `::error::<binary>: <test> FAILED` annotation, which is the classifier's own attribution and was there all along.
 
 **Rejected.** *Publishing 93% as the R15 rate* — it is this machine under this load, and CI says so directly; a single figure is the error this entry is about. *Raising the six-attempt budget to fit 93%* — above; six attempts already exceed what the classifier can justify, and a budget that fits the worst machine measured is a budget that hides real failures on all the others. *Marking the quarantined step `continue-on-error`* — it would make the step unable to report anything, which is worse than a step that is red for a documented reason. *Measuring a cold arm before publishing* — runs spaced minutes apart would separate load from machine and is the obvious successor; it is named in `.cargo/config.toml` as unmeasured rather than folded into this entry as though it had been. *Treating the 26 failures as a property-test discovery* — they were one boundary-sensitive assertion in an ordinary test binary, and reading them as a finding about the engine is the mistake the study's own misattribution nearly caused.
+
+---
+
+<a id="d-148"></a>D-148 — R15 is a **cumulative `connect()` volume** fault, not a concurrency fault, and the diagnosis it replaces stood for six releases because one row of the reproducer stopped at 500 (0.12.1). [D-092](s13-decision-register.md#d-092), [D-095](s13-decision-register.md#d-095), [D-110](s13-decision-register.md#d-110), [D-111](s13-decision-register.md#d-111), [D-124](s13-decision-register.md#d-124), [D-147](s13-decision-register.md#d-147), [R15](s11-s12-milestones-and-risks.md#r15), [§8](s6-s10-flows-to-dependencies.md#8-testing-strategy).
+
+> **Every mitigation this project has shipped for R15 serialises something. Serialising does not help. It lowers the rate because it lowers the total, which is a different mechanism from the one recorded for it — and the one this entry replaces.**
+
+**Fixture: `examples/r15_soak.rs --arm storm`, libsql 0.9.30, Windows, `--opens 48`, one file per open.** The decisive arm is release; the variable-separation matrix is debug. The rate itself stays in `.cargo/config.toml`, which remains its only home ([D-147](s13-decision-register.md#d-147)).
+
+## What the old diagnosis was, and why it survived
+
+From 0.6.0 this register, `.cargo/config.toml`, README and quickref all said **concurrent open**. The evidence was a reproducer that swept concurrency — 0/10 at 4, 8 and 16 simultaneous opens, 2/12 at 32, 5/12 at 128 — against a single sequential row: **500 opens, sequential, one process, 0/10**.
+
+The sweep was sound. The sequential row was three orders of magnitude too short, and everything downstream inherited its conclusion.
+
+## What was measured
+
+`storm` runs the open storm with no soak database, no readers and no actor, and puts each candidate variable behind its own flag. Read the counts as **eliminated / not eliminated** and never as rates — [D-124](s13-decision-register.md#d-124) measured this instrument's noise band at ~30 points at n = 20, and these are n = 6–10.
+
+| arm | faults | eliminated? |
+|---|---|---|
+| `--first-use build` (never calls `connect()`) | 0/6 | **yes** — at ~880,000 opens per run |
+| `--first-use connect` (no query) | 6/6 | no |
+| `--serial-opens` (`build()` under a mutex) | 6/6 | no |
+| `--serial-connect` (`connect()` under a mutex) | 5/6 | no |
+| `--hold` (every handle dropped in the parent) | 6/6 | no |
+| `--sequential` (multi-thread runtime) | 4/6 | no |
+| **`--sequential --current-thread`, release** | **2/10** | **no** |
+
+The last row is the one that carries the entry. One task, one OS thread, `build → connect → query → drop` in a loop: no overlap, no worker migration, no concurrent teardown. It still faults, and its clean runs reached 9,792–10,416 opens.
+
+**So 500 sequential opens is 0/10 because 500 is under the threshold, not because sequential is safe.**
+
+The only row that eliminates the fault does so by never calling `connect()`, and it survives ~880,000 `build()` calls per run — a 100× volume margin over the arms that die. That is the whole finding: **what the fault counts is cumulative `connect()`.**
+
+## What this explains that the old diagnosis could not
+
+`.cargo/config.toml` has carried an unexplained anomaly since 0.5.6: every test binary is 0/15 **alone** while the serialised suite running those same binaries is 5/10. It was recorded as "the suite-level runs are finding concurrency that per-binary runs do not, and this data does not say where", with `Database::open`'s three connections named as the suspect and explicitly marked as not evidence.
+
+There is no hidden concurrency. **The suite makes far more cumulative `connect()` calls than any one binary does.** The same reading covers the rest of the history: the three suite figures (1/20 at 0.5.4, 0/30 at 0.5.4, 5/10 at 0.5.6) track suite *size* — 171 → 221 tests — rather than thread count, and [D-147](s13-decision-register.md#d-147)'s five irreconcilable rates are five machines running the same work at five different speeds, which is five different totals per unit time.
+
+It also retires the standing untested candidate. The multi-thread runtime was suspected because `Database::open` takes three connections that can overlap on different workers even with libtest serialised; a current-thread build scored 10/20 against 15/20 at n = 20, inside the noise band, settling nothing. `--sequential --current-thread` settles it: not the mechanism.
+
+## What follows for the mitigations — nothing, yet
+
+**`RUST_TEST_THREADS = "1"` stays.** It demonstrably lowers the rate; only the recorded mechanism was wrong. It plausibly lowers connections-per-unit-time, which lowers the total reached before a run ends.
+
+**The `property-tests` quarantine stays**, and this entry strengthens its justification: a property case opens a database per generated case, which is the highest-volume shape in the repo.
+
+**The production claim gets stronger, not weaker.** *One process, one file, a bounded set of connections opened once and never churned* is precisely the shape that never accumulates `connect()` calls, and the 500-sequential-clean figure now reads as confirmation rather than as the boundary of what was tested. The exposed party is, and always was, the test suite.
+
+## Still open (W1.2a)
+
+Whether the threshold is a **fixed cumulative count** or a **per-`connect()` probability**. Clean release runs passed 10,416 opens while others died earlier, which looks probabilistic rather than like a hard ceiling. Settling it needs the running total printed as the child goes, several `--opens`/`--secs` combinations, and n large enough to clear the noise band. **That is the difference between this being a diagnosis and being an upstream bug report with a number in it**, which is what [R15](s11-s12-milestones-and-risks.md#r15) has wanted since 0.5.4.
+
+**Rejected.** *Putting a process-wide mutex in `open()`* — the [road map](../Macrame%20Road%20to%201.0.md) specified measuring before implementing precisely here, and the measurement refutes it: `--serial-opens` and `--serial-connect` both still fault. *Lifting the `property-tests` quarantine* — nothing here lowers the rate, and the volume reading says that step is the worst-exposed by construction. *Republishing the rate figures as a comparison between arms* — n = 6–10 against a ~30-point noise band, which is the error [D-124](s13-decision-register.md#d-124) retracted; the arms carry a boolean and the 100× margin on `--first-use build`, nothing finer. *Rewriting the six-release history of this row* — the concurrency sweep was correctly measured and correctly reported, and reading it as sloppiness rather than as an under-sampled control would lose the actual lesson, which is that a one-row arm is not a control.

@@ -194,26 +194,44 @@ been biasing that rate downward.
 no soak database, no readers, no actor — with each candidate variable behind its
 own flag. Measured at `--opens 48 --secs 2 --runs 6`, debug, reference machine:
 
-| configuration | faults | rules out |
+Read the counts as **eliminated / not eliminated**, never as rates: D-124
+measured this instrument's noise band at ~30 points at n = 20, and these are
+n = 6–10. The one row that clears that bar clears it on a 100× volume margin,
+not on its fault count.
+
+| configuration | faults | eliminated? |
 |---|---|---|
-| `--first-use build` | **0/6** | `build()` alone, at ~880,000 opens per run |
-| `--first-use connect` | 6/6 | — the fault needs `connect()` |
-| `--first-use query` | 6/6 | the query |
-| `--serial-opens` | 6/6 | serialising `build()` |
-| `--serial-connect` | 5/6 | serialising `connect()` |
-| `--hold` | 6/6 | concurrent teardown |
-| `--sequential` | **4/6** | **concurrency, entirely** |
+| `--first-use build` | 0/6 | **yes** — at ~880,000 opens per run |
+| `--first-use connect` | 6/6 | no — the fault needs `connect()` |
+| `--first-use query` | 6/6 | no |
+| `--serial-opens` | 6/6 | no — serialising `build()` |
+| `--serial-connect` | 5/6 | no — serialising `connect()` |
+| `--hold` | 6/6 | no — serialising teardown |
+| `--sequential` | 4/6 | no — removing overlap |
+| **`--sequential --current-thread`, release** | **2/10** | no — removing overlap *and* migration |
 
 **W1.2 — The sequential-open hypothesis is refuted. (done, 0.12.1)** The plan
 said to measure it at harness level and not to put a mutex in `open()` on a
 hypothesis. That instruction paid for itself immediately: serialising `build()`
-changes nothing (6/6), serialising `connect()` changes nothing worth having
-(5/6), and **`--sequential` — one task, no overlap anywhere — still faults 4/6**
-at roughly 6,000 cycles.
+changes nothing, serialising `connect()` changes nothing worth having, and
+**`--sequential --current-thread` — one task, one OS thread, no overlap and no
+worker migration — still faults 2/10 in release**, with its clean runs reaching
+9,792–10,416 opens.
 
-**R15 is not a concurrency bug.** What survives every arm is cumulative
-`connect()` volume: `build()` alone is clean at 880,000 per run, and adding
-`connect()` kills the process at ~6,000 regardless of timing.
+That last arm also matters because the risk row had listed the multi-thread
+runtime as the concurrency it *could not locate* since 0.8.0. It is not the
+mechanism either.
+
+**R15 is not a concurrency bug**, in any of the three available senses —
+simultaneity, thread migration, or teardown. What survives every arm is
+cumulative `connect()` volume: `build()` alone is clean at ~880,000 opens per
+run, and adding `connect()` kills the process within a few thousand however the
+work is spread across threads and time.
+
+**The old diagnosis survived six releases because one row of its reproducer
+stopped at 500.** The concurrency sweep was sound; the single sequential control
+was three orders of magnitude too short, and every downstream document inherited
+its conclusion.
 
 Two consequences, both load-bearing:
 
@@ -221,7 +239,15 @@ Two consequences, both load-bearing:
   serialises, and serialising does not help. It plausibly lowers
   connections-per-run enough to reduce the rate, which is a different claim from
   the one `.cargo/config.toml` makes, and the 93/100 figure is consistent with a
-  volume threshold rather than a race.
+  volume threshold rather than a race. **No mitigation changes** — the setting
+  works, and only its recorded reason was wrong.
+- **It discharges an anomaly open since 0.5.6.** `.cargo/config.toml` recorded,
+  unexplained, that every binary is 0/15 alone while the serialised suite
+  running those same binaries is 5/10, and named `Database::open`'s three
+  connections as a suspect it could not evidence. No hidden concurrency is
+  needed: the suite makes far more cumulative `connect()` calls than any one
+  binary. The same reading covers D-147's five irreconcilable rates — five
+  machines running the same work at five speeds is five totals per unit time.
 - **The production claim gets stronger.** "One process, one file, a bounded set
   of connections opened once and never churned" is exactly the shape that never
   accumulates `connect()` calls. The exposed party is the test suite, which

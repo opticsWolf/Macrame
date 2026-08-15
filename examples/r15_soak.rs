@@ -45,49 +45,63 @@
 //! is load-bearing**.
 //!
 //! `storm` runs the open storm alone — no soak database, no readers, no actor —
-//! and puts each candidate variable behind its own flag. Measured on the
-//! reference machine, debug build, `--opens 48 --secs 2 --runs 6`:
+//! and puts each candidate variable behind its own flag.
 //!
-//! | configuration | faults | what it rules out |
+//! **Read the column as a boolean, never as a rate.** D-124 retracted a claim
+//! built on eight runs per arm, and measured the noise band at ~30 points at
+//! n = 20. These are n = 6–8. The only distinction they can carry is
+//! *eliminated* versus *not eliminated*, and the one row that clears that bar
+//! does so on a 100× volume difference rather than on its fault count.
+//! Measured on the reference machine, debug build, `--opens 48 --secs 2`:
+//!
+//! | configuration | faults | eliminated? |
 //! |---|---|---|
-//! | `--first-use build` | **0/6** | `build()` alone, at ~880,000 opens per run |
-//! | `--first-use connect` | 6/6 | — the fault needs `connect()` |
-//! | `--first-use query` (default) | 6/6 | the query is not required |
-//! | `--serial-opens` | 6/6 | serialising `build()` |
-//! | `--serial-connect` | 5/6 | serialising `connect()` |
-//! | `--hold` | 6/6 | concurrent teardown |
-//! | `--sequential` | **4/6** | **concurrency, entirely** |
+//! | `--first-use build` | 0/6 | **yes** — and at ~880,000 opens per run, so this is volume, not luck |
+//! | `--first-use connect` | 6/6 | no — the fault needs `connect()` |
+//! | `--first-use query` (default) | 6/6 | no |
+//! | `--serial-opens` | 6/6 | no — serialising `build()` |
+//! | `--serial-connect` | 5/6 | no — serialising `connect()` |
+//! | `--hold` | 6/6 | no — serialising teardown |
+//! | `--sequential` | 4/6 | no — removing overlap |
+//! | `--sequential --current-thread` | 2/8 | no — removing overlap *and* thread migration |
 //!
 //! # The conclusion, which is not the one the mitigation was built on
 //!
-//! **R15 is not a concurrency bug.** `--sequential` runs one task with no
-//! overlap anywhere — open, connect, query, drop, repeat — and still faults 4/6,
-//! at roughly 6,000 cycles before the fault. Serialising `build()`, serialising
-//! `connect()`, and serialising teardown each leave it untouched.
+//! **R15 is not a concurrency bug, in any of the three senses available.** Not
+//! simultaneity: `--sequential` has no overlap anywhere. Not thread migration:
+//! `--sequential --current-thread` is one task pinned to one thread, which is
+//! the mechanism this risk row has listed as *unlocated* since 0.8.0. Not
+//! teardown: `--hold` drops every handle one at a time in the parent. All three
+//! still fault.
 //!
-//! What survives every arm is **cumulative volume of `connect()`**. `build()`
-//! alone is clean at 880,000 per run; add `connect()` and it dies at ~6,000
-//! regardless of timing.
+//! What survives every arm is **cumulative `connect()`**. `build()` alone is
+//! clean through ~880,000 opens per run; add `connect()` and the process dies
+//! within a few thousand, however they are spread over threads and time.
 //!
-//! Two consequences, both uncomfortable and both load-bearing:
+//! Two consequences, both load-bearing:
 //!
-//! * **`RUST_TEST_THREADS = "1"` cannot be the mitigation it is documented as.**
-//!   It serialises, and serialising does not help. That it reduced the observed
-//!   rate is real, but the mechanism recorded for it is wrong — most likely it
-//!   slows the suite enough to lower connections-per-run, not enough to reach
-//!   zero. `.cargo/config.toml`'s 93/100 for the quarantined step is consistent
-//!   with a volume threshold, not with a race.
+//! * **`RUST_TEST_THREADS = "1"` cannot work by the mechanism recorded for it.**
+//!   It serialises, and every arm here that serialises something still faults.
+//!   That it lowered the observed rate is not in doubt; *why* is, and the
+//!   likeliest reading is that it lowers connections-per-run rather than
+//!   removing a race. A volume threshold also explains what the rate history
+//!   could not: five published figures between 45% and 93% that were never
+//!   competing estimates of one constant (D-147).
 //! * **The production claim gets *stronger*, not weaker.** "One process, one
 //!   file, a bounded set of connections opened once and never churned" is
-//!   precisely the shape that never accumulates `connect()` calls. The exposure
-//!   is the test suite, which opens thousands of databases per run — the one
-//!   regime this measurement says is dangerous.
+//!   precisely the shape that never accumulates `connect()` calls, and it is
+//!   consistent with the 500-sequential-opens-clean figure in the binding notes
+//!   — 500 is simply well under the threshold. What is exposed is the test
+//!   suite, which opens thousands of databases per run.
 //!
-//! **Next, and not yet done:** find whether the fault sits at a fixed cumulative
-//! `connect()` count (a leak or a handle-table exhaustion) or at a rate. Run
-//! `--sequential` at several `--opens` and `--secs` and look for a constant
-//! total rather than a constant duration. That distinction decides whether this
-//! is reportable upstream as a leak with a number attached.
+//! **Next, and not yet done (W1.2a).** Whether the threshold is a fixed
+//! cumulative count or a rate. The clean `--sequential --current-thread` runs
+//! above reached 6,048–6,768 opens without faulting, so it is not a hard ceiling
+//! at 6,000; it looks probabilistic per `connect()`. Settling it needs runs at
+//! several `--opens` and `--secs` with the cumulative count printed as it goes,
+//! and enough n to survive the noise band this section opens by warning about.
+//! That distinction is what decides whether this is reportable upstream as a
+//! leak with a number attached.
 //!
 //! # Running it
 //!
@@ -102,10 +116,16 @@
 //! cargo run --release --example r15_soak -- --arm storm --runs 6 --serial-connect
 //! cargo run --release --example r15_soak -- --arm storm --runs 6 --hold
 //! cargo run --release --example r15_soak -- --arm storm --runs 6 --sequential
+//!
+//! # The arm that rules out concurrency outright
+//! cargo run --release --example r15_soak -- --arm storm --runs 8 \
+//!     --sequential --current-thread
 //! ```
 //!
 //! Every comparison here is against the default `storm` run at the **same**
-//! `--opens`. Two flags at once measures nothing.
+//! `--opens`. Two flags at once measures nothing — with the one exception above,
+//! where `--sequential --current-thread` is deliberately both halves of a single
+//! claim: no overlap *and* no migration.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -158,6 +178,16 @@ struct Args {
     /// says the fault needs simultaneity and a faulting run says it needs only
     /// volume. Nothing else here distinguishes those two.
     sequential: bool,
+    /// Build a current-thread runtime instead of a multi-thread one.
+    ///
+    /// **`--sequential` alone does not rule out concurrency, and this is why.**
+    /// A single task on a multi-thread runtime still migrates across worker
+    /// threads at every `.await`, so connections can be created on one OS thread
+    /// and dropped on another with no overlap anywhere. That is a different
+    /// mechanism from simultaneity and the risk row has named it as unlocated
+    /// since 0.8.0. `--sequential --current-thread` is the arm that separates
+    /// them: one task, one thread, no migration, no overlap.
+    current_thread: bool,
     /// How far each opener goes: `build`, `connect`, or `query`.
     ///
     /// Three steps, because the first measurement showed they are not one thing:
@@ -179,6 +209,7 @@ fn parse() -> Args {
         serial_connect: false,
         hold: false,
         sequential: false,
+        current_thread: false,
         first_use: "query".into(),
     };
     let argv: Vec<String> = std::env::args().skip(1).collect();
@@ -215,6 +246,10 @@ fn parse() -> Args {
             }
             "--sequential" => {
                 a.sequential = true;
+                i += 1;
+            }
+            "--current-thread" => {
+                a.current_thread = true;
                 i += 1;
             }
             "--first-use" => {
@@ -353,12 +388,13 @@ fn supervise(args: &Args) {
     let exe = std::env::current_exe().expect("current_exe");
     let shape = if args.arm == "storm" {
         format!(
-            " opens={} serial_build={} serial_connect={} hold={} seq={} first_use={}",
+            " opens={} serial_build={} serial_connect={} hold={} seq={} current_thread={} first_use={}",
             args.opens,
             args.serial_opens,
             args.serial_connect,
             args.hold,
             args.sequential,
+            args.current_thread,
             args.first_use
         )
     } else {
@@ -397,6 +433,9 @@ fn supervise(args: &Args) {
         }
         if args.sequential {
             child.arg("--sequential");
+        }
+        if args.current_thread {
+            child.arg("--current-thread");
         }
         child.args(["--first-use", &args.first_use]);
         let status = child.status().expect("spawn child");
@@ -483,10 +522,17 @@ fn supervise(args: &Args) {
 }
 
 fn run_arm(args: &Args) {
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .unwrap();
+    let rt = if args.current_thread {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    } else {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    };
     rt.block_on(async move {
         match args.arm.as_str() {
             "claim" => soak(args.secs, false).await,
@@ -622,6 +668,7 @@ async fn soak(secs: u64, with_open_storm: bool) {
                 serial_connect: false,
                 hold: false,
                 sequential: false,
+                current_thread: false,
                 first_use: "query".into(),
             };
             let mut round = 0u64;
