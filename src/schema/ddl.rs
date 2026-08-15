@@ -461,6 +461,57 @@ pub const VERIFY_CONCEPTS_FTS: &str =
 pub const REBUILD_CONCEPTS_FTS: &str =
     "INSERT INTO concepts_fts (concepts_fts) VALUES ('rebuild');";
 
+/// Refresh the query planner's statistics (0.12.4, D-149).
+///
+/// # Why this exists at all
+///
+/// Until 0.12.4 nothing in this crate ever ran `ANALYZE`, so `sqlite_stat1` did
+/// not exist in any database Macrame had created and **every plan was costed
+/// against SQLite's built-in defaults**: assume ~1M rows, assume each bound
+/// equality column divides the search by ten. That estimate is *structural* — a
+/// function of how many columns a query binds, not of what the table holds.
+///
+/// Which is a restatement of this schema's own worst recurring defect. From
+/// `tests/index_plan_tests.rs`: *"a covering index captures a query because it
+/// contains the columns, not because it discriminates."* D-042, D-059 and D-064
+/// are three instances of a planner doing the only thing available to it.
+/// [`CREATE_INDICES`] declares two indices that both lead on `source_id`, and
+/// with no statistics the planner separates them by column count alone.
+///
+/// # Bounded by construction
+///
+/// `ANALYZE` is a **write** — it writes `sqlite_stat1` and takes the write lock —
+/// so unbounded on a populated `links_current` it is exactly the kind of
+/// unbudgeted hold `CHUNK_BUDGET` exists to prevent. [`ANALYSIS_LIMIT`], set once
+/// per connection in `configure`, caps the rows examined per index and makes the
+/// cost a function of the index count rather than the table size. That is what
+/// lets this be scheduled as ordinary low-priority work.
+pub const ANALYZE: &str = "ANALYZE;";
+
+/// Re-analyse only what has gone stale (0.12.4, D-149).
+///
+/// SQLite tracks how much each table has changed since its last analysis and
+/// runs `ANALYZE` only where it believes the statistics no longer hold. A no-op
+/// when nothing has moved, which is what makes it safe to call on a schedule
+/// rather than only on demand.
+///
+/// Bounded by [`ANALYSIS_LIMIT`] like everything else on the connection.
+pub const OPTIMIZE: &str = "PRAGMA optimize;";
+
+/// The row cap that makes [`ANALYZE`] budgetable.
+///
+/// 400 is SQLite's own documented recommendation. It buys approximate statistics
+/// in roughly constant time instead of exact statistics in time proportional to
+/// the table — and approximate is emphatically enough here, because the decision
+/// being informed is *which of two indices discriminates*, not a cardinality
+/// estimate anyone reads.
+///
+/// Set on the connection rather than around each call, so it also bounds the
+/// analysis [`OPTIMIZE`] triggers internally. A limit that applied only to the
+/// explicit path would leave the scheduled one unbounded, which is the half that
+/// runs without anybody watching.
+pub const ANALYSIS_LIMIT: &str = "PRAGMA analysis_limit = 400";
+
 /// Every index the schema declares.
 ///
 /// # Two entries left in v8, and why the list is now allowed to be short

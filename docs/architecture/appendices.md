@@ -201,6 +201,24 @@ db.shadow_step(ShadowStep::Swap { build_start, epoch }).await?;  // -> Swapped {
 
 db.rebuild_fts().await?;                               // rebuild concepts_fts (D-051)
 
+// -- Planner statistics (0.12.4, D-149) --
+// Before 0.12.4 nothing ran ANALYZE, so sqlite_stat1 existed in no database this
+// crate had created and every plan was costed against SQLite's built-in
+// defaults: ~1M rows, each bound equality column divides by ten. That estimate
+// is structural -- it depends on how many columns a query binds, not on what the
+// table holds -- which is D-042/D-059/D-064's defect ("captures a query because
+// it contains the columns, not because it discriminates") as a standing state.
+//
+// Both are writes and take the write lock, scheduled as low-priority work.
+// PRAGMA analysis_limit = 400 on every connection bounds the hold by the index
+// count rather than the table size, which is what makes them schedulable at all.
+db.analyze().await?;                                   // ANALYZE, unconditional
+db.optimize().await?;                                  // PRAGMA optimize, only what is stale
+// close() calls optimize() itself, so a process that opens, works and closes
+// keeps its statistics current with nobody arranging it. A failure there warns
+// and does not fail the close: stale statistics cost plan quality, and close()
+// is where a caller learns whether their writes survived.
+
 // -- Archive --
 let report = db.archive(cutoff).await?;                // ArchiveReport { links_archived,
                                                        //   log_entries_archived, horizon }

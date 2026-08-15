@@ -605,6 +605,20 @@ pub enum LowPriCommand {
     RebuildFts {
         responder: oneshot::Sender<Result<()>>,
     },
+    /// Refresh or top up the query planner's statistics (0.12.4, D-149).
+    ///
+    /// Low priority, and not a close call: statistics being a few seconds stale
+    /// costs a plan that was already the plan a moment ago, where preempting an
+    /// interactive assertion costs a caller their latency bound. It is a write —
+    /// it writes `sqlite_stat1` — so it takes the write lock like anything else,
+    /// and `PRAGMA analysis_limit` in `configure` is what keeps the hold a
+    /// function of the index count instead of the table size.
+    Analyze {
+        /// `true` runs `PRAGMA optimize`, which re-analyses only what SQLite
+        /// believes has gone stale; `false` runs `ANALYZE` unconditionally.
+        incremental: bool,
+        responder: oneshot::Sender<Result<()>>,
+    },
     /// One step of a chunked shadow rebuild (§5.8, T1.2, D-082).
     ///
     /// Low priority, and one command per step rather than one per rebuild: the
@@ -1517,6 +1531,70 @@ impl Database {
             .await
     }
 
+    /// Refresh the query planner's statistics (0.12.4, [D-149]).
+    ///
+    /// Runs `ANALYZE`, which writes `sqlite_stat1`. **Before 0.12.4 nothing in
+    /// this crate ever did**, so the planner costed every query against SQLite's
+    /// built-in defaults — assume ~1M rows, assume each bound equality column
+    /// divides by ten. That estimate is structural: it depends on how many
+    /// columns a query binds, not on what the table contains.
+    ///
+    /// Which is this schema's own worst defect restated. D-042, D-059 and D-064
+    /// are three occasions where *a covering index captured a query because it
+    /// contained the columns, not because it discriminated*, and two of the four
+    /// declared indices lead on the same column. Statistics are what let the
+    /// planner tell them apart by measurement instead of by shape.
+    ///
+    /// # Cost, and why it is bounded
+    ///
+    /// This is a write and it takes the write lock. `PRAGMA analysis_limit`
+    /// (set per connection, see [`ddl::ANALYSIS_LIMIT`]) caps the rows examined
+    /// per index, so the hold scales with the number of indices — four — and not
+    /// with the size of `links_current`. It is scheduled as low-priority work
+    /// and will not preempt an interactive assertion.
+    ///
+    /// # When to call it
+    ///
+    /// After a bulk import, and after anything that changes a table's shape by
+    /// an order of magnitude. Prefer [`optimize`] for routine upkeep: it does
+    /// nothing when nothing has moved, and this does the work unconditionally.
+    ///
+    /// Statistics are derived state in the sense Doctrine VI means it — deleting
+    /// `sqlite_stat1` costs plan quality and no information, and this call
+    /// rebuilds it.
+    ///
+    /// [D-149]: ../docs/architecture/s13-decision-register.md#d-149
+    /// [`ddl::ANALYSIS_LIMIT`]: crate::schema::ddl::ANALYSIS_LIMIT
+    /// [`optimize`]: Database::optimize
+    pub async fn analyze(&self) -> Result<()> {
+        self.low(|responder| LowPriCommand::Analyze {
+            incremental: false,
+            responder,
+        })
+        .await
+    }
+
+    /// Re-analyse only what has gone stale (0.12.4, [D-149]).
+    ///
+    /// `PRAGMA optimize`. SQLite tracks how far each table has drifted since its
+    /// last analysis and re-analyses only where it believes the statistics no
+    /// longer hold — so this is a no-op on an idle database and the full cost of
+    /// [`analyze`] on one that has changed completely.
+    ///
+    /// That property is the whole point: it is safe to call on a schedule, where
+    /// [`analyze`] is not. `close()` runs it, so a process that opens, works and
+    /// closes keeps its statistics current without anybody arranging it.
+    ///
+    /// [D-149]: ../docs/architecture/s13-decision-register.md#d-149
+    /// [`analyze`]: Database::analyze
+    pub async fn optimize(&self) -> Result<()> {
+        self.low(|responder| LowPriCommand::Analyze {
+            incremental: true,
+            responder,
+        })
+        .await
+    }
+
     // **There is deliberately no `verify_fts()` (§5.9, D-071).**
     //
     // `rebuild_fts` is the repair with no way to ask whether it is needed, and
@@ -1885,6 +1963,26 @@ impl Database {
             let _ = handle.await;
         }
 
+        // Top up the planner's statistics while the actor is still alive to do
+        // it (0.12.4, D-149). `PRAGMA optimize` re-analyses only what SQLite
+        // believes has gone stale, so on a database that did nothing this costs
+        // nothing, and on one that was just bulk-loaded it is the difference
+        // between the next process planning on measurements and planning on
+        // built-in guesses.
+        //
+        // **Deliberately not fatal.** A failure here costs plan quality on the
+        // next open and nothing else — no ledger state depends on it — and
+        // `close()` is where a caller learns whether their *writes* survived.
+        // Turning a stale-statistics problem into a failed close would bury that
+        // answer under a much less important one.
+        if let Err(e) = self.optimize().await {
+            tracing::warn!(
+                "PRAGMA optimize failed during close(): {e}. Statistics may be \
+                 stale for the next process; call analyze() to rebuild them. \
+                 Nothing else is affected."
+            );
+        }
+
         let (tx, rx) = oneshot::channel();
         let _ = self
             .highpri_tx
@@ -1980,6 +2078,12 @@ async fn configure(conn: libsql::Connection) -> Result<libsql::Connection> {
     conn.execute("PRAGMA synchronous = NORMAL", ()).await?;
     conn.execute("PRAGMA foreign_keys = ON", ()).await?;
     conn.execute("PRAGMA recursive_triggers = OFF", ()).await?;
+    // Bounds every `ANALYZE` this connection will ever run, explicit or
+    // triggered by `PRAGMA optimize` (D-149). Set here rather than around the
+    // call sites so the scheduled path is bounded too — that is the half that
+    // runs with nobody watching. Returns the previous limit as a row, so it goes
+    // through `query()` for the reason the note above gives.
+    let _ = conn.query(crate::schema::ddl::ANALYSIS_LIMIT, ()).await?;
     Ok(conn)
 }
 
@@ -2327,6 +2431,7 @@ impl LowPriCommand {
             // public enum addition (D-036 periphery, but still a break).
             LowPriCommand::Rehydrate { .. } => K::Archive,
             LowPriCommand::RebuildFts { .. } => K::RebuildFts,
+            LowPriCommand::Analyze { .. } => K::Analyze,
             LowPriCommand::ShadowRebuild { .. } => K::ShadowRebuild,
         }
     }
@@ -2435,6 +2540,24 @@ impl LowPriCommand {
                     .await
                     .map(|_| ())
                     .map_err(Into::into);
+                turn.answer(responder, res);
+            }
+            LowPriCommand::Analyze {
+                incremental,
+                responder,
+            } => {
+                // Both go through `query()`, not `execute()`. `PRAGMA optimize`
+                // yields rows, and libsql's `execute()` rejects any statement
+                // that does ("Execute returned rows") — the same trap
+                // `configure` documents. `ANALYZE` does not yield rows, but is
+                // issued the same way so the two arms cannot drift into needing
+                // different call shapes for no visible reason.
+                let sql = if incremental {
+                    crate::schema::ddl::OPTIMIZE
+                } else {
+                    crate::schema::ddl::ANALYZE
+                };
+                let res = conn.query(sql, ()).await.map(|_| ()).map_err(Into::into);
                 turn.answer(responder, res);
             }
         }

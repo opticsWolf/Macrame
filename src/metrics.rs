@@ -71,6 +71,13 @@ pub enum CommandKind {
     /// profiles and the whole point of the chunked path is that its turns are
     /// short — averaging them together would hide exactly the improvement.
     ShadowRebuild,
+    /// Refreshing the query planner's statistics (0.12.4, D-149).
+    ///
+    /// Its own kind rather than folded into `RebuildFts`, though both are
+    /// maintenance on derived state: this one is bounded by
+    /// `PRAGMA analysis_limit` and that one is bounded by the size of the
+    /// concept table, so averaging their holds together would describe neither.
+    Analyze,
 }
 
 impl CommandKind {
@@ -92,6 +99,7 @@ impl CommandKind {
         CommandKind::Archive,
         CommandKind::RebuildFts,
         CommandKind::ShadowRebuild,
+        CommandKind::Analyze,
     ];
 
     pub const COUNT: usize = CommandKind::ALL.len();
@@ -116,6 +124,7 @@ impl CommandKind {
             CommandKind::Archive => "archive",
             CommandKind::RebuildFts => "rebuild_fts",
             CommandKind::ShadowRebuild => "shadow_rebuild",
+            CommandKind::Analyze => "analyze",
         }
     }
 

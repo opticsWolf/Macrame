@@ -325,9 +325,12 @@ nothing.
 before its first `ANALYZE` is a real state Macrame will be in, and the plans it
 gets are real plans. Two fixtures, both asserted.
 
-**W2.5 — Record D-148 and D-149.** That `ANALYZE` is bounded-by-construction and
-scheduled as ordinary low-priority work; and that plan pinning is only
-meaningful against a fixture whose statistics match production's.
+**W2.5 — Record D-149 and D-150.** That `ANALYZE` is bounded-by-construction and
+scheduled as ordinary low-priority work (**D-149, done in 0.12.4**); and that plan
+pinning is only meaningful against a fixture whose statistics match production's.
+
+*Renumbered:* D-148 went to W1's R15 finding, so every allocation below this line
+moves up by one. The register is the authority, not this plan.
 
 ---
 

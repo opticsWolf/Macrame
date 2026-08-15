@@ -2396,3 +2396,53 @@ clean  (3):  42416 44864 46384   <- all three stopped on the time limit
 [`docs/libsql-issue.md`](../libsql-issue.md) replaces the 2026-07-31 report, whose stated trigger — concurrent open — this entry refutes. It carries a ~15-line single-threaded reproducer, the elimination table, the distinct-file comparison, and the non-threshold data, and it asks three specific questions rather than for a fix. **Sending it is the maintainer's action; nothing here does it.**
 
 **Rejected.** *Putting a process-wide mutex in `open()`* — the [road map](../Macrame%20Road%20to%201.0.md) specified measuring before implementing precisely here, and the measurement refutes it: `--serial-opens` and `--serial-connect` both still fault. *Lifting the `property-tests` quarantine* — nothing here lowers the rate, and the volume reading says that step is the worst-exposed by construction. *Republishing the rate figures as a comparison between arms* — n = 6–10 against a ~30-point noise band, which is the error [D-124](s13-decision-register.md#d-124) retracted; the arms carry a boolean and the 100× margin on `--first-use build`, nothing finer. *Rewriting the six-release history of this row* — the concurrency sweep was correctly measured and correctly reported, and reading it as sloppiness rather than as an under-sampled control would lose the actual lesson, which is that a one-row arm is not a control.
+
+---
+
+<a id="d-149"></a>D-149 — The query planner gets **statistics**, bounded by `PRAGMA analysis_limit` so the write is schedulable (0.12.4). [D-042](s13-decision-register.md#d-042), [D-059](s13-decision-register.md#d-059), [D-064](s13-decision-register.md#d-064), [D-079](s13-decision-register.md#d-079), [D-089](s13-decision-register.md#d-089), [D-146](s13-decision-register.md#d-146), [§5.2](s5-modules.md#52-graphbuilderrs--traversal-valid-time-and-attribute-fidelity), [§9](s6-s10-flows-to-dependencies.md#9-performance-budgets).
+
+> **Every plan this crate has ever produced was costed against SQLite's built-in guesses, and the guess is "count the bound columns" — which is the defect D-042, D-059 and D-064 each found the hard way, standing as a permanent condition rather than a bug.**
+
+**Fixture: `tests/analyze_tests.rs`, skewed out-degree — one 149-edge hub against 49 single-edge leaves.** Skew is load-bearing: uniform data is exactly where measured statistics and default guesses agree, so a uniform fixture would pass whether or not the statistics existed.
+
+## What was wrong
+
+`ANALYZE` and `PRAGMA optimize` appeared nowhere in `src/`. `sqlite_stat1` therefore existed in **no database Macrame had ever created**, and SQLite fell back to its defaults: assume ~1,048,576 rows, assume each bound equality column divides the search by ten.
+
+That estimate is *structural*. It is a function of how many columns a query binds — not of what the table holds.
+
+Now read [`tests/index_plan_tests.rs`](../../tests/index_plan_tests.rs)'s own summary of this schema's worst recurring defect: *"a covering index captures a query because it contains the columns, not because it discriminates."* D-042, D-059 and D-064 are three instances of a planner doing the only thing available to it. [`CREATE_INDICES`](../../src/schema/ddl.rs) declares two indices that both lead on `source_id`, and with no statistics they are separated by column count alone. D-059's measured numbers — 4.4 ms into an empty table, 1.06 s into a 90,000-edge hub — are what a wrong selectivity guess costs on a skewed graph, and a code graph is maximally skewed.
+
+**The premise is asserted, not assumed.** `analyze_creates_statistics_that_did_not_exist` checks `sqlite_stat1` is empty *before* the first call. Without that half the test would pass in a world where the engine had been analysing all along, which is the world this entry claims we were not in.
+
+## What was added
+
+`Database::analyze()` runs `ANALYZE`; `Database::optimize()` runs `PRAGMA optimize`, which re-analyses only what SQLite believes has gone stale and is a no-op otherwise. Both are `LowPriCommand::Analyze` with their own [`CommandKind`](../../src/metrics.rs).
+
+**Low priority is not a close call.** Statistics being seconds stale costs a plan that was already the plan a moment ago; preempting an interactive assertion costs a caller their latency bound.
+
+`close()` calls `optimize()`, so a process that opens, works and closes keeps its statistics current with nobody arranging it. **A failure there warns and does not fail the close** — stale statistics cost plan quality and nothing else, and `close()` is where a caller learns whether their *writes* survived. Burying that answer under a much less important one would be the wrong trade.
+
+## Why it is bounded, and why the bound lives on the connection
+
+`ANALYZE` is a **write**: it writes `sqlite_stat1` and takes the write lock. Unbounded on a populated `links_current` that is exactly the unbudgeted hold `CHUNK_BUDGET` exists to prevent, and D-146 made hold time a *control input*, so an unbudgeted one now also perturbs the chunk controller.
+
+`PRAGMA analysis_limit = 400` — SQLite's own recommendation — caps rows examined per index, making the cost a function of the index count (four) rather than the table size. Approximate statistics are emphatically enough here: the decision being informed is *which of two indices discriminates*, not a cardinality anyone reads.
+
+It is set in `configure`, once per connection, rather than around each call. A limit applied only to the explicit path would leave the analysis `PRAGMA optimize` triggers internally unbounded — and that is the half that runs with nobody watching.
+
+## Doctrine and migration: both already accommodate this
+
+`sqlite_stat1` is derived state, rebuildable by re-running the command, carrying no assertions. That is **Doctrine VI** by construction; III and V do not reach it.
+
+And no rung is needed. `verify` checks presence by name and its doc comment already argues for tolerating extra objects; `refuse_if_occupied` filters `name NOT LIKE 'sqlite_%'`, which `sqlite_stat1` matches. Both were checked rather than assumed.
+
+## One thing this does not fix, said plainly
+
+**It does nothing for the vector filter planner**, and `src/graph/vector_filter.rs` already says why: `sqlite_stat1` carries average rows-per-key, which estimates an equality predicate and not multi-hop reachability. That path measures with a capped probe and continues to. Selling `ANALYZE` as improving it would be the same category error this entry is about.
+
+## A finding this turned up in passing
+
+`the_analysis_limit_is_applied_where_connections_are_configured` reads the source rather than querying the database, because **the only connection a test can reach is the wrong one**: `diagnostic_conn()` does not call `configure()` at all and reports `analysis_limit = 0`. Harmless for `ANALYZE` — a read-only connection cannot analyse — but it means diagnostic reads run with a different `busy_timeout` than every other connection in the process. Recorded here, scheduled as W5.5 in the [road map](../Macrame%20Road%20to%201.0.md), and deliberately not fixed out of order.
+
+**Rejected.** *Running `ANALYZE` inside `open()`* — it would put an unbudgeted write on the open path of every process, to fix statistics that are usually already fine. *Skipping `analysis_limit` for "accurate" statistics* — accuracy is not the constraint; a bounded hold is, and 400 rows per index answers the only question being asked. *Making `close()` fail on a failed `optimize()`* — above. *A background timer that analyses periodically* — a second scheduler beside the snapshot cadence, for work `close()` and an explicit call already cover; if a long-lived process needs it, it can call `optimize()` on its own cadence and say when. *Claiming this fixes the D-042/D-059/D-064 bug class* — it removes the blindness that generates it, and the plan-pinning registry still has to catch the instances.
