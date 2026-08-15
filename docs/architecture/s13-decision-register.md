@@ -2427,7 +2427,7 @@ Now read [`tests/index_plan_tests.rs`](../../tests/index_plan_tests.rs)'s own su
 
 `ANALYZE` is a **write**: it writes `sqlite_stat1` and takes the write lock. Unbounded on a populated `links_current` that is exactly the unbudgeted hold `CHUNK_BUDGET` exists to prevent, and D-146 made hold time a *control input*, so an unbudgeted one now also perturbs the chunk controller.
 
-`PRAGMA analysis_limit = 400` — SQLite's own recommendation — caps rows examined per index, making the cost a function of the index count (four) rather than the table size. Approximate statistics are emphatically enough here: the decision being informed is *which of two indices discriminates*, not a cardinality anyone reads.
+`PRAGMA analysis_limit = 400` — SQLite's own recommendation — caps rows examined per index, making the cost a function of the index count (four) rather than the table size. **Measured in 0.12.23 and this sentence is wrong** ([D-166](s13-decision-register.md#d-166)): the pragma is in force and worth 3–4×, but what remains still grows with the table — 5.26 ms at 10,000 edges, 19.1 ms at 40,000, against a 3 ms budget. A constant factor, not an independence. Approximate statistics are emphatically enough here: the decision being informed is *which of two indices discriminates*, not a cardinality anyone reads.
 
 It is set in `configure`, once per connection, rather than around each call. A limit applied only to the explicit path would leave the analysis `PRAGMA optimize` triggers internally unbounded — and that is the half that runs with nobody watching.
 
@@ -2772,3 +2772,22 @@ The `lib.rs` convention block existed so a contributor deciding whether to expos
 **Recorded as revisitable, with the shape of the answer.** If a caller appears, the epoch should cross as an opaque handle rather than as an integer, so the type system carries what the convention would otherwise have to. Waiting is not caution: a type invented for a hypothetical caller is a type nobody can check against a real use.
 
 Rejected: *exposing it with a documented obligation* (above — a convention where there is currently a type); *exposing it with the epoch as an `int`* (the weakest version: a fabricable value in the one place fabrication defeats the interlock); *leaving it unrecorded* (the state W6.5 exists to end — the convention block's whole purpose is that a decision like this is visible where it would be made).
+
+<a id="d-166"></a>D-166 — `analysis_limit` is a constant factor, not a bound; D-149 overstated it and §8 caught it by asking for a measurement (0.12.23, §8 acceptance). [D-149](s13-decision-register.md#d-149), [D-146](s13-decision-register.md#d-146), [§9](s6-s10-flows-to-dependencies.md#9-performance-budgets). Evidence: `examples/analyze_hold.rs`.
+
+[D-149](s13-decision-register.md#d-149) argued that `PRAGMA analysis_limit = 400` "caps the rows examined per index, making the cost a function of the index count (four) rather than the table size", and that this is "what lets this be scheduled as ordinary low-priority work". The argument was made by construction and never observed. §8's acceptance list asked for it **measured, not asserted** — and the measurement disagrees.
+
+| edges | the crate's own hold | `ANALYZE`, limit off | `ANALYZE`, limit 400 |
+|---|---|---|---|
+| 10,000 | 5.26 ms | 18.4 ms | 6.01 ms |
+| 40,000 | 19.1 ms | 78.6 ms | 19.4 ms |
+
+**The pragma is in force, and this is how that gets established at all.** The connection running `ANALYZE` is the write actor's, which no test can reach — `tests/analyze_tests.rs` reads the source for exactly this reason. So the example builds a ledger through `Database`, records the actor's own hold from `metrics()`, then re-opens the same file as a plain libSQL connection and times `ANALYZE` with the limit off and on. The crate's hold tracks the **capped** arm within a few percent and is nowhere near the uncapped one. Worth 3.1× at 10,000 edges and 4.1× at 40,000.
+
+**What it does not do is remove the table from the equation.** Over that 4× range the capped time grew 3.2×, which is very nearly linear. `analysis_limit` damps the constant; it does not change the shape. D-149's mechanism is real and its stated strength is not.
+
+**The consequence was already visible and nobody had looked.** [`CommandKind::Analyze`](s5-modules.md#510-metricsrs--what-the-actor-holds-the-lock-for) is **not** among the budget-exempt kinds, so a 19 ms hold against a 3 ms budget is counted: `metrics().budget_violations()` returns `("analyze", 1)` after a single call on a 40,000-edge ledger, and always would have. The instrument built for this worked; the reading was never taken. That is the argument for §8's "measured, not asserted" wording in general, and it is worth stating because the same phrasing appears against other items.
+
+**The position this leaves, stated rather than repaired.** `ANALYZE` is one indivisible statement — it cannot be chunked the way [D-146](s13-decision-register.md#d-146) chunks the bulk paths — so the hold is what it is. It remains low-priority work, preemptible *between* commands and not within one, and `optimize()` is still what `close()` calls because it does nothing when nothing has moved. What changes is that the rustdoc, the constant's documentation and this register now say ~19 ms rather than implying ~constant, so a caller scheduling `analyze()` on a large ledger is deciding with the real number.
+
+Rejected: *lowering `analysis_limit` until the hold fits the budget* (the limit governs statistical quality, and the budget is missed by 6× — the setting that met it would be sampling too little to separate the two `source_id`-leading indices, which is the entire purpose); *making `Analyze` budget-exempt* (it would silence the one signal that caught this, and exemption is for work that is *inherently* unchunkable **and** deliberately accepted — the second half was never argued for this kind); *chunking `ANALYZE`* (there is no such statement — `ANALYZE <index>` per index would be four holds of a quarter the size at best, and the shape stays linear); *deleting D-149* (its decision was right and its mechanism is real; only the strength claim was wrong, so it is corrected in place and cited here).

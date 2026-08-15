@@ -510,6 +510,29 @@ pub const OPTIMIZE: &str = "PRAGMA optimize;";
 /// analysis [`OPTIMIZE`] triggers internally. A limit that applied only to the
 /// explicit path would leave the scheduled one unbounded, which is the half that
 /// runs without anybody watching.
+///
+/// # Measured in 0.12.23: it is a constant factor, not a bound (D-166)
+///
+/// D-149 claimed this makes `ANALYZE`'s cost "a function of the index count
+/// rather than the table size". Measured on this schema — `examples/analyze_hold.rs`,
+/// which times the crate's own hold beside the same file analysed with the
+/// pragma off and on:
+///
+/// | edges | crate's hold | limit off | limit 400 |
+/// |---|---|---|---|
+/// | 10,000 | 5.26 ms | 18.4 ms | 6.01 ms |
+/// | 40,000 | 19.1 ms | 78.6 ms | 19.4 ms |
+///
+/// The pragma **is** in force — the crate's hold tracks the capped arm and not
+/// the uncapped one, which is how it is established at all, since the
+/// connection that runs `ANALYZE` is the actor's and no test can reach it. It
+/// is worth 3.1× at 10,000 edges and 4.1× at 40,000.
+///
+/// What it does not do is remove the table from the equation: over that 4×
+/// range the capped time grew 3.2×. So `analyze()` on a 40,000-edge ledger
+/// holds the write lock for ~19 ms, about 6× [`crate::CHUNK_BUDGET`], and
+/// [`crate::metrics::CommandKind::Analyze`] is **not** budget-exempt — it
+/// appears in `metrics().budget_violations()` and always had.
 pub const ANALYSIS_LIMIT: &str = "PRAGMA analysis_limit = 400";
 
 /// Every index the schema declares.

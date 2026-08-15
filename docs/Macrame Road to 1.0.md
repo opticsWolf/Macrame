@@ -898,10 +898,38 @@ contributor deciding this stands somewhere that tells them.
    impossible, W1.4's decision says so in writing.
 2. `sqlite_stat1` exists after `analyze()`, and `PRAGMA analysis_limit` bounds
    the hold: measured, not asserted.
+
+   > **Measured, and the measurement refutes half of it** (0.12.23, D-166).
+   > `sqlite_stat1` exists — `tests/analyze_tests.rs`. The bound does not hold
+   > as D-149 stated it. `examples/analyze_hold.rs` times the crate's own hold
+   > beside the same file analysed with the pragma off and on:
+   >
+   > | edges | crate's hold | limit off | limit 400 |
+   > |---|---|---|---|
+   > | 10,000 | 5.26 ms | 18.4 ms | 6.01 ms |
+   > | 40,000 | 19.1 ms | 78.6 ms | 19.4 ms |
+   >
+   > The pragma **is** applied — the crate's hold tracks the capped arm, which
+   > is the only way to establish it, since the connection that runs `ANALYZE`
+   > is the actor's and no test can reach it. It is worth 3–4×. But the capped
+   > time grew 3.2× over a 4× table, so it is a constant factor and not an
+   > independence: `analyze()` on a 40,000-edge ledger misses `CHUNK_BUDGET` by
+   > ~6×.
+   >
+   > **The instrument that catches this already existed and nobody had read
+   > it.** `Analyze` is not budget-exempt, so `metrics().budget_violations()`
+   > returns `("analyze", 1)` after one call — and always would have. That is
+   > the case this item's "measured, not asserted" wording was written for.
 3. `index_plan_tests` runs against both fixtures — empty, and populated+analysed
    — and both are green.
 4. The two new indexes have registry entries, and the query-keyed section covers
    the four named queries.
+
+   > **Met; the count in this line is its own miscount.** W2.3 names *three*
+   > queries — `CONCEPTS_ARCHIVABLE`, `LINKS_ARCHIVABLE`, `recorded_at_floor` —
+   > plus the two new indexes, which belong to the index-keyed `REGISTRY` rather
+   > than to `QUERY_REGISTRY`. All three query entries exist and are asserted
+   > against both fixtures; both indexes have registry entries.
 5. `EXPLAIN QUERY PLAN` on `CONCEPTS_ARCHIVABLE` shows a seek, not a scan.
 6. `cargo build` with no features gives a build whose `metrics()` returns real
    counters.

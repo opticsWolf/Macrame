@@ -1975,9 +1975,23 @@ impl Database {
     ///
     /// This is a write and it takes the write lock. `PRAGMA analysis_limit`
     /// (set per connection, see [`ddl::ANALYSIS_LIMIT`]) caps the rows examined
-    /// per index, so the hold scales with the number of indices — four — and not
-    /// with the size of `links_current`. It is scheduled as low-priority work
-    /// and will not preempt an interactive assertion.
+    /// per index. It is scheduled as low-priority work and will not preempt an
+    /// interactive assertion.
+    ///
+    /// **The bound is a constant factor, not an independence** (0.12.23,
+    /// D-166). This rustdoc said the hold "scales with the number of indices —
+    /// four — and not with the size of `links_current`", which is measurably
+    /// wrong: the pragma is worth 3–4× and what remains still grows with the
+    /// table. Measured, `examples/analyze_hold.rs`: **5.26 ms at 10,000 edges,
+    /// 19.1 ms at 40,000**, against a 3 ms [`crate::CHUNK_BUDGET`].
+    ///
+    /// So this call **misses the budget by ~6× on a moderately sized ledger**,
+    /// and [`crate::metrics::CommandKind::Analyze`] is deliberately not among
+    /// the budget-exempt kinds — `metrics().budget_violations()` names it. That
+    /// is the honest position: the work is low priority and preemptible between
+    /// commands, but it is one indivisible statement and cannot be chunked, so
+    /// the hold is what it is. Prefer [`optimize`], which does nothing when
+    /// nothing has moved.
     ///
     /// # When to call it
     ///
