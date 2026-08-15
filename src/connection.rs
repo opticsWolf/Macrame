@@ -911,6 +911,42 @@ pub struct Tuning {
     /// setting can ever fire. Pair [`WalCheckpointPolicy::Disabled`] with an
     /// explicit [`Database::checkpoint`] or the WAL grows without bound.
     pub wal_autocheckpoint: WalCheckpointPolicy,
+    /// Page cache for the **write** connection, as SQLite's `cache_size`
+    /// (0.12.15, W5.4).
+    ///
+    /// `None` leaves SQLite's default of −2000, which is −2000 *kibibytes*, or
+    /// 2 MB. **Negative values are KiB and positive values are pages** — that
+    /// is SQLite's convention and it is preserved rather than smoothed over,
+    /// because a caller who knows the pragma should not have to discover that
+    /// this crate redefined it. `Some(-64_000)` is 64 MB; `Some(64_000)` is
+    /// 64,000 pages, which at the 4 KiB page size this crate gets is 256 MB.
+    ///
+    /// The writer wants a large cache: it is one connection, it holds the write
+    /// lock while it works, and every page it has to re-read from disk is time
+    /// no other writer can use.
+    ///
+    /// # Unlike the two above, `None` here is not a policy enum
+    ///
+    /// Because SQLite's default is a *value* rather than a mechanism. Absence
+    /// still means "leave it alone" — it just happens that leaving this alone
+    /// is expressible as not running a pragma, where leaving the automatic
+    /// checkpointer alone required saying which of two things "alone" meant.
+    pub writer_cache_size: Option<i32>,
+    /// Page cache for every **read-only** connection: the shared
+    /// [`Database::read_conn`], the snapshot cadence's own connection, and
+    /// (since W5.5) each [`Database::diagnostic_conn`] (0.12.15, W5.4).
+    ///
+    /// Same units as [`Self::writer_cache_size`], and the same `None`.
+    ///
+    /// Split from the writer's because the profiles are opposite and one number
+    /// cannot serve both. There is exactly one writer and it is long-lived, so
+    /// its cache is a fixed cost paid once. Read-only connections are plural —
+    /// `diagnostic_conn` mints a new one per call — so a large value here is
+    /// multiplied by however many a caller opens, and the R15 hazard that
+    /// method documents is about concurrent opens. A single shared number
+    /// therefore has to be small enough for the multiplied case, which is the
+    /// wrong size for the one connection that holds the write lock.
+    pub reader_cache_size: Option<i32>,
 }
 
 // `Clock` is not `Debug` — it is a behavioural trait with two methods and
@@ -929,6 +965,8 @@ impl Tuning {
             },
             clock,
             wal_autocheckpoint: WalCheckpointPolicy::default(),
+            writer_cache_size: None,
+            reader_cache_size: None,
         }
     }
 }
@@ -939,6 +977,8 @@ impl std::fmt::Debug for Tuning {
             .field("cadence", &self.cadence)
             .field("clock", &self.clock.as_ref().map(|_| "<injected>"))
             .field("wal_autocheckpoint", &self.wal_autocheckpoint)
+            .field("writer_cache_size", &self.writer_cache_size)
+            .field("reader_cache_size", &self.reader_cache_size)
             .finish()
     }
 }
@@ -1009,17 +1049,19 @@ impl Database {
             cadence,
             clock: injected,
             wal_autocheckpoint,
+            writer_cache_size,
+            reader_cache_size,
         } = tuning;
         let cadence = cadence.resolve();
         let db = libsql::Builder::new_local(path).build().await?;
-        let write_conn = configure(db.connect()?).await?;
+        let write_conn = configure(db.connect()?, writer_cache_size).await?;
         // The writer is the only connection that commits, so it is the only one
         // whose `wal_autocheckpoint` can ever fire. Setting it on the readers
         // would be a pragma with no path to running (0.12.14, W5.3, D-157).
         if let Some(pragma) = wal_autocheckpoint.pragma() {
             let _ = write_conn.query(&pragma, ()).await?;
         }
-        let read_conn = configure(db.connect()?).await?;
+        let read_conn = configure(db.connect()?, reader_cache_size).await?;
 
         // PRAGMA query_only = ON on reader connection (§5.1.2)
         read_conn.execute("PRAGMA query_only = ON", ()).await?;
@@ -1074,7 +1116,7 @@ impl Database {
         // and this is one more sequential open during `open()`.
         let (cadence_stop, cadence) = match cadence {
             Some(cadence) => {
-                let cadence_conn = configure(db.connect()?).await?;
+                let cadence_conn = configure(db.connect()?, reader_cache_size).await?;
                 cadence_conn.execute("PRAGMA query_only = ON", ()).await?;
                 let (tx, rx) = tokio::sync::watch::channel(false);
                 let handle = tokio::spawn(snapshot::run_cadence(
@@ -2505,7 +2547,10 @@ async fn run_checkpoint(conn: &libsql::Connection) -> Result<CheckpointReport> {
 }
 
 /// Identical pragma configuration on every connection.
-async fn configure(conn: libsql::Connection) -> Result<libsql::Connection> {
+async fn configure(
+    conn: libsql::Connection,
+    cache_size: Option<i32>,
+) -> Result<libsql::Connection> {
     // NOTE: `journal_mode` and `busy_timeout` return their resulting value as a
     // row, and libsql's `execute()` rejects any statement that yields rows
     // ("Execute returned rows"). They must be issued through `query()`.
@@ -2520,6 +2565,13 @@ async fn configure(conn: libsql::Connection) -> Result<libsql::Connection> {
     // runs with nobody watching. Returns the previous limit as a row, so it goes
     // through `query()` for the reason the note above gives.
     let _ = conn.query(crate::schema::ddl::ANALYSIS_LIMIT, ()).await?;
+    // Per-connection, and split writer from reader since 0.12.15 (W5.4,
+    // D-158). `None` runs no pragma at all rather than restating SQLite's
+    // default, so the default remains SQLite's to change.
+    if let Some(pages) = cache_size {
+        conn.execute(&format!("PRAGMA cache_size = {pages}"), ())
+            .await?;
+    }
     Ok(conn)
 }
 

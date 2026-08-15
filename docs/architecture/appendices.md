@@ -36,6 +36,12 @@ let db = Database::open_tuned(path, Tuning {
     // D-157). Disabled is only correct paired with an explicit checkpoint();
     // the default stays at SQLite's 1,000 pages.
     wal_autocheckpoint: WalCheckpointPolicy::Disabled,
+    // Two knobs, not one (0.12.15, D-158): one long-lived writer holding the
+    // lock, against read-only connections that are plural. SQLite's units --
+    // negative is KiB, positive is pages. None runs no pragma, so the default
+    // stays SQLite's -2000.
+    writer_cache_size: Some(-64_000),
+    reader_cache_size: Some(-8_000),
     ..Default::default()
 }).await?;
 

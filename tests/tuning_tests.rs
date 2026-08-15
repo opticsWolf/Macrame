@@ -141,10 +141,13 @@ async fn a_clock_injected_through_tuning_stamps_the_ledger() {
             // Every field named, deliberately. D-155 says an exhaustive
             // literal breaks when a field is added, with a compile error at the
             // call site rather than a behaviour change — and W5.3 added
-            // `wal_autocheckpoint` one release later, breaking exactly here and
-            // nowhere else. Left exhaustive so it keeps demonstrating that.
+            // `wal_autocheckpoint` one release later, and W5.4 the two cache
+            // sizes the release after that — breaking exactly here and nowhere
+            // else, twice. Left exhaustive so it keeps demonstrating that.
             clock: Some(clock),
             wal_autocheckpoint: WalCheckpointPolicy::Default,
+            writer_cache_size: None,
+            reader_cache_size: None,
         },
     )
     .await

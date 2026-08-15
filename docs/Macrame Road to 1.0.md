@@ -672,6 +672,19 @@ of an exogenous input to the 0.12.0 controller.
 connections have opposite profiles and share a default today. Two knobs, because
 one number cannot serve both.
 
+> **Done, 0.12.15 (D-158).** `writer_cache_size` and `reader_cache_size`, both
+> `Option<i32>`, applied per connection. Note the shape: these are `Option` and
+> not policy enums like W5.1's and W5.3's, and the distinction is the point —
+> those two exist because "leave it alone" was ambiguous for a *mechanism* that
+> could be off or default, where for a *value* leaving it alone is simply not
+> setting the pragma. `None` therefore runs nothing, and the default stays
+> SQLite's −2000 rather than being restated here.
+>
+> SQLite's units are kept: negative is KiB, positive is pages. The test asserts
+> the *split* rather than the pragma — a single shared field produces a value
+> that is right everywhere, which is invisible to any test that sets one number
+> and reads it back.
+
 **W5.5 — `diagnostic_conn` calls `configure()`.** Fixes a genuine inconsistency:
 [connection.rs:967](../src/connection.rs:967) opens `SQLITE_OPEN_READ_ONLY` per
 call and never configures the connection, so diagnostic reads run with a

@@ -268,16 +268,36 @@ async fn a_backlog_shows_up_in_the_queue_depth() {
 /// silently does not apply; an extra row is a documented exemption the code does
 /// not grant, which is worse — it tells a caller their unbounded write is
 /// expected when the violation counter is about to disagree.
+///
+/// # It reads the source line by line, since 0.12.15
+///
+/// The first version split on the literal `"\n///\n"`, which is a string a
+/// Windows checkout does not contain: `core.autocrlf=true` is the default there
+/// and every line ends `\r\n`, so the terminator never matched, `table` became
+/// the entire rest of the file, and every kind was "named" — the test failed on
+/// `assert_edge`, which appears in `connection.rs` a hundred times and in no
+/// table. **It reported the two lists as disagreeing when they agreed**, on a
+/// fresh clone, for a reason having nothing to do with either list. A test that
+/// reads source has to tolerate both line endings, and taking lines is how,
+/// because `lines()` already handles it.
 #[test]
 fn the_budget_exemptions_and_their_documented_table_agree() {
     let source = include_str!("../src/connection.rs");
-    let table = source
-        .split("/// | Path | Bound | Why it cannot be chunked |")
-        .nth(1)
-        .expect("CHUNK_BUDGET's exemption table has moved or been renamed")
-        .split("\n///\n")
-        .next()
-        .expect("the exemption table did not terminate");
+    let table: String = source
+        .lines()
+        .skip_while(|l| !l.contains("| Path | Bound | Why it cannot be chunked |"))
+        // The table runs to the first doc line that is not a table row — `///`
+        // alone, or prose. `|` is the delimiter, so a row always has one.
+        .take_while(|l| l.trim_start().starts_with("///") && l.contains('|'))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        table.lines().count() > 3,
+        "CHUNK_BUDGET's exemption table has moved, been renamed, or lost its \
+         rows — {} line(s) matched",
+        table.lines().count()
+    );
 
     for kind in CommandKind::ALL {
         let named = table.contains(kind.as_str());
