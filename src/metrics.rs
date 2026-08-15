@@ -35,7 +35,10 @@
 //!
 //! # The feature gate
 //!
-//! Behind `metrics`, off by default. With the feature off, [`ActorMetrics`] is a
+//! Behind `metrics`, which has been a **default** feature since 0.12.11
+//! (D-154): a crate whose contract is a latency bound must not ship a default
+//! build that cannot report whether the bound is met. `--no-default-features`
+//! still removes it. With the feature off, [`ActorMetrics`] is a
 //! zero-sized type whose methods compile away and [`HoldTimer::start`] does not
 //! read the clock — so the actor loop has **one** shape either way. That
 //! matters more than the nanoseconds: a `#[cfg]` in the loop body is how the
@@ -111,6 +114,17 @@ pub enum CommandKind {
     /// **Appended at the end**, per [`CommandKind::index`]: the position of
     /// every existing variant is a persisted contract in two languages.
     Rehydrate,
+    /// An explicit `PRAGMA wal_checkpoint` (0.12.13, W5.2, D-156).
+    ///
+    /// Its own kind because it is the one actor turn that is **not** a
+    /// transaction: it moves frames from the WAL back into the main database
+    /// file, and its duration is a function of how much WAL has accumulated
+    /// rather than of anything the caller passed. Folding it into any existing
+    /// kind would make that kind's hold distribution bimodal for a reason no
+    /// dashboard could recover.
+    ///
+    /// **Appended at the end**, per [`CommandKind::index`].
+    Checkpoint,
 }
 
 impl CommandKind {
@@ -134,6 +148,7 @@ impl CommandKind {
         CommandKind::ShadowRebuild,
         CommandKind::Analyze,
         CommandKind::Rehydrate,
+        CommandKind::Checkpoint,
     ];
 
     pub const COUNT: usize = CommandKind::ALL.len();
@@ -181,6 +196,7 @@ impl CommandKind {
             CommandKind::ShadowRebuild => "shadow_rebuild",
             CommandKind::Analyze => "analyze",
             CommandKind::Rehydrate => "rehydrate",
+            CommandKind::Checkpoint => "checkpoint",
         }
     }
 
@@ -192,8 +208,11 @@ impl CommandKind {
     /// an `archive` as a budget violation would make the violation count useless
     /// on any database that archives.
     ///
-    /// The two lists must agree. There is no test tying them together, which is
-    /// worth knowing before adding a fifth: the table is prose and this is code.
+    /// The two lists must agree, and since 0.12.9 they are tied together in
+    /// both directions by `the_budget_exemptions_and_their_documented_table_agree`
+    /// — the extra-row direction being the one worth having, since a table row
+    /// with no code behind it promises a caller an exemption the violation
+    /// counter is about to disagree with.
     ///
     /// [`CommandKind::ShadowRebuild`] is deliberately **not** exempt. Its fill
     /// chunks are meant to fit the budget and its swap turn is not going to —
@@ -225,6 +244,7 @@ impl CommandKind {
                 | CommandKind::Archive
                 | CommandKind::RebuildCurrent
                 | CommandKind::Rehydrate
+                | CommandKind::Checkpoint
         )
     }
 }

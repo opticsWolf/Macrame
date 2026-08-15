@@ -284,7 +284,7 @@ fn next_chunk_size(
 /// worst case. That fits inside a 60 Hz frame with room, which is the standard
 /// this bound is ultimately answerable to.
 ///
-/// # Three operations are exempt, and the exemption is a contract, not an oversight
+/// # Some operations are exempt, and the exemption is a contract, not an oversight
 ///
 /// This was recorded in three separate rustdoc notes and nowhere near the bound
 /// itself, which is where a reader looks for its scope (§8.6). Stated here, with
@@ -296,6 +296,7 @@ fn next_chunk_size(
 /// | [`Database::archive`] | measured **26.8 ms** for 2,000 archivable edges; see [`Database::archive_windowed`] | D-012: copy-then-delete must be atomic, or a crash between the phases duplicates or loses rows |
 /// | `rebuild_current` | measured **24.6 / 104 / 318 ms** at 4K / 16K / 40K rows in `links` (was "~50 s per 10M edges", which nothing had measured) | D-023: the window between `DELETE` and `INSERT` is the whole of current belief; a reader landing in it sees a graph with no edges and no error |
 /// | [`Database::rehydrate`] | unmeasured; a function of how many rows the caller named | D-012 backwards: the same copy-then-delete atomicity, in the other direction. **A row here since 0.12.9 only because it was previously invisible** — rehydration reported as `archive` and inherited its exemption without anyone deciding on it (W4.3, D-152) |
+/// | [`Database::checkpoint`] | a function of the WAL's size, which is a function of how long since the last checkpoint — not of anything the caller passes | It is not a transaction at all. `PRAGMA wal_checkpoint` copies frames back into the main file and there is no unit smaller than the frame it is already working in; the caller asked for exactly this, and the alternative to a long checkpoint is a WAL that keeps growing (0.12.13, W5.2, D-156) |
 ///
 /// The `archive` figure is end-to-end through this method, so it **includes**
 /// the re-derivation `archive()` runs inside its transaction — but it does not
@@ -307,8 +308,8 @@ fn next_chunk_size(
 /// intervals" ([§9](../docs/architecture/s6-s10-flows-to-dependencies.md)) is
 /// therefore parameterised on the wrong quantity.
 ///
-/// All three are atomic **by contract**, which is why "cap the batch" and "add a
-/// third tier" were both considered and neither was taken: capping breaks the
+/// The first four are atomic **by contract**, which is why "cap the batch" and
+/// "add a third tier" were both considered and neither was taken: capping breaks the
 /// guarantee the operation exists to provide, and a third tier changes which
 /// caller waits without changing how long the lock is held. What was wrong was
 /// never the exemption — it was that the bound was stated as though it had none.
@@ -317,7 +318,7 @@ fn next_chunk_size(
 /// [`Database::bulk_import`], which is the same write chunked at
 /// [`chunk_rows::EDGES`] and explicitly *not* atomic overall (D-011).
 ///
-/// # One of the three is no longer unbounded (T1.1, D-080)
+/// # One of them is no longer unbounded (T1.1, D-080)
 ///
 /// `archive` was the worst of them, because its hold is a function of *how long
 /// since the last archive* rather than of anything the caller chose.
@@ -549,9 +550,53 @@ pub enum HighPriCommand {
         dim: usize,
         responder: oneshot::Sender<Result<()>>,
     },
+    /// Move WAL frames back into the main database file (§4.5, F-30, D-156).
+    ///
+    /// High priority, and for once the reason is not latency: a caller asking
+    /// for a checkpoint is asking for it *now*, usually at the end of a bulk
+    /// load or before taking a copy of the file, and queueing it behind the
+    /// background work it was meant to follow inverts the intent. It is also
+    /// the only command here that is not a transaction.
+    Checkpoint {
+        responder: oneshot::Sender<Result<CheckpointReport>>,
+    },
     Shutdown {
         responder: oneshot::Sender<Result<()>>,
     },
+}
+
+/// What `PRAGMA wal_checkpoint` returned (0.12.13, W5.2, D-156).
+///
+/// The three columns SQLite gives back, named, rather than `()` — a checkpoint
+/// that did nothing and a checkpoint that reclaimed a 400 MB WAL are the same
+/// `Ok(())`, and the difference is the entire reason a caller asked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CheckpointReport {
+    /// `true` when SQLite could not complete the requested mode because a
+    /// reader or writer was in the way.
+    ///
+    /// **This is not an error, and it is not ignorable.** `TRUNCATE` waits for
+    /// readers only as long as `busy_timeout` allows; past that it gives up and
+    /// says so, having possibly still copied frames. A caller checkpointing
+    /// before copying the file away must read this, because a busy checkpoint
+    /// means the main file is not self-contained yet.
+    pub busy: bool,
+    /// Frames left in the WAL at the end. `0` when the checkpoint completed,
+    /// since the mode run is `TRUNCATE`.
+    pub log_frames: u64,
+    /// Frames moved back into the database file.
+    ///
+    /// Read from a `FULL` pass rather than from the `TRUNCATE` — see
+    /// `run_checkpoint` for why a truncating checkpoint cannot report this
+    /// number itself.
+    pub checkpointed_frames: u64,
+}
+
+impl CheckpointReport {
+    /// The WAL was fully reclaimed: nothing blocked, and nothing is left.
+    pub fn is_complete(&self) -> bool {
+        !self.busy && self.log_frames == 0
+    }
 }
 
 /// Commands sent to the Write Actor on the low-priority channel (background work).
@@ -1454,6 +1499,44 @@ impl Database {
     }
 
     /// Rebuild `links_current` from `links` and verify zero drift (§5.8).
+    /// Move the WAL back into the main database file (§4.5, F-30, 0.12.13,
+    /// W5.2, D-156).
+    ///
+    /// Runs `PRAGMA wal_checkpoint(TRUNCATE)` on the write connection, as an
+    /// actor turn, and returns what SQLite reported. **Read
+    /// [`CheckpointReport::busy`]** — a checkpoint that could not run is an
+    /// `Ok` whose WAL is still there.
+    ///
+    /// # When a caller needs this
+    ///
+    /// Three cases, and only three:
+    ///
+    /// - **Before copying the database file elsewhere.** In WAL mode the `.db`
+    ///   file alone is not the database; recent commits live in the `-wal`. A
+    ///   complete checkpoint is what makes the main file self-contained.
+    /// - **At the end of a bulk load that turned the automatic checkpointer
+    ///   off.** That is the pairing this method exists for — see
+    ///   [`Tuning::wal_autocheckpoint`]. Disabling autocheckpoint without
+    ///   calling this leaves a WAL that grows for the life of the process.
+    /// - **Before a long idle period**, to give back the disk.
+    ///
+    /// Nobody else should call it on a timer. SQLite checkpoints automatically
+    /// every 1,000 pages and that default is not changed by this method
+    /// existing; a periodic explicit checkpoint on top of it buys nothing and
+    /// takes the write lock to do so.
+    ///
+    /// # It takes the write lock, and it is budget-exempt
+    ///
+    /// The hold is a function of how many frames have accumulated, which is a
+    /// function of how long since the last checkpoint — not of anything passed
+    /// in. It is on [`CHUNK_BUDGET`]'s exemption table for that reason, and it
+    /// is the one entry there that is not a transaction: there is no smaller
+    /// unit to chunk into, because the operation *is* the copy.
+    pub async fn checkpoint(&self) -> Result<CheckpointReport> {
+        self.high(|responder| HighPriCommand::Checkpoint { responder })
+            .await
+    }
+
     pub async fn rebuild_current(&self) -> Result<RebuildReport> {
         self.high(|responder| HighPriCommand::RebuildCurrent { responder })
             .await
@@ -2252,6 +2335,72 @@ fn normalize_all(edges: Vec<EdgeAssertion>) -> Result<Vec<EdgeAssertion>> {
     edges.into_iter().map(EdgeAssertion::normalized).collect()
 }
 
+/// One `FULL` checkpoint for the numbers, then a `TRUNCATE` for the file.
+///
+/// # Why `TRUNCATE` and not a mode parameter
+///
+/// The four SQLite modes are not four things a caller of *this* crate wants.
+/// `PASSIVE` is what the automatic checkpointer already runs on its own, so an
+/// explicit `PASSIVE` asks for something that was going to happen anyway;
+/// `RESTART` and `FULL` differ from `TRUNCATE` only in whether the WAL file is
+/// left at its high-water size. The reason W5.2 exists is
+/// [`Tuning::wal_autocheckpoint`] — a bulk importer turns the automatic
+/// checkpointer off and calls this once at the end — and what that caller wants
+/// is the WAL *gone*, not smaller than it was. So the mode is fixed and decided
+/// here rather than pushed to the caller as a choice they would have to read
+/// SQLite's documentation to make. If a mode ever needs selecting, that is an
+/// additive method, not a change to this one.
+///
+/// # Why it is two pragmas, which is not the obvious implementation
+///
+/// **A successful `TRUNCATE` reports `busy=0, log=0, checkpointed=0`** — the
+/// counts describe the WAL *after* the operation, and after a truncation there
+/// is no WAL to describe. Measured, not inferred: on a 387-frame WAL, `PASSIVE`
+/// returns `0, 387, 387` and `TRUNCATE` on the same file returns `0, 0, 0`. So
+/// the single-pragma implementation returns a [`CheckpointReport`] whose two
+/// counts are structurally zero on success, which makes the whole struct a
+/// less useful `bool`.
+///
+/// `FULL` copies every frame back and reports what it moved; the `TRUNCATE`
+/// that follows finds nothing left to copy and resets the file. The second pass
+/// is close to free for exactly that reason — it is a file operation, not a
+/// second copy. `busy` is the **union**: a checkpoint that was blocked in
+/// either phase did not fully happen, and a caller about to copy the database
+/// file elsewhere needs the pessimistic answer.
+///
+/// # They return rows, so they go through `query()`
+///
+/// The same libsql constraint the pragmas in `configure` document: `execute()`
+/// rejects any statement that yields rows, and these yield the row that is the
+/// entire point.
+async fn run_checkpoint(conn: &libsql::Connection) -> Result<CheckpointReport> {
+    // The columns are `busy, log, checkpointed`. SQLite reports -1 for the two
+    // counts when the checkpoint could not run; clamped to 0 rather than
+    // surfaced as a signed count, because `busy` already carries "this did not
+    // happen" and a negative frame count is not a quantity anyone can use.
+    //
+    // A database not in WAL mode returns no row at all. `configure` puts every
+    // connection this crate opens into WAL, so that is unreachable here — but a
+    // zeroed report is a better failure than a panic if it stops being.
+    async fn one(conn: &libsql::Connection, sql: &str) -> Result<(bool, u64, u64)> {
+        let mut rows = conn.query(sql, ()).await?;
+        let Some(row) = rows.next().await? else {
+            return Ok((false, 0, 0));
+        };
+        let field = |i: i32| -> u64 { row.get::<i64>(i).unwrap_or(0).max(0) as u64 };
+        Ok((row.get::<i64>(0).unwrap_or(0) != 0, field(1), field(2)))
+    }
+
+    let (full_busy, _, moved) = one(conn, "PRAGMA wal_checkpoint(FULL)").await?;
+    let (trunc_busy, log_frames, _) = one(conn, "PRAGMA wal_checkpoint(TRUNCATE)").await?;
+
+    Ok(CheckpointReport {
+        busy: full_busy || trunc_busy,
+        log_frames,
+        checkpointed_frames: moved,
+    })
+}
+
 /// Identical pragma configuration on every connection.
 async fn configure(conn: libsql::Connection) -> Result<libsql::Connection> {
     // NOTE: `journal_mode` and `busy_timeout` return their resulting value as a
@@ -2506,6 +2655,7 @@ impl HighPriCommand {
             HighPriCommand::WriteBulkAtomic { .. } => K::WriteBulkAtomic,
             HighPriCommand::RebuildCurrent { .. } => K::RebuildCurrent,
             HighPriCommand::RegisterModel { .. } => K::RegisterModel,
+            HighPriCommand::Checkpoint { .. } => K::Checkpoint,
             HighPriCommand::Shutdown { .. } => K::Shutdown,
         }
     }
@@ -2529,6 +2679,10 @@ impl HighPriCommand {
             HighPriCommand::Shutdown { responder } => {
                 turn.answer(responder, Ok(()));
                 return LoopCtl::Break;
+            }
+            HighPriCommand::Checkpoint { responder } => {
+                let res = run_checkpoint(conn).await;
+                turn.answer(responder, res);
             }
             HighPriCommand::AssertEdge { edge, responder } => {
                 let stamp = clock.now();

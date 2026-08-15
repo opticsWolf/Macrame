@@ -617,6 +617,19 @@ returns — busy/log/checkpointed frame counts — rather than `()`. Without thi
 `wal_autocheckpoint: None` is a footgun with no safe counterpart, which is why
 W5.2 and W5.3 are one wave.
 
+> **Done, 0.12.13 (D-156). "Returning what SQLite returns" turned out to need
+> two pragmas.** A successful `PRAGMA wal_checkpoint(TRUNCATE)` reports
+> `busy=0, log=0, checkpointed=0` — the counts describe the WAL *after* the
+> operation, and after a truncation there is none. Measured: on a 387-frame WAL,
+> `PASSIVE` returns `0, 387, 387` and `TRUNCATE` returns `0, 0, 0`. So the
+> obvious implementation returns a report whose counts are structurally zero on
+> success. `FULL` for the numbers, then `TRUNCATE` for the file; the second pass
+> has nothing left to copy, and `busy` is the union.
+>
+> `CommandKind::Checkpoint` is budget-exempt, and W4.3's two-directional
+> exemption test is what made that a decision instead of an omission — the same
+> trap as D-152, one wave later.
+
 **W5.3 — `wal_autocheckpoint` becomes settable.** Closes F-30. A bulk importer
 wants it off and one explicit checkpoint at the end; an interactive process
 wants the default. **The default does not change** — 1,000 pages stays, because

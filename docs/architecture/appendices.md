@@ -44,6 +44,12 @@ db.schema_version();   // u32
 db.archive_path();     // &Path
 db.snapshots_dir();    // &Path
 
+// Move the WAL back into the main file (0.12.13, D-156). A HighPriCommand:
+// asking for a checkpoint is asking for it now. `is_complete()` is the answer
+// most callers want; `busy` is the one they must not ignore, because a busy
+// checkpoint is an Ok whose WAL is still there.
+let report = db.checkpoint().await?;       // CheckpointReport { busy, log_frames, checkpointed_frames }
+
 // A read-only connection of the caller's own (0.6.0, D-091). SQLITE_OPEN_READ_ONLY
 // is an OS-level boundary; read_conn()'s PRAGMA is a guardrail its holder can
 // turn off in one statement, and it is *shared*, so a long reporting query there
