@@ -19,13 +19,26 @@ Macrame stores concepts linked by typed, weighted relationships — where both c
 
 | Strength | What it means |
 |---|---|
-| **Bitemporal by design** | Two independent clocks per row — *valid time* (when a fact held in the world) and *transaction time* (when the database learned it). `as_of(ts)` answers "what did the world look like?" and `reconstruct(ts)` answers "what did we believe?" — both correct, both different. |
+| **Bitemporal by design** | Two independent clocks per row — *valid time* (when a fact held in the world) and *transaction time* (when the database learned it). `reconstruct(ts)` answers "what did we believe?". `as_of(ts)` answers "what did the world look like?" **for topology, and mixes the two axes for concept attributes** — a known defect, written down in [D-160](docs/architecture/s13-decision-register.md#d-160) and scheduled for 0.14.0 (W7.1). See the note below. |
 | **Single file, embedded** | The entire database is one file on the local filesystem. Link it directly into your application. Run on Windows desktop, Linux, or macOS — the Rust suite runs on all three in CI. |
 | **Graph + vectors + search** | Recursive CTE traversal, native DiskANN vector search, FTS5 keyword search, and hybrid RRF fusion — all in one crate, no external graph library. |
 | **Five in-memory analytics** | Dijkstra, A*, SCC, k-core, and Louvain — operating on a typed `Subgraph` with zero external dependencies. |
 | **Rebuildable materialization** | `links_current` is a cache of current belief, always rebuildable from the append-only `transaction_log`. Drift is detectable by audit, recoverable by atomic or chunked rebuild. |
 | **Archival path** | Closed intervals move to a cold database inside atomic sessions. Point-in-time reconstruction composes from snapshots plus anchored folds — fast because it doesn't fold from genesis. |
 | **Runtime safety** | One Write Actor serialises all writes; read connections carry `PRAGMA query_only = ON` enforced at the engine level. No raw SQL escapes the guard. |
+
+**`as_of` is not yet purely valid-time, and this table said it was.** The same `ts` is
+compared against `links.valid_from`/`valid_to` — valid time, the contract — for the graph's
+shape, and against `transaction_log.recorded_at` — transaction time — for concept
+attributes under `AttributeMode::AtTime`. So `as_of("2020-06-01")` returns the edges that
+held in 2020 labelled with *what was believed in 2020*, which means a title corrected today
+to fix a 2020 typo comes back uncorrected. Right answer to "what did we believe"; wrong
+answer to "what was true", and the method's name promises the second.
+
+Stated a release before it is changed, deliberately: fixing it changes answers callers
+already depend on, so it belongs to a release allowed to break them
+([D-160](docs/architecture/s13-decision-register.md#d-160), 0.12.17). Topology-only
+traversals and `reconstruct()` are unaffected.
 
 ---
 
@@ -35,7 +48,7 @@ Macrame stores concepts linked by typed, weighted relationships — where both c
 
 ```toml
 [dependencies]
-macrame-db = "0.9"
+macrame-db = "0.12"
 ```
 
 ```rust
@@ -112,6 +125,31 @@ Every design decision derives from these invariants:
 - **Two-tier priority channels** — high-priority (user-driven) preempts low-priority (background)
 - **Cooperative chunking** — bounded to ~3 ms per chunk, sized from each chunk's measured hold rather than from a constant, under four per-path ceilings (90 edges, 70 concepts, 600 annotations, 30 embeddings) and a 35-row floor
 
+### Operational Controls (0.13.0)
+
+Everything below defaults to *leave it alone*. None of them spells "off" as the absent
+value, which is the failure the tri-state types exist to prevent
+([D-155](docs/architecture/s13-decision-register.md#d-155)) — a default that silently
+disables a mechanism reaches every caller who never heard of the knob.
+
+| Control | What it does |
+|---|---|
+| `Tuning` / `open_tuned` | One struct for the open-time options, so the set can grow without breaking callers. The three existing constructors still compile unchanged. Python takes the same options as keyword arguments — it has defaults in the language, so there is no type to import ([D-164](docs/architecture/s13-decision-register.md#d-164)) |
+| `checkpoint()` | Moves WAL frames back into the main file and **reports what it moved**. Runs `FULL` then `TRUNCATE`, because a truncating checkpoint reports zeros on success and cannot describe its own work. Check `busy` before treating the file as self-contained ([D-156](docs/architecture/s13-decision-register.md#d-156)) |
+| `wal_autocheckpoint` | `Default` / `Disabled` / `EveryPages(n)`. Disabling it is only correct paired with an explicit `checkpoint()`, and the cost is deferred rather than removed: ~8,400–9,100 frames in 41–45 ms at the end, against ~860 in 5.5–6.2 ms along the way ([D-157](docs/architecture/s13-decision-register.md#d-157)) |
+| `writer_cache_size` / `reader_cache_size` | Split, because the writer is one connection and the readers are several — one number would mean starving the writer or multiplying the readers' footprint ([D-158](docs/architecture/s13-decision-register.md#d-158)) |
+| `analyze()` / `optimize()` | Planner statistics. Before 0.12.4 nothing here ever ran `ANALYZE`, so every query was costed against SQLite's built-in guesses. `optimize()` is a no-op when nothing has moved, which is why `close()` calls it ([D-149](docs/architecture/s13-decision-register.md#d-149)) |
+
+**`analyze()` misses the ~3 ms chunk budget by ~6× on a populated ledger, and that is
+reported rather than hidden.** Measured: **19.1 ms at 40,000 edges**. `ANALYZE` is one
+indivisible statement, and `PRAGMA analysis_limit = 400` damps its cost 3–4× without making
+it independent of the table — the claim that it did was corrected in
+[D-166](docs/architecture/s13-decision-register.md#d-166) after §8's acceptance asked for a
+measurement instead of an argument. `metrics().budget_violations()` names `analyze` after
+every call and is meant to; the kind is deliberately **not** budget-exempt, because it also
+covers the `optimize()` that `close()` runs unprompted
+([D-168](docs/architecture/s13-decision-register.md#d-168), split scheduled for 0.14.0).
+
 ### Schema Versioning
 
 | Version | Feature |
@@ -139,8 +177,8 @@ v8 is the last rung that could change a *primary key* before the 1.0 freeze: `ro
 | MSRV | **1.88** (verified, not declared) |
 | Runtime | tokio async, single process |
 | Engine | libSQL 0.9.30 (MIT, unmodified) |
-| Schema version | 10 |
-| Test suite | 348 Rust · 357 with `metrics` · 355 Python — all green (measured 2026-08-08, 0.12.0). The three `property-tests` binaries (23 tests) are **run as their own step** — see below. **`--all-features` is not a supported configuration**, see below. Regenerate rather than trust this line: `python scripts/run_rust_suite.py --features metrics` |
+| Schema version | 11 |
+| Test suite | 391 Rust · 377 with `--no-default-features` · 381 Python — all green (measured 2026-08-15, 0.12.26). `metrics` is a **default** feature since 0.12.11, so the first figure is a plain `cargo test`; the second is the same suite with the counters compiled out, and the 14-test gap is `actor_metrics_tests`. The three `property-tests` binaries (23 tests) are **run as their own step** — see below. **`--all-features` is not a supported configuration**, see below. Regenerate rather than trust this line: `python scripts/run_rust_suite.py` |
 | Dependencies | tokio, serde, bincode, zstd, thiserror, tracing, ulid |
 
 ### Module Map
@@ -157,7 +195,7 @@ v8 is the last rung that could change a *primary key* before the 1.0 freeze: `ro
 
 ---
 
-## Python Bindings (v0.12.0)
+## Python Bindings (v0.12.26)
 
 | Detail | Value |
 |---|---|
@@ -175,8 +213,11 @@ v8 is the last rung that could change a *primary key* before the 1.0 freeze: `ro
 - **Opaque `Subgraph`** — A `#[pyclass]` with forwarded accessors; `.to_dict()` for callers who want the copy. It paid for itself in 0.8.0: the crate re-represented `EdgeRef` and **no binding signature moved**, because there is no converted copy whose layout had to follow (D-101, D-123).
 - **Open intervals cross as `None`** — Not a sentinel datetime, because `datetime.max` cannot survive `.astimezone()` east of UTC.
 - **Absent `content` crosses as `None`** — `load_subgraph` does not fetch document text unless asked (`content=True`). `""` cannot mark *not loaded*, because it is a valid value of the type (D-116, D-123).
-- **Every error is typed** — 35 exception classes under `MacrameError`, with six intermediate groups for catching sets: `IntegrityError`, `ValidationError`, `VectorError`, `TemporalError`, `WriterError`, `BudgetError`.
-- **`metrics` shipped on** — The wheel ships with the `metrics` feature enabled because feature flags do not survive into binary artifacts.
+- **Every error is typed** — 35 exception classes under `MacrameError` (36 including the base), of which six are intermediate groups for catching sets — `IntegrityError`, `ValidationError`, `VectorError`, `TemporalError`, `WriterError`, `BudgetError` — leaving 29 leaves.
+- **`metrics` shipped on** — The wheel ships with the `metrics` feature enabled because feature flags do not survive into binary artifacts. It has been a Rust default since 0.12.11 too, so the two sides no longer differ ([D-154](docs/architecture/s13-decision-register.md#d-154)).
+- **Parity is a wave, not a side effect** — 0.13.0 closed six gaps at once (W6): the archive-session and chunk-row constants, `registered_models()` / `declared_dimension()`, the maintenance calls and tuning keywords above, and a clock seam for tests. A gap opened in the release that created the feature is the one that never becomes a convention — the constants had gone eight releases for want of being anyone's next task.
+- **The chunk-row constants are ceilings, not sizes** — `CHUNK_ROWS_EDGES` and its three siblings bound the adaptive loop from above; a populated database converges below them. Dividing a batch by one to predict transaction count reads a 0.11.0 fact ([D-161](docs/architecture/s13-decision-register.md#d-161)).
+- **Three methods are deliberately absent** — `raw()`, `read_conn()` and `shadow_step`. The first two would dissolve the single-writer property or hand out a shared connection; the third is safe in Rust but its epoch obligation would cross as a convention where it is currently a type, on a method whose failure mode is a stale projection swapped over a live one without erroring ([D-165](docs/architecture/s13-decision-register.md#d-165)). A test asserts all three stay absent, so adding one means answering the register rather than deleting a line.
 
 ---
 
@@ -321,9 +362,9 @@ criterion baselines, machine against itself. See [§9 of the architecture docs](
 ## Documentation
 
 - [Architecture specification](docs/architecture/README.md) — normative surfaces: §4 (schema) and Appendix A (API)
-- [Architecture Quick Reference](docs/quickref.md) — v0.9.0 reference: API, schema, decisions, performance
+- [Architecture Quick Reference](docs/quickref.md) — API, schema, decisions, performance. Marked **v0.12.0** and current to [D-148](docs/architecture/s13-decision-register.md#d-148); it does not yet carry the 0.13.0 wave (D-149…D-169). This README said "v0.9.0 reference" until 0.12.25, which was wrong about its own pointer. Where it disagrees with the architecture set, the architecture set wins — it is the normative one.
 - [Python bindings](docs/architecture/s14-python-bindings.md) — §14: async→sync boundary, error tree, stubs
-- [Decision register](docs/architecture/s13-decision-register.md) — D-001…D-109 with rationale
+- [Decision register](docs/architecture/s13-decision-register.md) — D-001…D-169 with rationale
 
 ---
 

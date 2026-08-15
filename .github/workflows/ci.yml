@@ -69,6 +69,24 @@ jobs:
         env:
           RUSTFLAGS: -D warnings
 
+      # `metrics` is a default feature since 0.12.11 (D-154), and turning it off
+      # is a configuration this crate supports: `ActorMetrics` becomes an empty
+      # ZST and `record_hold` a no-op. Nothing here ever built that arrangement,
+      # so it was verified only by hand — and in 0.12.23 an example was added
+      # that calls `db.metrics()` with no `required-features`, which broke
+      # `cargo test --no-default-features` for two releases with every gate
+      # green (D-169).
+      #
+      # `--all-targets` is the point rather than a flourish: the break was in an
+      # example, and a plain `cargo check --no-default-features` does not build
+      # examples. Check rather than test, because what is at stake is whether
+      # the feature-off configuration still *compiles* — the behaviour it gates
+      # is covered by the suite above.
+      - name: check with metrics off
+        run: cargo check --no-default-features --all-targets
+        env:
+          RUSTFLAGS: -D warnings
+
       # Rustdoc has its own warning set that `cargo clippy` never sees —
       # unresolved intra-doc links, public docs linking to private items,
       # unclosed HTML tags — and nothing in this workflow built the docs, so

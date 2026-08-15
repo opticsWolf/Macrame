@@ -4,7 +4,7 @@
 # keeps the import path `use macrame::…` unchanged, so this is a registry name
 # and not a rename of the crate anyone writes against.
 name = "macrame-db"
-version = "0.12.25"
+version = "0.12.26"
 edition = "2021"
 # Measured, not declared: `cargo +1.88.0 check --all-features --all-targets`
 # passes and 1.85 does not.
@@ -172,6 +172,19 @@ metrics = []
 
 [[test]]
 name = "actor_metrics_tests"
+required-features = ["metrics"]
+
+# §8 item 2's evidence (D-166). Needs `metrics` for the same reason as the
+# `*_diag` examples below: the question is what the *actor* held the write lock
+# for, and the caller's wall time includes queueing. It also reads the turn
+# count, to prove the hold it reports belongs to the call it made rather than to
+# an `optimize()` some other path ran.
+#
+# This entry was missing when the example landed in 0.12.23, which broke
+# `cargo test --no-default-features` — §8 item 6's configuration, already
+# checked one release earlier and so not re-checked (D-169).
+[[example]]
+name = "analyze_hold"
 required-features = ["metrics"]
 
 # T1.1's evidence. Needs `metrics` because the question is what the *actor* held
