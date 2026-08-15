@@ -24,6 +24,17 @@ db.close().await?;                                        // drain the actor, th
 let db = Database::open_with_cadence(path, Some(SnapshotCadence::default())).await?;
 let db = Database::open_with_clock(path, None, Arc::new(FakeClock::new(t0))).await?;
 
+// The consolidated form (0.12.12, D-155). The three above stay and delegate
+// here; this is where every knob 0.13.0 adds arrives, because `#[non_exhaustive]`
+// plus `Default` make a new field additive for callers who wrote
+// `..Default::default()`. Note `CadencePolicy` rather than `Option<SnapshotCadence>`:
+// `None` in the older constructors means *disabled*, and a `Default`-derived
+// struct whose default silently stops writing anchors is a trap.
+let db = Database::open_tuned(path, Tuning {
+    cadence: CadencePolicy::Disabled,
+    ..Default::default()
+}).await?;
+
 // Accessors on the handle. There is no public write connection: the sole
 // write-capable connection lives inside the actor and cannot be named.
 db.read_conn();        // &libsql::Connection, PRAGMA query_only = ON (D-019)
@@ -39,9 +50,10 @@ db.snapshots_dir();    // &Path
 // competes with every traversal in the process.
 let conn = db.diagnostic_conn().await?;
 
-// Actor latency counters, behind --features metrics (0.6.0, D-079). Off by
-// default because the crate's contract is a latency bound, and instrumentation
-// that is nearly free of cost is not free of risk.
+// Actor latency counters, behind --features metrics (0.6.0, D-079). **On by
+// default since 0.12.11** (D-154): the cost was measured at under 0.2% of a
+// write and indistinguishable from zero, and a counter nobody has compiled in
+// is not diagnostic. `--no-default-features` still removes it entirely.
 #[cfg(feature = "metrics")]
 let snap: MetricsSnapshot = db.metrics();
 

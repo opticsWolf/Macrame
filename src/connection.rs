@@ -669,6 +669,142 @@ pub struct Database {
     shared: Arc<ActorShared>,
 }
 
+/// What the snapshot cadence should do, for [`Tuning::cadence`].
+///
+/// # Why this is not `Option<SnapshotCadence>`
+///
+/// [`Database::open_with_cadence`] takes `Option<SnapshotCadence>`, where `None`
+/// means *no cadence at all*. Carrying that field into [`Tuning`] unchanged
+/// would have made it the one field in the struct whose `None` is a request to
+/// change the behaviour rather than a request to leave it alone — and since
+/// `Tuning` derives `Default`, `open_tuned(path, Tuning::default())` would then
+/// have silently disabled snapshots, while `open(path)` runs them. Two calls
+/// that read as synonyms, one of which stops writing anchors.
+///
+/// So the tri-state is written out. `Default` is the default cadence, matching
+/// [`Database::open`]; `Disabled` is `open_with_cadence(path, None)`, and has to
+/// be asked for by name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum CadencePolicy {
+    /// [`SnapshotCadence::default`], as [`Database::open`] uses.
+    #[default]
+    Default,
+    /// No cadence task. `close()` is then the only thing that writes an anchor
+    /// (§5.5, D-053).
+    Disabled,
+    /// An explicit cadence.
+    Every(SnapshotCadence),
+}
+
+impl CadencePolicy {
+    /// Collapse to the `Option` the open path has always taken.
+    fn resolve(self) -> Option<SnapshotCadence> {
+        match self {
+            Self::Default => Some(SnapshotCadence::default()),
+            Self::Disabled => None,
+            Self::Every(cadence) => Some(cadence),
+        }
+    }
+}
+
+/// Everything [`Database::open_tuned`] can be told, in one growable struct
+/// (0.12.12, W5.1, D-155).
+///
+/// # Why a struct rather than a fourth constructor
+///
+/// There were three — [`Database::open`], [`Database::open_with_cadence`],
+/// [`Database::open_with_clock`] — and each new knob added one more, with the
+/// combinatorics of the ones before it. 0.13.0 alone wanted three knobs
+/// (`wal_autocheckpoint`, and a page cache each for the writer and the
+/// readers), which is the point at which the naming stops being possible.
+///
+/// **`Default` plus functional update is the whole design.** They make a new
+/// knob an additive change: callers construct with `..Default::default()` and
+/// keep compiling, and the fields that arrive after them are the ones they did
+/// not ask about. That is not a hypothetical — W5.1 ships this struct with two
+/// fields, and W5.3/W5.4 add the three tuning knobs to it without touching a
+/// caller.
+///
+/// # Why this is *not* `#[non_exhaustive]`
+///
+/// The plan for this wave specified `#[non_exhaustive]` alongside `Default`,
+/// on the usual reasoning that the attribute is what makes a struct growable.
+/// It does not compile: a `#[non_exhaustive]` **struct** cannot be built with
+/// literal syntax outside its own crate *at all*, and the functional-update
+/// form is literal syntax, so `Tuning { cadence, ..Default::default() }` is
+/// `E0639` for every external caller — the exact expression the attribute was
+/// added to protect. (The rule differs from `#[non_exhaustive]` on an enum,
+/// which only forces a wildcard arm; [`CadencePolicy`] keeps it for that
+/// reason.) The two ways to have both are a builder with setters, or plain
+/// `Default` — and `Default` is chosen because the field-literal form is the
+/// legible one, and because the growth this needs to survive is *additive*
+/// fields, which `..Default::default()` already absorbs.
+///
+/// The cost is real and worth stating: a caller who writes an exhaustive
+/// literal, with no `..Default::default()`, breaks when a field is added. That
+/// is a compile error at the call site with an obvious fix, not a silent
+/// behaviour change, and it is the price of the readable form.
+///
+/// # The three constructors stay
+///
+/// They delegate here and are not deprecated. `open(path)` is the right call for
+/// most callers and should not acquire a warning for being the common case; the
+/// consolidation is about where the *next* knob goes, not about moving anyone.
+///
+/// ```no_run
+/// # use macrame::prelude::*;
+/// # async fn f() -> macrame::Result<()> {
+/// let db = Database::open_tuned(
+///     "graph.db",
+///     Tuning {
+///         cadence: CadencePolicy::Disabled,
+///         ..Default::default()
+///     },
+/// )
+/// .await?;
+/// # Ok(()) }
+/// ```
+#[derive(Clone, Default)]
+pub struct Tuning {
+    /// What the snapshot cadence should do. Defaults to
+    /// [`SnapshotCadence::default`], as [`Database::open`] does.
+    pub cadence: CadencePolicy,
+    /// A clock to stamp `recorded_at` with, for tests (§5.1.2, D-062). `None`
+    /// is [`SystemClock`]. Floored against the database exactly as
+    /// [`Database::open_with_clock`] describes — read that before injecting
+    /// one against a non-empty file.
+    pub clock: Option<Arc<dyn Clock>>,
+}
+
+// `Clock` is not `Debug` — it is a behavioural trait with two methods and
+// requiring `Debug` of every implementor to print a handle here would be the
+// tail wagging the dog. So the field is reported as present-or-absent, which is
+// the only part of it a reader of a `Tuning` dump can act on.
+impl Tuning {
+    /// The `Option<SnapshotCadence>` the three older constructors take, mapped
+    /// onto the tri-state. `None` there means *disabled*, which is why
+    /// [`CadencePolicy`] exists — see its docs.
+    fn from_legacy(cadence: Option<SnapshotCadence>, clock: Option<Arc<dyn Clock>>) -> Self {
+        Self {
+            cadence: match cadence {
+                Some(cadence) => CadencePolicy::Every(cadence),
+                None => CadencePolicy::Disabled,
+            },
+            clock,
+        }
+    }
+}
+
+impl std::fmt::Debug for Tuning {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Tuning")
+            .field("cadence", &self.cadence)
+            .field("clock", &self.clock.as_ref().map(|_| "<injected>"))
+            .finish()
+    }
+}
+
 impl Database {
     /// Open a database file at `path`, configuring pragmas, running migrations, and spawning the Write Actor.
     ///
@@ -689,7 +825,7 @@ impl Database {
         path: impl AsRef<Path>,
         cadence: Option<SnapshotCadence>,
     ) -> Result<Self> {
-        Self::open_inner(path.as_ref(), cadence, None).await
+        Self::open_inner(path.as_ref(), Tuning::from_legacy(cadence, None)).await
     }
 
     /// Open with an injected clock (§5.1.2, **defect K**, D-062).
@@ -717,14 +853,22 @@ impl Database {
         cadence: Option<SnapshotCadence>,
         clock: Arc<dyn Clock>,
     ) -> Result<Self> {
-        Self::open_inner(path.as_ref(), cadence, Some(clock)).await
+        Self::open_inner(path.as_ref(), Tuning::from_legacy(cadence, Some(clock))).await
     }
 
-    async fn open_inner(
-        path: &Path,
-        cadence: Option<SnapshotCadence>,
-        injected: Option<Arc<dyn Clock>>,
-    ) -> Result<Self> {
+    /// Open with an explicit [`Tuning`] (0.12.12, W5.1, D-155).
+    ///
+    /// The consolidated form of the three constructors above, and the one that
+    /// grows: every knob 0.13.0 adds arrives as a field here rather than as a
+    /// fourth `open_*`. See [`Tuning`] for why the struct is
+    /// `#[non_exhaustive]` and why that makes the growth additive.
+    pub async fn open_tuned(path: impl AsRef<Path>, tuning: Tuning) -> Result<Self> {
+        Self::open_inner(path.as_ref(), tuning).await
+    }
+
+    async fn open_inner(path: &Path, tuning: Tuning) -> Result<Self> {
+        let Tuning { cadence, clock: injected } = tuning;
+        let cadence = cadence.resolve();
         let db = libsql::Builder::new_local(path).build().await?;
         let write_conn = configure(db.connect()?).await?;
         let read_conn = configure(db.connect()?).await?;

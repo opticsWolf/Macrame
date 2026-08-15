@@ -588,6 +588,29 @@ The three existing constructors stay, delegating, and are documented as the
 convenience forms they are. **No deprecation in 0.13.0** — `open(path)` is the
 right call for most callers and should not acquire a warning.
 
+> **Done, 0.12.12 (D-155). Both attributes specified above turned out to be
+> wrong, in opposite ways.**
+>
+> `#[non_exhaustive]` on the **struct** does not compile: a non-exhaustive
+> struct cannot be built with literal syntax outside its own crate at all, and
+> `..Default::default()` *is* literal syntax — so the attribute makes the very
+> expression it was added to protect an `E0639` for every external caller. (The
+> enum rule is different, which is why `CadencePolicy` keeps it.) Growth rests
+> on `Default` alone; the cost is that an exhaustive literal breaks when a field
+> is added, which is a compile error with an obvious fix.
+>
+> `cadence: Option<SnapshotCadence>` is a trap in a `Default` struct: `None`
+> means *disabled* in the old constructors, so `Tuning::default()` would have
+> silently stopped writing snapshot anchors while `open(path)` kept writing
+> them. Replaced by `CadencePolicy::{Default, Disabled, Every}`, so that every
+> field's absence means *leave it alone* and switching the cadence off has to be
+> asked for by name.
+>
+> Ships with **two** fields, not five: `wal_autocheckpoint` and the two cache
+> sizes arrive in W5.3/W5.4, which demonstrates the additive growth on this
+> release rather than asserting it about a later one. A documented knob that
+> does nothing yet is worse than one that does not exist.
+
 **W5.2 — `Database::checkpoint()`.** Closes §4.5. A `HighPriCommand`, because a
 caller asking for a checkpoint is asking for it now, and returning what SQLite
 returns — busy/log/checkpointed frame counts — rather than `()`. Without this,
