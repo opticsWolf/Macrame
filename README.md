@@ -348,6 +348,8 @@ criterion baselines, machine against itself. See [§9 of the architecture docs](
 | **Property test binaries fault mid-suite** | `property-tests` feature gate; serialised runs; CI classifies each run rather than counting failures, and retries only a crash. A property case opens a database per generated case, which is the highest cumulative-`connect()` shape in the repo and so the worst-exposed by construction ([D-148](docs/architecture/s13-decision-register.md#d-148)) |
 | **Covering index wins over selective** | `EXPLAIN QUERY PLAN` assertions on every index-sensitive query |
 | **Snapshot chain divergence** | `verify_snapshot_chain()` reports but does not repair (snapshots are disposable) |
+| **Retired concepts reachable through vector search** (0.13.1, open) | **No mitigation — this is a live defect, recorded rather than worked around.** `search_vector` joins only the embeddings table, so it has no `retired` column in scope and returns soft-deleted concepts; `hybrid_search` inherits it through its vector arm. `keyword_search` and `search_filtered` are unaffected. Fixed in 0.14.0 by one `concepts` join (W9.3, [D-170](docs/architecture/s13-decision-register.md#d-170)). Until then, a caller who relies on retirement for visibility must filter results against `retired` itself |
+| **Search reads today's corpus whatever `as_of` says** (0.13.1, open) | No search surface bounds a concept's valid interval, so `as_of` cannot reach retrieval and `search_filtered` mixes a past topology with the present corpus. Closed together with the row above in 0.14.0 (W9.4, [D-171](docs/architecture/s13-decision-register.md#d-171)) |
 
 **`--all-features` is not a configuration this project supports or gates**, and 0.10.0 stopped publishing a test count for it. `--all-features` is `metrics` + `property-tests` together, which puts the R15-prone binaries back inside the main run — the exact arrangement the step above exists to avoid. Measured 2026-08-07: **4 of 4 runs crashed at one attempt, and 4 of 5 still went red at the six-attempt retry budget** the quarantined step uses. A required job that fails four times in five is not a gate, it is noise that teaches people to re-run CI without reading it. Run `--features metrics` and `--features property-tests` as the two separate steps CI does ([D-140](docs/architecture/s13-decision-register.md#d-140)).
 
@@ -362,9 +364,9 @@ criterion baselines, machine against itself. See [§9 of the architecture docs](
 ## Documentation
 
 - [Architecture specification](docs/architecture/README.md) — normative surfaces: §4 (schema) and Appendix A (API)
-- [Architecture Quick Reference](docs/quickref.md) — API, schema, decisions, performance. Marked **v0.12.0** and current to [D-148](docs/architecture/s13-decision-register.md#d-148); it does not yet carry the 0.13.0 wave (D-149…D-169). This README said "v0.9.0 reference" until 0.12.25, which was wrong about its own pointer. Where it disagrees with the architecture set, the architecture set wins — it is the normative one.
+- [Architecture Quick Reference](docs/quickref.md) — API, schema, decisions, performance. Marked **v0.12.0** and current to [D-148](docs/architecture/s13-decision-register.md#d-148); it does not yet carry the 0.13.0 wave (D-149…D-169) or 0.13.1's findings (D-170…D-173). This README said "v0.9.0 reference" until 0.12.25, which was wrong about its own pointer. Where it disagrees with the architecture set, the architecture set wins — it is the normative one.
 - [Python bindings](docs/architecture/s14-python-bindings.md) — §14: async→sync boundary, error tree, stubs
-- [Decision register](docs/architecture/s13-decision-register.md) — D-001…D-169 with rationale
+- [Decision register](docs/architecture/s13-decision-register.md) — D-001…D-173 with rationale
 
 ---
 

@@ -1,12 +1,17 @@
 # Macrame — the road to 1.0
 
-Two releases, 0.13.0 and 0.14.0, and then the version number stops being a
-promise about the future.
+Three releases — 0.13.0, 0.14.0 and 0.15.0 — and then the version number stops
+being a promise about the future.
 
-Source: `docs/Macrame Codebase Review v0.12.0.md` (27 findings) plus three
-findings raised after it was written and recorded here for the first time
-(§0.3). Every one of the 30 appears exactly once in the coverage table at §1,
-against the wave that closes it. Nothing is listed as "later".
+Source: `docs/Macrame Codebase Review v0.12.0.md` (27 findings), plus three
+findings raised after it was written (§0.3), plus four raised against the 2026
+bitemporal literature review after 0.13.0 shipped (§0.4). Every one of the 34
+appears exactly once in the coverage table at §1, against the wave that closes
+it. Nothing is listed as "later".
+
+0.15.0 was added after 0.13.0 shipped and is the one release here that answers a
+use case rather than a finding; §15 says so in its own words rather than
+pretending otherwise.
 
 ---
 
@@ -23,7 +28,7 @@ happen while the version number still permits it.
 
 **It is not** a licence to add surface. Every item below either closes a finding
 or is a prerequisite for one that does. Two of the review's own recommendations
-are reversed here after the paradigm filter, and are recorded in §16 with the
+are reversed here after the paradigm filter, and are recorded in §19 with the
 reason rather than quietly dropped.
 
 ### 0.1 The split, and why it is this one
@@ -73,7 +78,7 @@ reason the order is not negotiable:
   asymmetry runs the other way: the default Rust build has neither.
 - **`synchronous = NORMAL` in WAL already skips the per-commit fsync.** There is
   no durability knob to win here, which is half of why `Durability` is rejected
-  in §16.
+  in §19.
 - **`ANALYZE` does not help the vector filter planner**, and the crate says so at
   [vector_filter.rs:73](../src/graph/vector_filter.rs:73). That path measures
   with a capped probe because average rows-per-key cannot estimate multi-hop
@@ -128,6 +133,131 @@ into a feedback-loop input.
 
 ---
 
+### 0.4 Four findings from the 2026 bitemporal literature review (0.13.1)
+
+Raised after 0.13.0 shipped, against Neelamegam, Bhogal, Samimi and Ozturkoglu,
+*Comprehensive insights into bitemporal databases: a PRISMA-guided systematic
+literature review*, Journal of Data, Information and Management 8(1), 71–96
+(2026) — a synthesis of 54 primary studies across 1995–2026. Two of the four are
+defects demonstrated in this tree; two are gaps the survey makes it impossible to
+keep calling deliberate. All four are scheduled inside the pre-1.0 window, under
+the same constraint that governs everything above: no critical item gets pushed
+past 1.0 on the grounds that the release was getting large.
+
+**Recorded first, because it changes how the rest of this section reads: the
+survey's headline complaint does not apply here.** §7.1 names append-only version
+chains as the field's dominant scalability limitation — Lomet's version chains
+growing without bound, Eshtay's storage duplication in NoSQL stores, Hou's
+snapshot-plus-delta reconstruction cost. That is the problem `archive`,
+`archive_windowed`, `rehydrate`, snapshot anchoring, `WalCheckpointPolicy` and
+`rebuild_current_chunked` were built for across 0.9.0–0.13.0. The findings below
+are the ones that survive after taking credit for that.
+
+**F-31 — `search_vector` returns retired concepts, and `keyword_search` does
+not.** Demonstrated, not inferred. `keyword_search` filters `AND c.retired = 0`
+([hybrid.rs:103](../src/vector/hybrid.rs:103)) and says why in its rustdoc.
+`search_vector` joins `vector_top_k(…)` to the embeddings table and to **nothing
+else** ([search.rs:146](../src/vector/search.rs:146)) — there is no `concepts`
+join, so there is no `retired` column in scope to filter on. `HybridSearch`
+fuses the two lists without a post-fusion visibility pass
+([hybrid.rs:~210](../src/vector/hybrid.rs)), so the vector arm carries the
+retired row straight through the fusion into the caller's result.
+
+A probe on a two-concept fixture, one retired and nearest the query:
+
+| surface | a retired concept | a concept expired in valid time |
+|---|---|---|
+| `search_vector` | **returned** | **returned** |
+| `keyword_search` | excluded | **returned** |
+| `hybrid_search` | **returned**, via the vector arm | **returned** |
+| `search_filtered` | excluded | **returned** |
+
+`search_filtered` is safe **by accident of composition, not by decision**: its
+candidate set comes from `TraversalBuilder::execute_ids`, whose `build_sql`
+closes with `WHERE c.retired = 0` ([builder.rs:229](../src/graph/builder.rs:229)),
+and both the pre-filter and post-filter arms intersect against that set. Nothing
+in `FilteredVectorSearch` itself knows about visibility. Change the traversal to
+return ids without hydrating, and the third surface leaks too.
+
+**This is defect Z's exact shape, one module over.** From
+[subgraph.rs:34](../src/graph/subgraph.rs:34): *"`links_current` … carries edges
+to retired concepts; `hydrate` filters `retired = 0`. So a retired neighbour left
+an `EdgeRef` pointing at a node"*. Wave 1 fixed that instance. The general lesson
+— **visibility is enforced at whichever join happens to touch `concepts`, and a
+path that never touches `concepts` enforces nothing** — was never generalised, and
+the vector path is the path that never touches `concepts`. **Severity: High.** A
+soft-deleted concept is retrievable through the crate's flagship retrieval
+surface, and the caller most likely to hit it is the one using Macrame as agent
+memory, where "retired" means the user asked for it to be forgotten.
+
+**F-32 — no search surface filters concept valid time.** The same probe, right
+column: a concept whose `valid_to` is in the past is returned by all four
+surfaces. This is uniform, so it is a gap and not an inconsistency, which is why
+it is graded below F-31 despite being wider.
+
+It is a gap with a specific consequence: **`as_of` and search cannot be
+combined.** `TraversalBuilder::as_of(t)` bounds edges by
+`l.valid_from <= ?3 AND ?3 < l.valid_to`
+([builder.rs:309](../src/graph/builder.rs:309)) — so the graph half of
+`search_filtered` is time-aware and the vector half is not, and the concepts the
+traversal reaches are filtered on `retired` but never on their own valid
+interval. A caller asking "what was near this query, among what was true last
+March" has no way to ask it, and the surface that looks closest to answering
+gives an answer that silently mixes March's topology with today's corpus.
+
+The survey's §6.3 and §7 make this the wrong thing to leave open: the ML- and
+agent-memory integration it identifies as *"perhaps the most significant open
+direction"* is precisely retrieval that carries temporal context, and BiteNet
+(Peng et al. 2020) is the only prior work it finds doing it. **Severity: Medium**
+as a defect, **High** as the thing that distinguishes this crate from a vector
+store with timestamps. Scheduled with F-31 because they are one join.
+
+**F-33 — the two-dimensional index question has never been asked, and the
+obvious answer does not fit.** Finding 3.1 splits `as_of` into its two axes at
+W7.1. The moment that lands, predicates of the form
+`valid_from <= tv < valid_to AND recorded_at <= tx` become expressible and
+therefore common, and this crate's indexes are all one-dimensional B-trees.
+
+The survey's §4.2 is the standard citation for that being a problem — standard
+relational indexes *"degenerate into full-table or extensive index-range scans"*
+on interval-overlap queries. **Its own evidence is more equivocal than the
+citation suggests, and the equivocation is the useful part.** Kaufmann et al.
+(2015)'s Bitemporal Timeline Index explicitly *declines* to model the two
+dimensions as a 2-D spatial structure and keeps **one 1-D index per temporal
+domain**, outperforming spatial structures on selection, join and aggregation.
+Fig. 9's conclusion is that *no single index structure is optimal for all
+bitemporal query workloads*. So the literature does not say "use an R\*Tree"; it
+says "measure, and expect the answer to be workload-dependent".
+
+**And the obvious port is arithmetically blocked here, which is worth recording
+before someone spends a wave on it.** SQLite's `rtree` module stores coordinates
+as **32-bit floats**; `rtree_i32` stores **32-bit integers**. This crate's
+timestamps are fixed-width ISO-8601 text with microsecond resolution (D-029), and
+a 64-bit microsecond epoch fits neither: float32 carries a 24-bit mantissa, so
+epoch-seconds near 1.8 × 10⁹ quantise to roughly 128-second buckets, and int32
+overflows in 2038 at second resolution. An R\*Tree over these columns can
+therefore only ever be a **coarse bounding-box pre-filter with an exact recheck
+against the text columns** — which is a legitimate design, and is how the module
+is meant to be used, but it is not the drop-in index the citation implies and it
+must never be the authority. **Severity: Medium**, and it is a measurement item
+before it is a build item.
+
+**F-34 — every temporal query in this crate is composed in Rust.** There is no
+declarative surface: a caller writes `TraversalBuilder`, `HybridSearch`,
+`FilteredVectorSearch` and chains them by hand. The survey's §6.2.3 and §7 name
+this as the industrial-adoption boundary — Oracle and Leipzig's TPGM+ pairs the
+bitemporal property graph with **T-PGQL**, a declarative language, and the survey
+treats the language as the deliverable rather than the model.
+
+Recorded as a finding rather than left as taste, because W12 forces the question:
+a branch selector, a valid-time instant and a transaction-time instant are three
+orthogonal qualifiers on the same read, and adding each of them to each builder
+by hand is a combinatorial surface. **Severity: Low today, Medium the moment
+branching lands.** This is the one item in this document I would cut first if
+0.15.0 grows, and it is scheduled where cutting it is still possible.
+
+---
+
 ## 1. Coverage: every finding, and the wave that closes it
 
 | # | Finding | Sev | Wave | Release |
@@ -162,10 +292,16 @@ into a feedback-loop input.
 | F-28 | No `ANALYZE`; planner runs on default selectivity | High | W2.1, W2.2 | 0.13.0 |
 | F-29 | Plan-pinning fixture has no rows and no statistics | High | W2.4 | 0.13.0 |
 | F-30 | Autocheckpoint perturbs the chunk controller | Med | W5.3 | 0.13.0 |
+| F-31 | `search_vector` returns retired concepts; `keyword_search` does not | High | W9.3 | 0.14.0 |
+| F-32 | No search surface filters concept valid time | Med | W9.4, W9.5 | 0.14.0 |
+| F-33 | The 2-D index question is unasked and the obvious answer does not fit | Med | W10.6 | 0.14.0 |
+| F-34 | No declarative surface; three qualifiers × four builders | Low | W13 | 0.15.0 |
 
-Nine High-severity findings. **Eight close in 0.13.0.** The ninth, §3.1, is
+Ten High-severity findings. **Eight close in 0.13.0.** The ninth, §3.1, is
 documented in 0.13.0 (W5.6) and broken correctly in 0.14.0 (W7.1) — see §0.1 for
-why that order and not the reverse.
+why that order and not the reverse. The tenth, F-31, was found after 0.13.0
+shipped and closes in 0.14.0; it is a live defect rather than a design gap, and
+it is the only High in this document that reached a released version unrecorded.
 
 ---
 
@@ -495,12 +631,12 @@ observed being hit.
 > `run_max == 0`, which is what stops the counter reporting starvation on every
 > database forever.
 >
-> **This falsifies the stated premise of §16's rejection of the forced-yield
+> **This falsifies the stated premise of §19's rejection of the forced-yield
 > policy** — "whether the bound is ever hit in practice is a measurement nobody
 > has taken". It has now been taken. What remains open is a judgement rather
 > than a measurement: whether a synthetic 64-task burst is evidence about
 > production or only about the mechanism. No policy is added here, per this
-> wave's own instruction; see §16, which is annotated rather than rewritten.
+> wave's own instruction; see §19, which is annotated rather than rewritten.
 
 **W4.5 — `metrics` becomes a default feature.** Closes §4.3, and only now. The
 cost is 10–11 relaxed atomics per turn, about 0.01% of the 0.8 ms
@@ -1008,6 +1144,22 @@ pairing, decided on W5.6's documentation. A break, and correct: Doctrine II says
 the two clocks are never mixed, and a single parameter that means one thing
 sometimes and the other thing otherwise is the mixing.
 
+> **Sharpened 0.13.1, against the 2026 survey.** The finding was written as an
+> ambiguity in one parameter. It is larger than that, and the survey makes the
+> larger version hard to unsee: Macrame reaches its two axes through **two
+> unrelated mechanisms**. `as_of` filters live rows by valid time
+> ([builder.rs:309](../src/graph/builder.rs:309)); `reconstruct` folds
+> `transaction_log` to a transaction-time instant. There is no query for the
+> cell where they cross — *what did we believe at T\_tx about what was true at
+> T\_vt* — which is the question Jensen and Snodgrass's BCDM defines a
+> bitemporal database as answering.
+>
+> This does not change W7.1's deliverable, and it does change its acceptance:
+> splitting the parameter is only half done if the two halves still route to two
+> mechanisms that cannot be composed. Setting both must be expressible, or
+> refused by name — and F-33/W10.6 is the question of what that costs, which is
+> why it is scheduled immediately after.
+
 **W7.2 — `write_annotations_atomic` goes through `classify`.** Closes §3.6. It
 bypasses the classification the non-atomic path applies, so the same input
 produces different stored state depending on which entry point was used. One of
@@ -1070,7 +1222,7 @@ can walk to exhaustion is not acceptable in a file the crash path depends on.
 
 ---
 
-## 11. W9 — Temporal completeness
+## 11. W9 — Temporal and visibility completeness
 
 **W9.1 — `hydrate_at_time` past the archive horizon.** Closes §3.2. Once rows
 are archived, `AtTime` reconstruction silently returns less than the truth — it
@@ -1083,6 +1235,72 @@ reporting something the doctrine says cannot happen.
 **W9.2 — Prove it.** A test that archives, then reconstructs across the horizon,
 and asserts the chosen behaviour. This is the finding most likely to be
 "fixed" by a change nobody can demonstrate.
+
+W9.3 to W9.6 were added in 0.13.1 and close F-31 and F-32. They are in this wave
+rather than W7 because they are the same claim as W9.1 pointed at a different
+surface: **a read that quietly omits — or quietly includes — what the ledger says
+is invisible is reporting something the doctrine says cannot happen.**
+
+**W9.3 — one visibility predicate, applied where the join is, not where it is
+convenient.** Closes F-31. `search_vector` must exclude retired concepts, and
+after it does, `hybrid_search` is fixed by construction because its vector arm
+*is* `search_vector`.
+
+The implementation is a join, and the choice of which join is the whole decision:
+
+- **Join `concepts` inside `search_vector`.** One predicate, one place, every
+  caller covered including the two that compose it. Costs a join against a
+  `TEXT PRIMARY KEY` on `k` rows — `vector_top_k` has already reduced the corpus
+  to `k` by the time this runs, so it is `k` index seeks and not a scan.
+- **Filter after the fact in each caller.** Three places to keep in step, and it
+  is what produced this finding — `keyword_search` did its half and nothing
+  propagated the obligation.
+
+The first. **And it changes what `top_k` means, which must be decided rather
+than discovered**: filtering after the index has already chosen `k` rows returns
+fewer than `k`. Either the index is asked for `k′ > k` and the surplus absorbs
+the retired rows — the escalation `FilteredVectorSearch::run_post_filter`
+already implements for exactly this problem — or `top_k` becomes a ceiling
+rather than a count. The former, because the latter is a silent behaviour change
+for every existing caller, and because the machinery exists two modules away.
+
+**W9.4 — search reads at an instant, or says it does not.** Closes F-32.
+`search_vector`, `keyword_search` and `hybrid_search` gain an optional valid-time
+instant; with it set, the `concepts` join W9.3 introduces also bounds
+`c.valid_from <= t AND t < c.valid_to`. Absent, behaviour is today's — the
+current corpus — because D-155's lesson is that an absent knob must leave the
+mechanism alone.
+
+**The instant is the same parameter W7.1 splits `as_of` into**, and this is the
+ordering argument for W9 following W7: adding a time parameter to search before
+the crate has settled what a time parameter *means* would ship a third spelling
+of the axis confusion 3.1 exists to end.
+
+**W9.5 — decay, once the instant exists.** The survey's §6.3 identifies
+agent-memory retrieval that carries temporal context as the field's emptiest
+quadrant, with BiteNet its only cited instance. Once W9.4 gives search an
+instant, weighting a hit by the age of what it matched is arithmetic on numbers
+already in hand.
+
+**The trap is the sign, and it is worth naming before anyone writes the
+multiply.** `search_vector` returns a **distance** and its results ascend —
+`tests_py/test_vector.py::test_vector_search_scores_ascend`. `hybrid_search`
+returns a **fused score** and its results descend —
+`test_hybrid_scores_descend`. A decay factor in (0, 1] multiplied into a
+similarity correctly penalises age; the same factor multiplied into a distance
+makes stale rows look *nearer*. So decay is defined against similarity, and the
+distance surface either converts or divides — and whichever it does is a test,
+not a comment.
+
+Scope discipline: one `half_life` parameter, defaulting to off, applied at
+ranking and never at storage. Nothing about an embedding changes because time
+passed; only its rank does.
+
+**W9.6 — prove all three the way W9.2 proves W9.1.** A fixture with a retired
+concept nearest the query and a valid-time-expired concept second, asserted
+across all four search surfaces including `search_filtered` — whose safety is
+currently accidental (F-31) and which must therefore be pinned as a
+*requirement* rather than left to keep passing by composition.
 
 ---
 
@@ -1108,7 +1326,7 @@ measurement recommended, made real and tested.
 
 **W10.4 — Decide the low-priority fairness floor, on evidence that is not a
 synthetic burst.** Added 0.12.10, after W4.4's counter falsified the premise
-§16 rejected this on ([D-153](architecture/s13-decision-register.md#d-153)).
+§19 rejected this on ([D-153](architecture/s13-decision-register.md#d-153)).
 
 W4.4 established the mechanism is unbounded and trivially reachable:
 `run_max=63` out of 63 starved turns, deterministic, a background `bulk_import`
@@ -1128,7 +1346,7 @@ that order:
 2. **Only then, if the reading justifies it, add the floor.** The obvious form
    is "after N consecutive starved turns, take one low-priority command", which
    costs one branch per turn and bounds the run at N by construction.
-3. **Whatever the answer, record it and close §16's entry properly.** The
+3. **Whatever the answer, record it and close §19's entry properly.** The
    rejection currently stands annotated rather than resolved, and inheriting it
    unread is the failure this wave exists to prevent.
 
@@ -1189,6 +1407,42 @@ prepared to close this as "not worth it".** A `Subgraph` big enough for this to
 matter may be rarer than the finding assumes, and this is the lowest-value item
 in either release.
 
+**W10.6 — The two-dimensional index question, measured before it is answered.**
+Closes F-33. W7.1 makes bitemporal predicates expressible; this asks what they
+cost and what, if anything, should be built for them.
+
+**Measurement first, and the fixture already exists.** W2.4 builds a populated,
+analysed plan-pinning fixture and W10.1 gates plan shape against it. So the
+question is answerable with what those two waves leave behind: write the
+cross-axis predicate W7.1 enables, take `EXPLAIN QUERY PLAN` and an operation
+count, and see whether the planner seeks or scans. **This may close as "no index
+needed", and that is a legitimate outcome** — the crate's ledger is
+`recorded_at`-ordered by construction and `idx_txlog_time` already exists, so the
+transaction-time bound may seek perfectly well on its own.
+
+If it does not, the options in the order the evidence supports them:
+
+1. **A second one-dimensional index, per domain.** What Kaufmann et al. (2015)'s
+   Bitemporal Timeline Index does, and what it beat the spatial structures with.
+   Cheapest to try, cheapest to revert, and it is the shape every index in this
+   crate already has.
+2. **A covering composite** leading on whichever bound discriminates. This is
+   D-042/D-059/D-064's playbook, and W2's statistics are what finally make the
+   planner able to choose between two candidates on selectivity rather than on
+   column count.
+3. **An R\*Tree bounding-box pre-filter, with an exact recheck.** Last, and only
+   with its ceiling written into the code: `rtree` coordinates are **float32**
+   and `rtree_i32` is **int32**, so neither can hold a microsecond epoch —
+   float32 quantises epoch-seconds to ~128-second buckets, int32 overflows in
+   2038. It can bound a candidate set; it can never be the authority, and the
+   recheck against the canonical text columns is not optional. A design that
+   forgets the recheck returns *nearly* the right answer, which is the worst
+   failure mode available to a ledger.
+
+**Whatever the answer, it is a decision-register entry.** The one thing this
+wave must not produce is an index added because a paper said B-trees are
+insufficient for a query nobody has timed.
+
 ---
 
 ## 13. W11 — The 1.0 freeze audit
@@ -1237,17 +1491,239 @@ finding.
 7. Every finding in §1 is closed, or explicitly recorded as not-to-be-fixed with
    a reason. Zero silent carries.
 8. D-155 … D-157 in the register.
+9. No search surface returns a retired concept — asserted across all four,
+   including the one that is currently safe by accident (W9.6).
+10. A search at an instant returns what was valid at that instant, and a search
+    with no instant returns today's corpus. Both demonstrated on one fixture.
+11. The cross-axis predicate W7.1 enables has a recorded plan shape and an
+    operation count, and W10.6's conclusion — index or no index — is a register
+    entry with the numbers in it.
 
 ---
 
-## 15. What 1.0 promises after this, and what it does not
+# v0.15.0 — branching
+
+**This is the first release in this document driven by a use case rather than by
+a finding, and the exception is stated rather than smuggled.** §0 says every item
+either closes a finding or is a prerequisite for one that does. W12 does neither.
+It is here because the crate's owner named a use it must serve before 1.0 freezes
+the surface — **an agentic harness whose conversation tree forks at every turn** —
+and because the alternative is worse: branching touches the schema, the
+projection, the read builders and the Python surface, so a 1.0 that freezes
+without it freezes against it.
+
+W13 is a finding (F-34) and is here because branching is what makes it bite.
+
+---
+
+## 15. W12 — Branching: transaction time becomes a tree
+
+### 15.1 What a branch is, stated before anything is built
+
+The temptation is to treat a branch as a third axis beside valid time and
+transaction time. It is not, and getting this wrong is how the schema acquires a
+column that means nothing precise.
+
+> **A branch is transaction time with a tree order instead of a line order.**
+
+Valid time answers *when was this true in the world*. Transaction time answers
+*when did we come to believe it*. A bitemporal ledger assumes belief arrives in
+one sequence — the second axis is a total order because there is one history of
+what the database was told. A branch is a fork in **that** sequence: two
+divergent lineages of belief over the same valid-time domain.
+
+Everything else falls out of this, which is the test of whether the framing is
+right:
+
+- **Valid time is untouched.** `valid_from` and `valid_to` mean exactly what they
+  mean today, and no query over them changes.
+- **Doctrine III is strengthened, not weakened.** Assertions are superseded,
+  never deleted — and a branch never rewrites its parent, it appends elsewhere.
+  Branching is the most append-only operation in the crate.
+- **Doctrine II gains a clause, not an axis.** Two clocks on every row becomes
+  two clocks and a lineage.
+- **`recorded_at` stays a total order *within* a branch** and becomes a partial
+  order across them, ordered by `(branch ancestry, recorded_at)`.
+
+That last point is where the survey's distributed-systems material actually lands
+for an embedded engine. §7 raises hybrid logical clocks for reconciling
+retroactive updates across eventually-consistent replicas — irrelevant to a
+single-writer single-file crate, and rejected in §16 on those grounds. But the
+*problem* HLCs solve is turning a partial order over concurrent lineages into a
+deterministic total one, and **branching creates that problem locally**, with the
+branch id where the node id would be. If Macrame ever needs an HLC it will be for
+this, not for replication.
+
+### 15.2 The storage model: shared ledger, logical versions
+
+The survey supplies the precedent directly. §6.3, on Gancarski et al. (1999)'s
+Database Version model: valid and transaction time attached to *complete database
+states* rather than to individual tuples, *"supports branching valid-time
+histories, which is difficult to achieve in conventional temporal designs"*, and
+— the load-bearing clause — *"separating logical database versions from physical
+storage"*. That is 1999, and it is the only branching architecture in 54 papers.
+
+Its lesson is the opposite of the obvious design:
+
+- **Rejected: a `branch_id` tag interpreted per row.** Every table gains a
+  column, every index gains a lead column, every query gains a predicate, and a
+  fork means writing a row per inherited fact. Rost et al. (2022) and Hou et al.
+  (2023) both measure the analogous choice for *time* — timestamps modelled as
+  ordinary properties — and both find query cost growing with history. The same
+  argument applies to lineage modelled as an ordinary property.
+- **Taken: a branch is a named logical version over a shared physical ledger.**
+
+```sql
+CREATE TABLE branches (
+    id          TEXT PRIMARY KEY,          -- ULID
+    name        TEXT NOT NULL UNIQUE,
+    parent_id   TEXT REFERENCES branches(id),  -- NULL for the root only
+    forked_at   TEXT NOT NULL,             -- parent's recorded_at at the fork
+    created_at  TEXT NOT NULL
+);
+```
+
+`main` is the root: `parent_id IS NULL`, `forked_at` the epoch sentinel. Ledger
+tables gain `branch_id TEXT NOT NULL DEFAULT 'main'` — the default is what makes
+the migration a rung and not a rewrite.
+
+A read on branch B resolves B's ancestry: rows written on B, plus rows written on
+each ancestor A **before the fork point on the path down from A**. Copy-on-write.
+A branch that has asserted nothing costs one row in `branches` and reads exactly
+its parent.
+
+**The fork must be O(1), and that requirement is what selects this design.** A
+conversation tree forks at every turn; a fork that copies rows is a fork nobody
+can afford at that rate. One `INSERT` into `branches` and nothing else.
+
+### 15.3 The hard part, named rather than deferred
+
+`links_current` is the projection that makes traversal fast, and it is
+branch-agnostic today. Three ways out, and the crate should take them in this
+order:
+
+1. **Resolve at read.** `links_current` gains `branch_id`; a traversal joins the
+   ancestry chain. Fork stays O(1); traversal gains a factor of chain depth, and
+   `idx_lc_traversal_cover` gains `branch_id` as its lead column — a fourth index
+   write per assertion on a table that already takes four.
+2. **Hybrid: materialise the trunk, resolve the twigs.** A branch materialises
+   its own projection only once it exceeds a row threshold. This is D-007's
+   pattern exactly — two strategies, an arithmetic cost model, and the estimate
+   returned to the caller — and `FilteredVectorSearch`'s pre-filter/post-filter
+   choice is the working precedent for how it is exposed.
+3. **Materialise per branch.** Storage multiplied by branch count and an O(rows)
+   fork. Correct for a handful of long-lived branches; wrong for the use case
+   that motivates the wave. Recorded so that it is rejected on evidence rather
+   than re-proposed.
+
+**(1) first, measured, with (2) as the escape hatch.** The measurement is the
+deliverable: depth-3 traversal on a chain of 1, 10 and 100 branches, against the
+same fixture unbranched.
+
+### 15.4 What ships, and what deliberately does not
+
+**In:**
+
+- `Database::fork(name, from) -> BranchId`, `branches()`, and a branch-scoped
+  read view. The view is a handle, which is why **W11.1 (`Database: Clone`) is a
+  prerequisite** — a branch view is the same actor with a lineage attached, and
+  cloning is how it stops being a second `Arc` in every caller's code.
+- **`diff(a, b)`** — what branch A asserts that B does not. For the motivating
+  use case this is the payload: *what did this exploration conclude that the
+  trunk does not know*. It is also cheap in this design, because divergence is
+  exactly the set of rows carrying the branch's own id.
+- **Abandonment.** A conversation tree discards most of what it grows, so
+  `archive` gains a branch-aware arm: an abandoned branch's rows are a contiguous
+  archivable set by construction, which is the cheapest archive predicate in the
+  crate.
+- **Schema rung to v12**, with `a_version_bump_must_bring_its_own_rung_test`
+  enforcing it and the existing-rows default proving the migration is additive.
+- **The Python surface, in the same release.** W6's finding was that a binding
+  gap opened in the release that created the feature never becomes a convention.
+
+**Out, and stated as a decision rather than an omission:**
+
+- **Merge.** Reconciling two belief lineages requires answering *which assertion
+  wins*, and there is no doctrine-neutral answer — Doctrine III says assertions
+  are superseded, and a merge has to choose a superseder on the caller's behalf.
+  Fork, read, diff and abandon is a complete and useful feature without it. Merge
+  is its own decision and should not be smuggled in under branching's schema
+  rung.
+- **Cross-branch traversal.** An edge from a node on one branch to a node on
+  another is either a lineage violation or a merge in disguise. Refused, named,
+  and tested.
+
+### 15.5 The use case, written down because this document requires it
+
+An agentic harness storing a conversation tree: each turn is a concept, each
+reply an edge, each *alternative* continuation a fork. The requirements this
+imposes, and which W12 is measured against:
+
+| requirement | why the design meets it |
+|---|---|
+| fork at every turn | one row in `branches`, no copying (§15.2) |
+| read a leaf's full lineage cheaply | ancestry resolution, depth-bounded (§15.3) |
+| abandon most branches | branch-scoped archive predicate (§15.4) |
+| ask what a branch concluded | `diff` (§15.4) |
+| never corrupt the trunk | append-only by construction — Doctrine III (§15.1) |
+
+---
+
+## 16. W13 — A query AST, not a macro
+
+Closes F-34, and is scoped by what W12 does to the read surface. After branching
+there are three orthogonal qualifiers on every read — a branch, a valid-time
+instant, a transaction-time instant — and four builders that would each need all
+three.
+
+**What this is:** a typed intermediate representation that the existing builders
+lower into, so the three qualifiers are expressed once and composed rather than
+re-implemented per surface.
+
+**What this is not:** a `macrame_query! { MATCH … AT VALID … }` procedural macro.
+That is the most-requested shape and the wrong first step — a proc-macro that
+emits SQL strings is the least testable artefact this crate could produce, it
+reintroduces string-splicing on the read path that D-039 removed from the
+traversal CTE, and it fixes a syntax before anyone has used the semantics. The
+survey's own precedents (T-PGQL, temporal XQuery, SQL:2011 statement modifiers)
+are compilers over an algebra; the algebra is the part worth having, and a text
+syntax over a working AST is additive whenever someone wants it.
+
+**This is the first item to cut if 0.15.0 grows.** Said in §0.4 and repeated here
+so it is visible from both places.
+
+---
+
+## 17. Acceptance for 0.15.0
+
+1. A fork is O(1) in rows written, demonstrated by a test that forks 1,000 times
+   and asserts the row count in every ledger table is unchanged.
+2. A branch reads its parent's history and its own, and the trunk is byte-identical
+   before and after a child branch is written to and abandoned.
+3. Traversal cost against branch-chain depth is measured and recorded, and the
+   strategy choice (§15.3) is a decision-register entry with the numbers in it.
+4. Cross-branch edges are refused with a named error, with a test.
+5. `diff(a, b)` returns exactly the assertions carrying `a`'s lineage and no
+   others, over a fixture where the two branches disagree about the same edge.
+6. Schema v12 migrates a populated v11 database with every existing row on
+   `main`, and the rung test passes.
+7. Python reaches the whole of it in the same release, including `diff`.
+8. Merge and cross-branch traversal are recorded in §16 as refused, with reasons.
+
+---
+
+## 18. What 1.0 promises after this, and what it does not
 
 **Promises.** The public API is stable for 1.x. The on-disk format is stable or
 migrated by a rung. `CHUNK_BUDGET` is observable in the default build, and
 `violations()` is the honest answer to whether it is met. Query plans are
 pinned against a fixture whose statistics match production's. The snapshot
 format is bounded and checksummed. Every doctrine has a test that fails when it
-is violated.
+is violated. **No read surface returns what the ledger says is invisible** — the
+promise F-31 showed was never actually held. **The two time axes are separately
+addressable**, and where they cannot be composed the refusal is named.
+**Branching is a supported topology**, with an O(1) fork and a trunk that a child
+cannot corrupt.
 
 **Does not promise.** That `CHUNK_BUDGET` is always met — it is a budget the
 actor steers on, and on a populated `links` table it is still missed by ~0.2 ms
@@ -1255,7 +1731,11 @@ at the floor. That benchmarks are reproducible across sessions; D-070 says
 otherwise and that is a property of the measurement, not of the code. That
 concurrent opens are safe on Windows, unless W1 says they are. That single-row
 writes are fast; they cost the ~0.8 ms transaction floor by construction, and the
-bulk paths exist for that reason.
+bulk paths exist for that reason. That branches can be **merged** — they can be
+forked, read, compared and abandoned, and merge is refused with a reason (§19).
+That traversal cost is independent of branch-chain depth; §15.3 says which
+strategy ships and what it costs. That there is a query *language*; W13 delivers
+an algebra, and a syntax over it is a 1.x addition if anyone wants one.
 
 **The distinction is the deliverable.** A 1.0 that promises less and means all of
 it is worth more than one that promises a latency bound it cannot measure — which
@@ -1263,7 +1743,7 @@ is the release Macrame would have shipped if §4.3 had gone the other way.
 
 ---
 
-## 16. Rejected before starting
+## 19. Rejected before starting
 
 **`synchronous` / a `Durability` knob.** In WAL mode `NORMAL` already skips the
 per-commit fsync and syncs at checkpoints. `FULL` buys durability against OS
@@ -1325,3 +1805,40 @@ no evidence behind it.
 > first, precisely because the counter was added in the release that would carry
 > the fix, and a before/after taken with it alone measures the fix against
 > itself.
+
+### Added 0.13.1, after the 2026 bitemporal survey
+
+Four proposals that came in with §0.4's findings and are refused here rather than
+scheduled. Recorded because each is the *obvious* next step from the survey, and
+an unrecorded rejection is one that gets re-proposed every time someone reads the
+paper.
+
+**Hybrid logical clocks and CRDT conflict resolution for edge replicas.** The
+survey's §7 raises this as the cloud-native gap, and it is a real gap in the
+field. It is not one here: Macrame is a single-writer, single-file embedded
+engine, and the property that makes retroactive edits reconcilable — one actor,
+one connection, one total order on `recorded_at` — is doctrine rather than
+accident. Adopting an HLC now would add a clock nothing can currently make
+disagree. **What is worth carrying forward is the observation, not the
+mechanism**: the partial-order problem an HLC solves is the one *branching*
+creates locally (§15.1), with the branch id where the node id would be. If a
+clock is ever needed it will arrive from W12, not from replication.
+
+**An R\*Tree as the bitemporal index.** Not rejected — deferred to a
+measurement, W10.6 — but the *drop-in* version is rejected outright, and for an
+arithmetic reason rather than a design preference: SQLite's `rtree` coordinates
+are float32 and `rtree_i32`'s are int32, and this crate's timestamps are
+microsecond ISO-8601 text (D-029). Neither type can hold the value. An R\*Tree
+here can bound a candidate set and must never be the authority; a design without
+the exact recheck returns nearly the right answer, which on a ledger is the worst
+available failure.
+
+**A `macrame_query!` procedural macro.** See W13. The algebra is the part worth
+having; a macro that emits SQL strings reintroduces exactly what D-039 removed
+from the traversal CTE, and it fixes a syntax before anyone has used the
+semantics.
+
+**Merge, as part of branching.** §15.4. Fork, read, diff and abandon is a
+complete feature. Merging two belief lineages requires deciding which assertion
+supersedes which on the caller's behalf, and Doctrine III has no neutral answer
+to that. It is its own decision and must not ride in on W12's schema rung.
