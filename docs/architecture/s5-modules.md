@@ -186,7 +186,7 @@ async fn run_writer_actor(
     clock: Arc<dyn Clock>,
     mut high_pri_rx: mpsc::Receiver<HighPriCommand>,
     mut low_pri_rx: mpsc::Receiver<LowPriCommand>,
-) -> Result<()> {
+) {
     loop {
         let ctl = tokio::select! {
             // biased polls the arms in written order: while the high-priority
@@ -199,9 +199,10 @@ async fn run_writer_actor(
         };
         if matches!(ctl, LoopCtl::Break) { break; }
     }
-    Ok(())
 }
 ```
+
+**It returns nothing, and returned a `Result<()>` it could not fail until 0.13.4 (W7.3, [D-177](s13-decision-register.md#d-177)).** The paragraph below is the reason: every command routes its `DbError` to that command's responder rather than to the loop, so there was never a third thing for an actor-level `Err` to carry, and none was ever constructed. The cost of leaving it was not the branch itself but what it concealed — `close()` read `Ok(res) => res?`, which looks like a failure path under review, while the branch that *does* fire, a **panicked** actor arriving as a `tokio::task::JoinError`, had no test. The mapping now lives in `writer_exit` and is tested against a real one.
 
 Each execute runs exactly one transaction — BEGIN IMMEDIATE … COMMIT — and routes its DbError, if any, to the command's responder rather than to the loop; a failed assertion must not kill the writer. The loop is the only scheduler in the system, and its policy is one line: between any two transactions, re-check the UI queue before touching the background queue. The priority queue decides who goes next; it does not — cannot — interrupt a transaction already in flight, because SQLite's lock is not preemptible. That single fact is the reason [§5.1.5](s5-modules.md#515-cooperative-chunking--the-golden-rule) exists.
 

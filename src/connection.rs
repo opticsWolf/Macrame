@@ -700,7 +700,7 @@ pub struct Database {
     /// mints the same way `open()` configured the internal readers (0.12.16,
     /// W5.5, D-159). Before that split, each one ran with SQLite's defaults.
     reader_cache_size: Option<i32>,
-    writer: Option<tokio::task::JoinHandle<Result<()>>>,
+    writer: Option<tokio::task::JoinHandle<()>>,
     /// Stops the snapshot cadence. Dropping it stops the task too, which is what
     /// keeps a `Database` that is dropped rather than closed from leaving a task
     /// running against a connection whose database is going away.
@@ -2449,26 +2449,23 @@ impl Database {
             .await;
         let _ = rx.await;
 
-        // **The writer's `Result` is propagated, not discarded (Wave 4.2).**
-        // It used to be `let _ = handle.await`, so an actor that had panicked or
-        // returned an error closed "successfully" and the caller's last chance to
-        // learn that the write path had died was spent silently. A `JoinError`
-        // here means the actor panicked; the inner `Result` is whatever it
-        // returned.
+        // **The writer's exit status is propagated, not discarded (Wave 4.2).**
+        // It used to be `let _ = handle.await`, so an actor that had died closed
+        // "successfully" and the caller's last chance to learn that the write
+        // path was gone was spent silently.
+        //
+        // Through 0.13.3 this awaited a `JoinHandle<Result<()>>` and did
+        // `Ok(res) => res?`, which looked like two failure paths and was one:
+        // the actor's `Result` could not be `Err` (W7.3, D-177). What remains is
+        // the branch that can fire — the actor panicked or was aborted — mapped
+        // by `writer_exit`, which is tested against a real `JoinError`.
         //
         // Ordered before the final snapshot on purpose: a snapshot written after
-        // a failed writer records a state the caller has no reason to trust, and
-        // returning the writer's error while also having written that file is
-        // worse than not writing it.
+        // a dead writer records a state the caller has no reason to trust, and
+        // returning the error while also having written that file is worse than
+        // not writing it.
         if let Some(handle) = self.writer.take() {
-            match handle.await {
-                Ok(res) => res?,
-                Err(e) => {
-                    return Err(DbError::WriterStopped(format!(
-                        "the write actor did not exit cleanly: {e}"
-                    )))
-                }
-            }
+            writer_exit(handle.await)?;
         }
 
         let ts = self.clock.now();
@@ -2708,13 +2705,29 @@ fn derive_archive_path(path: &Path) -> PathBuf {
 /// **No forced yield is added here.** Whether one is needed is the question the
 /// counter answers, and adding a policy now would be fixing a bound nobody has
 /// observed being hit — the same mistake D-124 was retracted for.
+///
+/// # It returns nothing, and used to return a `Result` it could not fail
+/// (0.13.4, W7.3, §3.5, [D-177])
+///
+/// The two exits are `LoopCtl::Break` from [`HighPriCommand::Shutdown`] and the
+/// `else` arm when both channels are closed. Neither can fail, and neither
+/// could before: every command's error goes back on that command's own
+/// responder, where the caller who issued it can act on it. There was no third
+/// thing for an actor-level `Err` to carry, and none was ever constructed.
+///
+/// A `Result` that is structurally always `Ok` is not free. It reads as a
+/// failure path under review, so `close()`'s `res?` looked like it was doing
+/// something, and the branch that actually fires — a **panicked** actor,
+/// reported as a `JoinError` — sat beside it untested. That is the swap this
+/// change makes: the unfireable branch is gone and the real one is pinned, in
+/// [`writer_exit`].
 async fn run_writer_actor(
     conn: libsql::Connection,
     clock: Arc<dyn Clock>,
     mut highpri_rx: mpsc::Receiver<HighPriCommand>,
     mut lowpri_rx: mpsc::Receiver<LowPriCommand>,
     shared: Arc<ActorShared>,
-) -> Result<()> {
+) {
     loop {
         // Read once and reused by both the depth sample and the starvation
         // counter, so the two cannot disagree about what was queued when this
@@ -2740,7 +2753,25 @@ async fn run_writer_actor(
             break;
         }
     }
-    Ok(())
+}
+
+/// Turn the write actor's join status into the error `close()` reports.
+///
+/// One line of mapping, given a name so it can be tested against a real
+/// [`tokio::task::JoinError`]. Before 0.13.4 this was inline beside a `res?` on
+/// an actor `Result` that could only ever be `Ok`, and the arrangement had the
+/// coverage exactly backwards: the branch that cannot fire was plumbed through
+/// two signatures, and the branch that does fire — the actor panicked, and the
+/// caller's writes are going nowhere — had no test at all (W7.3, D-177).
+///
+/// Cancellation is folded in with panics deliberately. `JoinError` distinguishes
+/// them, and nothing in the crate ever aborts this task, so a cancelled writer
+/// means something outside the crate reached in and stopped it. That is not a
+/// gentler condition than a panic and must not read as one.
+fn writer_exit(joined: std::result::Result<(), tokio::task::JoinError>) -> Result<()> {
+    joined.map_err(|e| {
+        DbError::WriterStopped(format!("the write actor did not exit cleanly: {e}"))
+    })
 }
 
 /// One command's hold: the timer, its label, and the counters it reports to.
@@ -3855,5 +3886,49 @@ mod tests {
             next_chunk_size(90, Duration::from_millis(1), Duration::ZERO, 35, 90),
             35
         );
+    }
+
+    /// A panicked write actor is reported, and the report says so (W7.3, D-177).
+    ///
+    /// This is the branch `close()` actually has. Through 0.13.3 it sat beside
+    /// `Ok(res) => res?` on an actor `Result` that could never be `Err`, and the
+    /// pair looked like two failure paths under review — so the one that cannot
+    /// fire was carried through two signatures and the one that can had no test.
+    ///
+    /// The `JoinError` is real rather than mocked: `JoinError` has no public
+    /// constructor, and one built by hand would pin the mapping against a value
+    /// tokio does not produce.
+    #[tokio::test]
+    async fn a_writer_that_panicked_is_reported_by_close() {
+        // Swallow the panic's own output. The task is *meant* to panic, and a
+        // backtrace in a green suite trains people to skim it.
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let handle = tokio::spawn(async { panic!("the write connection is gone") });
+        let joined = handle.await;
+        std::panic::set_hook(prev);
+
+        assert!(joined.is_err(), "the task must have panicked for this to test anything");
+
+        match writer_exit(joined) {
+            Err(DbError::WriterStopped(reason)) => {
+                assert!(
+                    reason.contains("did not exit cleanly"),
+                    "the message must say what happened: {reason}"
+                );
+            }
+            other => panic!("a panicked actor must be WriterStopped, got {other:?}"),
+        }
+    }
+
+    /// An actor that ran to completion closes clean.
+    ///
+    /// The other half, and the one that must not acquire a failure mode by
+    /// accident: `run_writer_actor` returns `()`, so the only way this can start
+    /// reporting an error is if someone gives the actor a `Result` again.
+    #[tokio::test]
+    async fn a_writer_that_finished_normally_closes_clean() {
+        let handle = tokio::spawn(async {});
+        assert!(writer_exit(handle.await).is_ok());
     }
 }

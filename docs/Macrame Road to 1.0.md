@@ -272,7 +272,7 @@ branching lands.** This is the one item in this document I would cut first if
 | 3.2 | `AtTime` degrades silently after archive | Med | W9.1 | 0.14.0 |
 | 3.3 | Snapshot loader unbounded | Med | W8.2 | 0.14.0 |
 | 3.4 | Future `recorded_at` poisons the clock floor | Med | W7.4 | 0.14.0 |
-| 3.5 | `run_writer_actor` cannot return `Err` | Low | W7.3 | 0.14.0 |
+| 3.5 | `run_writer_actor` cannot return `Err` | Low | W7.3 | 0.13.4 ✅ |
 | 3.6 | `write_annotations_atomic` bypasses `classify` | Med | W7.2 | 0.13.3 ✅ |
 | 3.7 | Snapshot rename atomic but not durable | Med | W8.3 | 0.14.0 |
 | 4.1 | No anti-starvation floor on low-priority work | Med | W4.4 (counter), W10.4 (the floor itself) | 0.13.0 / 0.14.0 |
@@ -1229,6 +1229,25 @@ the two is wrong; `classify` is the one with the tests.
 can actually report — a poisoned connection, a channel invariant violated — or
 change the signature. A `Result` that is structurally always `Ok` trains readers
 to skip it.
+
+> **✅ Shipped 0.13.4 ([D-177](../docs/architecture/s13-decision-register.md#d-177)).**
+> The signature. The first option was examined and there is nothing for an
+> actor-level `Err` to carry: per-command failures go back on the command's own
+> responder (D-014's rule that a failed assertion must not kill the writer), a
+> dropped responder is documented as not an actor error, and the `else` exit is
+> reachable only after `Database` was dropped — which drops the `JoinHandle`
+> too, so no status could be read.
+>
+> **The finding understates itself.** "Trains readers to skip it" is what it
+> cost a reader; what it cost the code is that `close()` matched
+> `Ok(res) => res?` beside the `JoinError` arm, so two failure paths appeared
+> where one existed — and the real one, a **panicked** actor with the caller's
+> writes going nowhere, had no test. The mapping is now `writer_exit`, pinned
+> against a real `JoinError` from a panicking task.
+>
+> A *poisoned connection* was the finding's own suggestion and is rejected with
+> its reason recorded: the cheap probes for it are writes, so the detector would
+> take the write lock every turn to guard against a bug no path currently has.
 
 **W7.4 — Refuse a future `recorded_at`.** Closes §3.4. `recorded_at_floor`
 ([clock.rs:36](../src/util/clock.rs:36)) takes `MAX(recorded_at)` with no upper
