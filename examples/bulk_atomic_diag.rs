@@ -1,11 +1,14 @@
 //! T1.3: what does `write_bulk_atomic` actually cost as a function of batch size?
 //!
 //! The item asks for a warning computed as "rows × measured per-row cost". That
-//! model assumes the cost is linear, and it is not: `write_edges_atomic` opens
-//! with `reject_overlaps_within`, which compares every pair in the batch — O(n²)
-//! before a single row is written. So there are two terms, and which one
-//! dominates depends on the size, which is exactly what a caller trying to
-//! predict their stall needs to know.
+//! model assumes the cost is flat, and it is not — but as of 0.13.6 (W7.5,
+//! D-179) it is no longer the guard that makes it so. `reject_overlaps_within`
+//! compared every pair in the batch, O(n²) before a single row was written, and
+//! now sorts and sweeps. What is left is the insert path, whose per-row cost
+//! still rises with the size of the table the batch is loading.
+//!
+//! The two shapes below are kept because their *convergence* is the result: they
+//! differed by 7× and now agree to within 15%.
 //!
 //! Three quantities per size:
 //!
@@ -17,11 +20,11 @@
 //!     public entry point, so this is measured on an equivalent local copy and
 //!     labelled as such rather than presented as an instrumented reading.
 //!
-//! The batch is deliberately *worst case for the guard*: every edge shares a
-//! source, so the early `continue` on mismatched endpoints never fires and all
-//! n(n−1)/2 pairs are compared in full. A batch of unrelated edges is much
-//! cheaper, which is itself worth knowing — the ceiling a caller can predict
-//! from the signature has to be the worst case, not the typical one.
+//! The `History` batch is the old worst case for the guard: every edge shares
+//! all three key columns, so the pairwise loop's early `continue` never fired
+//! and all n(n−1)/2 pairs were compared in full. Keeping it is what makes the
+//! change legible — it is the same batch, and the number it prints is the one
+//! the guard used to dominate.
 //!
 //! Run with:  cargo run --release --features metrics --example bulk_atomic_diag
 
@@ -40,9 +43,10 @@ enum Shape {
     Fanout,
     /// `n` assertions about the **same** `(source, target, type)` at distinct
     /// non-overlapping closed intervals — legal, since only one interval may be
-    /// *open*. Every pair reaches `Interval::new` and `overlaps`, so the guard
-    /// runs its expensive path n(n−1)/2 times. A batch of corrections to one
-    /// relationship's history has exactly this shape.
+    /// *open*. Every pair used to reach `Interval::new` and `overlaps`, so the
+    /// guard ran its expensive path n(n−1)/2 times; since 0.13.6 they land in
+    /// one sorted group and the comparison runs once per row. A batch of
+    /// corrections to one relationship's history has exactly this shape.
     History,
 }
 

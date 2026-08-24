@@ -91,6 +91,13 @@ def estimate_bulk_hold(edges: Sequence[EdgeAssertion]) -> timedelta:
 
     Call it *before* the write. The batch is one transaction under one stamp and
     cannot be chunked, so this is also how long every other writer waits.
+
+    It is a function of the row count alone as of 0.13.6 (D-179). Until then the
+    batch's *shape* mattered — 20,000 corrections to one relationship's history
+    cost 18.1 s against 2.6 s for 20,000 unrelated edges, because the
+    within-batch overlap guard compared every pair. That guard sorts and sweeps
+    now and the two shapes agree, so the estimate does not ask what the edges
+    point at. Machine-specific, and an order of magnitude rather than a promise.
     """
 
 # -------------------------------------------------------------- value types ---

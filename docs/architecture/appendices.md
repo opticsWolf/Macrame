@@ -113,7 +113,7 @@ db.upsert_concept(concept).await?;
 // write_bulk_atomic is the one write with no latency bound. Ask first
 // (0.6.0, D-081): the batch is one act under one stamp and cannot be chunked,
 // so this duration is time every other writer spends waiting.
-let held: Duration = estimated_bulk_hold(&edges);   // ~34 ms / 500 rows, ~2.6 s / 20K
+let held: Duration = estimated_bulk_hold(&edges);   // ~33 ms / 500 rows, ~2.2 s / 20K
 if held > BULK_ATOMIC_WARN_HOLD { /* 250 ms; the call warns above this */ }
 
 db.write_bulk_atomic(edges).await?;    // one transaction, one stamp, one stall

@@ -320,6 +320,8 @@ Recorded here because this is where a reader looks for it. Until 0.5.6 the exemp
 | `archive()` | measured **26.8 ms** for 2,000 archivable edges | [D-012](s13-decision-register.md#d-012): copy-then-delete must be atomic, or a crash between the phases duplicates or loses rows |
 | `rebuild_current()` | ~50 s per 10M edges | [D-023](s13-decision-register.md#d-023): the window between the `DELETE` and the `INSERT` is the whole of current belief |
 
+**What the first row costs changed in 0.13.6 ([D-179](s13-decision-register.md#d-179)), though the exemption did not.** `write_edges_atomic` opened with a within-batch overlap guard ([D-060](s13-decision-register.md#d-060)) that compared every pair, so an uncapped batch carried an uncapped quadratic term — 20,000 corrections to one relationship's history held the actor for **18.1 s**. It sorts and sweeps now, and the same batch holds for **2.2 s**, which is what 20,000 inserts cost regardless of shape. The exemption is still [D-014](s13-decision-register.md#d-014)'s and still right; what it exempted the caller from is now a smaller number.
+
 All three are atomic **by contract**. Capping the batch and adding a third priority tier were both considered and neither taken: capping breaks the guarantee the operation exists to provide, and a third tier changes which caller waits without changing how long the lock is held. The defect was never the exemption — it was stating the bound as though it had none. A caller who needs the latency bound rather than the atomicity has `bulk_import`, which is the same write chunked and explicitly not atomic overall ([D-011](s13-decision-register.md#d-011)).
 ```rust
 // shape only — see Appendix A for normative signatures

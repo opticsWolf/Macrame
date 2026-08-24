@@ -267,7 +267,7 @@ branching lands.** This is the one item in this document I would cut first if
 | 2.3 | Per-transaction overhead ~0.8 ms; singular paths pay it per row | Med | W3.4 | 0.13.0 |
 | 2.4 | Snapshot work runs on a tokio worker | Med | W8.1 | 0.14.0 |
 | 2.5 | `Subgraph` string-keyed adjacency | Low | W10.3 | 0.14.0 |
-| 2.6 | `reject_overlaps_within` O(n²) | Med | W7.5 | 0.14.0 |
+| 2.6 | `reject_overlaps_within` O(n²) | Med | W7.5 | 0.13.6 ✅ |
 | 3.1 | `as_of` mixes valid time and transaction time | High | W5.6 / W7.1 | both |
 | 3.2 | `AtTime` degrades silently after archive | Med | W9.1 | 0.14.0 |
 | 3.3 | Snapshot loader unbounded | Med | W8.2 | 0.14.0 |
@@ -1284,6 +1284,29 @@ absorbing them silently.
 **W7.5 — `reject_overlaps_within`.** Closes §2.6. O(n²) over the batch. Sort by
 `(source, target, edge_type, valid_from)` and check adjacent pairs; the guard's
 semantics do not change.
+
+> **✅ Shipped 0.13.6 ([D-179](../docs/architecture/s13-decision-register.md#d-179)).**
+> Sorted and swept, `n log n`, and the semantics are unchanged as specified.
+> The 20,000-edge batch that held the actor for **18.1 s** now holds it for
+> **2.2 s** — the fan-out shape's own cost, so the shape term left
+> [D-081](../docs/architecture/s13-decision-register.md#d-081)'s
+> `estimated_bulk_hold` at the same time and it was re-fitted against fresh
+> measurement.
+>
+> **"Check adjacent pairs" is not sufficient and the rewrite does not do it.**
+> That construction is correct for plain intervals; it needs every adjacent pair
+> to be *eligible*, and two are not — identical `valid_from` is re-assertion,
+> and two open intervals belong to `trg_links_single_open`. `[5,20)`, `[5,6)`,
+> `[7,8)` skips the first pair for equal `valid_from`, finds a clean gap in the
+> second, and never looks at the plain overlap between the first and third. The
+> sweep therefore carries the widest `valid_to` reached so far, plus a second
+> one restricted to closed intervals, and advances in runs of equal
+> `valid_from`. The failing case is a test.
+>
+> One thing does change that the item does not mention: the error names the
+> *earlier* interval as the existing one. The pairwise version named whichever
+> the caller passed first, and within one batch under one stamp that ordering
+> means nothing.
 
 **W7.6 — Bulk paths report progress and accept cancellation.** Closes §4.2.
 `low_chunked` discards `written` on error ([connection.rs:1841](../src/connection.rs:1841)),

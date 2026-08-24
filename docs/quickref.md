@@ -666,7 +666,7 @@ pub const BULK_ATOMIC_WARN_HOLD: Duration = Duration::from_millis(250)
 pub const SAMPLE_LIMIT: usize = 32
 pub const MAX_ARCHIVE_SESSIONS: usize = 4_096
 
-pub fn estimated_bulk_hold(edges: &[EdgeAssertion]) -> Duration  // ~34 ms / 500 rows
+pub fn estimated_bulk_hold(edges: &[EdgeAssertion]) -> Duration  // ~33 ms / 500 rows
 ```
 
 **`Clock` trait**: Injectable clock for deterministic testing. `SystemClock` enforces monotonicity by flooring to `MAX(recorded_at)`. `FakeClock` advances explicitly.

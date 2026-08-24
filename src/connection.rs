@@ -345,70 +345,60 @@ pub const CHUNK_BUDGET: std::time::Duration = std::time::Duration::from_millis(3
 pub const BULK_ATOMIC_WARN_HOLD: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// Roughly how long [`Database::write_bulk_atomic`] will hold the actor for
-/// this batch (T1.3, D-081).
+/// this batch (T1.3, D-081; re-fitted 0.13.6, W7.5, D-179).
 ///
-/// # Three terms, because the cost is neither linear nor a function of size
+/// # Two terms, and the batch's shape is no longer one of them
 ///
-/// T1.3 asks for "rows × measured per-row cost". That model is wrong twice over,
-/// and both corrections came out of measuring it.
+/// T1.3 asks for "rows × measured per-row cost". Through 0.13.5 that was wrong
+/// in a way worth a paragraph: `write_edges_atomic` opened with a
+/// `reject_overlaps_within` that compared **every pair**, and the quadratic
+/// term's constant depended on the batch's *shape* rather than its size, so two
+/// 20,000-edge batches held the actor for **2.6 s** and **18.1 s** — a size-only
+/// model was off by 7× between them, in the under-predicting direction.
 ///
-/// First, the cost is not linear. `write_edges_atomic` opens with
-/// `reject_overlaps_within`, which compares **every pair** in the batch before a
-/// row is written. Second — and this is the one that matters — the quadratic
-/// term's constant depends on the batch's *shape*, not its size. The pairwise
-/// loop starts with an early `continue` on mismatched `(source, target,
-/// edge_type)`; pairs that share all three fall through to `Interval::new` and
-/// `overlaps`, which is **sixteen times** dearer per pair.
+/// W7.5 sorts and sweeps instead, and the 18.1 s batch now holds for **2.2 s**.
+/// The shape term is gone from the code and therefore from here: measured on
+/// the same machine, the two shapes are within 15% of each other at every size
+/// from 100 to 20,000 rows, which is inside the noise this model claims.
+///
+/// What is left is not flat either, and the second term is why. Per-row cost
+/// rises from ~36 µs at 100 rows to ~111 µs at 20,000, because each insert
+/// maintains indexes and two triggers against a table the batch is itself
+/// growing:
 ///
 /// ```text
-/// hold ≈ 73 µs · rows  +  5.5 ns · mismatched pairs  +  86 ns · matching pairs
+/// hold ≈ rows · (7.4 µs + 7.24 µs · ⌊log₂ rows⌋)
 /// ```
-///
-/// Two batches of 20,000 edges, measured on the same machine: one fanning out to
-/// distinct targets holds the actor for **2.5 s**, and one asserting 20,000
-/// corrections to a single relationship's history holds it for **18.6 s**. A
-/// size-only model is off by 7× between those two, in the direction that
-/// matters — it under-predicts the bad case. So this counts the matching pairs
-/// rather than guessing, with one `HashMap` pass over the batch. That pass is
-/// O(rows) against an operation about to spend milliseconds per row.
 ///
 /// # What this is calibrated against, and where it will be wrong
 ///
-/// libSQL 0.9.30, one machine, best of three, over 100–20,000 rows in both
-/// shapes; within 5% across that range except below ~500 rows, where fixed costs
-/// dominate and it over-predicts by 3× — harmless, since nothing that small can
-/// approach [`BULK_ATOMIC_WARN_HOLD`].
+/// libSQL 0.9.30, one machine, best of three, 100–20,000 rows in both shapes;
+/// within 15% from 500 rows up. Below that it under-predicts by up to 3×, which
+/// is harmless in the same way the old 3× over-prediction was — nothing that
+/// small approaches [`BULK_ATOMIC_WARN_HOLD`].
+///
+/// **The log term reads the batch because the batch is all it has.** It stands
+/// for the depth of a structure the batch is loading, and this signature never
+/// sees the table. That is exact for the bulk import this warns about, and
+/// optimistic for a small batch appended to an already-large table — the same
+/// blind spot the flat per-row model had, now visible instead of averaged away.
 ///
 /// It is machine-specific and says nothing about disk. It exists to turn
-/// "uncapped" into an order of magnitude a caller can act on — the difference
-/// between 30 ms and 18 s — and should not be read more precisely than that.
-/// `examples/bulk_atomic_diag.rs` prints predicted against measured, so the
-/// model's drift is visible rather than assumed.
+/// "uncapped" into an order of magnitude a caller can act on, and should not be
+/// read more precisely than that. `examples/bulk_atomic_diag.rs` prints
+/// predicted against measured, so the model's drift is visible rather than
+/// assumed.
 pub fn estimated_bulk_hold(edges: &[EdgeAssertion]) -> std::time::Duration {
     let rows = edges.len() as u64;
-    let all_pairs = rows.saturating_mul(rows.saturating_sub(1)) / 2;
-
-    // Pairs sharing all three key columns, which is exactly the set that reaches
-    // the guard's expensive path. Grouped rather than sorted: the batch is
-    // borrowed, and sorting would either clone it or reorder the caller's data.
-    let mut groups: std::collections::HashMap<(&str, &str, &str), u64> =
-        std::collections::HashMap::new();
-    for e in edges {
-        *groups
-            .entry((&e.source, &e.target, &e.edge_type))
-            .or_insert(0) += 1;
+    if rows == 0 {
+        return std::time::Duration::ZERO;
     }
-    let matching: u64 = groups.values().map(|&g| g * (g - 1) / 2).sum();
-    let mismatched = all_pairs - matching;
 
     // Nanoseconds throughout, saturating: a caller who passes a batch large
     // enough to overflow this has a problem the arithmetic cannot express, and
     // saturating to ~584 years still crosses every threshold above.
-    std::time::Duration::from_nanos(
-        (73_000u64.saturating_mul(rows))
-            .saturating_add(mismatched.saturating_mul(11) / 2)
-            .saturating_add(matching.saturating_mul(86)),
-    )
+    let per_row = 7_400u64.saturating_add((rows.ilog2() as u64).saturating_mul(7_240));
+    std::time::Duration::from_nanos(rows.saturating_mul(per_row))
 }
 
 /// Most sessions [`Database::archive_windowed`] will run for one call (T1.1).
@@ -3415,44 +3405,131 @@ async fn check_prepared(stmt: &libsql::Statement, edge: &EdgeAssertion) -> Resul
 ///
 /// The database check cannot see rows that are not in the database yet, so a
 /// batch carrying two overlapping intervals for one relationship would pass
-/// every per-row check and commit the overlap in one transaction. Quadratic in
-/// the batch, which is affordable because the chunk is bounded at
-/// [`chunk_rows::EDGES`] = 90 and because the comparison is a pair of string
-/// compares — and because grouping first means the inner loop only ever runs
-/// over edges sharing a key, which is normally one.
+/// every per-row check and commit the overlap in one transaction.
+///
+/// # Sorted and swept rather than compared pairwise (0.13.6, W7.5, D-179)
+///
+/// This used to compare every pair. At [`chunk_rows::EDGES`] = 90 that is
+/// nothing, and the chunked paths are the only ones where 90 is the bound —
+/// [`Database::write_bulk_atomic`] is exempt from [`CHUNK_BUDGET`] by contract,
+/// so its batch is whatever the caller passed, and the quadratic term is what
+/// made 20,000 corrections to one relationship's history cost seconds rather
+/// than milliseconds. Sorting by `(source, target, edge_type, valid_from)` and
+/// sweeping costs `n log n` and changes nothing a caller can observe except the
+/// wait.
+///
+/// **Adjacent pairs are not sufficient, and that is the whole difficulty.** For
+/// plain intervals they would be: sort by start, and if any two overlap then
+/// some neighbouring two overlap. That proof needs every pair to be *eligible*,
+/// and here two are not — identical `valid_from` is re-assertion rather than
+/// overlap, and two open intervals belong to `trg_links_single_open`. Skip an
+/// adjacent pair for either reason and a real overlap can hide behind it:
+/// `[5,20)`, `[5,6)`, `[7,8)` has the first pair skipped for equal `valid_from`
+/// and the second not overlapping, while `[5,20)` and `[7,8)` overlap plainly.
+/// So the sweep carries the widest `valid_to` reached so far instead of looking
+/// only backwards one step, and carries a second one restricted to closed
+/// intervals — because an open predecessor is excluded for an open candidate
+/// and eligible for a closed one, which are different questions with different
+/// answers.
+///
+/// Equal `valid_from` is handled by advancing in runs: everything with the same
+/// start is checked against the maxima, and only then folded into them, so the
+/// members of a run never see each other.
+///
+/// The report names the *earlier* interval as the existing one, which is the
+/// pairwise version's input order only by accident. Within a batch neither is
+/// older in transaction time — they arrive under one stamp — so valid-time order
+/// is the only ordering that means anything, and it is the one a reader will
+/// assume the words carry.
 fn reject_overlaps_within(edges: &[EdgeAssertion]) -> Result<()> {
-    for (i, a) in edges.iter().enumerate() {
-        let ia = Interval::new(a.valid_from.clone(), a.valid_to.clone());
-        for b in &edges[i + 1..] {
-            if a.source != b.source || a.target != b.target || a.edge_type != b.edge_type {
-                continue;
-            }
-            // Identical valid_from is re-assertion within one batch: the last
-            // writer wins by seq_id, as it does across batches. Not an overlap.
-            if a.valid_from == b.valid_from {
-                continue;
-            }
-            let ib = Interval::new(b.valid_from.clone(), b.valid_to.clone());
-            // Both open is the trigger's case; it fires during the insert and
-            // rolls the batch back with the more specific error.
-            if defer_to_single_open(&ia, &ib) {
-                continue;
-            }
-            if ia.overlaps(&ib) {
-                return Err(DbError::OverlappingInterval {
-                    overlap: Box::new(crate::error::Overlap {
-                        source_id: a.source.clone(),
-                        target_id: a.target.clone(),
-                        edge_type: a.edge_type.clone(),
-                        valid_from: a.valid_from.clone(),
-                        valid_to: a.valid_to.clone(),
-                        existing_from: ib.valid_from,
-                        existing_to: ib.valid_to,
-                    }),
-                });
-            }
-        }
+    // Indices, not the edges. The batch is borrowed and its order is the order
+    // the rows are written in; sorting it would either clone it or reorder the
+    // caller's data, which is `estimated_bulk_hold`'s reason for grouping too.
+    let mut order: Vec<u32> = (0..edges.len() as u32).collect();
+    order.sort_unstable_by(|&i, &j| {
+        let a = &edges[i as usize];
+        let b = &edges[j as usize];
+        (&a.source, &a.target, &a.edge_type, &a.valid_from).cmp(&(
+            &b.source,
+            &b.target,
+            &b.edge_type,
+            &b.valid_from,
+        ))
+    });
+
+    fn key(e: &EdgeAssertion) -> (&str, &str, &str) {
+        (e.source.as_str(), e.target.as_str(), e.edge_type.as_str())
     }
+    let at = |k: usize| &edges[order[k] as usize];
+
+    let mut group = 0;
+    while group < order.len() {
+        let mut group_end = group + 1;
+        while group_end < order.len() && key(at(group_end)) == key(at(group)) {
+            group_end += 1;
+        }
+
+        // The furthest `valid_to` reached by anything already swept in this key
+        // group, and the edge it came from so the error can name it. The second
+        // one ignores open intervals: an open candidate may not be compared
+        // against an open predecessor, and the sentinel would otherwise win the
+        // maximum every time and make every such pair look like an overlap.
+        let mut widest: Option<&EdgeAssertion> = None;
+        let mut widest_closed: Option<&EdgeAssertion> = None;
+
+        let mut run = group;
+        while run < group_end {
+            let mut run_end = run + 1;
+            while run_end < group_end && at(run_end).valid_from == at(run).valid_from {
+                run_end += 1;
+            }
+
+            for k in run..run_end {
+                let e = at(k);
+                let existing = if e.valid_to == timestamp::OPEN_SENTINEL {
+                    widest_closed
+                } else {
+                    widest
+                };
+                let Some(p) = existing else { continue };
+                // `Interval::overlaps` is `max(from) < min(to)`, and the sort
+                // has already settled the max: `p.valid_from <= e.valid_from`.
+                // What is left is the same predicate with the maximum resolved,
+                // and it is written out rather than allocating two `Interval`s
+                // per row to ask the same question.
+                if e.valid_from < p.valid_to && e.valid_from < e.valid_to {
+                    return Err(DbError::OverlappingInterval {
+                        overlap: Box::new(crate::error::Overlap {
+                            source_id: e.source.clone(),
+                            target_id: e.target.clone(),
+                            edge_type: e.edge_type.clone(),
+                            valid_from: e.valid_from.clone(),
+                            valid_to: e.valid_to.clone(),
+                            existing_from: p.valid_from.clone(),
+                            existing_to: p.valid_to.clone(),
+                        }),
+                    });
+                }
+            }
+
+            for k in run..run_end {
+                let e = at(k);
+                if widest.is_none_or(|w| e.valid_to > w.valid_to) {
+                    widest = Some(e);
+                }
+                if e.valid_to != timestamp::OPEN_SENTINEL
+                    && widest_closed.is_none_or(|w| e.valid_to > w.valid_to)
+                {
+                    widest_closed = Some(e);
+                }
+            }
+
+            run = run_end;
+        }
+
+        group = group_end;
+    }
+
     Ok(())
 }
 
@@ -3683,30 +3760,30 @@ mod tests {
             .valid_to(format!("2026-01-01T00:00:00.{:06}Z", micros + 1))
     }
 
-    /// The estimate must depend on the batch's **shape**, not only its size.
+    /// The estimate must **no longer** depend on the batch's shape (0.13.6).
     ///
-    /// This is the correction T1.3's "rows × per-row cost" needed. Two batches
-    /// of the same length whose measured holds differ by 7× must not be
-    /// predicted identically, and the direction matters: a model that averages
-    /// the two under-predicts the expensive shape, which is the only one anyone
-    /// needs warning about.
+    /// Its dependence on shape was correct for as long as the guard was
+    /// quadratic and the constant differed 16× between the two paths through
+    /// its inner loop. W7.5 removed that term, and measurement agrees: 1.94 s
+    /// and 2.22 s for the two 20,000-edge batches that used to differ by 7×.
+    /// A model that kept predicting a 7× spread would now be wrong in the
+    /// *expensive* direction — warning loudly about a batch that is fine.
     #[test]
-    fn two_batches_of_one_size_are_not_predicted_alike() {
+    fn two_batches_of_one_size_are_predicted_alike() {
         const N: usize = 20_000;
         let fanout: Vec<_> = (0..N).map(|i| edge(&format!("t{i:07}"), i)).collect();
         let history: Vec<_> = (0..N).map(|i| edge("t0", i)).collect();
 
-        let (a, b) = (estimated_bulk_hold(&fanout), estimated_bulk_hold(&history));
-        assert!(
-            b > a * 5,
-            "the guard's expensive path is 16x dearer per pair and this batch \
-             takes it on every pair, but the estimates are {a:?} and {b:?}"
+        assert_eq!(
+            estimated_bulk_hold(&fanout),
+            estimated_bulk_hold(&history),
+            "the guard no longer reads the batch's shape, so neither may this"
         );
     }
 
-    /// Measured on libSQL 0.9.30: 2.5 s and 18.6 s for those two batches. The
-    /// estimator tracked both within 5%, and this pins that it still does — a
-    /// coefficient edited without re-measuring fails here.
+    /// Measured on libSQL 0.9.30 after W7.5: 1.94 s and 2.22 s for those two
+    /// batches, against 2.6 s and 18.1 s before it. This pins that the model
+    /// still tracks them — a coefficient edited without re-measuring fails here.
     #[test]
     fn the_estimate_matches_what_was_measured() {
         const N: usize = 20_000;
@@ -3714,7 +3791,7 @@ mod tests {
         let history: Vec<_> = (0..N).map(|i| edge("t0", i)).collect();
 
         for (batch, measured_ms, label) in
-            [(fanout, 2_618u128, "fanout"), (history, 18_057, "history")]
+            [(fanout, 1_936u128, "fanout"), (history, 2_220, "history")]
         {
             let predicted = estimated_bulk_hold(&batch).as_millis();
             let ratio = predicted as f64 / measured_ms as f64;
@@ -3727,16 +3804,28 @@ mod tests {
         }
     }
 
-    /// An empty or single-edge batch has no pairs, and the arithmetic must not
-    /// underflow computing it.
+    /// `ilog2` panics on zero, and an empty batch is the caller asking whether
+    /// a batch they have not built yet would be slow.
     #[test]
-    fn a_batch_too_small_to_have_pairs_still_estimates() {
+    fn an_empty_batch_estimates_nothing_rather_than_panicking() {
         assert_eq!(estimated_bulk_hold(&[]), std::time::Duration::ZERO);
         let one = [edge("t0", 0)];
         assert_eq!(
             estimated_bulk_hold(&one),
-            std::time::Duration::from_nanos(73_000)
+            std::time::Duration::from_nanos(7_400)
         );
+    }
+
+    /// The model is used as a threshold test, so it must not go backwards.
+    #[test]
+    fn a_bigger_batch_never_predicts_a_shorter_hold() {
+        let mut last = std::time::Duration::ZERO;
+        for n in [1usize, 2, 3, 7, 8, 100, 511, 512, 513, 5_000, 20_000] {
+            let batch: Vec<_> = (0..n).map(|i| edge(&format!("t{i:07}"), i)).collect();
+            let now = estimated_bulk_hold(&batch);
+            assert!(now >= last, "{n} rows predicts {now:?} after {last:?}");
+            last = now;
+        }
     }
 
     /// The warning threshold sits well above the bound this path is exempt from.
@@ -3748,6 +3837,143 @@ mod tests {
     #[test]
     fn the_warning_threshold_is_not_the_chunk_budget() {
         assert!(BULK_ATOMIC_WARN_HOLD > CHUNK_BUDGET * 10);
+    }
+
+    // -----------------------------------------------------------------------
+    // reject_overlaps_within — sorted and swept (0.13.6, W7.5, D-179)
+    //
+    // The pairwise version was obviously correct and too slow; this one is
+    // neither, so what follows pins the cases where the obvious fix is wrong
+    // rather than only the cases the guard already caught.
+    // -----------------------------------------------------------------------
+
+    /// An edge over an explicit interval, all four key columns spelled out.
+    fn span(target: &str, edge_type: &str, from: usize, to: Option<usize>) -> EdgeAssertion {
+        let stamp = |n: usize| format!("2026-01-01T00:00:00.{n:06}Z");
+        EdgeAssertion::new("src", target, edge_type)
+            .valid_from(stamp(from))
+            .valid_to(to.map_or_else(|| timestamp::OPEN_SENTINEL.to_string(), stamp))
+    }
+
+    fn closed(from: usize, to: usize) -> EdgeAssertion {
+        span("t0", "LINKS", from, Some(to))
+    }
+
+    fn open_at(from: usize) -> EdgeAssertion {
+        span("t0", "LINKS", from, None)
+    }
+
+    /// The case that makes adjacent pairs insufficient.
+    ///
+    /// Sort by start and any overlap shows up between neighbours — but only if
+    /// every neighbouring pair is eligible to be checked. `[5,20)` and `[5,6)`
+    /// are not: identical `valid_from` is re-assertion. Skip them, and `[5,6)`
+    /// against `[7,8)` is a clean gap, and the plain overlap between `[5,20)`
+    /// and `[7,8)` never gets looked at.
+    #[test]
+    fn an_overlap_hidden_behind_an_equal_valid_from_is_still_found() {
+        let batch = vec![closed(5, 20), closed(5, 6), closed(7, 8)];
+        assert!(matches!(
+            reject_overlaps_within(&batch),
+            Err(DbError::OverlappingInterval { .. })
+        ));
+    }
+
+    /// The same trap in the other direction: skipped for being open.
+    ///
+    /// Two open intervals are `trg_links_single_open`'s case and are passed
+    /// over here. A running maximum that counted them would take the sentinel
+    /// as the widest reach and report every later open interval as overlapping
+    /// it — inventing an error rather than missing one, which is why the sweep
+    /// carries a second maximum restricted to closed intervals.
+    #[test]
+    fn two_open_intervals_are_left_to_the_trigger() {
+        let batch = vec![closed(1, 5), open_at(10), open_at(20)];
+        assert!(reject_overlaps_within(&batch).is_ok());
+    }
+
+    /// An open interval still overlaps a closed one that reaches past its start.
+    #[test]
+    fn an_open_interval_over_a_closed_one_is_an_overlap() {
+        let batch = vec![closed(1, 50), open_at(10)];
+        assert!(matches!(
+            reject_overlaps_within(&batch),
+            Err(DbError::OverlappingInterval { .. })
+        ));
+    }
+
+    /// Same `valid_from`, different `valid_to`: a batch correcting itself.
+    ///
+    /// Last writer wins by `seq_id`, exactly as it does across batches. The
+    /// guard has no opinion.
+    #[test]
+    fn equal_valid_from_is_re_assertion_not_overlap() {
+        let batch = vec![closed(5, 20), closed(5, 6), closed(5, 900)];
+        assert!(reject_overlaps_within(&batch).is_ok());
+    }
+
+    /// Grouping is what makes the sweep sound, so it is pinned rather than read.
+    #[test]
+    fn edges_with_different_keys_do_not_see_each_other() {
+        let batch = vec![
+            span("t0", "LINKS", 1, Some(50)),
+            span("t1", "LINKS", 10, Some(60)),
+            span("t0", "CITES", 10, Some(60)),
+            span("t0", "LINKS", 50, Some(60)),
+        ];
+        assert!(reject_overlaps_within(&batch).is_ok());
+    }
+
+    /// Which of the two the report calls *existing* (0.13.6).
+    ///
+    /// Neither is older in transaction time — a batch lands under one stamp —
+    /// so the pairwise version's answer was its input order, which means
+    /// nothing. Valid-time order is the only ordering the two intervals have.
+    #[test]
+    fn the_report_names_the_earlier_interval_as_the_existing_one() {
+        let batch = vec![closed(7, 8), closed(5, 20)];
+        let Err(DbError::OverlappingInterval { overlap }) = reject_overlaps_within(&batch) else {
+            panic!("the batch overlaps itself");
+        };
+        assert!(overlap.valid_from.ends_with(".000007Z"), "{overlap:?}");
+        assert!(overlap.existing_from.ends_with(".000005Z"), "{overlap:?}");
+    }
+
+    /// A guard whose answer depended on the caller's ordering would be a worse
+    /// guard than the one it replaced, and sorting is exactly the change that
+    /// could introduce that.
+    #[test]
+    fn the_answer_does_not_depend_on_the_order_the_caller_passed() {
+        let mut batch = vec![closed(5, 20), closed(5, 6), closed(7, 8)];
+        batch.reverse();
+        assert!(reject_overlaps_within(&batch).is_err());
+
+        let mut clean = vec![closed(1, 5), closed(5, 6), closed(7, 8), open_at(8)];
+        clean.reverse();
+        assert!(reject_overlaps_within(&clean).is_ok());
+    }
+
+    /// §2.6, and the reason the rewrite happened rather than the doc alone.
+    ///
+    /// Every edge shares a key, so the old loop reached `Interval::overlaps`
+    /// on all n(n−1)/2 pairs — 50 million of them here, which is seconds even
+    /// in release and considerably worse in the debug profile this runs under.
+    /// The bound is loose on purpose: it is an order of magnitude, not a
+    /// benchmark, and the only thing it can fail on is the quadratic term
+    /// coming back.
+    #[test]
+    fn one_relationships_whole_history_is_no_longer_quadratic() {
+        const N: usize = 10_000;
+        let batch: Vec<_> = (0..N).map(|i| closed(i * 2, i * 2 + 1)).collect();
+
+        let started = std::time::Instant::now();
+        assert!(reject_overlaps_within(&batch).is_ok());
+        let took = started.elapsed();
+
+        assert!(
+            took < std::time::Duration::from_secs(2),
+            "{N} same-key edges took {took:?} in the guard"
+        );
     }
 
     // -----------------------------------------------------------------------

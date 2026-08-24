@@ -271,18 +271,20 @@ def test_the_hold_estimate_is_available_before_the_write():
     edges = [macrame.EdgeAssertion(f"s{i}", "t", "LINKS", valid_from=T0) for i in range(500)]
     held = macrame.estimate_bulk_hold(edges)
     assert isinstance(held, dt.timedelta)
-    # Measured on libSQL 0.9.30: 500 rows is ~34 ms. The band is wide because
+    # Measured on libSQL 0.9.30: 500 rows is ~33 ms. The band is wide because
     # the estimate is a shape, not a promise.
     assert dt.timedelta(milliseconds=10) < held < dt.timedelta(milliseconds=200)
 
 
-def test_the_estimate_is_not_a_function_of_size_alone():
-    """The 7× case the model exists for.
+def test_the_estimate_no_longer_depends_on_the_batchs_shape():
+    """The 7× case the model used to exist for, closed in 0.13.6 (W7.5, D-179).
 
     20,000 edges spread over distinct relationships and 20,000 corrections to
-    one relationship's history are the same row count and not the same cost —
-    the second reaches the single-open guard's expensive path on every pair. A
-    size-only model under-predicts it by 7×, in the direction that matters.
+    one relationship's history were the same row count and not the same cost:
+    the second reached the within-batch overlap guard's expensive path on every
+    pair, and the guard was quadratic. It sorts and sweeps now, the measured
+    holds agree to within 15%, and a model still predicting a 7× spread would
+    warn about a batch that is fine.
     """
     n = 2000
     spread = [macrame.EdgeAssertion(f"s{i}", "t", "LINKS", valid_from=T0) for i in range(n)]
@@ -292,7 +294,7 @@ def test_the_estimate_is_not_a_function_of_size_alone():
         )
         for i in range(n)
     ]
-    assert macrame.estimate_bulk_hold(same) > macrame.estimate_bulk_hold(spread)
+    assert macrame.estimate_bulk_hold(same) == macrame.estimate_bulk_hold(spread)
 
 
 def test_an_empty_batch_estimates_to_nothing():
