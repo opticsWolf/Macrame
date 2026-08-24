@@ -307,6 +307,32 @@ pub enum DbError {
     // -- 0.5.0: concept integrity --
     #[error("recorded_at must advance on concept update (got {got}, had {had})")]
     RecordedAtRegression { got: String, had: String },
+
+    /// The stored transaction-time floor is in the future (0.13.5, W7.4, §3.4).
+    ///
+    /// The clock is raised to `MAX(recorded_at)` at open so that stamps stay
+    /// strictly increasing across restarts. That makes a single row from the
+    /// future — a skewed host, a bad import, a fixture that escaped — this
+    /// process's floor, and every stamp it issues lands at or after it. Those
+    /// rows are then written, so the next open reads the same floor back: the
+    /// damage is permanent, and it spreads.
+    ///
+    /// Refused at open rather than absorbed, which is where the crate can still
+    /// tell the difference between a stamp it wrote and one it did not.
+    /// `macrame::FutureStampPolicy` widens or waives the bound; waiving it
+    /// opens the file to be *read*, and does not repair it.
+    // The message names the *knob* rather than the Rust spelling of it,
+    // because it crosses to Python verbatim and a caller there cannot write a
+    // `Tuning` literal. `future_stamps` and `allow` are the two words that mean
+    // the same thing on both surfaces.
+    #[error(
+        "the newest recorded_at in this database is {stamp}, past the limit \
+         {limit}. The clock floor is taken from it, so opening would stamp \
+         every later write at or after it — permanently, since the next open \
+         reads those rows back. Set the future_stamps policy to allow to open \
+         it and inspect it; that inherits the floor rather than repairing it"
+    )]
+    FutureRecordedAt { stamp: String, limit: String },
 }
 
 pub type Result<T> = std::result::Result<T, DbError>;

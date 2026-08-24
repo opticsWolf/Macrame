@@ -80,6 +80,7 @@ from ._macrame import (
     ArchiveViolationError,
     ArchiveWindowError,
     RecordedInstantUnreachableError,
+    FutureRecordedAtError,
     AttributeMode,
     AttributeModeUnstatedError,
     BudgetError,
@@ -216,6 +217,7 @@ __all__ = [
     "ArchiveViolationError",
     "ArchiveWindowError",
     "RecordedInstantUnreachableError",
+    "FutureRecordedAtError",
     # writer
     "WriterUnavailableError",
     "WriterDroppedResponderError",

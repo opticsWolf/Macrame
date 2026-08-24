@@ -608,6 +608,7 @@ class Database:
         wal_autocheckpoint: int | str | None = None,
         writer_cache_size: int | None = None,
         reader_cache_size: int | None = None,
+        future_stamps: float | str | None = None,
     ) -> Database:
         """Open a ledger, running migrations and starting the write actor.
 
@@ -621,6 +622,15 @@ class Database:
         The two cache sizes are SQLite `cache_size` units: negative is KiB,
         positive is pages. They are separate because the writer is one
         connection and the readers are several.
+
+        `future_stamps` decides what happens when the newest stored
+        `recorded_at` is ahead of the wall clock. `None` refuses beyond a day;
+        a number is your own tolerance in seconds (`0` refuses anything ahead
+        at all); `"allow"` opens the file regardless. The refusal exists
+        because the clock floors itself at `MAX(recorded_at)`, so a stamp from
+        the future is inherited by every write that follows and written back
+        into rows the next open reads — the one bad value in the file that
+        manufactures more of itself. Raises `FutureRecordedAtError`.
         """
 
     def close(self) -> None:
@@ -959,6 +969,10 @@ class RebuildInterruptedError(IntegrityError):
 class RecordedAtRegressionError(IntegrityError):
     got: str
     had: str
+
+class FutureRecordedAtError(IntegrityError):
+    stamp: str
+    limit: str
 
 class ArchiveSessionLeakedError(IntegrityError):
     marker: str

@@ -271,7 +271,7 @@ branching lands.** This is the one item in this document I would cut first if
 | 3.1 | `as_of` mixes valid time and transaction time | High | W5.6 / W7.1 | both |
 | 3.2 | `AtTime` degrades silently after archive | Med | W9.1 | 0.14.0 |
 | 3.3 | Snapshot loader unbounded | Med | W8.2 | 0.14.0 |
-| 3.4 | Future `recorded_at` poisons the clock floor | Med | W7.4 | 0.14.0 |
+| 3.4 | Future `recorded_at` poisons the clock floor | Med | W7.4 | 0.13.5 ✅ |
 | 3.5 | `run_writer_actor` cannot return `Err` | Low | W7.3 | 0.13.4 ✅ |
 | 3.6 | `write_annotations_atomic` bypasses `classify` | Med | W7.2 | 0.13.3 ✅ |
 | 3.7 | Snapshot rename atomic but not durable | Med | W8.3 | 0.14.0 |
@@ -1255,6 +1255,31 @@ bound, so one row stamped in 2087 — a clock skew, a bad import, a test fixture
 that escaped — permanently pins the floor and every subsequent write inherits
 it. Bound it at open, and refuse writes stamped beyond a tolerance rather than
 absorbing them silently.
+
+> **✅ Shipped 0.13.5 ([D-178](../docs/architecture/s13-decision-register.md#d-178)).**
+> `DbError::FutureRecordedAt` at open, governed by
+> `Tuning { future_stamps: FutureStampPolicy::Default | Tolerance(d) | Allow }`
+> — `WalCheckpointPolicy`'s shape, for D-155's reason. Default tolerance is a
+> day, generous because what is being caught is out by *years*; a tight bound
+> would catch timezone-confused hosts instead. Crossed to Python in the same
+> release as `future_stamps=None | seconds | "allow"` and
+> `FutureRecordedAtError`.
+>
+> **The second clause is answered by the first, and the other reading of it is
+> refused with its reason.** `recorded_at` is never caller-supplied — every one
+> is `clock.now()` inside the actor — so "refuse writes stamped beyond a
+> tolerance" is the writes already in the file, which is what
+> `recorded_at_floor` being the only cited location implies. Read instead as a
+> per-`now()` skew guard, it needs a reference the wall clock cannot move; a
+> monotonic anchor does not advance across suspend on any target here, so a
+> laptop resumed after a week is indistinguishable from a host skewed by a
+> week, and clamping writes a stamp claiming the transaction happened last
+> Tuesday.
+>
+> **The guard's first catch was this project's own fixtures.** `tests_py`'s
+> clock `START` was 2030 — a fake set ahead of the wall clock, which is exactly
+> the "test fixture that escaped" the finding names. It was wrong in every test
+> in the file and observable in the one that reopened.
 
 **W7.5 — `reject_overlaps_within`.** Closes §2.6. O(n²) over the batch. Sort by
 `(source, target, edge_type, valid_from)` and check adjacent pairs; the guard's

@@ -101,6 +101,11 @@ EXPECTED: dict[str, tuple[str, str, dict]] = {
         "TemporalError",
         {"ts": "2026-02-03T04:05:06.000007Z"},
     ),
+    "FutureRecordedAt": (
+        "FutureRecordedAtError",
+        "IntegrityError",
+        {"stamp": "2065-02-03T04:05:06.000007Z", "limit": "2026-02-04T04:05:06.000007Z"},
+    ),
     # -- vector --
     "DimMismatch": (
         "DimMismatchError",
@@ -158,9 +163,24 @@ def _variants_declared_in_rust() -> list[str]:
                 end = i
                 break
     names = []
+    attr_depth = 0
     for line in body[:end].splitlines():
         stripped = line.strip()
-        if not stripped or stripped.startswith(("///", "//", "#[")):
+        # An attribute can span lines, and a `#[error("…")]` message wraps
+        # wherever the text wraps. Skipping only the line that *starts* with
+        # `#[` left the continuations in, so any wrapped line beginning with a
+        # capital was read as a variant — `FutureStampPolicy::Allow`, sitting
+        # in the message that tells a caller how to open a refused database,
+        # was reported as a `DbError` variant that no sample table covers
+        # (0.13.5, W7.4). Track the attribute\'s parens instead.
+        if attr_depth == 0 and stripped.startswith("#["):
+            attr_depth = 1
+        if attr_depth:
+            attr_depth += stripped.count("(") - stripped.count(")")
+            if stripped.endswith("]") and attr_depth <= 1:
+                attr_depth = 0
+            continue
+        if not stripped or stripped.startswith(("///", "//")):
             continue
         m = re.match(r"^([A-Z]\w*)", stripped)
         if m:

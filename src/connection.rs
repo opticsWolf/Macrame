@@ -3,6 +3,7 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::error::{classify, DbError, Result, WriteOp};
+use crate::util::clock::FutureStampPolicy;
 use crate::graph::edge::EdgeAssertion;
 use crate::integrity::{rebuild_current, RebuildReport};
 use crate::schema::migrations;
@@ -951,6 +952,21 @@ pub struct Tuning {
     /// therefore has to be small enough for the multiplied case, which is the
     /// wrong size for the one connection that holds the write lock.
     pub reader_cache_size: Option<i32>,
+    /// What to do about a stored `recorded_at` in the future (0.13.5, W7.4,
+    /// §3.4).
+    ///
+    /// The clock floors itself at `MAX(recorded_at)` so stamps stay strictly
+    /// increasing across restarts, which means one row from the future becomes
+    /// this process's floor and every stamp it issues inherits it — into rows
+    /// the next open reads back. Defaults to refusing beyond
+    /// [`DEFAULT_FUTURE_STAMP_TOLERANCE`], a day.
+    ///
+    /// Like [`Self::wal_autocheckpoint`] and unlike the two cache sizes, this
+    /// is a policy enum rather than an `Option`, for
+    /// [D-155](../../docs/architecture/s13-decision-register.md)'s reason: it
+    /// guards an invariant, and a `None` that switches it off would switch it
+    /// off for every caller who never heard of it.
+    pub future_stamps: FutureStampPolicy,
 }
 
 // `Clock` is not `Debug` — it is a behavioural trait with two methods and
@@ -971,6 +987,7 @@ impl Tuning {
             wal_autocheckpoint: WalCheckpointPolicy::default(),
             writer_cache_size: None,
             reader_cache_size: None,
+            future_stamps: FutureStampPolicy::default(),
         }
     }
 }
@@ -1055,6 +1072,7 @@ impl Database {
             wal_autocheckpoint,
             writer_cache_size,
             reader_cache_size,
+            future_stamps,
         } = tuning;
         let cadence = cadence.resolve();
         let db = libsql::Builder::new_local(path).build().await?;
@@ -1079,12 +1097,14 @@ impl Database {
         // are guaranteed to exist.
         let clock: Arc<dyn Clock> = match injected {
             Some(clock) => {
-                if let Some(floor) = crate::util::clock::recorded_at_floor(&read_conn).await? {
+                if let Some(floor) =
+                    crate::util::clock::recorded_at_floor(&read_conn, future_stamps).await?
+                {
                     clock.raise_floor(floor);
                 }
                 clock
             }
-            None => Arc::new(SystemClock::new(&read_conn).await?),
+            None => Arc::new(SystemClock::new(&read_conn, future_stamps).await?),
         };
         let shared = Arc::new(ActorShared::default());
         let writer = tokio::spawn(run_writer_actor(

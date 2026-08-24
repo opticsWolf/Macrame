@@ -188,6 +188,10 @@ pub enum DbError {
     // -- 0.5.0: concept integrity --
     #[error("recorded_at must advance on concept update (got {got}, had {had})")]
     RecordedAtRegression { got: String, had: String },
+
+    // -- 0.13.5: the clock floor --
+    #[error("the newest recorded_at in this database is {stamp}, past the limit {limit} …")]
+    FutureRecordedAt { stamp: String, limit: String },
 }
 ```
 
@@ -196,6 +200,8 @@ The error philosophy is threefold. Nothing panics across the API boundary — ev
 The 0.4.5 variants encode one policy: the failure of the writer task must be containable. An in-flight oneshot whose actor has panicked resolves to WriterDroppedResponder rather than a panic of its own; every subsequent operation resolves to WriterUnavailable. The application learns precisely what happened and what to do — reopen — and the cascade stops at the crate boundary. The actor's death itself is reported through tracing with the underlying cause, so the crash report exists even when the user-facing error is deliberately terse.
 
 The 0.5.0 RecordedAtRegression variant surfaces the concept monotonicity trigger ([§4.3](s4-schema.md#43-the-transaction-log)) as a typed error rather than a raw engine abort, carrying both the rejected and existing timestamps so the caller can diagnose the clock or code path at fault.
+
+**`FutureRecordedAt` is refused at open, and it is the only variant that refuses the whole database rather than an operation (0.13.5, W7.4, [D-178](s13-decision-register.md#d-178)).** The clock floors itself at `MAX(recorded_at)` so stamps stay strictly increasing across restarts. That makes one row from the future — a skewed host, a bad import, a fixture that escaped — this process's floor, and every stamp it issues lands at or after it; those rows are written, so the next open reads the same floor back. **The damage is permanent and it spreads**, which is why the refusal is proportionate and why it is placed at open: that is the last point where the crate can still tell a stamp it wrote from one it did not. A *corrupt* stamp is still a `warn!` and no floor ([D-027](s13-decision-register.md#d-027)) — an unparseable value cannot be inherited, so it cannot spread. `Tuning { future_stamps: FutureStampPolicy::Allow, .. }` opens the file to be read; it does not repair it, and every write made under it inherits the floor.
 
 
 **The 0.5.6 and 0.6.0 variants exist to name the right subject, and that is a policy rather than a habit ([D-069](s13-decision-register.md#d-069)).** An error that names the wrong thing sends a caller to fix the wrong thing, so each of these was split out of a variant that already covered the case badly. `InvalidTimestamp` and `InvalidId` were `ReplayCorrupt { seq: 0 }` and `NotFound` — the first claiming the ledger was damaged when the caller's input was malformed, carrying a sequence number that cannot exist because `AUTOINCREMENT` starts at 1; the second telling a caller the thing is missing and inviting them to create it with the same id, which would be refused again. `DiagnosticConn` is its own variant because a file is not a node ([D-091](s13-decision-register.md#d-091)). `RebuildInterrupted` is distinct from `RebuildFailed` because *the repair did not run* is not *the repair did not repair*: `links_current` is untouched, whatever was true of it before is still true, and the action is to retry ([D-082](s13-decision-register.md#d-082)). `AttributeModeUnstated` was a `tracing::warn!` until 0.6.0, which is invisible in any application that has not configured a subscriber — it is now a value the caller cannot miss ([D-085](s13-decision-register.md#d-085)).

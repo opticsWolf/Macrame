@@ -17,6 +17,7 @@ pub use connection::{
     WalCheckpointPolicy, CHUNK_BUDGET,
 };
 pub use error::{DbError, Overlap, Result};
+pub use util::{FutureStampPolicy, DEFAULT_FUTURE_STAMP_TOLERANCE};
 
 pub mod prelude {
     pub use crate::connection::{
@@ -37,7 +38,9 @@ pub mod prelude {
         archive, query_as_of_edges, reconstruct, ArchiveReport, Interval, MaterializedState,
         SnapshotCadence,
     };
-    pub use crate::util::{Clock, FakeClock, SystemClock};
+    pub use crate::util::{
+        Clock, FakeClock, FutureStampPolicy, SystemClock, DEFAULT_FUTURE_STAMP_TOLERANCE,
+    };
     pub use crate::vector::{
         declared_dimension, escape_fts5_query, keyword_search, reciprocal_rank_fusion,
         register_model, registered_models, search_vector, upsert_embedding, EmbeddingCodec,

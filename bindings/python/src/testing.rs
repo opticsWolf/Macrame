@@ -53,6 +53,7 @@ pub(crate) const DB_ERROR_VARIANTS: &[&str] = &[
     "ArchiveViolation",
     "AttributeModeUnstated",
     "RecordedInstantUnreachable",
+    "FutureRecordedAt",
     "DiagnosticConn",
     "ArchiveWindow",
     "InvalidTimestamp",
@@ -138,6 +139,10 @@ fn sample(name: &str) -> Option<DbError> {
         },
         "RecordedInstantUnreachable" => DbError::RecordedInstantUnreachable {
             ts: "2026-02-03T04:05:06.000007Z".into(),
+        },
+        "FutureRecordedAt" => DbError::FutureRecordedAt {
+            stamp: "2065-02-03T04:05:06.000007Z".into(),
+            limit: "2026-02-04T04:05:06.000007Z".into(),
         },
         "DiagnosticConn" => DbError::DiagnosticConn {
             path: "sample.db".into(),

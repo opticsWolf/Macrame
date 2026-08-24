@@ -204,6 +204,14 @@ impl PyDatabase {
     ///   "disabled" overload, because a caller who computed a threshold and got
     ///   zero has a bug, and inheriting the overload turns it into an unbounded
     ///   WAL ([D-157](../../../docs/architecture/s13-decision-register.md)).
+    /// - `future_stamps`: what to do about a stored `recorded_at` from the
+    ///   future (0.13.5, W7.4,
+    ///   [D-178](../../../docs/architecture/s13-decision-register.md)). `None`
+    ///   refuses beyond a day; a number of seconds sets your own tolerance
+    ///   (`0` refuses anything at all ahead of the wall clock); `"allow"`
+    ///   opens the file regardless, which is a reading path and not a repair.
+    ///   Same shape as `wal_autocheckpoint` and for the same reason: absent
+    ///   means *the bound applies*, never *the bound is off*.
     /// - `writer_cache_size` / `reader_cache_size`: SQLite `cache_size` units —
     ///   negative is KiB, positive is pages. Split because the writer is one
     ///   connection and the readers are several
@@ -219,6 +227,7 @@ impl PyDatabase {
         wal_autocheckpoint = None,
         writer_cache_size = None,
         reader_cache_size = None,
+        future_stamps = None,
     ))]
     fn open(
         py: Python<'_>,
@@ -228,6 +237,7 @@ impl PyDatabase {
         wal_autocheckpoint: Option<&Bound<'_, PyAny>>,
         writer_cache_size: Option<i32>,
         reader_cache_size: Option<i32>,
+        future_stamps: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
         let cadence = to_cadence(snapshot_every_entries, snapshot_poll_seconds)?;
         let tuning = macrame::Tuning {
@@ -238,6 +248,7 @@ impl PyDatabase {
             wal_autocheckpoint: to_wal_policy(wal_autocheckpoint)?,
             writer_cache_size,
             reader_cache_size,
+            future_stamps: to_future_stamp_policy(future_stamps)?,
             ..Default::default()
         };
 
@@ -1530,4 +1541,50 @@ fn to_wal_policy(obj: Option<&Bound<'_, PyAny>>) -> PyResult<macrame::WalCheckpo
         ))
     })?;
     Ok(macrame::WalCheckpointPolicy::EveryPages(pages))
+}
+
+/// `None` / `"allow"` / a non-negative number of seconds → a
+/// [`macrame::FutureStampPolicy`] (0.13.5, W7.4, D-178).
+///
+/// Deliberately the same three-state shape as [`to_wal_policy`], including that
+/// the *absent* state is the one that leaves the guard on. A `None` meaning
+/// "no bound" would switch off a check against a value that spreads, for every
+/// caller who never heard of the keyword — D-155's failure mode against a
+/// costlier invariant.
+///
+/// A negative tolerance is refused rather than saturated at zero: it can only
+/// come from arithmetic, and arithmetic that produced a negative duration has a
+/// sign error the caller should see.
+fn to_future_stamp_policy(
+    obj: Option<&Bound<'_, PyAny>>,
+) -> PyResult<macrame::FutureStampPolicy> {
+    let Some(obj) = obj else {
+        return Ok(macrame::FutureStampPolicy::Default);
+    };
+    if obj.is_none() {
+        return Ok(macrame::FutureStampPolicy::Default);
+    }
+    if let Ok(s) = obj.extract::<String>() {
+        return match s.as_str() {
+            "allow" => Ok(macrame::FutureStampPolicy::Allow),
+            other => Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "future_stamps accepts None, \"allow\", or a tolerance in \
+                 seconds; got {other:?}"
+            ))),
+        };
+    }
+    let seconds: f64 = obj.extract().map_err(|_| {
+        pyo3::exceptions::PyTypeError::new_err(
+            "future_stamps accepts None, \"allow\", or a tolerance in seconds",
+        )
+    })?;
+    if !seconds.is_finite() || seconds < 0.0 {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "future_stamps tolerance must be a finite, non-negative number of \
+             seconds, got {seconds}. Pass \"allow\" to waive the bound entirely."
+        )));
+    }
+    Ok(macrame::FutureStampPolicy::Tolerance(
+        std::time::Duration::from_secs_f64(seconds),
+    ))
 }

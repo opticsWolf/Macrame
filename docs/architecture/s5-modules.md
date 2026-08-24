@@ -91,12 +91,21 @@ pub trait Clock: Send + Sync {
 
 SystemClock enforces this by maintaining an interior Mutex tracking the last-issued timestamp. On each call to now(), it computes max(wall_clock, last_issued + 1μs) and updates the interior state. On construction (SystemClock::new()), it queries the database for MAX(recorded_at) across concepts and links and floors the interior state to that value, so that a restart after an NTP backward correction cannot issue a timestamp older than the newest row in the database. This guarantees that trg_concepts_monotonic_ra ([§4.3](s4-schema.md#43-the-transaction-log)) never rejects a legitimate update due to clock drift. FakeClock is monotonic by construction: the harness advances it explicitly via advance(Duration), and it never moves backwards.
 
+**The floor is inherited, which makes a stamp from the future the one bad value in the file that spreads (0.13.5, W7.4, [D-178](s13-decision-register.md#d-178)).** The paragraph above describes the correction in one direction only. Read it the other way: a single row stamped in 2087 — a skewed host, a bad import, a `FakeClock` fixture that escaped its test — becomes this process's floor, every stamp the clock then issues lands at or after it, and those stamps are *written*. The next open reads the same floor back out of rows this crate itself produced. Nothing in the design recovers from that, because nothing in the design can tell the poisoned rows from legitimate ones once they are stored.
+
+So `recorded_at_floor` bounds what it will absorb. Beyond `FutureStampPolicy`'s tolerance — a day by default, generous because what is being caught is out by *years* — the open returns [`DbError::FutureRecordedAt`](s6-s10-flows-to-dependencies.md#7-errors) rather than taking the floor. This is the only refusal in the crate that rejects a whole database rather than an operation, and it is proportionate for the reason above: it is the last point at which a stamp the crate wrote can still be told from one it did not.
+
+**A corrupt stamp keeps the `warn!` it has always had** ([D-027](s13-decision-register.md#d-027)), and the asymmetry is the argument: a value that will not parse cannot become the floor, so it cannot propagate, and the monotonicity trigger contains it. A value that parses and is wrong is contained by nothing. `Tuning { future_stamps: FutureStampPolicy::Allow, .. }` opens a refused file so it can be *read*; it is not a repair, and writes made under it inherit the floor.
+
 Timestamp parsing contract (0.5.2, [D-027](s13-decision-register.md#d-027)). Because recorded_at is stored as ISO-8601 text, SystemClock::new() must parse the stored string back into a SystemTime to use as its floor. This is the one place in the clock module where a panic is possible if handled carelessly, so the contract is explicit:
 ```rust
 // util/clock.rs — shape only
 
 impl SystemClock {
-    pub async fn new(conn: &libsql::Connection) -> Result<Self> {
+    pub async fn new(
+        conn: &libsql::Connection,
+        policy: FutureStampPolicy,          // 0.13.5, W7.4 — see below
+    ) -> Result<Self> {
         // SQLite MAX() on ISO-8601 'Z' text is lexicographic, which is
         // chronologically correct for UTC strings with identical format.
         let max_ts: Option<String> = conn.query(
@@ -108,6 +117,9 @@ impl SystemClock {
         ).await?.next().await?.and_then(|row| row.get(0).ok());
 
         let floor = match max_ts {
+            // A stamp from the *future* is refused rather than absorbed
+            // (0.13.5, W7.4, D-178): the floor is inherited, so absorbing it
+            // manufactures more of it. Elided here — see the prose below.
             Some(ts) => parse_iso8601_utc(&ts).unwrap_or_else(|e| {
                 // Corrupt or manually-edited timestamp. Don't panic on
                 // startup; fall back to wall clock and warn. The

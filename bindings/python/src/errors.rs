@@ -200,6 +200,21 @@ create_exception!(
 );
 create_exception!(
     macrame,
+    FutureRecordedAtError,
+    IntegrityError,
+    "The newest `recorded_at` in the database is from the future, so opening \
+     would inherit it. Attributes: `stamp`, `limit`.\n\n\
+     The clock floors itself at `MAX(recorded_at)` so stamps stay strictly \
+     increasing across restarts. One row from the future therefore becomes \
+     this process's floor, every stamp it issues lands at or after it, and \
+     those rows are written — so the next open reads the same floor back. It \
+     is the one bad value in the file that manufactures more of itself, which \
+     is why this refuses the whole database rather than an operation.\n\n\
+     `Database.open(path, future_stamps=\"allow\")` opens it so it can be \
+     read. That is not a repair: writes made under it inherit the floor."
+);
+create_exception!(
+    macrame,
     ArchiveSessionLeakedError,
     IntegrityError,
     "The archive-session marker table is present as committed state, which \
@@ -557,6 +572,13 @@ fn build(py: Python<'_>, err: DbError) -> PyErr {
                 e.setattr("had", had)
             })
         }
+
+        DbError::FutureRecordedAt { stamp, limit } => {
+            raise::<FutureRecordedAtError, _>(py, m, |e| {
+                e.setattr("stamp", stamp)?;
+                e.setattr("limit", limit)
+            })
+        }
     }
 }
 
@@ -604,6 +626,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
         RebuildFailedError,
         RebuildInterruptedError,
         RecordedAtRegressionError,
+        FutureRecordedAtError,
         ArchiveSessionLeakedError,
         // validation
         InvalidEdgeTypeError,

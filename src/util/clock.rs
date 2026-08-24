@@ -1,7 +1,56 @@
-use crate::error::Result;
+use crate::error::{DbError, Result};
 use crate::util::timestamp;
 use std::sync::Mutex;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
+
+/// How far ahead of the wall clock a stored `recorded_at` may be before
+/// [`recorded_at_floor`] refuses it. Twenty-four hours.
+///
+/// A whole day is deliberately generous. The condition being caught is a stamp
+/// that is *wrong* — a skewed machine, a bad import, a fixture that escaped —
+/// and those are typically years out, not hours. What a tight bound would catch
+/// instead is a timezone-confused host or a database carried across a daylight
+/// boundary by a tool that mishandled it, and refusing to open on that is worse
+/// than the disease. The check exists to stop a stamp no clock could have
+/// issued from becoming permanent, not to police minutes.
+pub const DEFAULT_FUTURE_STAMP_TOLERANCE: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// What [`crate::Database::open_tuned`] does about a `recorded_at` in the future
+/// (0.13.5, W7.4, [D-178]).
+///
+/// Shaped like [`crate::WalCheckpointPolicy`] and for
+/// [D-155](../../docs/architecture/s13-decision-register.md)'s reason: this
+/// guards an invariant, so "leave it alone" must not be spelt with an `Option`
+/// whose `None` turns it off for every caller who never heard of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FutureStampPolicy {
+    /// Refuse beyond [`DEFAULT_FUTURE_STAMP_TOLERANCE`].
+    #[default]
+    Default,
+    /// Refuse beyond a tolerance of your own. `Duration::ZERO` refuses any
+    /// stamp at all ahead of the wall clock, which is the strictest form and is
+    /// only reasonable where the host's time is known good.
+    Tolerance(Duration),
+    /// Open regardless, and take the floor from whatever is stored.
+    ///
+    /// **The repair path, and it is not a repair.** It exists because a
+    /// database this check refuses cannot otherwise be reached by the crate
+    /// that refuses it, and inspecting a file requires opening it. Every write
+    /// made under this policy inherits the poisoned floor, so use it to read
+    /// and to plan, not to carry on.
+    Allow,
+}
+
+impl FutureStampPolicy {
+    /// `None` means no bound is applied.
+    fn tolerance(self) -> Option<Duration> {
+        match self {
+            Self::Default => Some(DEFAULT_FUTURE_STAMP_TOLERANCE),
+            Self::Tolerance(d) => Some(d),
+            Self::Allow => None,
+        }
+    }
+}
 
 /// Trait defining the clock interface for timestamp generation.
 /// CONTRACT: successive calls return strictly increasing values,
@@ -33,7 +82,28 @@ pub trait Clock: Send + Sync {
 /// One definition of "the floor", used by [`SystemClock::new`] and by
 /// `open_with_clock`, rather than the query existing twice and being kept in
 /// step by hand.
-pub(crate) async fn recorded_at_floor(conn: &libsql::Connection) -> Result<Option<SystemTime>> {
+///
+/// # A stamp from the future is refused rather than absorbed (0.13.5, W7.4, §3.4)
+///
+/// The floor is `MAX(recorded_at)` and the clock is raised to it, so a single
+/// row stamped in 2087 — a skewed host, a bad import, a fixture that escaped —
+/// becomes this process's floor, and every stamp it then issues is in 2087 too.
+/// Those rows are written, so the next open reads the same floor back. **The
+/// damage is permanent and it spreads**, which is what separates this from an
+/// ordinary bad value.
+///
+/// It is caught here rather than at the write, because here is where a stamp
+/// the crate could not have issued becomes one the crate does issue. `policy`
+/// decides how far ahead is too far; see [`FutureStampPolicy`].
+///
+/// A corrupt stamp is still a `warn!` and no floor, unchanged
+/// ([D-027](../../docs/architecture/s13-decision-register.md)) — an unparseable
+/// value cannot be inherited, so it cannot spread, and refusing to open on one
+/// would be the harsher answer to the smaller problem.
+pub(crate) async fn recorded_at_floor(
+    conn: &libsql::Connection,
+    policy: FutureStampPolicy,
+) -> Result<Option<SystemTime>> {
     let max_ts: Option<String> = conn
         .query(
             "SELECT MAX(recorded_at) FROM (
@@ -50,7 +120,18 @@ pub(crate) async fn recorded_at_floor(conn: &libsql::Connection) -> Result<Optio
 
     Ok(match max_ts {
         Some(ts) => match parse_iso8601_utc(&ts) {
-            Ok(t) => Some(t),
+            Ok(t) => {
+                if let Some(tolerance) = policy.tolerance() {
+                    let limit = SystemTime::now() + tolerance;
+                    if t > limit {
+                        return Err(DbError::FutureRecordedAt {
+                            stamp: ts,
+                            limit: format_iso8601_utc(limit),
+                        });
+                    }
+                }
+                Some(t)
+            }
             Err(e) => {
                 tracing::warn!(
                     "clock: failed to parse MAX(recorded_at)={:?}: {}; no floor applied",
@@ -70,11 +151,12 @@ pub struct SystemClock {
 }
 
 impl SystemClock {
-    pub async fn new(conn: &libsql::Connection) -> Result<Self> {
+    pub async fn new(conn: &libsql::Connection, policy: FutureStampPolicy) -> Result<Self> {
         // Wall clock when the database is empty or its stamp will not parse:
         // there is nothing to be behind, and a corrupt stored timestamp must not
-        // become this process's floor (D-027).
-        let floor = recorded_at_floor(conn)
+        // become this process's floor (D-027). A stamp from the *future* is a
+        // different case and `recorded_at_floor` refuses it (W7.4).
+        let floor = recorded_at_floor(conn, policy)
             .await?
             .unwrap_or_else(SystemTime::now);
         Ok(Self {
