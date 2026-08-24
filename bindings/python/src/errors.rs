@@ -399,6 +399,22 @@ create_exception!(
 /// replacing a `NotFoundError` with an `AttributeError` about the machinery
 /// that was trying to describe it would be a strictly worse thing to hand a
 /// caller.
+///
+/// # Every exception leaves here with a `written` attribute (0.13.9, D-182)
+///
+/// `None` by default, meaning *partial application is not a concept on this
+/// path* — which is true of every path but the four chunked writes.
+/// [`to_py_bulk`] overwrites it with the real count on those.
+///
+/// It is set **here**, in the one place every mapped exception passes through,
+/// rather than in the arms that need it. Rust states this in the type system —
+/// the four chunked methods return `BulkResult<usize>` and nothing else does —
+/// and Python has no such type, so the attribute has to be uniform or a caller
+/// writing `except MacrameError as e: log(e.written)` gets an `AttributeError`
+/// raised *inside their except block*, replacing the diagnostic they were
+/// trying to record. `getattr(e, "written", None)` does not fix that: it cannot
+/// tell "the attribute is missing" from "this path cannot partially apply",
+/// and those are different answers to the caller's real question.
 fn raise<T, F>(py: Python<'_>, message: String, set: F) -> PyErr
 where
     T: PyTypeInfo,
@@ -407,6 +423,7 @@ where
     let ty: Bound<'_, PyType> = T::type_object(py);
     match ty.call1((message,)) {
         Ok(instance) => {
+            let _ = instance.setattr("written", py.None());
             let _ = set(&instance);
             PyErr::from_value(instance)
         }
@@ -430,11 +447,15 @@ pub(crate) fn to_py(err: DbError) -> PyErr {
 ///
 /// The exception class is still chosen by the cause, so `except NotFoundError`
 /// keeps catching a missing concept whether it came from `upsert_concept` or
-/// from the middle of a 20,000-row `write_concepts`. What changes is that the
-/// instance carries the partial count — which is why this is a separate
-/// function rather than a field on every exception: the count only exists on
-/// the four paths that can commit part of a batch, and putting `written = 0` on
-/// the rest would be a claim about atomicity that no other path makes.
+/// from the middle of a 20,000-row `write_concepts`. What this adds is the
+/// count, replacing the `None` [`raise`] leaves on every exception with the
+/// number of rows the chunks before the stop committed.
+///
+/// `None` and not `0` for the paths that never reach here (0.13.9, D-182): `0`
+/// already means something on a chunked path — *the first chunk failed* — so
+/// reusing it for *there are no chunks* would make `e.written == 0` ambiguous
+/// between two different execution models. `e.written is not None` is the test
+/// for "is this database in a partial state", and it has to stay exact.
 pub(crate) fn to_py_bulk(err: BulkInterrupted) -> PyErr {
     Python::attach(|py| {
         let e = build(py, err.cause);
@@ -473,13 +494,13 @@ fn build(py: Python<'_>, err: DbError) -> PyErr {
 
         DbError::NotFound(id) => raise::<NotFoundError, _>(py, m, |e| e.setattr("id", id)),
 
-        // `written` is set here as well as in `to_py_bulk`, which overwrites
-        // it with the real count. Only a chunked path can raise this, so the
-        // attribute is always present -- and a cancellation with no bulk
-        // context behind it wrote nothing, which is what 0 says.
-        DbError::BulkCancelled => {
-            raise::<BulkCancelledError, _>(py, m, |e| e.setattr("written", 0usize))
-        }
+        // No `written` here: `raise` defaults it and `to_py_bulk` fills it in
+        // (0.13.9, D-182). Only the chunk loop can produce this variant and it
+        // always arrives inside a `BulkInterrupted`, so the count is real by
+        // the time a caller sees one. The exception is `_raise_db_error`, which
+        // constructs the variant directly for the mapping tests and has no
+        // batch behind it -- `None` is the honest answer there.
+        DbError::BulkCancelled => raise::<BulkCancelledError, _>(py, m, |_| Ok(())),
 
         DbError::DimMismatch {
             got,
@@ -631,12 +652,22 @@ fn build(py: Python<'_>, err: DbError) -> PyErr {
 }
 
 /// The error for touching a closed handle.
+///
+/// The one Macrame exception that does not come from a [`DbError`], and so the
+/// one that does not pass through [`raise`]. It carries `written = None` for
+/// the same reason everything else does (0.13.9, D-182): a caller inspecting an
+/// exception should never have to know which of the two construction sites
+/// produced it.
 pub(crate) fn closed_error() -> PyErr {
-    MacrameClosedError::new_err(
+    let err = MacrameClosedError::new_err(
         "this Database is closed. Reopen it with Database.open(path); a closed \
          handle is not reusable, because close() shut down the write actor and \
          wrote the final snapshot.",
-    )
+    );
+    Python::attach(|py| {
+        let _ = err.value(py).setattr("written", py.None());
+    });
+    err
 }
 
 /// Register every class on the module.

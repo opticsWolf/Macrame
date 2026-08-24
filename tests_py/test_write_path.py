@@ -520,3 +520,86 @@ def test_a_cancel_token_reads_back_and_reprs(db):
     token.cancel()
     token.cancel()  # idempotent; a token never un-cancels
     assert token.cancelled is True
+
+
+# --------------------------------------------------------------------------
+# `written` off the chunked paths (0.13.9, D-182)
+# --------------------------------------------------------------------------
+
+
+def test_an_atomic_batch_that_fails_reports_written_as_none(db):
+    """`0` would be a different claim, and a wrong one.
+
+    On a chunked path `0` means *the first chunk failed*, which says the batch
+    was being applied in pieces and none of them landed. `write_bulk_atomic`
+    was never being applied in pieces — it is one transaction — so the honest
+    answer to "how much of this landed" is that the question does not apply.
+    """
+    with pytest.raises(macrame.OverlappingIntervalError) as caught:
+        db.write_bulk_atomic(
+            [
+                macrame.EdgeAssertion("n0", "n1", "KNOWS", valid_from=T0, valid_to=T2),
+                macrame.EdgeAssertion("n0", "n1", "KNOWS", valid_from=T1, valid_to=T2),
+            ]
+        )
+    assert caught.value.written is None
+    assert count(db, "links") == 0
+
+
+def test_a_single_write_that_fails_reports_written_as_none(db):
+    db.assert_edge(macrame.EdgeAssertion("n1", "n2", "LINKS", valid_from=T0))
+    with pytest.raises(macrame.SingleOpenViolationError) as caught:
+        db.assert_edge(macrame.EdgeAssertion("n1", "n2", "LINKS", valid_from=T1))
+    assert caught.value.written is None
+
+
+def test_a_closed_handle_reports_written_as_none(db_path):
+    """The one exception that does not come from a `DbError`.
+
+    It is built at the other of the two construction sites in `errors.rs`, and
+    a caller inspecting an exception should not have to know that.
+    """
+    handle = macrame.Database.open(db_path, snapshot_every_entries=None)
+    handle.close()
+    with pytest.raises(macrame.MacrameClosedError) as caught:
+        handle.write_concepts([macrame.ConceptUpsert("x", "X", valid_from=T0)])
+    assert caught.value.written is None
+
+
+def test_written_is_readable_on_anything_caught_as_a_macrame_error(db):
+    """The reason the attribute is universal, written as the code that would
+    otherwise break.
+
+    A handler that logs `e.written` must not raise an `AttributeError` from
+    inside itself — that replaces the failure being recorded with a failure
+    about the recording, in the one place a caller has no second chance.
+    """
+    calls = [
+        # A construction-time refusal, which reaches the same mapping layer by
+        # a different route than a failed write does.
+        lambda: macrame.ConceptUpsert("bad|id", "Bad", valid_from=T0),
+        lambda: db.write_bulk_atomic(
+            [
+                macrame.EdgeAssertion("n0", "n1", "KNOWS", valid_from=T0, valid_to=T2),
+                macrame.EdgeAssertion("n0", "n1", "KNOWS", valid_from=T1, valid_to=T2),
+            ]
+        ),
+        lambda: db.write_concepts(
+            _many_concepts(macrame.CHUNK_ROWS_CONCEPTS)
+            + [
+                macrame.ConceptUpsert("dup", "First", valid_from=T0),
+                macrame.ConceptUpsert("dup", "Second", valid_from=T0),
+            ]
+        ),
+    ]
+    seen = []
+    for call in calls:
+        try:
+            call()
+        except macrame.MacrameError as e:
+            seen.append(e.written)  # the line this test exists for
+        else:
+            pytest.fail("expected a MacrameError")
+    assert seen[0] is None
+    assert seen[1] is None
+    assert isinstance(seen[2], int), "a chunked path answers with a count"

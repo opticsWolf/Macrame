@@ -42,8 +42,9 @@ EXPECTED: dict[str, tuple[str, str, dict]] = {
         {"path": "sample.db", "reason": "sample-reason"},
     ),
     # Cancellation is not an integrity failure, so it hangs off the base class
-    # directly (0.13.8, D-181). `written` is set by the four chunked paths that
-    # can raise it, not by the sample, which is why it is not listed here.
+    # directly (0.13.8, D-181). `written` is on every exception and is not a
+    # per-variant field, so it is not listed here for this variant or any other
+    # -- `test_every_raised_error_carries_written` covers it once, below.
     "BulkCancelled": ("BulkCancelledError", "MacrameError", {}),
     # -- integrity --
     "OverlappingInterval": (
@@ -337,6 +338,37 @@ def test_the_grouping_bases_are_catchable_as_groups():
     for variant in ("CurrentDrift", "RebuildFailed", "OverlappingInterval"):
         with pytest.raises(macrame.IntegrityError):
             _macrame._raise_db_error(variant)
+
+
+@pytest.mark.parametrize("variant", sorted(EXPECTED))
+def test_every_raised_error_carries_written(variant):
+    """`written` is on every exception, and it is `None` unless it means
+    something (0.13.9, D-182).
+
+    Python has no way to say what Rust says in the type system — that only the
+    four chunked methods return `BulkResult<usize>` — so the alternative to a
+    universal attribute is a caller writing `except MacrameError as e:
+    log(e.written)` and getting an `AttributeError` raised *inside their except
+    block*, which replaces the failure they were trying to record with one about
+    the logging. Set centrally in `raise()`, so this holds for every variant
+    without any arm having to remember it.
+
+    `None` here and not `0`: `_raise_db_error` constructs the variant with no
+    batch behind it, and on a chunked path `0` already means *the first chunk
+    failed*. The int case is `test_a_failure_partway_says_how_much_of_the_batch_survived`
+    in test_write_path.py.
+    """
+    with pytest.raises(macrame.MacrameError) as caught:
+        _macrame._raise_db_error(variant)
+    exc = caught.value
+    assert hasattr(exc, "written"), (
+        f"{type(exc).__name__} has no `written`; every Macrame exception carries "
+        f"one so that inspecting an error never depends on which path raised it"
+    )
+    assert exc.written is None, (
+        f"{type(exc).__name__}.written is {exc.written!r}; a directly constructed "
+        f"variant has no partial write behind it, and `None` is what says so"
+    )
 
 
 def test_every_exported_error_is_a_macrame_error():

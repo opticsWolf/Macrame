@@ -991,6 +991,24 @@ class Database:
 class MacrameError(Exception):
     """Base of every error this library raises."""
 
+    written: int | None
+    """How many rows were committed before this error stopped the write.
+
+    `None` on every path where partial application is not a concept — reads,
+    single writes, `write_bulk_atomic`, connection errors — and an `int` on the
+    four chunked paths (`bulk_import`, `write_concepts`, `upsert_embeddings`,
+    `write_analytics_annotations`), which are atomic per chunk and not overall.
+
+    So `e.written is not None` is the test for *did this leave the database
+    partially written*, and when it is an int those rows are committed and
+    staying committed. `0` means the first chunk failed, which is why the "not
+    applicable" case is `None` and not `0` — they are different facts.
+
+    Present on every Macrame exception (0.13.9), so
+    `except MacrameError as e: log(e.written)` never raises an `AttributeError`
+    from inside the handler that was trying to record the original failure.
+    """
+
 class MacrameClosedError(MacrameError):
     """Raised by any method on a closed handle. A closed handle is not
     reusable — reopen with `Database.open(path)`."""
@@ -1023,10 +1041,10 @@ class BulkCancelledError(MacrameError):
 
     Not a fault, and the only Macrame exception a caller raises on purpose.
     Nothing rolled back: `written` is how many rows the chunks before the stop
-    committed, and they are still committed (0.13.8).
+    committed, and they are still committed (0.13.8). Only a chunked path can
+    raise this, so `written` is an int here in practice — it is declared on
+    `MacrameError` because every exception carries it (0.13.9).
     """
-
-    written: int
 
 class InvalidEdgeTypeError(ValidationError):
     edge_type: str

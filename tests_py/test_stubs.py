@@ -43,6 +43,19 @@ STUB_ONLY = {"Timestamp", "Embedding", "Edge", "BulkProgress"}
 # of them is this project's to describe.
 INHERITED = {"args", "add_note", "with_traceback"}
 
+# Not inherited, but universal for the same practical purpose: `written` is set
+# on every raised instance by `errors.rs`'s two construction sites rather than
+# by any one arm (0.13.9, D-182), so it belongs to no class in particular. The
+# stub declares it once on `MacrameError`; the per-class comparisons below would
+# otherwise read that as a declaration `errors.rs` never makes, since the regex
+# that reads the arms cannot see a setattr that is outside all of them.
+# `test_every_raised_error_carries_written` in test_errors.py is what actually
+# holds this one to the runtime.
+UNIVERSAL = {"written"}
+
+# What the per-class comparisons ignore: members no single class owns.
+IGNORED = INHERITED | UNIVERSAL
+
 
 @pytest.fixture(scope="module")
 def stub() -> ast.Module:
@@ -130,10 +143,10 @@ def test_every_stubbed_class_matches_the_real_one_member_for_member(stub):
         # against errors.rs by the next test instead.
         if issubclass(cls, Exception):
             continue
-        declared = _declared(node.body) - INHERITED
+        declared = _declared(node.body) - IGNORED
         # `__init__` in a stub describes what `__new__` accepts at runtime.
         stubbed = {k for k in declared if not k.startswith("_") or k in BEHAVIOURAL_DUNDERS}
-        real = _runtime_members(cls) - INHERITED
+        real = _runtime_members(cls) - IGNORED
         for name_ in declared - stubbed - {"__init__"}:
             if not hasattr(cls, name_):
                 problems.append(f"{name}: stub declares {name_}, which does not exist")
@@ -171,8 +184,13 @@ def test_exception_attributes_match_the_mapping_layer(stub):
         cls = getattr(ext, name)
         if not issubclass(cls, Exception):
             continue
-        stubbed = _declared(node.body) - INHERITED
-        actual = from_rust.get(name, set())
+        stubbed = _declared(node.body) - IGNORED
+        # `UNIVERSAL` comes off both sides. `written` is set outside every arm
+        # (0.13.9, D-182), and the split above has no end delimiter -- whatever
+        # follows the last `raise::<…>` in the file is folded into that arm's
+        # body, so `closed_error`'s central default would otherwise be reported
+        # as a field of whichever class happens to be matched last.
+        actual = from_rust.get(name, set()) - UNIVERSAL
         if missing := actual - stubbed:
             problems.append(f"{name}: errors.rs sets {sorted(missing)}, stub does not declare it")
         if extra := stubbed - actual:
@@ -194,7 +212,7 @@ def test_a_raised_error_really_carries_what_the_stub_promises():
             cls = type(e).__name__
             node = _classes(ast.parse(STUB.read_text(encoding="utf-8"))).get(cls)
             assert node is not None, f"{cls} is raised and not stubbed at all"
-            for attr in _declared(node.body) - INHERITED:
+            for attr in _declared(node.body) - IGNORED:
                 assert hasattr(e, attr), (
                     f"the stub says {cls}.{attr} exists; a raised {cls} has no "
                     f"such attribute"
