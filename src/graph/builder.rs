@@ -1,4 +1,4 @@
-use crate::error::Result;
+use crate::error::{Result, StatedInstants};
 use crate::temporal::as_of::NodeAttributes;
 
 /// Attribute hydration mode for temporal traversals (§5.2).
@@ -53,7 +53,8 @@ pub struct TraversalBuilder {
     /// nothing in the call had the information needed to raise an error.
     ///
     /// **Renamed from `as_of` in 0.13.2 (W7.1, D-174).** The old name carried
-    /// one instant onto two clocks; see [`Self::as_of_valid`].
+    /// one instant onto two clocks; the method's own docs are where that is
+    /// argued out.
     pub as_of_valid: Option<String>,
     /// The **transaction-time** instant to traverse at: *what did we believe
     /// then* (0.13.2, W7.1, D-174).
@@ -112,7 +113,7 @@ impl TraversalBuilder {
     ///
     /// Calling this is what turns `Current` from a default into a decision, and
     /// [`Self::execute`] treats the two differently on a historical traversal —
-    /// see [`Self::as_of`].
+    /// see [`Self::as_of_valid`].
     pub fn attribute_mode(mut self, mode: AttributeMode) -> Self {
         self.attribute_mode = Some(mode);
         self
@@ -574,17 +575,16 @@ WITH RECURSIVE {fold}walk(node_id, depth) AS (
     /// a test that needed a connection to check it would be testing something
     /// else as well.
     pub(crate) fn resolved_mode(&self) -> Result<AttributeMode> {
-        // Either instant makes the question live, and the error names whichever
-        // was set — valid time first, because a caller who set both is asking a
-        // question the message reads correctly either way.
-        let instant = self
-            .as_of_valid
-            .as_deref()
-            .or(self.as_of_recorded.as_deref());
-        match (instant, self.attribute_mode) {
-            (Some(as_of), None) => Err(crate::error::DbError::AttributeModeUnstated {
-                as_of: as_of.to_string(),
-            }),
+        // Either instant makes the question live, and the error names *which*
+        // (0.13.10, W7.7, D-183). This was an `.or()` picking valid time first,
+        // which answered the caller with an axis they might not have asked
+        // about and dropped the other one when they had asked about both.
+        let instants =
+            StatedInstants::new(self.as_of_valid.as_deref(), self.as_of_recorded.as_deref());
+        match (instants, self.attribute_mode) {
+            (Some(instants), None) => {
+                Err(crate::error::DbError::AttributeModeUnstated { instants })
+            }
             (_, Some(mode)) => Ok(mode),
             (None, None) => Ok(AttributeMode::Current),
         }
@@ -606,17 +606,22 @@ mod tests {
             .resolved_mode()
             .expect_err("past topology plus present text must not be a default");
 
-        match err {
-            DbError::AttributeModeUnstated { as_of } => assert_eq!(as_of, TUE),
+        match &err {
+            DbError::AttributeModeUnstated { instants } => {
+                assert_eq!(instants.valid(), Some(TUE));
+                assert_eq!(instants.recorded(), None, "no belief instant was set");
+            }
             other => panic!("got {other:?}"),
         }
 
         // And the message has to be actionable: a caller who reads only this
-        // should know which two calls resolve it.
-        let text = DbError::AttributeModeUnstated {
-            as_of: TUE.to_string(),
-        }
-        .to_string();
+        // should know which axis they asked about and which two calls resolve
+        // it. `as_of(…)` named a method that has not existed since 0.12.17.
+        let text = err.to_string();
+        assert!(
+            text.contains(&format!("as_of_valid({TUE})")),
+            "the message must name the call the caller made: {text}"
+        );
         assert!(
             text.contains("AtTime") && text.contains("Current"),
             "{text}"
@@ -657,6 +662,34 @@ mod tests {
             matches!(err, DbError::AttributeModeUnstated { .. }),
             "{err:?}"
         );
+        // The axis reaches the caller. Until 0.13.10 this said `as_of(…)`,
+        // which is the valid-time method's old name and not what was called.
+        let text = err.to_string();
+        assert!(text.contains(&format!("as_of_recorded({TUE})")), "{text}");
+        assert!(!text.contains("as_of("), "no dead method name: {text}");
+    }
+
+    /// Both axes set is the bitemporal cell, and dropping half of it was the
+    /// second half of the defect: the `.or()` reported valid time and said
+    /// nothing about the belief instant the caller had also stated.
+    #[test]
+    fn both_instants_are_reported_when_both_were_stated() {
+        const WED: &str = "2026-01-07T00:00:00.000000Z";
+        let err = TraversalBuilder::new("a")
+            .as_of_valid(TUE)
+            .as_of_recorded(WED)
+            .resolved_mode()
+            .expect_err("the cell needs a stated mode as much as either axis");
+
+        match &err {
+            DbError::AttributeModeUnstated { instants } => {
+                assert_eq!(instants.valid(), Some(TUE));
+                assert_eq!(instants.recorded(), Some(WED));
+            }
+            other => panic!("got {other:?}"),
+        }
+        let text = err.to_string();
+        assert!(text.contains(TUE) && text.contains(WED), "{text}");
     }
 
     /// A traversal about now still defaults, so no existing caller changes.

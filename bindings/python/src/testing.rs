@@ -135,8 +135,13 @@ fn sample(name: &str) -> Option<DbError> {
         "ArchiveViolation" => DbError::ArchiveViolation {
             table: "links".into(),
         },
+        // Both axes, so the sample proves both attributes cross and exercises
+        // the two-instant rendering (0.13.10, D-183).
         "AttributeModeUnstated" => DbError::AttributeModeUnstated {
-            as_of: "2026-02-03T04:05:06.000007Z".into(),
+            instants: macrame::StatedInstants::Both {
+                valid: "2026-02-03T04:05:06.000007Z".into(),
+                recorded: "2026-04-05T06:07:08.000009Z".into(),
+            },
         },
         "RecordedInstantUnreachable" => DbError::RecordedInstantUnreachable {
             ts: "2026-02-03T04:05:06.000007Z".into(),

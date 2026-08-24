@@ -736,11 +736,9 @@ impl Database {
     /// **silently returned the present** — the walk and the projection both read
     /// live topology while the caller had asked for Tuesday's, with nothing said.
     /// Found while splitting `as_of` and fixed in the same change, because the
-    /// fix is the same one: [`TraversalBuilder::bind_params`] is now the single
+    /// fix is the same one: `TraversalBuilder::bind_params` is now the single
     /// producer of the parameter list and both call sites take it, so the two
     /// cannot bind different instants at `?3` again.
-    ///
-    /// [`TraversalBuilder::bind_params`]: super::TraversalBuilder::bind_params
     ///
     /// `attribute_mode` is still ignored: hydration here is always the live
     /// concept row, which is what a `Subgraph` has always carried. That is a

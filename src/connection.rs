@@ -1090,7 +1090,7 @@ pub struct Tuning {
     /// increasing across restarts, which means one row from the future becomes
     /// this process's floor and every stamp it issues inherits it — into rows
     /// the next open reads back. Defaults to refusing beyond
-    /// [`DEFAULT_FUTURE_STAMP_TOLERANCE`], a day.
+    /// [`crate::DEFAULT_FUTURE_STAMP_TOLERANCE`], a day.
     ///
     /// Like [`Self::wal_autocheckpoint`] and unlike the two cache sizes, this
     /// is a policy enum rather than an `Option`, for

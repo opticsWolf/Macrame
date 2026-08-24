@@ -125,7 +125,23 @@ def test_an_instant_without_an_attribute_mode_raises(db, axis):
     # be the same gap in a new place (W7.1).
     with pytest.raises(macrame.AttributeModeUnstatedError) as e:
         db.traverse("a", **{axis: T1})
-    assert e.value.as_of == T1
+    # The error names the axis the caller asked about, and says the other one
+    # was not stated (0.13.10, D-183). Until then both arrived as `as_of`, a
+    # keyword that stopped existing when the axes were split.
+    other = "as_of_recorded" if axis == "as_of_valid" else "as_of_valid"
+    assert getattr(e.value, axis) == T1
+    assert getattr(e.value, other) is None
+    assert f"{axis}({T1})" in str(e.value)
+    assert "as_of(" not in str(e.value)
+
+
+def test_both_instants_are_named_when_both_were_given(db):
+    """The bitemporal cell asks the question too, and the old message
+    reported half of it."""
+    with pytest.raises(macrame.AttributeModeUnstatedError) as e:
+        db.traverse("a", as_of_valid=T1, as_of_recorded=T1)
+    assert e.value.as_of_valid == T1
+    assert e.value.as_of_recorded == T1
 
 
 def test_as_of_valid_with_a_stated_mode_is_accepted(db):

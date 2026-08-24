@@ -131,13 +131,13 @@ pub enum DbError {
     ArchiveSessionLeaked { marker: String },
 
     #[error(
-        "traversal as_of({as_of}) did not state an attribute mode: topology at \
-         {as_of} would be returned with attributes as they are *now*. Call \
+        "traversal {instants} did not state an attribute mode: that topology \
+         would be returned with attributes as they are *now*. Call \
          .attribute_mode(AttributeMode::AtTime) for attributes as believed at \
-         {as_of}, or .attribute_mode(AttributeMode::Current) to confirm live \
-         attributes are intended"
+         the stated instant, or .attribute_mode(AttributeMode::Current) to \
+         confirm live attributes are intended"
     )]
-    AttributeModeUnstated { as_of: String },
+    AttributeModeUnstated { instants: StatedInstants },
     #[error(
         "transaction-time instant {ts} cannot be answered from the hot log: rows \
          have been archived out of it and a traversal has no archive path. Use \
@@ -211,6 +211,8 @@ The 0.5.0 RecordedAtRegression variant surfaces the concept monotonicity trigger
 
 
 **The 0.5.6 and 0.6.0 variants exist to name the right subject, and that is a policy rather than a habit ([D-069](s13-decision-register.md#d-069)).** An error that names the wrong thing sends a caller to fix the wrong thing, so each of these was split out of a variant that already covered the case badly. `InvalidTimestamp` and `InvalidId` were `ReplayCorrupt { seq: 0 }` and `NotFound` — the first claiming the ledger was damaged when the caller's input was malformed, carrying a sequence number that cannot exist because `AUTOINCREMENT` starts at 1; the second telling a caller the thing is missing and inviting them to create it with the same id, which would be refused again. `DiagnosticConn` is its own variant because a file is not a node ([D-091](s13-decision-register.md#d-091)). `RebuildInterrupted` is distinct from `RebuildFailed` because *the repair did not run* is not *the repair did not repair*: `links_current` is untouched, whatever was true of it before is still true, and the action is to retry ([D-082](s13-decision-register.md#d-082)). `AttributeModeUnstated` was a `tracing::warn!` until 0.6.0, which is invisible in any application that has not configured a subscriber — it is now a value the caller cannot miss ([D-085](s13-decision-register.md#d-085)).
+
+**`AttributeModeUnstated` names the axis, and until 0.13.10 it named a method instead ([D-183](s13-decision-register.md#d-183)).** The variant carried `as_of: String` and rendered it as `as_of(…)` — the method [D-174](s13-decision-register.md#d-174) removed in 0.13.2 when it split the axes. Both instants reached that field through an `.or()`, so a caller who set `as_of_recorded` was told about `as_of`, a caller who set both was told about one of them, and neither learned which clock they had asked about. It now carries `StatedInstants` — `Valid`, `Recorded` or `Both`, and never neither, because this error exists *because* an instant was set — rendered as the calls that produce them. The remedy it offers is a keyword on the same call, so naming the keyword is the whole of its job.
 
 **`RecordedInstantUnreachable` names a question the surface cannot reach, which is a fourth category (0.13.2, W7.1, [D-174](s13-decision-register.md#d-174)).** `TraversalBuilder::as_of_recorded` folds `transaction_log`, and `archive` removes superseded rows from it; a traversal takes a `Connection` and not an archive path, so once anything has been archived it cannot go and get what was moved. The variant exists rather than a silent partial fold because a fold missing its superseded rows returns *nearly* the right topology — the failure mode a ledger can least afford and the one a non-empty-result assertion will not catch. It is **conservative by one bit**: the test is whether anything was *ever* archived, not whether this instant survived it, because the archive cutoff is not recorded hot-side ([D-132](s13-decision-register.md#d-132) refused the marker that would have carried it, outright rather than deferred). So it refuses instants a fold might have answered, and says in its message which operation can.
 
@@ -288,7 +290,7 @@ All targets are measured on the reference hardware (Windows 11, NVMe SSD, 32 GB 
 | Single concept upsert | ≤ 3 ms | One table write + one log entry |
 | 3-hop traversal, warm cache (1K edges) | ≤ 10 ms | Recursive CTE over links_current, indexed |
 | 3-hop traversal, cold cache (1K edges) | ≤ 50 ms | Same CTE; I/O-bound |
-| as_of(ts) traversal (1K edges) | ≤ 15 ms | CTE + two predicate rewrites; no log access |
+| as_of_valid(ts) traversal (1K edges) | ≤ 15 ms | CTE + two predicate rewrites; no log access |
 | AtTime hydration (100 result nodes) | ≤ 30 ms | Window query over idx_txlog_entity, bounded by result set |
 | reconstruct(ts), 10K log entries, no snapshot | ≤ 100 ms | Full fold from genesis |
 | reconstruct(ts), 100K log entries, no snapshot | ≤ 500 ms | Full fold from genesis |

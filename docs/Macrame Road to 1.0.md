@@ -1363,6 +1363,39 @@ already makes natural.
 **W7.7 — Record D-155:** which axis `as_of` now means, and what a caller who
 wants the other one calls instead.
 
+
+> **✅ Shipped 0.13.10 (recorded as
+> [D-183](../docs/architecture/s13-decision-register.md#d-183), because D-155 was
+> taken by 0.12.12's `Tuning` decision before this item was written and
+> renumbering it would break the entries that cite it).**
+>
+> **The prose this item asks for already existed, and checking it against the
+> crate is what the item was worth.** [D-174](../docs/architecture/s13-decision-register.md#d-174)
+> answered *which axis* in 0.13.2 and `as_of_valid`'s rustdoc answers it at
+> length. `DbError::AttributeModeUnstated` — the error a caller meets when they
+> ask about the past — did not: it carried `as_of: String` and rendered
+> *"traversal as_of(…) did not state an attribute mode"*, naming a method
+> removed in 0.13.2. It was fed by `as_of_valid.or(as_of_recorded)`, so a caller
+> who set the belief instant was told about `as_of`, and a caller who set both
+> was told about one.
+>
+> This is [D-180](../docs/architecture/s13-decision-register.md#d-180) a second
+> time, found the same way: by auditing a documentation item, because nothing in
+> either suite asserted the sentence.
+>
+> The variant now carries `StatedInstants` — `Valid`, `Recorded` or `Both`,
+> never neither, since the error exists *because* an instant was set — rendered
+> as the calls that produce it. That is W7.7's second clause answered in the
+> error itself: a caller who wanted the other axis reads what to call from what
+> they were handed. Python gets `as_of_valid` and `as_of_recorded` in place of
+> `as_of`.
+>
+> **The rustdoc gate had been red since 0.13.2.** `unresolved link to
+> Self::as_of` in `attribute_mode`'s own doc comment — the method the error
+> points callers at — plus three more from 0.13.2 and 0.13.5. CI runs that step
+> under `RUSTDOCFLAGS: -D warnings`, so it was a failing build and not a
+> warning. All four fixed.
+
 ---
 
 ## 10. W8 — The snapshot becomes durable and bounded

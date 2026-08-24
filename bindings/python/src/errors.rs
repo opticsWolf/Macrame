@@ -563,8 +563,17 @@ fn build(py: Python<'_>, err: DbError) -> PyErr {
             raise::<ArchiveSessionLeakedError, _>(py, m, |e| e.setattr("marker", marker))
         }
 
-        DbError::AttributeModeUnstated { as_of } => {
-            raise::<AttributeModeUnstatedError, _>(py, m, |e| e.setattr("as_of", as_of))
+        // Two attributes and not one, both always present (0.13.10, W7.7,
+        // D-183). `as_of` named a method removed in 0.12.17 and said nothing
+        // about which clock the caller had asked about; a Python caller who
+        // passed `as_of_recorded=` got an attribute called `as_of` back.
+        // Whichever axis was not stated is `None`, which reads the same way it
+        // does on the traversal call that produced this.
+        DbError::AttributeModeUnstated { instants } => {
+            raise::<AttributeModeUnstatedError, _>(py, m, |e| {
+                e.setattr("as_of_valid", instants.valid())?;
+                e.setattr("as_of_recorded", instants.recorded())
+            })
         }
 
         DbError::RecordedInstantUnreachable { ts } => {

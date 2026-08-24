@@ -97,10 +97,16 @@ EXPECTED: dict[str, tuple[str, str, dict]] = {
         {"value": "not-a-time", "reason": "sample-reason"},
     ),
     "InvalidModelName": ("InvalidModelNameError", "ValidationError", {"model": "Bad-Model"}),
+    # Both axes on the sample, so the pair is checked rather than one of them
+    # (0.13.10, D-183). `as_of` was the old single field and named a keyword
+    # that stopped existing in 0.13.2.
     "AttributeModeUnstated": (
         "AttributeModeUnstatedError",
         "ValidationError",
-        {"as_of": "2026-02-03T04:05:06.000007Z"},
+        {
+            "as_of_valid": "2026-02-03T04:05:06.000007Z",
+            "as_of_recorded": "2026-04-05T06:07:08.000009Z",
+        },
     ),
     "RecordedInstantUnreachable": (
         "RecordedInstantUnreachableError",

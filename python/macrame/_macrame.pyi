@@ -1061,7 +1061,16 @@ class InvalidTimestampError(ValidationError):
     reason: str
 
 class AttributeModeUnstatedError(ValidationError):
-    as_of: str
+    """A traversal set an instant and left `attribute_mode` unstated.
+
+    Both attributes are always present; the one the traversal did not set is
+    `None` (0.13.10). They are named for the keywords that produce them, because
+    the remedy is a keyword on the same call — and `as_of`, which this carried
+    until 0.13.10, has not been one since 0.13.2.
+    """
+
+    as_of_valid: str | None
+    as_of_recorded: str | None
 
 class RecordedInstantUnreachableError(TemporalError):
     ts: str

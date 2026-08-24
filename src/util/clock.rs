@@ -3,8 +3,8 @@ use crate::util::timestamp;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
 
-/// How far ahead of the wall clock a stored `recorded_at` may be before
-/// [`recorded_at_floor`] refuses it. Twenty-four hours.
+/// How far ahead of the wall clock a stored `recorded_at` may be before the
+/// floor computed at open refuses it. Twenty-four hours.
 ///
 /// A whole day is deliberately generous. The condition being caught is a stamp
 /// that is *wrong* — a skewed machine, a bad import, a fixture that escaped —

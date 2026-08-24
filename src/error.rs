@@ -45,6 +45,84 @@ impl Overlap {
     }
 }
 
+/// Which instants a traversal stated, for the one error that has to name them
+/// (0.13.10, W7.7, D-183).
+///
+/// Three cases and never zero. [`DbError::AttributeModeUnstated`] exists
+/// *because* an instant was set, so a fourth case carrying neither would be a
+/// state no construction site can reach — [D-177]'s objection to a `Result`
+/// that cannot fail, in a different shape. [`Self::new`] returns an `Option`
+/// and the `None` is the ordinary live traversal, resolved before any error
+/// exists.
+///
+/// [D-177]: ../docs/architecture/s13-decision-register.md#d-177
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StatedInstants {
+    /// `as_of_valid` alone — *what was true then*.
+    Valid(String),
+    /// `as_of_recorded` alone — *what we believed then*.
+    Recorded(String),
+    /// Both, which is the bitemporal cell: *what did we believe at `recorded`
+    /// about what was true at `valid`*.
+    Both {
+        /// The valid-time instant.
+        valid: String,
+        /// The transaction-time instant.
+        recorded: String,
+    },
+}
+
+impl StatedInstants {
+    /// `None` when neither axis was set, which is not an error and not this
+    /// type's business to describe.
+    pub fn new(valid: Option<&str>, recorded: Option<&str>) -> Option<Self> {
+        match (valid, recorded) {
+            (Some(v), Some(r)) => Some(Self::Both {
+                valid: v.to_string(),
+                recorded: r.to_string(),
+            }),
+            (Some(v), None) => Some(Self::Valid(v.to_string())),
+            (None, Some(r)) => Some(Self::Recorded(r.to_string())),
+            (None, None) => None,
+        }
+    }
+
+    /// The valid-time instant, if this traversal stated one.
+    pub fn valid(&self) -> Option<&str> {
+        match self {
+            Self::Valid(v) | Self::Both { valid: v, .. } => Some(v),
+            Self::Recorded(_) => None,
+        }
+    }
+
+    /// The transaction-time instant, if this traversal stated one.
+    pub fn recorded(&self) -> Option<&str> {
+        match self {
+            Self::Recorded(r) | Self::Both { recorded: r, .. } => Some(r),
+            Self::Valid(_) => None,
+        }
+    }
+}
+
+/// Rendered as the **calls that produce them**, which is the whole point.
+///
+/// A message reading `as_of(2020-06-01)` names a method that has not existed
+/// since 0.12.17 ([D-174](../docs/architecture/s13-decision-register.md#d-174)),
+/// so a caller who goes looking for it finds nothing — and, worse, is not told
+/// which of the two axes the instant they set landed on. `as_of_valid(…)` and
+/// `as_of_recorded(…)` are what a caller typed and what a caller can change.
+impl std::fmt::Display for StatedInstants {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Valid(v) => write!(f, "as_of_valid({v})"),
+            Self::Recorded(r) => write!(f, "as_of_recorded({r})"),
+            Self::Both { valid, recorded } => {
+                write!(f, "as_of_valid({valid}) with as_of_recorded({recorded})")
+            }
+        }
+    }
+}
+
 /// Central error type for the Macrame bitemporal ledger database.
 #[derive(Debug, Error)]
 pub enum DbError {
@@ -163,8 +241,8 @@ pub enum DbError {
     /// A traversal asked about the past without saying which text it wanted
     /// (T3.2, D-085).
     ///
-    /// `TraversalBuilder::as_of(ts)` fixes the *topology* at `ts`. Node
-    /// attributes are a second, independent question, and the default answer —
+    /// An instant on either axis fixes the *topology*. Node attributes are a
+    /// second, independent question, and the default answer —
     /// `AttributeMode::Current` — is live text. That combination returns the
     /// past's graph wearing the present's titles, which is a legitimate thing to
     /// want and a terrible thing to get by accident.
@@ -176,14 +254,24 @@ pub enum DbError {
     /// Fix by stating the mode: `.attribute_mode(AttributeMode::AtTime)` for the
     /// past's text, or `.attribute_mode(AttributeMode::Current)` to affirm that
     /// live text is what was meant.
+    ///
+    /// # It carries [`StatedInstants`] rather than one string (0.13.10, W7.7, D-183)
+    ///
+    /// The field was `as_of: String` and the message rendered it as
+    /// `as_of(…)` — a method removed in 0.12.17 when
+    /// [D-174](../docs/architecture/s13-decision-register.md#d-174) split the
+    /// axes. Both instants collapsed into it through an `.or()`, so a caller who
+    /// set `as_of_recorded` was told about `as_of`, a caller who set both was
+    /// told about one of them, and neither was told which clock they had asked
+    /// about. Naming the axis is the whole remedy this error offers.
     #[error(
-        "traversal as_of({as_of}) did not state an attribute mode: topology at \
-         {as_of} would be returned with attributes as they are *now*. Call \
+        "traversal {instants} did not state an attribute mode: that topology \
+         would be returned with attributes as they are *now*. Call \
          .attribute_mode(AttributeMode::AtTime) for attributes as believed at \
-         {as_of}, or .attribute_mode(AttributeMode::Current) to confirm live \
-         attributes are intended"
+         the stated instant, or .attribute_mode(AttributeMode::Current) to \
+         confirm live attributes are intended"
     )]
-    AttributeModeUnstated { as_of: String },
+    AttributeModeUnstated { instants: StatedInstants },
     /// [`crate::Database::diagnostic_conn`] could not open the file read-only
     /// (T5.1, D-091).
     ///

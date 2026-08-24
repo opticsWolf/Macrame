@@ -690,7 +690,8 @@ async fn a_historical_traversal_must_say_which_titles_it_wants() {
         .await
         .expect_err("as_of with a defaulted attribute mode must not guess");
     assert!(
-        matches!(&err, DbError::AttributeModeUnstated { as_of: got } if *got == as_of),
+        matches!(&err, DbError::AttributeModeUnstated { instants }
+            if instants.valid() == Some(as_of.as_str()) && instants.recorded().is_none()),
         "got {err:?}"
     );
 
