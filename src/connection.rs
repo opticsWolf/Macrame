@@ -3393,6 +3393,9 @@ async fn check_prepared(stmt: &libsql::Statement, edge: &EdgeAssertion) -> Resul
                     valid_to: edge.valid_to.clone(),
                     existing_from: existing.valid_from,
                     existing_to: existing.valid_to,
+                    // This guard reads committed rows, so the interval it names
+                    // is one the caller can go and look at (D-180).
+                    within_batch: false,
                 }),
             });
         }
@@ -3507,6 +3510,10 @@ fn reject_overlaps_within(edges: &[EdgeAssertion]) -> Result<()> {
                             valid_to: e.valid_to.clone(),
                             existing_from: p.valid_from.clone(),
                             existing_to: p.valid_to.clone(),
+                            // Nothing here is in the database, and the batch is
+                            // refused whole, so nothing here ever will be. The
+                            // message has to say so (D-180).
+                            within_batch: true,
                         }),
                     });
                 }

@@ -169,6 +169,7 @@ fn sample(name: &str) -> Option<DbError> {
                 valid_to: "2026-09-01T00:00:00.000000Z".into(),
                 existing_from: "2026-01-01T00:00:00.000000Z".into(),
                 existing_to: "2026-06-01T00:00:00.000000Z".into(),
+                within_batch: false,
             }),
         },
         "CurrentDrift" => DbError::CurrentDrift { n: 4242 },

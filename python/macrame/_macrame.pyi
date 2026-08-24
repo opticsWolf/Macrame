@@ -681,8 +681,9 @@ class Database:
         The batch is one act, so it cannot be chunked — splitting it is the thing
         this method exists not to do. The actor's hold is therefore a function of
         `len(edges)`, and every other writer in the process waits that long:
-        ~34 ms at 500 rows, ~155 ms at 2,000, ~1.0 s at 10,000, ~2.6 s at 20,000
-        (T1.3, D-081). Call `estimate_bulk_hold(edges)` first to find out which.
+        ~33 ms at 500 rows, ~165 ms at 2,000, ~0.9 s at 10,000, ~2.2 s at 20,000
+        (T1.3, D-081; re-measured after D-179, which removed the batch shape's
+        effect on all four). Call `estimate_bulk_hold(edges)` for a given batch.
 
         A caller who needs the latency bound and not the atomicity wants
         `bulk_import` — the same write, chunked, and explicitly not atomic
@@ -947,9 +948,16 @@ class SingleOpenViolationError(IntegrityError):
     edge_type: str
 
 class OverlappingIntervalError(IntegrityError):
-    """The seven fields are flattened onto the exception rather than nested
-    behind an `.overlap` object: `valid_*` is what the caller asserted,
-    `existing_*` is what it collided with."""
+    """The fields are flattened onto the exception rather than nested behind an
+    `.overlap` object: `valid_*` is what the caller asserted, `existing_*` is
+    what it collided with, and `within_batch` says where that one lives.
+
+    `within_batch` is False for the ordinary case — the other interval is a
+    committed row, and `query_as_of_edges` will show it. It is True when
+    `write_bulk_atomic` was handed a batch that contradicts itself, which is
+    caught before the transaction opens: the interval named is another edge in
+    the same call, the batch is refused whole, and querying for it finds
+    nothing (0.13.7)."""
 
     source_id: str
     target_id: str
@@ -958,6 +966,7 @@ class OverlappingIntervalError(IntegrityError):
     valid_to: str
     existing_from: str
     existing_to: str
+    within_batch: bool
 
 class NegativeEdgeWeightError(IntegrityError):
     source_id: str

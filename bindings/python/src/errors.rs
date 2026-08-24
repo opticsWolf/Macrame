@@ -150,8 +150,13 @@ create_exception!(
     IntegrityError,
     "Two valid-time intervals for one relationship claim the same instant.\n\n\
      Attributes: `source_id`, `target_id`, `edge_type`, the asserted `valid_from` \
-     / `valid_to`, and the stored `existing_from` / `existing_to`. Both intervals \
-     are reported because neither alone identifies the conflict."
+     / `valid_to`, the `existing_from` / `existing_to` it collides with, and \
+     `within_batch`. Both intervals are reported because neither alone \
+     identifies the conflict.\n\n\
+     `within_batch` says which guard raised this. False means the other \
+     interval is a committed row and can be queried. True means it is another \
+     edge in the same `write_bulk_atomic` call, refused before the transaction \
+     opened — nothing named is in the database, and nothing named will be."
 );
 create_exception!(
     macrame,
@@ -542,7 +547,8 @@ fn build(py: Python<'_>, err: DbError) -> PyErr {
                 e.setattr("valid_from", overlap.valid_from)?;
                 e.setattr("valid_to", overlap.valid_to)?;
                 e.setattr("existing_from", overlap.existing_from)?;
-                e.setattr("existing_to", overlap.existing_to)
+                e.setattr("existing_to", overlap.existing_to)?;
+                e.setattr("within_batch", overlap.within_batch)
             })
         }
 

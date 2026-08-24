@@ -82,10 +82,13 @@ async fn raw_sql_writes_the_overlapping_pair_the_actor_refuses() {
         )
         .await
         .expect_err("the actor guards this");
-    assert!(
-        matches!(err, DbError::OverlappingInterval { .. }),
-        "got {err:?}"
-    );
+    let DbError::OverlappingInterval { ref overlap } = err else {
+        panic!("got {err:?}");
+    };
+    // The other side of D-180: this guard *did* read a committed row, and the
+    // row is still there for the caller to go and look at.
+    assert!(!overlap.within_batch, "{overlap:?}");
+    assert!(err.to_string().contains("is already recorded"), "{err}");
 
     // Through a connection of one's own: accepted, no trigger objects.
     let raw = db.raw().connect().unwrap();

@@ -74,15 +74,17 @@ fn engine_linked() -> bool {
 /// is time every other writer in the process spends waiting.
 ///
 /// **It is a shape, not a promise.** Calibrated on libSQL 0.9.30, one machine,
-/// 100–20,000 rows, within 5% across that range except below ~500 rows where
-/// fixed costs dominate and it over-predicts by 3× — harmless, since nothing
-/// that small approaches the warning threshold. It says nothing about disk. It
-/// exists to distinguish 30 ms from 18 s, and should not be read closer than
-/// that.
+/// 100–20,000 rows, within 15% from 500 rows up; below that it under-predicts
+/// by up to 3×, which is harmless since nothing that small approaches the
+/// warning threshold. It says nothing about disk, and should not be read closer
+/// than an order of magnitude.
 ///
-/// The 7× case it is built for: 20,000 edges spread over distinct relationships
-/// against 20,000 corrections to a single relationship's history. A size-only
-/// model under-predicts the second by 7×, which is the direction that hurts.
+/// **It reads `len(edges)` and nothing else, as of 0.13.6 (D-179).** Until then
+/// the batch's *shape* was the dominant term — 20,000 corrections to one
+/// relationship's history cost 18.1 s against 2.6 s for 20,000 unrelated edges,
+/// because the within-batch overlap guard compared every pair. That guard sorts
+/// and sweeps now, the two shapes hold for 2.2 s and 1.9 s, and a model still
+/// predicting the spread would warn about a batch that is fine.
 #[pyfunction]
 fn estimate_bulk_hold(edges: Vec<types::PyEdgeAssertion>) -> std::time::Duration {
     let edges: Vec<macrame::prelude::EdgeAssertion> = edges.into_iter().map(|e| e.inner).collect();

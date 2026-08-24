@@ -213,6 +213,29 @@ def test_an_overlapping_interval_raises_with_both_intervals(db):
     assert (e.source_id, e.target_id, e.edge_type) == ("n0", "n1", "LINKS")
     assert e.valid_from == "2026-03-01T00:00:00.000000Z"  # what was asserted
     assert e.existing_from == T0  # what it hit
+    # It hit a committed row, and the row is still there to be queried.
+    assert e.within_batch is False
+
+
+def test_a_batch_that_contradicts_itself_says_so(db):
+    """One error class, two guards, and only one is about the file (D-180).
+
+    `write_bulk_atomic` checks the batch against itself before the transaction
+    opens. The interval it names is another edge in this same call, the batch is
+    refused whole, and a caller told the edge "already holds" it would go
+    looking for a row that was never written.
+    """
+    with pytest.raises(macrame.OverlappingIntervalError) as caught:
+        db.write_bulk_atomic(
+            [
+                macrame.EdgeAssertion("n0", "n1", "KNOWS", valid_from=T0, valid_to=T2),
+                macrame.EdgeAssertion("n0", "n1", "KNOWS", valid_from=T1, valid_to=T2),
+            ]
+        )
+    e = caught.value
+    assert e.within_batch is True
+    assert "this same batch" in str(e)
+    assert count(db, "links") == 0, "nothing may land from a batch that is refused"
 
 
 def test_a_second_open_interval_raises_single_open(db):

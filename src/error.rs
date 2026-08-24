@@ -5,7 +5,7 @@ use thiserror::Error;
 ///
 /// Both are reported because neither alone identifies the conflict: the caller
 /// knows what they asserted and not what it collided with, and a message naming
-/// only the stored interval reads as though the assertion were the innocent one.
+/// only the other interval reads as though the assertion were the innocent one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Overlap {
     pub source_id: String,
@@ -14,9 +14,35 @@ pub struct Overlap {
     /// The interval the caller asserted.
     pub valid_from: String,
     pub valid_to: String,
-    /// The interval already stored that it collides with.
+    /// The interval it collides with — see [`Overlap::within_batch`] for where
+    /// that one is, because it is not always in the database.
     pub existing_from: String,
     pub existing_to: String,
+    /// Whether the collision is with another edge in the *same call* (0.13.7,
+    /// D-180).
+    ///
+    /// Two guards raise this one error. `reject_overlapping_interval` compares
+    /// the assertion against committed rows; `reject_overlaps_within` compares
+    /// a batch against itself, before the transaction opens, and nothing it
+    /// names is in the database — the batch is refused whole, so nothing it
+    /// names ever will be. A caller told an edge "already holds" an interval
+    /// goes looking for a row that is not there.
+    pub within_batch: bool,
+}
+
+impl Overlap {
+    /// The message's closing clause: where the second interval came from.
+    ///
+    /// A method rather than two `#[error]` strings, because one variant gets
+    /// one format string, and rather than a `String` because this is on a
+    /// `Display` path.
+    pub fn provenance(&self) -> &'static str {
+        if self.within_batch {
+            "this same batch also asserts"
+        } else {
+            "is already recorded"
+        }
+    }
 }
 
 /// Central error type for the Macrame bitemporal ledger database.
@@ -265,10 +291,11 @@ pub enum DbError {
     /// what a caller is told; `matches!(err, OverlappingInterval { .. })` is
     /// unaffected, which is how every call site uses it.
     #[error(
-        "edge {} -> {} ({}) already holds [{}, {}), which overlaps the asserted [{}, {})",
+        "edge {} -> {} ({}): the asserted [{}, {}) overlaps [{}, {}), which {}",
         .overlap.source_id, .overlap.target_id, .overlap.edge_type,
+        .overlap.valid_from, .overlap.valid_to,
         .overlap.existing_from, .overlap.existing_to,
-        .overlap.valid_from, .overlap.valid_to
+        .overlap.provenance()
     )]
     OverlappingInterval { overlap: Box<Overlap> },
 
@@ -501,10 +528,8 @@ mod tests {
         );
     }
 
-    /// The boxed variant still reports both intervals.
-    #[test]
-    fn an_overlap_names_the_asserted_interval_and_the_stored_one() {
-        let err = DbError::OverlappingInterval {
+    fn sample_overlap(within_batch: bool) -> DbError {
+        DbError::OverlappingInterval {
             overlap: Box::new(Overlap {
                 source_id: "a".into(),
                 target_id: "b".into(),
@@ -513,11 +538,35 @@ mod tests {
                 valid_to: "2026-09-01T00:00:00.000000Z".into(),
                 existing_from: "2026-01-01T00:00:00.000000Z".into(),
                 existing_to: "2026-06-01T00:00:00.000000Z".into(),
+                within_batch,
             }),
-        };
-        let msg = err.to_string();
+        }
+    }
+
+    /// The boxed variant still reports both intervals.
+    #[test]
+    fn an_overlap_names_the_asserted_interval_and_the_other_one() {
+        let msg = sample_overlap(false).to_string();
         assert!(msg.contains("a -> b (KNOWS)"), "{msg}");
-        assert!(msg.contains("already holds [2026-01-01"), "{msg}");
         assert!(msg.contains("asserted [2026-03-01"), "{msg}");
+        assert!(msg.contains("[2026-01-01"), "{msg}");
+    }
+
+    /// One error, two guards, and only one of them is talking about the
+    /// database (0.13.7, D-180).
+    ///
+    /// `reject_overlaps_within` refuses the batch *before* the transaction
+    /// opens, so the interval it names is not stored and will not become
+    /// stored. Saying the edge "already holds" it sent a caller looking for a
+    /// row that was never written.
+    #[test]
+    fn an_overlap_says_which_side_of_the_write_the_other_interval_is_on() {
+        let stored = sample_overlap(false).to_string();
+        assert!(stored.contains("is already recorded"), "{stored}");
+        assert!(!stored.contains("batch"), "{stored}");
+
+        let in_batch = sample_overlap(true).to_string();
+        assert!(in_batch.contains("this same batch also asserts"), "{in_batch}");
+        assert!(!in_batch.contains("recorded"), "{in_batch}");
     }
 }

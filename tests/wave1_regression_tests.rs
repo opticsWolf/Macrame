@@ -863,10 +863,18 @@ async fn a_batch_carrying_its_own_overlap_is_refused_whole() {
         .await
         .expect_err("the batch overlaps itself");
 
+    let macrame::DbError::OverlappingInterval { ref overlap } = err else {
+        panic!("got {err:?}");
+    };
+    // The interval it names is in this batch and not in the file, and the
+    // count below is what makes that a fact rather than a phrasing choice
+    // (0.13.7, D-180).
     assert!(
-        matches!(err, macrame::DbError::OverlappingInterval { .. }),
-        "got {err:?}"
+        overlap.within_batch,
+        "a batch refused before the transaction opened cannot say the edge \
+         already holds anything: {overlap:?}"
     );
+    assert!(err.to_string().contains("this same batch"), "{err}");
 
     let n: i64 = db
         .read_conn()

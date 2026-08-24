@@ -53,6 +53,7 @@ EXPECTED: dict[str, tuple[str, str, dict]] = {
             "valid_to": "2026-09-01T00:00:00.000000Z",
             "existing_from": "2026-01-01T00:00:00.000000Z",
             "existing_to": "2026-06-01T00:00:00.000000Z",
+            "within_batch": False,
         },
     ),
     "SingleOpenViolation": (
