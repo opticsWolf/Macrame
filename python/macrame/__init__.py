@@ -122,6 +122,7 @@ from ._macrame import (
     RecordedAtRegressionError,
     ReplayCorruptError,
     SingleOpenViolationError,
+    SnapshotCorruptError,
     SnapshotIncompatibleError,
     Subgraph,
     SubgraphTooLargeError,
@@ -217,6 +218,7 @@ __all__ = [
     "ModelNotRegisteredError",
     # temporal
     "ReplayCorruptError",
+    "SnapshotCorruptError",
     "SnapshotIncompatibleError",
     "PayloadVersionError",
     "ArchiveViolationError",

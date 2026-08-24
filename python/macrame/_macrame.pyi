@@ -1143,6 +1143,24 @@ class SnapshotIncompatibleError(TemporalError):
     path: str
     reason: str
 
+class SnapshotCorruptError(TemporalError):
+    """A damaged snapshot file, as distinct from a foreign one and from a
+    damaged ledger (0.13.12, W8.2).
+
+    `SnapshotIncompatibleError` means another build wrote it, which is ordinary
+    after an upgrade. `ReplayCorruptError` means the transaction log itself is
+    damaged, which is the worst thing this library can report. This one means
+    the *cache* is damaged: the ledger is untouched, deleting the file restores
+    correctness, and the cost is a slower reconstruction.
+
+    Nothing in normal operation raises it to a caller — a damaged snapshot is
+    skipped and the fold runs from the log — so seeing one means `load_snapshot`
+    was called directly, or that every snapshot on disk is unusable.
+    """
+
+    path: str
+    reason: str
+
 class PayloadVersionError(TemporalError):
     got: int
     max: int

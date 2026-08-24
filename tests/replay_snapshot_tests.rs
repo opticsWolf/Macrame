@@ -311,6 +311,9 @@ async fn cleanup_skips_files_it_cannot_order() {
 
 // -- D-043: the snapshot container is versioned -----------------------------
 
+/// The v3 header length, in one place, so the tests below index it by name.
+const HEADER_LEN: usize = 38;
+
 /// A snapshot written by this build must carry the header and round-trip.
 #[tokio::test]
 async fn a_snapshot_carries_its_header_and_reloads() {
@@ -320,16 +323,195 @@ async fn a_snapshot_carries_its_header_and_reloads() {
 
     let raw = std::fs::read(&path).unwrap();
     assert_eq!(&raw[0..4], b"MACR", "missing magic: {:?}", &raw[0..4]);
-    // v2 as of D-054: the header gained the snapshot's own instant.
-    assert_eq!(u16::from_le_bytes([raw[4], raw[5]]), 2, "format version");
+    // v2 (D-054) added the snapshot's own instant; v3 (W8.2, D-185) added both
+    // lengths and the checksum over them.
+    assert_eq!(u16::from_le_bytes([raw[4], raw[5]]), 3, "format version");
     assert_eq!(
         u32::from_le_bytes([raw[6], raw[7], raw[8], raw[9]]),
         migrations::SCHEMA_VERSION,
         "schema version"
     );
 
+    let payload_len = u64::from_le_bytes(raw[18..26].try_into().unwrap());
+    let plain_len = u64::from_le_bytes(raw[26..34].try_into().unwrap());
+    assert_eq!(
+        payload_len as usize,
+        raw.len() - HEADER_LEN,
+        "the declared payload length must be the bytes actually there"
+    );
+    assert!(
+        plain_len > payload_len,
+        "a snapshot that did not compress at all would mean zstd was skipped: \
+         {plain_len} plaintext, {payload_len} compressed"
+    );
+    assert_ne!(
+        u32::from_le_bytes(raw[34..38].try_into().unwrap()),
+        0,
+        "an unwritten checksum field is zero, so a real one had better not be"
+    );
+
     let loaded = macrame::temporal::load_snapshot(&path).unwrap();
     assert_eq!(loaded.seq_anchor, 7);
+}
+
+// -- D-185: v3 is bounded and checksummed -----------------------------------
+
+/// Truncation is the failure the declared length exists for, and it is caught
+/// before anything is hashed or decompressed.
+///
+/// It is also the one the atomic rename was supposed to make impossible
+/// ([D-043]), which is the reason to check anyway: the rename covers a crash
+/// during *this* process's write, and nothing covers a filesystem that lost
+/// the tail of a file it had already acknowledged.
+///
+/// [D-043]: ../docs/architecture/s13-decision-register.md#d-043
+#[tokio::test]
+async fn a_truncated_snapshot_is_refused_by_its_declared_length() {
+    let harness = TestHarness::new();
+    let dir = harness.temp_dir.path().join("snapshots");
+    let path = save_snapshot(&dir, &empty_state(11)).unwrap();
+
+    let raw = std::fs::read(&path).unwrap();
+    std::fs::write(&path, &raw[..raw.len() - 8]).unwrap();
+
+    match macrame::temporal::load_snapshot(&path).unwrap_err() {
+        DbError::SnapshotCorrupt { reason, .. } => {
+            assert!(
+                reason.contains("payload bytes"),
+                "the length check should name itself: {reason}"
+            );
+        }
+        other => panic!("expected SnapshotCorrupt, got {other:?}"),
+    }
+}
+
+/// The same check from the other side. Appending is what a partially-flushed
+/// overwrite looks like, and a reader that ignored the extra bytes would
+/// deserialize a prefix and call it the state.
+#[tokio::test]
+async fn bytes_appended_to_a_snapshot_are_refused() {
+    let harness = TestHarness::new();
+    let dir = harness.temp_dir.path().join("snapshots");
+    let path = save_snapshot(&dir, &empty_state(12)).unwrap();
+
+    let mut raw = std::fs::read(&path).unwrap();
+    raw.extend_from_slice(b"trailing");
+    std::fs::write(&path, &raw).unwrap();
+
+    match macrame::temporal::load_snapshot(&path).unwrap_err() {
+        DbError::SnapshotCorrupt { reason, .. } => {
+            assert!(reason.contains("appended"), "{reason}");
+        }
+        other => panic!("expected SnapshotCorrupt, got {other:?}"),
+    }
+}
+
+/// **The check that closes §3.3.** A payload that is the right length and the
+/// wrong bytes is what bit rot looks like, and it is exactly the input that
+/// used to reach the deserializer — which would then work through a corrupt
+/// stream rather than reject it. The checksum runs before zstd sees a byte.
+#[tokio::test]
+async fn a_flipped_bit_in_the_payload_is_caught_by_the_checksum() {
+    let harness = TestHarness::new();
+    let dir = harness.temp_dir.path().join("snapshots");
+    let path = save_snapshot(&dir, &empty_state(13)).unwrap();
+
+    let mut raw = std::fs::read(&path).unwrap();
+    let victim = raw.len() - 3;
+    raw[victim] ^= 0b0001_0000;
+    std::fs::write(&path, &raw).unwrap();
+
+    match macrame::temporal::load_snapshot(&path).unwrap_err() {
+        DbError::SnapshotCorrupt { reason, .. } => {
+            assert!(
+                reason.contains("checksum mismatch"),
+                "the checksum should be what fires: {reason}"
+            );
+        }
+        other => panic!("expected SnapshotCorrupt, got {other:?}"),
+    }
+}
+
+/// Damage to the header is damage: the lengths are under the checksum, so a
+/// reader never acts on a `payload_len` it has not verified.
+///
+/// Flipping a bit in `plain_len` leaves the file's framing intact — the
+/// declared payload length still matches — so the length check passes and the
+/// checksum is the only thing standing between a corrupt bound and the
+/// decompressor.
+#[tokio::test]
+async fn a_corrupted_length_field_is_caught_by_the_same_checksum() {
+    let harness = TestHarness::new();
+    let dir = harness.temp_dir.path().join("snapshots");
+    let path = save_snapshot(&dir, &empty_state(14)).unwrap();
+
+    let mut raw = std::fs::read(&path).unwrap();
+    raw[26] ^= 0b0000_0001;
+    std::fs::write(&path, &raw).unwrap();
+
+    match macrame::temporal::load_snapshot(&path).unwrap_err() {
+        DbError::SnapshotCorrupt { reason, .. } => {
+            assert!(reason.contains("checksum mismatch"), "{reason}");
+        }
+        other => panic!("expected SnapshotCorrupt, got {other:?}"),
+    }
+}
+
+/// A v2 file meets a v3 build as *incompatible*, not as *damaged*, and the
+/// distinction is the whole point of having both.
+///
+/// This is the ordinary upgrade path: the scan skips the file and folds from
+/// the log ([Doctrine VI]), where reporting damage would send someone looking
+/// for a fault that is not there.
+///
+/// [Doctrine VI]: ../docs/architecture/s0-s3-foundations.md#doctrine-vi
+#[tokio::test]
+async fn a_v2_snapshot_is_incompatible_rather_than_corrupt() {
+    let harness = TestHarness::new();
+    let dir = harness.temp_dir.path().join("snapshots");
+    let path = save_snapshot(&dir, &empty_state(15)).unwrap();
+
+    let mut raw = std::fs::read(&path).unwrap();
+    raw[4..6].copy_from_slice(&2u16.to_le_bytes());
+    std::fs::write(&path, &raw).unwrap();
+
+    match macrame::temporal::load_snapshot(&path).unwrap_err() {
+        DbError::SnapshotIncompatible { reason, .. } => {
+            assert!(reason.contains("format v2"), "{reason}");
+        }
+        other => panic!("expected SnapshotIncompatible, got {other:?}"),
+    }
+}
+
+/// Damage on any path is skipped rather than raised, which is what makes the
+/// new variant safe to introduce.
+///
+/// `reconstruct` composes onto the newest usable snapshot; a corrupt newest
+/// snapshot must cost a slower fold and not an error, because the ledger is
+/// the authority and it is untouched.
+#[tokio::test]
+async fn a_corrupt_snapshot_is_skipped_and_the_fold_still_answers() {
+    let harness = TestHarness::new();
+    let db = composed_db(&harness).await;
+    let snaps = harness.temp_dir.path().join("snaps");
+
+    let ts = max_recorded_at(&db).await;
+    let base = reconstruct(db.read_conn(), &ts, None, None).await.unwrap();
+    let path = save_snapshot(&snaps, &base).unwrap();
+
+    let mut raw = std::fs::read(&path).unwrap();
+    let victim = raw.len() - 2;
+    raw[victim] ^= 0xFF;
+    std::fs::write(&path, &raw).unwrap();
+
+    let state = reconstruct(db.read_conn(), &ts, None, Some(&snaps))
+        .await
+        .expect("a damaged cache must not fail a read the ledger can answer");
+    assert_eq!(
+        state.concepts.len(),
+        3,
+        "the fold from genesis must still find every concept"
+    );
 }
 
 /// **The failure the header exists to prevent.**

@@ -140,6 +140,11 @@ EXPECTED: dict[str, tuple[str, str, dict]] = {
         "TemporalError",
         {"path": "sample.snap", "reason": "sample-reason"},
     ),
+    "SnapshotCorrupt": (
+        "SnapshotCorruptError",
+        "TemporalError",
+        {"path": "sample.snap", "reason": "sample-reason"},
+    ),
     "PayloadVersion": ("PayloadVersionError", "TemporalError", {"got": 9, "max": 2}),
     "ArchiveViolation": ("ArchiveViolationError", "TemporalError", {"table": "links"}),
     "ArchiveWindow": (
@@ -318,6 +323,11 @@ def test_an_archive_window_crosses_as_a_timedelta():
         ("NotFoundError", "DiagnosticConnError", "a file is not a node (D-069/D-091)"),
         ("RebuildFailedError", "RebuildInterruptedError", "did not repair vs did not run"),
         ("ReplayCorruptError", "SnapshotIncompatibleError", "a fault vs an upgrade"),
+        # Three subjects, not two (0.13.12, W8.2, D-185). A damaged cache is
+        # neither a damaged ledger nor a foreign file, and the response to it
+        # -- delete the snapshot, fold from the log -- is its own.
+        ("SnapshotCorruptError", "SnapshotIncompatibleError", "damaged vs foreign"),
+        ("SnapshotCorruptError", "ReplayCorruptError", "the cache vs the ledger"),
         ("InvalidTimestampError", "ReplayCorruptError", "caller input vs damaged ledger"),
         ("SingleOpenViolationError", "OverlappingIntervalError", "the sentinel vs the general case"),
     ],

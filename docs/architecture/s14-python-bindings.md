@@ -268,8 +268,12 @@ node, `InvalidId` rather than `NotFound` because refused is not missing, `Invali
 rather than `ReplayCorrupt` because bad caller input is not a damaged ledger,
 `RebuildInterrupted` rather than `RebuildFailed` because *did not run* is not *did not
 repair*. Rendering all of that onto `RuntimeError(str(e))` would discard it at the last
-possible moment. The six pairs above are pinned as non-inheriting classes, because
+possible moment. The eight pairs above are pinned as non-inheriting classes, because
 collapsing one is a regression no functional test would notice: both sides still raise.
+
+
+**`SnapshotCorruptError` is the third name in a family that had two (0.13.12, W8.2, [D-185](s13-decision-register.md#d-185)).** `SnapshotIncompatibleError` means another build wrote the file, `ReplayCorruptError` means the ledger itself is damaged, and the new one means the *cache* is damaged and the ledger is not — three subjects, three responses, and the middle one is the worst thing this library can say about a database. Until v3 every failure of `load_snapshot` arrived as `ReplayCorruptError` with `seq = 0`, so a Python caller writing `except ReplayCorruptError` to catch a damaged ledger was also catching a snapshot file that could simply be deleted. Nothing on the ordinary path raises the new class — a damaged snapshot is skipped by the scan and the fold runs from the log — which is exactly why it needed the separate name: the case where a caller *does* see it is the case where they were about to act on the wrong diagnosis.
+
 
 **Completeness is enforced by the compiler.** The mapping is a `match` over `DbError`
 with no wildcard arm, so a variant added upstream fails to build `macrame-py` at the line

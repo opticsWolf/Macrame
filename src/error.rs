@@ -191,6 +191,36 @@ pub enum DbError {
     #[error("snapshot {path} is not readable by this build: {reason}")]
     SnapshotIncompatible { path: String, reason: String },
 
+    /// A snapshot that is damaged rather than foreign (0.13.12, W8.2, D-185).
+    ///
+    /// The third case in the same family, and it needed its own name for the
+    /// reason [D-069] gives: an error that names the wrong subject sends a
+    /// caller to fix the wrong thing.
+    ///
+    /// * [`Self::SnapshotIncompatible`] — *a different build wrote this*.
+    ///   Ordinary after an upgrade.
+    /// * [`Self::ReplayCorrupt`] — **the ledger is damaged.** The log is the
+    ///   only authority in this system and this is the worst thing it can say.
+    /// * This — *the cache is damaged.* The ledger is untouched. Deleting the
+    ///   file restores correctness and costs a slower reconstruction, because
+    ///   [Doctrine VI] makes a snapshot derivative and disposable.
+    ///
+    /// Every failure of `load_snapshot` used to be `ReplayCorrupt { seq: 0 }`,
+    /// which claimed the ledger was damaged and carried a sequence number that
+    /// cannot exist — `AUTOINCREMENT` starts at 1. That is the same placeholder
+    /// [D-069] removed from `InvalidTimestamp`, left in place here because
+    /// nothing had cause to look at it.
+    ///
+    /// It carries the path and not a `seq`, because a snapshot is identified by
+    /// its file. The reason names the check that failed, and the checks are
+    /// ordered so that the earliest possible one fires: declared length, then
+    /// checksum, then the decompressed size against what the header declared.
+    ///
+    /// [D-069]: ../docs/architecture/s13-decision-register.md#d-069
+    /// [Doctrine VI]: ../docs/architecture/s0-s3-foundations.md#doctrine-vi
+    #[error("snapshot {path} is damaged: {reason}")]
+    SnapshotCorrupt { path: String, reason: String },
+
     #[error("payload v{got} unsupported (max {max})")]
     PayloadVersion { got: u8, max: u8 },
 

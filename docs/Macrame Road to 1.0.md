@@ -270,7 +270,7 @@ branching lands.** This is the one item in this document I would cut first if
 | 2.6 | `reject_overlaps_within` O(n²) | Med | W7.5 | 0.13.6 ✅ |
 | 3.1 | `as_of` mixes valid time and transaction time | High | W5.6 / W7.1 | both |
 | 3.2 | `AtTime` degrades silently after archive | Med | W9.1 | 0.14.0 |
-| 3.3 | Snapshot loader unbounded | Med | W8.2 | 0.14.0 |
+| 3.3 | Snapshot loader unbounded | Med | W8.2 | 0.13.12 ✅ |
 | 3.4 | Future `recorded_at` poisons the clock floor | Med | W7.4 | 0.13.5 ✅ |
 | 3.5 | `run_writer_actor` cannot return `Err` | Low | W7.3 | 0.13.4 ✅ |
 | 3.6 | `write_annotations_atomic` bypasses `classify` | Med | W7.2 | 0.13.3 ✅ |
@@ -1452,6 +1452,49 @@ the single huge `Vec::with_capacity`, so the practical failure is not one
 catastrophic allocation but a deserializer working through a corrupt stream to
 exhaustion. A v3 header with a declared length and a checksum turns that into an
 immediate, named error.
+
+
+> **✅ Shipped 0.13.12 (recorded as
+> [D-185](../docs/architecture/s13-decision-register.md#d-185)).**
+>
+> **The failure is not the one "unbounded" suggests, and the item says so.**
+> serde's cautious capacity already blunts the single huge allocation; what was
+> left is a deserializer working through a corrupt stream until something runs
+> out, on the file the crash path reaches for first. So the fix is to know the
+> bytes are wrong before deserializing any of them.
+>
+> v3 carries `payload_len`, `plain_len` and a CRC-32 over the first 34 header
+> bytes **and** the payload. Checks run framing → integrity → size: the length
+> catches truncation and appended junk without hashing; the **checksum runs
+> before zstd is handed a byte**, which is what closes §3.3; `plain_len` is
+> enforced *during* decompression, bounding the reader to `plain_len + 1` so a
+> frame that expands further stops one byte over the line rather than doing the
+> work first and complaining after. The bincode limit is then the buffer's own
+> length, replacing `Infinite`.
+>
+> **Both lengths sit under the checksum**, which is what makes a declared bound
+> a bound rather than a suggestion — and is why there is no arbitrary size cap
+> beside it. CRC-32 is detection, not authentication; the unit tests forge a
+> *valid* checksum on purpose, so what they test is the reader after integrity
+> has been satisfied deliberately.
+>
+> **Damage got its own name, and that is [D-069](../docs/architecture/s13-decision-register.md#d-069)
+> in a place D-069 did not reach.** Every failure of `load_snapshot` was
+> `ReplayCorrupt { seq: 0 }` — the variant meaning *the ledger is damaged*,
+> carrying a sequence number that cannot exist. Three subjects, three names:
+> `SnapshotIncompatible` (another build wrote it), `ReplayCorrupt` (the ledger),
+> `SnapshotCorrupt` (the cache, and deleting the file is the repair).
+>
+> **§5.5's own header description had been wrong since 0.5.5** — "ten bytes",
+> diagram stopping at offset 10, while D-054's note further down the same
+> section already said eighteen. A correction filed beside the passage instead
+> of into it, which is [D-183](../docs/architecture/s13-decision-register.md#d-183)'s
+> shape a third time.
+>
+> v2 files are refused as `SnapshotIncompatible` and the scan folds from the
+> log. That is the whole migration — nothing is in a snapshot that is not also
+> in the ledger.
+
 
 **W8.3 — fsync the directory after rename.** Closes §3.7. The rename is atomic
 and the directory entry is not durable until the directory itself is synced —

@@ -2,8 +2,11 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
+use bincode::Options;
+
 use crate::error::{DbError, Result};
 use crate::temporal::replay::MaterializedState;
+use crate::util::crc32::Crc32;
 
 /// Header magic. Also the marker that separates a 0.5.5 snapshot from the
 /// headerless files 0.5.4 and earlier wrote, whose first bytes are zstd's own
@@ -17,12 +20,33 @@ const SNAP_MAGIC: [u8; 4] = *b"MACR";
 /// does not make an old file fail to parse, it makes it parse into the wrong
 /// values — and a snapshot is the first thing a restart reaches for, so the
 /// wrong values arrive labelled as the newest state anyone believed.
-/// **v2 (0.5.5)** adds the snapshot's own instant to the header (D-054).
-const SNAP_FORMAT_VERSION: u16 = 2;
+///
+/// * **v2 (0.5.5)** adds the snapshot's own instant to the header (D-054).
+/// * **v3 (0.13.12)** adds both lengths and a checksum (W8.2, D-185).
+///
+/// A v2 file meets a v3 build as [`DbError::SnapshotIncompatible`], which is
+/// the case this versioned container was built for: the scan skips it and
+/// folds from the log. No migration, because there is nothing to migrate —
+/// a snapshot is a cache.
+const SNAP_FORMAT_VERSION: u16 = 3;
 
-/// `magic (4) + format_version (2) + schema_version (4) + taken_at_micros (8)`,
-/// little-endian.
-const SNAP_HEADER_LEN: usize = 18;
+/// The v3 container header, little-endian throughout:
+///
+/// ```text
+/// offset  0      4    6      10               18            26           34     38
+///         MACR | fmt | schema | taken_at_micros | payload_len | plain_len | crc32 |
+///         (4)    (2)   (4)      (8)               (8)           (8)         (4)
+/// ```
+///
+/// `payload_len` is the compressed byte count that follows this header,
+/// `plain_len` what it decompresses to, and `crc32` covers the first 34 bytes
+/// of the header **and** the payload — so the two lengths are themselves under
+/// the checksum and a reader can trust them before acting on them (W8.2,
+/// D-185).
+const SNAP_HEADER_LEN: usize = 38;
+
+/// Where the checksum sits: everything before it is covered by it.
+const SNAP_CRC_OFFSET: usize = SNAP_HEADER_LEN - 4;
 
 /// Microseconds since the Unix epoch, from the snapshot's own `timestamp`.
 ///
@@ -44,12 +68,30 @@ fn taken_at_micros(state: &MaterializedState) -> u64 {
         .unwrap_or(0)
 }
 
-fn snapshot_header(schema_version: u32, taken_at: u64) -> [u8; SNAP_HEADER_LEN] {
+/// Build the header for a payload, checksum included.
+///
+/// Takes the payload rather than a precomputed checksum so that there is one
+/// place where the covered bytes are decided. A checksum passed in as a `u32`
+/// would let a caller compute it over the wrong range, and the failure mode of
+/// that is a file that verifies against itself and nothing else.
+fn snapshot_header(
+    schema_version: u32,
+    taken_at: u64,
+    payload: &[u8],
+    plain_len: u64,
+) -> [u8; SNAP_HEADER_LEN] {
     let mut h = [0u8; SNAP_HEADER_LEN];
     h[0..4].copy_from_slice(&SNAP_MAGIC);
     h[4..6].copy_from_slice(&SNAP_FORMAT_VERSION.to_le_bytes());
     h[6..10].copy_from_slice(&schema_version.to_le_bytes());
     h[10..18].copy_from_slice(&taken_at.to_le_bytes());
+    h[18..26].copy_from_slice(&(payload.len() as u64).to_le_bytes());
+    h[26..34].copy_from_slice(&plain_len.to_le_bytes());
+
+    let mut crc = Crc32::new();
+    crc.update(&h[..SNAP_CRC_OFFSET]);
+    crc.update(payload);
+    h[SNAP_CRC_OFFSET..].copy_from_slice(&crc.finish().to_le_bytes());
     h
 }
 
@@ -137,10 +179,14 @@ pub fn save_snapshot(snapshots_dir: &Path, state: &MaterializedState) -> Result<
     let mut file =
         fs::File::create(&tmp_path).map_err(|e| fail("failed to create snapshot temp file", e))?;
     // Header first, uncompressed: it has to be readable without committing to
-    // decompressing a payload this build may not understand (D-043).
+    // decompressing a payload this build may not understand (D-043). Since v3
+    // it also carries the checksum over the payload that follows it, which is
+    // why it is built after the compression rather than before (W8.2, D-185).
     file.write_all(&snapshot_header(
         crate::schema::migrations::SCHEMA_VERSION,
         taken_at_micros(state),
+        &compressed,
+        serialized.len() as u64,
     ))
     .map_err(|e| fail("failed to write snapshot header", e))?;
     file.write_all(&compressed)
@@ -171,57 +217,123 @@ pub fn save_snapshot(snapshots_dir: &Path, state: &MaterializedState) -> Result<
 /// Headerless files written by 0.5.4 and earlier are rejected by the same path:
 /// their first four bytes are zstd's magic, which is not `MACR`.
 ///
+/// # Damage is a third answer, and it is bounded (0.13.12, W8.2, D-185)
+///
+/// [`DbError::SnapshotCorrupt`] is not [`DbError::SnapshotIncompatible`] and
+/// not [`DbError::ReplayCorrupt`]: the file is damaged, the ledger is not, and
+/// the repair is to delete the file. Every failure below used to be
+/// `ReplayCorrupt { seq: 0 }`, which said the log was damaged and carried a
+/// sequence number that cannot exist.
+///
+/// The checks run in the order that lets the cheapest one fire first, and each
+/// is a named error rather than a symptom further down:
+///
+/// 1. **Declared payload length** against the bytes actually present. Catches
+///    truncation and trailing junk without hashing anything.
+/// 2. **Checksum** over the header and the payload, before zstd is handed a
+///    single byte. This is the check that closes §3.3: a corrupt stream is
+///    refused *as* a corrupt stream, rather than being walked to exhaustion by
+///    a deserializer trying to make sense of it.
+/// 3. **Declared plaintext length**, enforced during decompression rather than
+///    checked after it — the reader is bounded to `plain_len + 1` bytes, so a
+///    frame that expands further stops at the bound instead of allocating.
+/// 4. **A bincode limit** equal to the buffer's own size, replacing the
+///    `Infinite` limit `bincode::deserialize` carries.
+///
+/// Steps 3 and 4 are redundant with step 2 for every file this crate wrote,
+/// and that is the point of having them: they hold when the checksum has
+/// already been satisfied by something that computed it deliberately.
+///
 /// # This blocks (0.13.11, W8.1)
 ///
 /// Read, decompress, deserialize, all synchronous — see [`save_snapshot`] for
 /// the argument. The crate's one async reader is `snapshot_anchor`, which
 /// offloads the whole scan rather than each file.
 pub fn load_snapshot(path: &Path) -> Result<MaterializedState> {
-    let mut file = fs::File::open(path).map_err(|e| DbError::ReplayCorrupt {
-        seq: 0,
-        reason: format!("Failed to open snapshot file {:?}: {e}", path),
-    })?;
+    let damaged = |reason: String| DbError::SnapshotCorrupt {
+        path: path.display().to_string(),
+        reason,
+    };
+    let foreign = |reason: String| DbError::SnapshotIncompatible {
+        path: path.display().to_string(),
+        reason,
+    };
 
-    let mut raw = Vec::new();
-    file.read_to_end(&mut raw)
-        .map_err(|e| DbError::ReplayCorrupt {
-            seq: 0,
-            reason: format!("Failed to read snapshot file {:?}: {e}", path),
-        })?;
+    let raw = fs::read(path).map_err(|e| damaged(format!("could not be read: {e}")))?;
 
     if raw.len() < SNAP_HEADER_LEN || raw[0..4] != SNAP_MAGIC {
-        return Err(DbError::SnapshotIncompatible {
-            path: path.display().to_string(),
-            reason: "not a macrame snapshot, or written before the versioned \
-                     container existed (0.5.4 and earlier)"
+        return Err(foreign(
+            "not a macrame snapshot, or written before the versioned container \
+             existed (0.5.4 and earlier)"
                 .to_string(),
-        });
+        ));
     }
 
     let format = u16::from_le_bytes([raw[4], raw[5]]);
     let schema = u32::from_le_bytes([raw[6], raw[7], raw[8], raw[9]]);
     let expected_schema = crate::schema::migrations::SCHEMA_VERSION;
     if format != SNAP_FORMAT_VERSION || schema != expected_schema {
-        return Err(DbError::SnapshotIncompatible {
-            path: path.display().to_string(),
-            reason: format!(
-                "snapshot is format v{format}/schema v{schema}; this build reads \
-                 format v{SNAP_FORMAT_VERSION}/schema v{expected_schema}"
-            ),
-        });
+        return Err(foreign(format!(
+            "snapshot is format v{format}/schema v{schema}; this build reads \
+             format v{SNAP_FORMAT_VERSION}/schema v{expected_schema}"
+        )));
     }
 
-    let compressed = &raw[SNAP_HEADER_LEN..];
-    let decompressed = zstd::decode_all(compressed).map_err(|e| DbError::ReplayCorrupt {
-        seq: 0,
-        reason: format!("Failed to decompress snapshot {:?}: {e}", path),
-    })?;
+    // Unwraps: the slices are fixed ranges of a buffer already checked to be at
+    // least SNAP_HEADER_LEN long, so `try_into` on each cannot fail.
+    let payload_len = u64::from_le_bytes(raw[18..26].try_into().unwrap());
+    let plain_len = u64::from_le_bytes(raw[26..34].try_into().unwrap());
+    let declared_crc =
+        u32::from_le_bytes(raw[SNAP_CRC_OFFSET..SNAP_HEADER_LEN].try_into().unwrap());
 
-    let state: MaterializedState =
-        bincode::deserialize(&decompressed).map_err(|e| DbError::ReplayCorrupt {
-            seq: 0,
-            reason: format!("Failed to deserialize snapshot {:?}: {e}", path),
-        })?;
+    let payload = &raw[SNAP_HEADER_LEN..];
+    if payload.len() as u64 != payload_len {
+        return Err(damaged(format!(
+            "the header declares {payload_len} payload bytes and the file \
+             carries {}: truncated, or something was appended",
+            payload.len()
+        )));
+    }
+
+    let mut crc = Crc32::new();
+    crc.update(&raw[..SNAP_CRC_OFFSET]);
+    crc.update(payload);
+    let actual_crc = crc.finish();
+    if actual_crc != declared_crc {
+        return Err(damaged(format!(
+            "checksum mismatch: the header declares {declared_crc:#010x} and \
+             the bytes hash to {actual_crc:#010x}"
+        )));
+    }
+
+    // Bounded at `plain_len + 1` so that a frame claiming to be larger than it
+    // said stops one byte over the line rather than at whatever it decides to
+    // expand to. `saturating_add` because `plain_len` is a number off a disk.
+    let mut decoder =
+        zstd::Decoder::new(payload).map_err(|e| damaged(format!("zstd rejected it: {e}")))?;
+    let mut plain = Vec::new();
+    decoder
+        .by_ref()
+        .take(plain_len.saturating_add(1))
+        .read_to_end(&mut plain)
+        .map_err(|e| damaged(format!("could not be decompressed: {e}")))?;
+    if plain.len() as u64 != plain_len {
+        return Err(damaged(format!(
+            "the header declares {plain_len} plaintext bytes and the payload \
+             decompressed to {}",
+            plain.len()
+        )));
+    }
+
+    // `bincode::deserialize`'s own options, plus a limit: the default is
+    // `Infinite`, and the buffer's length is the only honest bound available
+    // once the bytes are in hand.
+    let state: MaterializedState = bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .allow_trailing_bytes()
+        .with_limit(plain.len() as u64)
+        .deserialize(&plain)
+        .map_err(|e| damaged(format!("could not be deserialized: {e}")))?;
 
     Ok(state)
 }
@@ -646,5 +758,114 @@ mod tests {
         assert_eq!(loaded.timestamp, state.timestamp);
         assert_eq!(loaded.concepts.len(), state.concepts.len());
         assert_eq!(loaded.concepts["c19999"], state.concepts["c19999"]);
+    }
+
+    /// Rewrite a saved snapshot's header with a doctored `plain_len`, checksum
+    /// and all.
+    ///
+    /// The checksum is *recomputed*, which is the point: these tests are about
+    /// what the reader does when the integrity field has already been
+    /// satisfied. CRC-32 is detection, not authentication, and anything with
+    /// write access to the directory can produce a file that verifies — so the
+    /// bounds below have to hold on their own.
+    fn forge_plain_len(path: &Path, plain_len: u64) {
+        let mut raw = fs::read(path).unwrap();
+        raw[26..34].copy_from_slice(&plain_len.to_le_bytes());
+        let mut crc = Crc32::new();
+        crc.update(&raw[..SNAP_CRC_OFFSET]);
+        crc.update(&raw[SNAP_HEADER_LEN..]);
+        let checksum = crc.finish().to_le_bytes();
+        raw[SNAP_CRC_OFFSET..SNAP_HEADER_LEN].copy_from_slice(&checksum);
+        fs::write(path, &raw).unwrap();
+    }
+
+    /// §3.3, stated as a bound rather than as a hope.
+    ///
+    /// The header says ten plaintext bytes; the payload is a real zstd frame
+    /// holding a whole state. The reader is bounded to `plain_len + 1`, so it
+    /// stops eleven bytes in — it does not decompress the frame to find out how
+    /// wrong the header was, which is the behaviour that made an unbounded
+    /// loader a denial-of-service surface rather than a bug.
+    #[test]
+    fn a_payload_larger_than_its_declared_length_stops_at_the_bound() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = save_snapshot(dir.path(), &bulky_state(3)).unwrap();
+        forge_plain_len(&path, 10);
+
+        match load_snapshot(&path).unwrap_err() {
+            DbError::SnapshotCorrupt { reason, .. } => {
+                assert!(
+                    reason.contains("10 plaintext bytes") && reason.contains("11"),
+                    "the bound must be what stopped it, and it must say so: {reason}"
+                );
+            }
+            other => panic!("expected SnapshotCorrupt, got {other:?}"),
+        }
+    }
+
+    /// The other direction, and the reason the check is an equality.
+    ///
+    /// A header claiming *more* than the frame holds cannot exhaust anything —
+    /// the frame ends and the reader stops. Rejecting it anyway is what keeps
+    /// the declared length a fact about the file rather than a ceiling: a
+    /// reader that accepted a short frame under a large declaration would be
+    /// accepting a truncated payload that happened to end on a frame boundary.
+    #[test]
+    fn a_payload_smaller_than_its_declared_length_is_refused_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = save_snapshot(dir.path(), &bulky_state(4)).unwrap();
+        forge_plain_len(&path, u32::MAX as u64);
+
+        match load_snapshot(&path).unwrap_err() {
+            DbError::SnapshotCorrupt { reason, .. } => {
+                assert!(reason.contains("plaintext bytes"), "{reason}");
+            }
+            other => panic!("expected SnapshotCorrupt, got {other:?}"),
+        }
+    }
+
+    /// A declared length no allocator would survive must not reach an
+    /// allocator.
+    ///
+    /// `u64::MAX` is the number a corrupt or hostile header reaches for, and
+    /// the `saturating_add` in the reader is what keeps `plain_len + 1` from
+    /// wrapping to zero and reading nothing at all. What bounds the work here
+    /// is the frame itself, which ends where it ends — the failure is the
+    /// length check afterwards, not an allocation.
+    #[test]
+    fn a_declared_length_of_u64_max_neither_wraps_nor_allocates() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = save_snapshot(dir.path(), &bulky_state(5)).unwrap();
+        forge_plain_len(&path, u64::MAX);
+
+        match load_snapshot(&path).unwrap_err() {
+            DbError::SnapshotCorrupt { reason, .. } => {
+                assert!(
+                    reason.contains(&format!("{} plaintext bytes", u64::MAX)),
+                    "{reason}"
+                );
+            }
+            other => panic!("expected SnapshotCorrupt, got {other:?}"),
+        }
+    }
+
+    /// The checksum covers the header, so the forgery helper above has to be a
+    /// forgery — if it did not recompute the field, every test using it would
+    /// be passing for the wrong reason.
+    #[test]
+    fn doctoring_the_header_without_the_checksum_fails_earlier() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = save_snapshot(dir.path(), &bulky_state(6)).unwrap();
+
+        let mut raw = fs::read(&path).unwrap();
+        raw[26..34].copy_from_slice(&10u64.to_le_bytes());
+        fs::write(&path, &raw).unwrap();
+
+        match load_snapshot(&path).unwrap_err() {
+            DbError::SnapshotCorrupt { reason, .. } => {
+                assert!(reason.contains("checksum mismatch"), "{reason}");
+            }
+            other => panic!("expected SnapshotCorrupt, got {other:?}"),
+        }
     }
 }

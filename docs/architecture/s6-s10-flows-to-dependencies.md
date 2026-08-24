@@ -112,6 +112,9 @@ pub enum DbError {
     #[error("snapshot {path} is not readable by this build: {reason}")]
     SnapshotIncompatible { path: String, reason: String },
 
+    #[error("snapshot {path} is damaged: {reason}")]
+    SnapshotCorrupt { path: String, reason: String },
+
     #[error("payload v{got} unsupported (max {max})")]
     PayloadVersion { got: u8, max: u8 },
 
@@ -211,6 +214,8 @@ The 0.5.0 RecordedAtRegression variant surfaces the concept monotonicity trigger
 
 
 **The 0.5.6 and 0.6.0 variants exist to name the right subject, and that is a policy rather than a habit ([D-069](s13-decision-register.md#d-069)).** An error that names the wrong thing sends a caller to fix the wrong thing, so each of these was split out of a variant that already covered the case badly. `InvalidTimestamp` and `InvalidId` were `ReplayCorrupt { seq: 0 }` and `NotFound` — the first claiming the ledger was damaged when the caller's input was malformed, carrying a sequence number that cannot exist because `AUTOINCREMENT` starts at 1; the second telling a caller the thing is missing and inviting them to create it with the same id, which would be refused again. `DiagnosticConn` is its own variant because a file is not a node ([D-091](s13-decision-register.md#d-091)). `RebuildInterrupted` is distinct from `RebuildFailed` because *the repair did not run* is not *the repair did not repair*: `links_current` is untouched, whatever was true of it before is still true, and the action is to retry ([D-082](s13-decision-register.md#d-082)). `AttributeModeUnstated` was a `tracing::warn!` until 0.6.0, which is invisible in any application that has not configured a subscriber — it is now a value the caller cannot miss ([D-085](s13-decision-register.md#d-085)).
+
+**Three variants, three subjects, and the third arrived in 0.13.12 ([D-185](s13-decision-register.md#d-185)).** `SnapshotIncompatible` says *another build wrote this*, which is ordinary after an upgrade. `ReplayCorrupt` says **the ledger is damaged**, which is the worst thing this library can report about itself. `SnapshotCorrupt` says the *cache* is damaged and the ledger is not — deleting the file restores correctness and costs a slower reconstruction, because [Doctrine VI](s0-s3-foundations.md#doctrine-vi) makes a snapshot derivative and disposable. Until v3 there was no third name, so every failure of `load_snapshot` — a bad read, a failed decompression, a refused deserialization — came back as `ReplayCorrupt { seq: 0 }`: the wrong subject, carrying a sequence number that cannot exist because `AUTOINCREMENT` starts at 1. That is the same placeholder the paragraph above records [D-069](s13-decision-register.md#d-069) removing from `InvalidTimestamp`, left in the snapshot path because nothing had cause to look at it. Nothing in normal operation raises the new variant to a caller: a damaged snapshot is skipped by the scan and the fold runs from the log.
 
 **`AttributeModeUnstated` names the axis, and until 0.13.10 it named a method instead ([D-183](s13-decision-register.md#d-183)).** The variant carried `as_of: String` and rendered it as `as_of(…)` — the method [D-174](s13-decision-register.md#d-174) removed in 0.13.2 when it split the axes. Both instants reached that field through an `.or()`, so a caller who set `as_of_recorded` was told about `as_of`, a caller who set both was told about one of them, and neither learned which clock they had asked about. It now carries `StatedInstants` — `Valid`, `Recorded` or `Both`, and never neither, because this error exists *because* an instant was set — rendered as the calls that produce them. The remedy it offers is a keyword on the same call, so naming the keyword is the whole of its job.
 

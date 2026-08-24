@@ -324,6 +324,18 @@ create_exception!(
 );
 create_exception!(
     macrame,
+    SnapshotCorruptError,
+    TemporalError,
+    "A damaged snapshot file. Attributes: `path`, `reason`.\n\n\
+     Three siblings, three subjects (0.13.12, W8.2). \
+     `SnapshotIncompatibleError` means another build wrote it and is ordinary \
+     after an upgrade; `ReplayCorruptError` means the *ledger* is damaged, \
+     which is the worst thing this library can say; this one means the cache \
+     is damaged and the ledger is not. Deleting the file restores correctness \
+     and costs a slower reconstruction."
+);
+create_exception!(
+    macrame,
     PayloadVersionError,
     TemporalError,
     "A log payload version this build cannot read. Attributes: `got`, `max`."
@@ -550,6 +562,11 @@ fn build(py: Python<'_>, err: DbError) -> PyErr {
             })
         }
 
+        DbError::SnapshotCorrupt { path, reason } => raise::<SnapshotCorruptError, _>(py, m, |e| {
+            e.setattr("path", path)?;
+            e.setattr("reason", reason)
+        }),
+
         DbError::PayloadVersion { got, max } => raise::<PayloadVersionError, _>(py, m, |e| {
             e.setattr("got", got)?;
             e.setattr("max", max)
@@ -729,6 +746,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
         // temporal
         ReplayCorruptError,
         SnapshotIncompatibleError,
+        SnapshotCorruptError,
         PayloadVersionError,
         ArchiveViolationError,
         ArchiveWindowError,

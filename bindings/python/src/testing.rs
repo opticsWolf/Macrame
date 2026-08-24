@@ -49,6 +49,7 @@ pub(crate) const DB_ERROR_VARIANTS: &[&str] = &[
     "NegativeEdgeWeight",
     "ReplayCorrupt",
     "SnapshotIncompatible",
+    "SnapshotCorrupt",
     "PayloadVersion",
     "ArchiveViolation",
     "AttributeModeUnstated",
@@ -128,6 +129,10 @@ fn sample(name: &str) -> Option<DbError> {
             reason: "sample-reason".into(),
         },
         "SnapshotIncompatible" => DbError::SnapshotIncompatible {
+            path: "sample.snap".into(),
+            reason: "sample-reason".into(),
+        },
+        "SnapshotCorrupt" => DbError::SnapshotCorrupt {
             path: "sample.snap".into(),
             reason: "sample-reason".into(),
         },

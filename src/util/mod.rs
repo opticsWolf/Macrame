@@ -1,4 +1,5 @@
 pub mod clock;
+pub(crate) mod crc32;
 pub mod ids;
 pub mod limits;
 pub mod timestamp;
