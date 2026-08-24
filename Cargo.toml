@@ -4,7 +4,7 @@
 # keeps the import path `use macrame::…` unchanged, so this is a registry name
 # and not a rename of the crate anyone writes against.
 name = "macrame-db"
-version = "0.13.13"
+version = "0.13.14"
 edition = "2021"
 # Measured, not declared: `cargo +1.88.0 check --all-features --all-targets`
 # passes and 1.85 does not.
@@ -38,6 +38,11 @@ categories = ["database", "database-implementations", "data-structures"]
 # subdirectory that carries its own `Cargo.toml`, since that is another
 # package; `cargo package --list` is the check, and it is asserted by
 # `tests/packaging_tests.rs` rather than left to memory.
+#
+# `fuzz/` (0.13.14, W8.4) is out for the same reason and by the same mechanism,
+# and it is not a workspace member either -- its manifest carries an empty
+# `[workspace]` table, which is what keeps libFuzzer and a nightly-only
+# dependency out of every command run here.
 exclude = [
     "pyproject.toml",
     "python/",
@@ -169,6 +174,24 @@ property-tests = []
 #
 #     cargo test --features metrics
 metrics = []
+
+# Doors for `fuzz/` (0.13.14, W8.4, D-187). Off by default and turned on by
+# nothing but the fuzz crate, which needs to reach two items a caller has no
+# business reaching: the byte-level parser behind `load_snapshot`, and a way to
+# build a *valid* container around arbitrary bytes.
+#
+# The second is the one that matters. A CRC-32 over the header and the payload
+# is exactly the shape coverage-guided mutation cannot solve, so a fuzzer
+# pointed at the whole container spends its budget bouncing off the checksum and
+# never reaches zstd or bincode -- the two components W8.2 bounded, and the two
+# where a defect would actually live. W8.2 made this format fuzz-hostile on
+# purpose; this feature is what gets a fuzzer past its own defences.
+#
+# Adds no public API: the module behind it is `#[doc(hidden)]` and is not
+# compiled without the flag.
+#
+#     cargo +nightly fuzz run snapshot_payload
+fuzzing = []
 
 [[test]]
 name = "actor_metrics_tests"

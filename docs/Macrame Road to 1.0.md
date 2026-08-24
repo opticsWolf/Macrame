@@ -285,7 +285,7 @@ branching lands.** This is the one item in this document I would cut first if
 | 5.1 | R15 reaches the main suite | High | W1 | 0.13.0 |
 | 5.2 | Index registry is one-directional | Med | W2.3 | 0.13.0 |
 | 5.3 | No performance regression detection | Med | W10.1 | 0.14.0 |
-| 5.4 | No snapshot fuzzing | Low | W8.4 | 0.14.0 |
+| 5.4 | No snapshot fuzzing | Low | W8.4 | 0.13.14 ✅ |
 | 6.1 | Release history table stops at 0.9.0 | Low | W11.3 | 0.14.0 |
 | 6.2 | `Cargo.toml` metrics cost model is false | Med | W4.1 | 0.13.0 |
 | 6.3 | Comment-to-code ratio | — | W11.4 | 0.14.0 |
@@ -1546,6 +1546,50 @@ for.
 **W8.4 — Fuzz the loader.** Closes §5.4. `cargo-fuzz` over the v3 format, seeded
 with valid snapshots. W8.2 gives it something to assert: a corrupt input should
 produce a named error, never a panic and never an allocation storm.
+
+
+> **✅ Shipped 0.13.14 (recorded as
+> [D-187](../docs/architecture/s13-decision-register.md#d-187)).**
+>
+> **The obvious version of this item produces a fuzzer that tests the checksum
+> four hundred million times.** W8.2 put a CRC-32 over 34 header bytes and the
+> whole payload — exactly the shape coverage-guided mutation cannot solve — so a
+> target handed raw bytes clears the magic in seconds and then never reaches
+> zstd or bincode, which are the two components §3.3 named. W8.2 made this
+> format fuzz-hostile on purpose, and W8.4's real content is getting past its
+> own defences.
+>
+> **Three targets, one per layer**, with the inner two handed a container the
+> harness builds around their input: `snapshot_container` (framing),
+> `snapshot_payload` (plaintext → `bincode`'s decoder under W8.2's limit), and
+> `snapshot_frame` (a declared length plus arbitrary payload bytes → zstd and
+> the `plain_len` bound). The third is the one the checksum cannot help with: a
+> decompression bomb's checksum is *correct*, so only the declared bound stands
+> between the reader and full expansion. That is where **"never an allocation
+> storm"** stops being rhetorical, and it is asserted by libFuzzer's
+> `-malloc_limit_mb`, which is the tool built for it.
+>
+> **Seeds are generated, never committed** — a corpus of valid v3 files is
+> correct until `SNAP_FORMAT_VERSION` next moves, after which the session starts
+> from nothing while still looking seeded. Every seed is read back *out of* a
+> snapshot `save_snapshot` wrote, so none of it is a second description of the
+> writer.
+>
+> **It runs in CI and nowhere else, and the deterministic half is the answer to
+> that.** `cargo-fuzz` needs nightly and libFuzzer and does not support Windows.
+> So `src/temporal/snapshot.rs` asserts the same properties **exhaustively** in
+> every `cargo test` on every platform: every single-bit flip of a real snapshot
+> refused, every truncation and extension refused, every plaintext mutation
+> behind a correct checksum answered rather than survived, and a 64 MiB bomb
+> stopping 1,025 bytes in. Verified by mutation — disabling the checksum
+> comparison turns it red at bit 0 of byte 10, inside `taken_at_micros`, a field
+> nothing else guards.
+>
+> **§8 had been using the word "fuzz" since 0.4.0 for a differential oracle over
+> generated histories** — a property test, and a good one, but not a fuzzer, and
+> nothing in the repository generated unstructured input for anything. Fourth
+> documentation finding of this wave, same shape as the others.
+
 
 **W8.5 — Record D-156:** the v3 header, and why a format that a corrupt stream
 can walk to exhaustion is not acceptable in a file the crash path depends on.

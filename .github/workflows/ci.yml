@@ -250,6 +250,69 @@ jobs:
         shell: bash
         run: python scripts/run_rust_suite.py --features property-tests --attempts 6
 
+  # The snapshot loader's fuzz targets (0.13.14, W8.4, D-187).
+  #
+  # This job is where W8.4 actually runs. `cargo-fuzz` needs nightly and
+  # libFuzzer and does not support Windows, so it exists nowhere in the local
+  # development loop -- which is exactly why the deterministic half of the item
+  # lives in `src/temporal/snapshot.rs`'s unit tests, where every `cargo test`
+  # on every platform runs it. This half is the part a fixed set of cases
+  # cannot do: exploring inputs nobody thought of.
+  #
+  # Time-boxed rather than open-ended. A fuzzing session has no natural end, and
+  # a PR gate that never finishes is a gate that gets removed; 90 seconds a
+  # target finds shallow regressions against a seeded corpus and keeps the job
+  # inside the noise of the rest of CI. Finding deep bugs is what a long
+  # out-of-band session is for, and the corpus this job seeds is the same one it
+  # would start from.
+  #
+  # The limits are the assertion, not a safety margin. `-rss_limit_mb` and
+  # `-malloc_limit_mb` are how "never an allocation storm" -- the clause the
+  # plan states and the reason W8.2 bounded the reader at all -- becomes a
+  # reported finding with the offending input attached rather than a runner that
+  # quietly runs out of memory. 256 MiB is far above anything these targets
+  # legitimately touch and far below a storm.
+  fuzz:
+    name: fuzz (snapshot loader)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Two Cargo workspaces: the crate, and the fuzz crate that deliberately
+          # is not a member of it.
+          workspaces: |
+            . -> target
+            fuzz -> fuzz/target
+      - name: install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      # Generated, never committed: a corpus of valid v3 files goes stale the
+      # moment SNAP_FORMAT_VERSION moves, and a stale corpus still looks like a
+      # corpus. See `fuzz/src/bin/seed.rs`.
+      - name: seed the corpus
+        working-directory: fuzz
+        run: cargo run --bin seed
+
+      - name: snapshot_container
+        run: cargo fuzz run snapshot_container -- -max_total_time=90 -rss_limit_mb=256 -malloc_limit_mb=256
+      - name: snapshot_payload
+        run: cargo fuzz run snapshot_payload -- -max_total_time=90 -rss_limit_mb=256 -malloc_limit_mb=256
+      - name: snapshot_frame
+        run: cargo fuzz run snapshot_frame -- -max_total_time=90 -rss_limit_mb=256 -malloc_limit_mb=256
+
+      # A crash is the whole output of this job, and libFuzzer writes it to a
+      # file rather than to the log. Without this the run says "the fuzzer
+      # failed" and the input that caused it is gone with the runner.
+      - name: upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts/
+          if-no-files-found: ignore
+
   # A `cargo publish` failure after a tag is pushed is expensive: the tag is
   # already public and the version number is spent. This runs the same
   # packaging and verification step on every PR, so the release job's only new

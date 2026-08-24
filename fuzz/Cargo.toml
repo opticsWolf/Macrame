@@ -1,0 +1,78 @@
+# The snapshot loader's fuzz targets (0.13.14, W8.4, D-187).
+#
+# Not a workspace member, and the empty `[workspace]` below is what keeps it
+# that way. `tests/packaging_tests.rs` pins the parent's membership list to
+# `["bindings/python"]` for a reason -- every member is built by any command not
+# scoped to a package -- and a fuzz crate that joined the workspace would put
+# libFuzzer and a nightly-only dependency into `cargo test` at the root.
+#
+# Cargo also excludes a subdirectory carrying its own manifest from the `.crate`
+# tarball, which is the same mechanism that keeps `bindings/` out of it, so this
+# directory costs a published crate nothing.
+
+[package]
+name = "macrame-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+# `fuzzing` is what opens the two doors these targets need: the byte-level
+# parser behind `load_snapshot`, and a way to build a *valid* container around
+# arbitrary bytes. See the feature's own comment in the parent manifest for why
+# the second one is the important half.
+macrame-db = { path = "..", features = ["fuzzing"] }
+
+# For the seed generator only: it reads the plaintext back out of a container
+# the writer produced rather than re-serializing a state, so the corpus cannot
+# drift from the format. Already a transitive dependency of `macrame-db`.
+zstd = "0.13"
+
+[workspace]
+members = []
+
+# Line numbers in a crash report, without giving up the optimisation that makes
+# a fuzzing run worth starting.
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "snapshot_container"
+path = "fuzz_targets/snapshot_container.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "snapshot_payload"
+path = "fuzz_targets/snapshot_payload.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "snapshot_frame"
+path = "fuzz_targets/snapshot_frame.rs"
+test = false
+doc = false
+bench = false
+
+# The seed generator. A plain binary, run with plain `cargo run` before a
+# fuzzing session rather than under libFuzzer.
+#
+# Seeds are **generated and not committed**, which is the whole argument for it
+# being a program: a corpus of valid v3 files checked into git is correct until
+# `SNAP_FORMAT_VERSION` next moves, after which every seed is refused at step
+# two and the session starts from nothing while still looking seeded. Generating
+# them from this build cannot go stale.
+[[bin]]
+name = "seed"
+path = "src/bin/seed.rs"
+test = false
+doc = false
+bench = false

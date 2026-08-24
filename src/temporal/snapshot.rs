@@ -306,16 +306,36 @@ pub fn save_snapshot(snapshots_dir: &Path, state: &MaterializedState) -> Result<
 /// the argument. The crate's one async reader is `snapshot_anchor`, which
 /// offloads the whole scan rather than each file.
 pub fn load_snapshot(path: &Path) -> Result<MaterializedState> {
+    let label = path.display().to_string();
+    let raw = fs::read(path).map_err(|e| DbError::SnapshotCorrupt {
+        path: label.clone(),
+        reason: format!("could not be read: {e}"),
+    })?;
+    parse_snapshot(&label, &raw)
+}
+
+/// The half of [`load_snapshot`] that is a parser (0.13.14, W8.4, D-187).
+///
+/// Split out because a parser that can only be reached through a filesystem
+/// path is a parser that can only be fuzzed through the filesystem: a syscall
+/// round trip per case, on the one axis where cases per second is the entire
+/// measure of the tool. `load_snapshot` is now *read the file* and this is
+/// *understand the bytes*, which is also the honest description of what the
+/// two halves were already doing.
+///
+/// `label` is what the error carries as `path`. It is a `&str` rather than a
+/// `&Path` because the caller that is not a file — the fuzz harness — does not
+/// have one, and inventing a fake path so the signature could keep its type
+/// would be putting a lie in every error message it produced.
+pub(crate) fn parse_snapshot(label: &str, raw: &[u8]) -> Result<MaterializedState> {
     let damaged = |reason: String| DbError::SnapshotCorrupt {
-        path: path.display().to_string(),
+        path: label.to_string(),
         reason,
     };
     let foreign = |reason: String| DbError::SnapshotIncompatible {
-        path: path.display().to_string(),
+        path: label.to_string(),
         reason,
     };
-
-    let raw = fs::read(path).map_err(|e| damaged(format!("could not be read: {e}")))?;
 
     if raw.len() < SNAP_HEADER_LEN || raw[0..4] != SNAP_MAGIC {
         return Err(foreign(
@@ -711,6 +731,125 @@ pub(crate) async fn run_cadence(
     }
 }
 
+/// Wrap arbitrary plaintext in a container that passes every check the checksum
+/// guards (0.13.14, W8.4,
+/// [D-187](../../docs/architecture/s13-decision-register.md#d-187)).
+///
+/// **A checksummed format is fuzz-hostile, and this is the answer to that.**
+/// Coverage-guided mutation finds a four-byte magic quickly; it does not find a
+/// CRC-32 that has to agree with 34 header bytes *and* the whole payload. A
+/// fuzzer pointed at the container as a whole therefore spends its budget being
+/// turned away at step two and never reaches zstd or bincode — the two
+/// components W8.2 bounded, and the two where a real defect would live. This
+/// builds the container the way [`save_snapshot`] builds it, around whatever
+/// bytes it is handed, which puts every input past the gate.
+///
+/// It is the same move the W8.2 unit tests make when they forge a *valid*
+/// checksum on purpose: what is under test is the reader once integrity has
+/// been satisfied by something that computed it deliberately, because that is
+/// the case the bounds after the checksum exist for.
+#[cfg(any(test, feature = "fuzzing"))]
+pub(crate) fn wrap_plaintext(plain: &[u8]) -> Vec<u8> {
+    // Level 3, as `save_snapshot` uses. A caller mutating the plaintext is
+    // mutating what the deserializer sees, which is the point; the compression
+    // in between is not what is being explored.
+    let compressed = zstd::encode_all(plain, 3).expect("in-memory zstd encode");
+    wrap_payload(&compressed, plain.len() as u64)
+}
+
+/// [`wrap_plaintext`] one layer lower: a valid container around bytes that do
+/// not have to be a zstd frame, under a plaintext length that does not have to
+/// be true (0.13.14, W8.4, D-187).
+///
+/// This is the shape that reaches step 3 of the reader — decompression bounded
+/// by a *declared* length — with the checksum already satisfied. It is how a
+/// decompression bomb is expressed: a frame that expands to far more than the
+/// header admits to, signed correctly, which is the case
+/// [D-185](../../docs/architecture/s13-decision-register.md#d-185) argues the
+/// bound must survive because the checksum cannot help with it.
+#[cfg(any(test, feature = "fuzzing"))]
+pub(crate) fn wrap_payload(payload: &[u8], plain_len: u64) -> Vec<u8> {
+    let header = snapshot_header(
+        crate::schema::migrations::SCHEMA_VERSION,
+        0,
+        payload,
+        plain_len,
+    );
+    let mut out = Vec::with_capacity(header.len() + payload.len());
+    out.extend_from_slice(&header);
+    out.extend_from_slice(payload);
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Doors for `fuzz/`, and for nothing else (0.13.14, W8.4, D-187)
+// ---------------------------------------------------------------------------
+
+/// Reachable only with `--features fuzzing`, which nothing but `fuzz/` turns on
+/// (0.13.14, W8.4,
+/// [D-187](../../docs/architecture/s13-decision-register.md#d-187)).
+///
+/// `#[doc(hidden)]` and feature-gated rather than public: these are not an API,
+/// they are the two places a fuzz harness has to reach that a caller has no
+/// business reaching. The default build does not compile this module at all, so
+/// the crate's public surface is unchanged by its existence.
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub mod fuzzing {
+    use super::*;
+
+    /// Exactly what [`load_snapshot`] does once it has the bytes.
+    ///
+    /// The fuzz target for the container as a whole. Every input is a candidate
+    /// file; the property is that it comes back as a state or as a **named**
+    /// error, and never as a panic.
+    pub fn parse(raw: &[u8]) -> Result<MaterializedState> {
+        parse_snapshot("<fuzz>", raw)
+    }
+
+    /// `super::wrap_plaintext`, which the in-suite mutation tests also use —
+    /// one construction, so the fuzzer and the deterministic tests are
+    /// exercising the same container and not two descriptions of one.
+    ///
+    /// The input is the **plaintext**, so what a fuzzer explores through this
+    /// door is `bincode`'s decoder: zstd always sees a frame this function just
+    /// produced.
+    pub fn wrap_plaintext(plain: &[u8]) -> Vec<u8> {
+        super::wrap_plaintext(plain)
+    }
+
+    /// `super::wrap_payload`: a correct container around bytes that need not
+    /// be a zstd frame, under a plaintext length that need not be true.
+    ///
+    /// The door for the layer between the other two. What a fuzzer explores
+    /// through this one is **zstd** and the declared-length bound — including
+    /// the decompression bomb, which is the one input in this format whose
+    /// checksum can be perfectly correct and whose reader still has to refuse
+    /// it.
+    pub fn wrap_payload(payload: &[u8], plain_len: u64) -> Vec<u8> {
+        super::wrap_payload(payload, plain_len)
+    }
+
+    /// Take a real snapshot apart, so a corpus for the two inner targets can be
+    /// derived from a file `save_snapshot` actually wrote.
+    ///
+    /// This exists so that seeds are never *transcribed*. A seed generator that
+    /// built its own plaintext would be a second description of what the writer
+    /// produces, drifting the first time either end changes — and a corpus that
+    /// has drifted still looks like a corpus, so nothing would say so. Reading
+    /// the payload out of a genuine container cannot be wrong about the format
+    /// while the format is what this build writes.
+    ///
+    /// `None` for anything that is not a container this build recognises.
+    pub fn payload_of(container: &[u8]) -> Option<(&[u8], u64)> {
+        if container.len() < SNAP_HEADER_LEN || container[0..4] != SNAP_MAGIC {
+            return None;
+        }
+        let plain_len = u64::from_le_bytes(container[26..34].try_into().ok()?);
+        Some((&container[SNAP_HEADER_LEN..], plain_len))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -976,5 +1115,202 @@ mod tests {
             .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("tmp"))
             .collect();
         assert!(leftovers.is_empty(), "left behind {leftovers:?}");
+    }
+
+    // -----------------------------------------------------------------------
+    // The deterministic half of W8.4 (0.13.14, D-187)
+    //
+    // `cargo-fuzz` needs nightly and libFuzzer and does not run on Windows, so
+    // it runs in CI and nowhere else. These do the same job on every platform
+    // and in every `cargo test`, exhaustively rather than randomly, and they
+    // are what a finding from the fuzzer would be pinned as.
+    // -----------------------------------------------------------------------
+
+    /// Small enough that flipping every bit of the container is cheap, and not
+    /// so small that the payload is a single zstd literal block.
+    fn modest_state(seq: i64) -> MaterializedState {
+        let mut concepts = HashMap::new();
+        for i in 0..8u32 {
+            concepts.insert(
+                format!("c{i}"),
+                NodeAttributes {
+                    id: format!("c{i}"),
+                    title: format!("concept {i}"),
+                    content: format!("some content for {i} ").repeat(3),
+                    embedding_model: (i % 2 == 0).then(|| "model-a".to_string()),
+                },
+            );
+        }
+        MaterializedState {
+            seq_anchor: seq,
+            timestamp: TS.to_string(),
+            concepts,
+            edges: vec![(
+                "c0".to_string(),
+                "c1".to_string(),
+                "relates_to".to_string(),
+                TS.to_string(),
+                "A".to_string(),
+            )],
+            predates_recorded_history: false,
+        }
+    }
+
+    /// Every failure a reader may report about a *file*. Anything else — a
+    /// panic, or an error naming the ledger — is the finding.
+    fn assert_named_refusal(what: &str, err: DbError) {
+        match err {
+            DbError::SnapshotCorrupt { .. } | DbError::SnapshotIncompatible { .. } => {}
+            other => panic!("{what}: expected a named snapshot error, got {other:?}"),
+        }
+    }
+
+    /// The container's whole promise, asserted exhaustively rather than
+    /// sampled: **change any bit of a snapshot and it is refused.**
+    ///
+    /// That this holds is not luck. Bytes 0..34 and the payload are under the
+    /// checksum, bytes 34..38 *are* the checksum, and CRC-32 detects every
+    /// single-bit error by construction — so there is no byte of the file where
+    /// a flip can go unnoticed, and the test says so for all of them instead of
+    /// asserting it for the three a hand-written case would have picked.
+    ///
+    /// The clean parse first is deliberate. A fixture that does not load makes
+    /// every assertion below pass for the wrong reason, which is exactly how
+    /// [D-054](../../docs/architecture/s13-decision-register.md#d-054)'s
+    /// retention tests spent a release exercising a path they did not name.
+    #[test]
+    fn every_single_bit_flip_in_a_snapshot_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = save_snapshot(dir.path(), &modest_state(1)).unwrap();
+        let clean = fs::read(&path).unwrap();
+
+        parse_snapshot("clean", &clean)
+            .expect("the fixture must load, or nothing below means anything");
+
+        let mut refused = 0usize;
+        for byte in 0..clean.len() {
+            for bit in 0..8u8 {
+                let mut damaged = clean.clone();
+                damaged[byte] ^= 1 << bit;
+                match parse_snapshot("damaged", &damaged) {
+                    Ok(_) => panic!("bit {bit} of byte {byte} changed and the file still loaded"),
+                    Err(e) => {
+                        assert_named_refusal(&format!("bit {bit} of byte {byte}"), e);
+                        refused += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(refused, clean.len() * 8, "every bit of the file was tried");
+    }
+
+    /// Every prefix of a snapshot is refused, and so is every snapshot with
+    /// anything appended to it.
+    ///
+    /// Truncation is the shape an atomic rename was supposed to make
+    /// impossible ([D-043](../../docs/architecture/s13-decision-register.md#d-043))
+    /// and a filesystem that loses the tail of a file it acknowledged can still
+    /// produce. Trailing bytes are the shape a partially-overwritten file
+    /// takes. Both are caught by the declared length before anything is
+    /// hashed, which is why they are cheap enough to test for every length.
+    #[test]
+    fn every_truncation_and_every_extension_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = save_snapshot(dir.path(), &modest_state(2)).unwrap();
+        let clean = fs::read(&path).unwrap();
+
+        for cut in 0..clean.len() {
+            match parse_snapshot("cut", &clean[..cut]) {
+                Ok(_) => panic!("a {cut}-byte prefix loaded as a whole snapshot"),
+                Err(e) => assert_named_refusal(&format!("{cut}-byte prefix"), e),
+            }
+        }
+
+        for extra in [1usize, 7, 64, 4096] {
+            let mut grown = clean.clone();
+            grown.extend(std::iter::repeat_n(0u8, extra));
+            match parse_snapshot("grown", &grown) {
+                Ok(_) => panic!("{extra} appended bytes went unnoticed"),
+                Err(e) => assert_named_refusal(&format!("{extra} appended bytes"), e),
+            }
+        }
+    }
+
+    /// The half a fuzzer cannot reach on its own: **arbitrary bytes behind a
+    /// checksum that agrees with them.**
+    ///
+    /// `wrap_plaintext` recomputes the header and the CRC, so every case here
+    /// clears steps 1–3 of the reader and lands squarely on zstd and bincode,
+    /// which is where W8.2's bounds live and where a panic would be a real
+    /// defect. Some of these deserialize into a perfectly valid — and quite
+    /// wrong — `MaterializedState`, which is not a failure: nothing in this
+    /// format claims to detect damage that arrives with a correct checksum, and
+    /// [D-185](../../docs/architecture/s13-decision-register.md#d-185) says so
+    /// in as many words. The property is that the reader answers rather than
+    /// dies.
+    #[test]
+    fn arbitrary_plaintext_behind_a_valid_checksum_never_panics() {
+        let plain = bincode::serialize(&modest_state(3)).unwrap();
+
+        let mut answered = 0usize;
+        for byte in 0..plain.len() {
+            for bit in [0u8, 3, 7] {
+                let mut mutated = plain.clone();
+                mutated[byte] ^= 1 << bit;
+                match parse_snapshot("wrapped", &wrap_plaintext(&mutated)) {
+                    Ok(_) => answered += 1,
+                    Err(e) => {
+                        assert_named_refusal(&format!("bit {bit} of plaintext byte {byte}"), e);
+                        answered += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(answered, plain.len() * 3);
+
+        // Shapes a bit flip cannot produce: nothing at all, a run of zeros, and
+        // a plaintext far longer than any state this fixture describes.
+        for odd in [vec![], vec![0u8; 1], vec![0u8; 4096], vec![0xFFu8; 64]] {
+            match parse_snapshot("odd", &wrap_plaintext(&odd)) {
+                Ok(_) => {}
+                Err(e) => assert_named_refusal("an odd plaintext", e),
+            }
+        }
+    }
+
+    /// A decompression bomb with a **correct** checksum, which is the one
+    /// damaged input this format cannot detect by hashing and has to refuse by
+    /// arithmetic (0.13.14, W8.4).
+    ///
+    /// 64 MiB of zeros compresses to a few hundred bytes. The container built
+    /// around it here is entirely well-formed — magic, versions, both lengths
+    /// and a CRC that agrees with every byte — and it declares a plaintext of
+    /// 1,024 bytes. A reader that decompressed first and checked afterwards
+    /// would allocate the full 64 MiB to discover that; the `take(plain_len +
+    /// 1)` bound stops it 65,535 KiB short, which is what the reported length
+    /// in the error proves.
+    ///
+    /// This is the "never an allocation storm" half of W8.4 asserted where a
+    /// deterministic test can assert it. The other half — arbitrary frames,
+    /// arbitrary declared lengths — is `fuzz_targets/snapshot_frame.rs` under
+    /// libFuzzer's own `-malloc_limit_mb`, which is the tool built for it.
+    #[test]
+    fn a_decompression_bomb_with_a_valid_checksum_stops_at_the_declared_length() {
+        let bomb = zstd::encode_all(&vec![0u8; 64 * 1024 * 1024][..], 3).unwrap();
+        assert!(
+            bomb.len() < 64 * 1024,
+            "the fixture must actually be a bomb"
+        );
+
+        let container = wrap_payload(&bomb, 1024);
+        match parse_snapshot("bomb", &container).unwrap_err() {
+            DbError::SnapshotCorrupt { reason, .. } => {
+                assert!(
+                    reason.contains("1024 plaintext bytes") && reason.contains("1025"),
+                    "the reader should stop one byte past the declared length: {reason}"
+                );
+            }
+            other => panic!("expected SnapshotCorrupt, got {other:?}"),
+        }
     }
 }
