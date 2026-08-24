@@ -274,7 +274,7 @@ branching lands.** This is the one item in this document I would cut first if
 | 3.4 | Future `recorded_at` poisons the clock floor | Med | W7.4 | 0.13.5 ✅ |
 | 3.5 | `run_writer_actor` cannot return `Err` | Low | W7.3 | 0.13.4 ✅ |
 | 3.6 | `write_annotations_atomic` bypasses `classify` | Med | W7.2 | 0.13.3 ✅ |
-| 3.7 | Snapshot rename atomic but not durable | Med | W8.3 | 0.14.0 |
+| 3.7 | Snapshot rename atomic but not durable | Med | W8.3 | 0.13.13 ✅ |
 | 4.1 | No anti-starvation floor on low-priority work | Med | W4.4 (counter), W10.4 (the floor itself) | 0.13.0 / 0.14.0 |
 | 4.2 | No cancellation or progress on bulk paths | Med | W7.6 | 0.14.0 ✅ |
 | 4.3 | `metrics` off by default | High | W4.5 | 0.13.0 |
@@ -1500,6 +1500,48 @@ immediate, named error.
 and the directory entry is not durable until the directory itself is synced —
 the standard POSIX gap, and it matters on the crash path the snapshot exists
 for.
+
+
+> **✅ Shipped 0.13.13 (recorded as
+> [D-186](../docs/architecture/s13-decision-register.md#d-186)).**
+>
+> **Atomic answers which file is at the name; it does not answer whether the
+> name is on the disk.** The `fsync` before the rename covers the file's bytes,
+> and the rename is a change to the *directory*. What a power loss takes in that
+> window is the pointer — an intact snapshot under a name nothing looks for,
+> while the newest name that still resolves is an older file. `save_snapshot`
+> flushes the directory after the rename now.
+>
+> **The honest size of it is a slower start, never a wrong answer.** Folding
+> from the previous anchor is correct by construction, because
+> [Doctrine VI](../docs/architecture/s0-s3-foundations.md) makes a snapshot
+> disposable. What rests on it is §5.1.7: `close()` promises a final anchor, and
+> the crash where that anchor is the difference between a fast restart and a
+> full fold is precisely the crash the guarantee was missing. A failed flush is
+> therefore reported rather than logged — the file exists and is readable, so
+> the error means *this function cannot promise the name outlives a power loss*,
+> and `close()` is the caller whose promise that is.
+>
+> **Deletions get no flush, and the asymmetry is the argument.** A deletion a
+> crash undoes resurrects a valid snapshot, which the next pass deletes again; a
+> creation a crash undoes loses the anchor.
+>
+> **Windows gets a no-op with a name.** There is no directory `fsync`;
+> `FlushFileBuffers` wants write access a directory handle does not grant, and
+> the volume-wide call needs administrative privileges and flushes every open
+> file on the volume. NTFS's metadata journal stands in for it — a weaker
+> statement, assuming NTFS or ReFS — and it is written into the branch's own
+> docs, because a gap closed on one platform and silently open on another is a
+> false belief rather than a known defect.
+>
+> **These are the crate's first `#[cfg]` platform arms.** The `unix` body does
+> not compile locally, so it was checked by temporarily building it under
+> `#[cfg(windows)]` (compiles, clippy-clean) and CI's three-OS matrix runs it
+> for real on two of three legs. No test can assert durability without cutting
+> the power; what the new tests assert is that a directory descriptor accepts
+> `fsync` at all (POSIX permits `EINVAL`), that the non-unix arm really is
+> inert, and that the publish step is still a rename.
+
 
 **W8.4 — Fuzz the loader.** Closes §5.4. `cargo-fuzz` over the v3 format, seeded
 with valid snapshots. W8.2 gives it something to assert: a corrupt input should

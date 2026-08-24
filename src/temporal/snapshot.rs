@@ -138,14 +138,61 @@ pub(crate) fn seq_from_filename(path: &Path) -> Option<i64> {
         .ok()
 }
 
+/// Make the *directory entry* durable, on the platforms that have a way to say
+/// so (0.13.13, W8.3,
+/// [D-186](../../docs/architecture/s13-decision-register.md#d-186)).
+///
+/// `fs::rename` is atomic, and atomic is not durable. The rename decides
+/// *which* file is at the final name — a crash across it leaves the old
+/// snapshot or the new one, never a splice — but the name itself lives in the
+/// directory, and a directory's own metadata reaches the disk when the
+/// filesystem feels like it. The window is a real one and its shape is
+/// unhelpful: the file's bytes are already `fsync`ed, so what a power loss
+/// takes is the *pointer*, leaving a perfectly good snapshot under a name
+/// nothing looks for while the newest name still resolves to an older file.
+///
+/// This is the standard POSIX gap, and the crash it matters on is precisely the
+/// crash a snapshot exists for.
+#[cfg(unix)]
+fn sync_directory(dir: &Path) -> std::io::Result<()> {
+    // Read-only is enough and is also all that is on offer: `fsync` on a
+    // directory descriptor flushes that directory's metadata, and a directory
+    // cannot be opened for writing.
+    fs::File::open(dir)?.sync_all()
+}
+
+/// Windows and anything else: nothing, deliberately and by name (0.13.13, W8.3,
+/// [D-186](../../docs/architecture/s13-decision-register.md#d-186)).
+///
+/// There is no directory `fsync` on Windows. A directory *handle* can be opened
+/// with `FILE_FLAG_BACKUP_SEMANTICS`, but `FlushFileBuffers` needs write access
+/// on the handle and a directory does not grant it; the call that does cover
+/// directory metadata takes a volume handle, requires administrative
+/// privileges, and flushes every open file on the volume — which is not a thing
+/// a library may do to its host process's machine.
+///
+/// What stands in for it is NTFS's own metadata journal: the rename is a
+/// logged transaction, so a completed rename is recovered by the filesystem
+/// rather than by anything this crate arranges. That is a genuinely weaker
+/// statement than the `unix` branch makes — it rests on the filesystem being
+/// NTFS or ReFS, and says nothing about FAT32 or a network share — and it is
+/// written down rather than assumed, because a silent no-op is how a durability
+/// gap survives being closed.
+#[cfg(not(unix))]
+fn sync_directory(_dir: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
 /// Save a bincode-serialized, zstd-compressed snapshot file (.snap.zst) (§5.5).
 ///
-/// Written to a temporary file, flushed to disk, and renamed into place. A
-/// snapshot is read back with no integrity check beyond what zstd and bincode
-/// happen to notice, so a half-written file at the final name is a file that
-/// looks loadable and is not — and it would be the *newest* one, which is
-/// exactly the one a restart reaches for. Rename within a directory is atomic,
-/// so a crash leaves either the old snapshot or the new one, never a splice.
+/// Written to a temporary file, flushed to disk, renamed into place, and the
+/// directory flushed after the rename. A snapshot is read back with no
+/// integrity check beyond the container's own checksum, so a half-written file
+/// at the final name is a file that looks loadable and is not — and it would be
+/// the *newest* one, which is exactly the one a restart reaches for. Rename
+/// within a directory is atomic, so a crash leaves either the old snapshot or
+/// the new one, never a splice; `sync_directory` is what makes the winner of
+/// that race survive the power loss that caused it (0.13.13, W8.3).
 ///
 /// # This blocks, and it is not a small block (0.13.11, W8.1)
 ///
@@ -200,6 +247,15 @@ pub fn save_snapshot(snapshots_dir: &Path, state: &MaterializedState) -> Result<
         let _ = fs::remove_file(&tmp_path);
         fail("failed to publish snapshot", e)
     })?;
+
+    // After the rename, because it is the rename that has to survive. The file
+    // is already at its final name when this runs, so a failure here does not
+    // mean the snapshot is missing or damaged — it means this function cannot
+    // promise the name outlives a power loss, which is the whole of what it
+    // promises past `sync_all` above, and so it is reported rather than logged
+    // (W8.3, D-186).
+    sync_directory(snapshots_dir)
+        .map_err(|e| fail("failed to make the snapshot's directory entry durable", e))?;
 
     Ok(path)
 }
@@ -498,6 +554,11 @@ pub fn cleanup_expired_snapshots(snapshots_dir: &Path) -> Result<usize> {
         .map(|(_, path, _)| path.clone())
         .collect();
 
+    // No directory sync after these (W8.3, D-186), and the asymmetry is the
+    // point: a deletion that a crash undoes resurrects a *valid* snapshot,
+    // which the next pass deletes again. A creation that a crash undoes loses
+    // the anchor. Durability is owed to the name that has to be there, not to
+    // the name that has to be gone.
     let mut removed = 0;
     for path in doomed {
         if let Err(e) = fs::remove_file(&path) {
@@ -867,5 +928,53 @@ mod tests {
             }
             other => panic!("expected SnapshotCorrupt, got {other:?}"),
         }
+    }
+
+    /// The portability fact the `unix` branch rests on, asserted directly
+    /// rather than through a snapshot write (0.13.13, W8.3).
+    ///
+    /// POSIX permits `fsync` on a directory descriptor to fail with `EINVAL`,
+    /// and some filesystems take it up on that. If this platform were one of
+    /// them, *every* `save_snapshot` would now fail — a large consequence for a
+    /// call whose whole purpose is invisible when it works — so the question
+    /// gets its own test with its own name.
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_handle_can_be_synced() {
+        let dir = tempfile::tempdir().unwrap();
+        sync_directory(dir.path()).expect("fsync on a directory descriptor");
+    }
+
+    /// Off unix this does nothing, and *nothing* is the behaviour under test
+    /// (0.13.13, W8.3).
+    ///
+    /// A path that does not exist would be an error from any implementation
+    /// that touched the filesystem, so a green here says the branch really is
+    /// inert — which is what the docs claim, and a claim about a no-op is the
+    /// kind that rots quietly if nobody writes it down as an assertion.
+    #[cfg(not(unix))]
+    #[test]
+    fn the_directory_sync_is_inert_off_unix() {
+        let dir = tempfile::tempdir().unwrap();
+        sync_directory(&dir.path().join("no-such-directory"))
+            .expect("the non-unix branch has nothing that can fail");
+    }
+
+    /// The publish step is a rename, not a copy: a `.tmp` surviving a
+    /// successful save would mean the file at the final name got there some
+    /// other way, and the atomicity W8.3 makes durable would be gone with it.
+    #[test]
+    fn a_completed_save_leaves_no_temporary_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = save_snapshot(dir.path(), &bulky_state(7)).unwrap();
+        assert!(path.exists(), "the snapshot is at its final name");
+
+        let leftovers: Vec<PathBuf> = fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "left behind {leftovers:?}");
     }
 }
