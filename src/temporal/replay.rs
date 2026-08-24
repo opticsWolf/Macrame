@@ -227,7 +227,7 @@ pub async fn reconstruct(
 ) -> Result<MaterializedState> {
     match hot_log_reach(conn, ts, archive_path).await? {
         HotLogReach::Covers => {
-            if let Some(base) = snapshot_anchor(snapshots_dir, ts) {
+            if let Some(base) = snapshot_anchor(snapshots_dir, ts).await {
                 let anchor = base.seq_anchor;
                 let delta =
                     fold_delta(conn, ANCHORED_HOT_FOLD, libsql::params![ts, anchor]).await?;
@@ -291,7 +291,7 @@ pub async fn reconstruct(
     // Composition works across the archive boundary because the anchored fold
     // unions both files; before 0.5.5 it was refused here rather than made to
     // work, and the refusal was the only thing keeping the answer right.
-    let result = match snapshot_anchor(snapshots_dir, ts) {
+    let result = match snapshot_anchor(snapshots_dir, ts).await {
         Some(base) => {
             let anchor = base.seq_anchor;
             fold_delta(conn, ANCHORED_COLD_FOLD, libsql::params![ts, anchor])
@@ -505,9 +505,43 @@ impl std::fmt::Display for ChainCheck {
 /// incompatible snapshot is an ordinary consequence of upgrading, and the whole
 /// point of distinguishing it from corruption is that the answer is to carry on
 /// without it.
-fn snapshot_anchor(snapshots_dir: Option<&Path>, ts: &str) -> Option<MaterializedState> {
-    let dir = snapshots_dir?;
+///
+/// # It runs on a blocking thread, and a lost one costs speed only (0.13.11, W8.1, D-184)
+///
+/// The scan is a directory listing plus one or more full
+/// [`load_snapshot`](super::snapshot::load_snapshot) calls — decompression and
+/// bincode over the whole state, on a worker that has other tasks waiting. The
+/// *whole scan* is offloaded rather than each file, because the loop is
+/// sequential by construction (it stops at the first usable file) and a hop per
+/// candidate would add scheduling to a path whose common case reads exactly one.
+///
+/// A [`tokio::task::JoinError`] means the loader panicked, and the answer is the
+/// same one this function already gives for every other kind of unusable file:
+/// `None`, and fold from genesis. That is not leniency, it is what a snapshot
+/// *is* — derivative and disposable under [Doctrine VI], so the cost of ignoring
+/// one is a slower reconstruction and never a wrong one. It is also a real
+/// improvement over the previous arrangement: inline, a panic in the loader
+/// unwound through [`reconstruct`] and took the caller's task with it, which
+/// meant a single corrupt file could stop a process that had a correct answer
+/// available the whole time. W8.4 fuzzes for exactly those panics; this is what
+/// happens to the ones it has not found yet.
+///
+/// [Doctrine VI]: ../../../docs/architecture/s0-s3-foundations.md#doctrine-vi
+async fn snapshot_anchor(snapshots_dir: Option<&Path>, ts: &str) -> Option<MaterializedState> {
+    let dir = snapshots_dir?.to_path_buf();
+    let ts = ts.to_string();
+    match tokio::task::spawn_blocking(move || newest_usable_snapshot(&dir, &ts)).await {
+        Ok(found) => found,
+        Err(e) => {
+            tracing::warn!("the snapshot scan did not finish ({e}); folding from genesis");
+            None
+        }
+    }
+}
 
+/// The blocking half of [`snapshot_anchor`]: read the directory, load
+/// newest-first, stop at the first snapshot at or before `ts`.
+fn newest_usable_snapshot(dir: &Path, ts: &str) -> Option<MaterializedState> {
     let mut candidates: Vec<(i64, PathBuf)> = std::fs::read_dir(dir)
         .ok()?
         .flatten()

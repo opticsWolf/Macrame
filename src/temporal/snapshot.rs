@@ -104,6 +104,16 @@ pub(crate) fn seq_from_filename(path: &Path) -> Option<i64> {
 /// looks loadable and is not — and it would be the *newest* one, which is
 /// exactly the one a restart reaches for. Rename within a directory is atomic,
 /// so a crash leaves either the old snapshot or the new one, never a splice.
+///
+/// # This blocks, and it is not a small block (0.13.11, W8.1)
+///
+/// bincode over the whole state, zstd over the result, a file write and an
+/// `fsync` — CPU and disk, both unbounded in the size of the graph, and none of
+/// it yielding. Called from an async task it stalls that runtime worker for the
+/// whole duration, which at 100K edges is the two seconds §9 budgets for it.
+/// Every async caller inside the crate goes through `save_and_prune`; a
+/// caller outside it wants `tokio::task::spawn_blocking` around this, and the
+/// signature stays synchronous so that they can have it.
 pub fn save_snapshot(snapshots_dir: &Path, state: &MaterializedState) -> Result<PathBuf> {
     let fail = |what: &str, e: std::io::Error| DbError::ReplayCorrupt {
         seq: state.seq_anchor,
@@ -160,6 +170,12 @@ pub fn save_snapshot(snapshots_dir: &Path, state: &MaterializedState) -> Result<
 ///
 /// Headerless files written by 0.5.4 and earlier are rejected by the same path:
 /// their first four bytes are zstd's magic, which is not `MACR`.
+///
+/// # This blocks (0.13.11, W8.1)
+///
+/// Read, decompress, deserialize, all synchronous — see [`save_snapshot`] for
+/// the argument. The crate's one async reader is `snapshot_anchor`, which
+/// offloads the whole scan rather than each file.
 pub fn load_snapshot(path: &Path) -> Result<MaterializedState> {
     let mut file = fs::File::open(path).map_err(|e| DbError::ReplayCorrupt {
         seq: 0,
@@ -210,6 +226,43 @@ pub fn load_snapshot(path: &Path) -> Result<MaterializedState> {
     Ok(state)
 }
 
+/// [`save_snapshot`] then [`cleanup_expired_snapshots`], on a blocking thread
+/// (0.13.11, W8.1, D-184).
+///
+/// The whole write side of the snapshot in one hop, because the two run back to
+/// back and a second `spawn_blocking` between them would buy a scheduling point
+/// nobody is waiting at. Order and error behaviour are exactly what they were
+/// inline: a failed save is returned and the prune does not run, a failed prune
+/// is returned even though the snapshot is already on disk.
+///
+/// # Losing the thread is an error and not a shrug
+///
+/// A `spawn_blocking` task cannot be cancelled once it has started, so the only
+/// way `await` yields a [`tokio::task::JoinError`] here is that the closure
+/// panicked. That closure is the code that writes the file `close()` promises
+/// to have written, so the panic becomes [`DbError::ReplayCorrupt`] carrying
+/// the anchor — the same class every other failure of `save_snapshot` reports,
+/// which is the point: a caller handling "the snapshot did not get written"
+/// should not need a second arm for the case where it failed by panicking.
+///
+/// This is the opposite call from the read side, where a failed load costs
+/// speed and nothing else — see `snapshot_anchor`.
+async fn save_and_prune(snapshots_dir: PathBuf, state: MaterializedState) -> Result<PathBuf> {
+    let seq = state.seq_anchor;
+    tokio::task::spawn_blocking(move || {
+        let path = save_snapshot(&snapshots_dir, &state)?;
+        cleanup_expired_snapshots(&snapshots_dir)?;
+        Ok(path)
+    })
+    .await
+    .unwrap_or_else(|e| {
+        Err(DbError::ReplayCorrupt {
+            seq,
+            reason: format!("the thread writing the snapshot did not finish: {e}"),
+        })
+    })
+}
+
 /// Write the final snapshot on clean shutdown (§5.1.7).
 ///
 /// Called after the Write Actor has stopped, so the state it folds is quiescent
@@ -219,6 +272,10 @@ pub fn load_snapshot(path: &Path) -> Result<MaterializedState> {
 /// This was a `Ok(())` stub that `close()` never called, which meant every
 /// restart replayed the log from whatever snapshot happened to be lying around
 /// rather than from the shutdown anchor.
+///
+/// The fold is async and the write is not, so the write goes to a blocking
+/// thread (`save_and_prune`, 0.13.11, W8.1). Both halves used to run on the
+/// caller's worker, and the second half is the expensive one.
 pub async fn write_final(
     conn: &libsql::Connection,
     snapshots_dir: &Path,
@@ -227,9 +284,7 @@ pub async fn write_final(
 ) -> Result<PathBuf> {
     let state =
         crate::temporal::replay::reconstruct(conn, ts, archive_path, Some(snapshots_dir)).await?;
-    let path = save_snapshot(snapshots_dir, &state)?;
-    cleanup_expired_snapshots(snapshots_dir)?;
-    Ok(path)
+    save_and_prune(snapshots_dir.to_path_buf(), state).await
 }
 
 /// Snapshots kept unconditionally, newest first, by [`cleanup_expired_snapshots`] (§5.5).
@@ -381,6 +436,12 @@ impl Default for SnapshotCadence {
 /// Read from the filenames rather than remembered across runs: a process that
 /// starts against a database someone else has been writing should not re-anchor
 /// immediately, and the files are the only record of what has been anchored.
+///
+/// Left on the caller's worker where [`save_and_prune`] was moved off it
+/// (0.13.11, W8.1): one `read_dir` over a directory retention holds to about
+/// `RETAIN + RETAIN_DAYS` entries, no file opened and nothing decompressed,
+/// run once when the cadence starts. `spawn_blocking` is not free, and paying
+/// it to move a bounded directory listing would be cargo-culting the fix.
 fn newest_anchor_on_disk(snapshots_dir: &Path) -> i64 {
     let Ok(entries) = fs::read_dir(snapshots_dir) else {
         return 0;
@@ -474,5 +535,116 @@ pub(crate) async fn run_cadence(
                 tracing::warn!("snapshot cadence: failed to write an anchor: {e}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::temporal::as_of::NodeAttributes;
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+
+    const TS: &str = "2026-08-24T12:00:00.000000Z";
+
+    /// A state big enough that serializing and compressing it is measurable
+    /// work rather than a few microseconds.
+    ///
+    /// The size is the test: a state small enough to compress instantly would
+    /// pass whether the work was offloaded or not, because the current-thread
+    /// executor would never get a turn either way.
+    fn bulky_state(seq: i64) -> MaterializedState {
+        let mut concepts = HashMap::new();
+        for i in 0..20_000u32 {
+            concepts.insert(
+                format!("c{i}"),
+                NodeAttributes {
+                    id: format!("c{i}"),
+                    title: format!("concept number {i}"),
+                    content: format!("{i} ").repeat(40),
+                    embedding_model: None,
+                },
+            );
+        }
+        MaterializedState {
+            seq_anchor: seq,
+            timestamp: TS.to_string(),
+            concepts,
+            edges: Vec::new(),
+            predates_recorded_history: false,
+        }
+    }
+
+    /// §2.4, and the property W8.1 exists for.
+    ///
+    /// On a **current-thread** runtime there is exactly one worker, so "does
+    /// this block the runtime" stops being a question about load and becomes a
+    /// question about whether any other task runs at all. Inline, the whole
+    /// serialize-compress-write-fsync sequence sits between two scheduling
+    /// points and the ticker gets zero turns; offloaded, awaiting the join
+    /// handle yields and the ticker runs for the duration.
+    ///
+    /// The single-worker runtime is also what makes this a regression test
+    /// against the wrong fix: `block_in_place` would move the work off the
+    /// *async* path but panics outside a multi-threaded runtime, so a rewrite
+    /// that reached for it would fail here rather than in production.
+    #[test]
+    fn the_snapshot_write_does_not_hold_the_runtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let ticks = rt.block_on(async {
+            let ticks = Arc::new(AtomicU64::new(0));
+            let counter = Arc::clone(&ticks);
+            let ticker = tokio::spawn(async move {
+                loop {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                    tokio::task::yield_now().await;
+                }
+            });
+
+            save_and_prune(dir.path().to_path_buf(), bulky_state(1))
+                .await
+                .expect("the snapshot must still be written");
+
+            ticker.abort();
+            ticks.load(Ordering::Relaxed)
+        });
+
+        assert!(
+            ticks > 0,
+            "no other task ran while the snapshot was being written: the \
+             serialisation is back on the runtime worker (§2.4, W8.1)"
+        );
+    }
+
+    /// Moving the work to another thread must not change what lands on disk.
+    ///
+    /// The offload is a scheduling change and nothing else, so the file it
+    /// produces has to be the file [`save_snapshot`] produced when the same
+    /// call ran inline — same name, same header, same state coming back out.
+    #[test]
+    fn a_snapshot_written_off_thread_reads_back_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let state = bulky_state(77);
+        let path = rt
+            .block_on(save_and_prune(dir.path().to_path_buf(), state.clone()))
+            .unwrap();
+
+        assert_eq!(seq_from_filename(&path), Some(77));
+        let loaded = load_snapshot(&path).unwrap();
+        assert_eq!(loaded.seq_anchor, state.seq_anchor);
+        assert_eq!(loaded.timestamp, state.timestamp);
+        assert_eq!(loaded.concepts.len(), state.concepts.len());
+        assert_eq!(loaded.concepts["c19999"], state.concepts["c19999"]);
     }
 }

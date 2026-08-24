@@ -265,7 +265,7 @@ branching lands.** This is the one item in this document I would cut first if
 | 2.1 | `links` has no explicit index — four full scans, one per `open()` | High | W3.1 | 0.13.0 |
 | 2.2 | `CONCEPTS_ARCHIVABLE` quadratic on `links.target_id` | High | W3.2 | 0.13.0 |
 | 2.3 | Per-transaction overhead ~0.8 ms; singular paths pay it per row | Med | W3.4 | 0.13.0 |
-| 2.4 | Snapshot work runs on a tokio worker | Med | W8.1 | 0.14.0 |
+| 2.4 | Snapshot work runs on a tokio worker | Med | W8.1 | 0.13.11 ✅ |
 | 2.5 | `Subgraph` string-keyed adjacency | Low | W10.3 | 0.14.0 |
 | 2.6 | `reject_overlaps_within` O(n²) | Med | W7.5 | 0.13.6 ✅ |
 | 3.1 | `as_of` mixes valid time and transaction time | High | W5.6 / W7.1 | both |
@@ -1403,6 +1403,48 @@ wants the other one calls instead.
 **W8.1 — `spawn_blocking` around snapshot save and load.** Closes §2.4.
 Serialisation and file I/O currently run on a tokio worker, which is exactly what
 `spawn_blocking` exists to prevent.
+
+
+> **✅ Shipped 0.13.11 (recorded as
+> [D-184](../docs/architecture/s13-decision-register.md#d-184)).**
+>
+> **The note that covered this was about a different axis.**
+> [§5.5](../docs/architecture/s5-modules.md#55-temporalreplayrs-and-temporalsnapshotrs--reconstruction-and-snapshots)
+> says snapshotting runs on the read side and never touches the write
+> connection, which is true and is about the *connection*. bincode over the
+> whole state, zstd over the result, a write and an `fsync` are synchronous to
+> the last instruction, and they ran on whichever tokio worker was polling
+> `write_final` — the pool the actor's own I/O is scheduled on. §9 budgets that
+> at two seconds for 100K edges.
+>
+> **The load half was the easier one to miss.** `snapshot_anchor` decompresses
+> and deserializes a whole `MaterializedState` on the async path of every
+> composing `reconstruct`, which is the ordinary read path and has no shutdown
+> to hide behind.
+>
+> Both go to `spawn_blocking`, one hop each: the write covers the save and the
+> retention pass that follows it, the read covers the whole scan rather than
+> one file, since the loop stops at the first usable snapshot and the common
+> case reads exactly one. `save_snapshot` and `load_snapshot` stay synchronous
+> — benches, tools and the suite call them from no runtime at all.
+>
+> **A lost thread means different things at the two ends, deliberately.** A
+> `spawn_blocking` task cannot be cancelled, so a `JoinError` is a panic. On the
+> write side that is the file `close()` promised to have written and it becomes
+> `ReplayCorrupt`; on the read side it joins the incompatible and unreadable
+> files the scan already skips — `None`, and fold from genesis. That closes a
+> panic path too: inline, a panic in the loader unwound through `reconstruct`
+> and took the caller's task with it, so one corrupt file could stop a process
+> that had a correct answer available. **W8.4 fuzzes for exactly those
+> panics**, and this is what happens to the ones it has not found yet.
+>
+> `newest_anchor_on_disk` stayed inline on purpose: one bounded `read_dir`, no
+> file opened, run once when the cadence starts.
+>
+> **W8.5's "Record D-156" will not work either.** D-156 is 0.12.13's
+> `checkpoint()` decision, the same collision W7.7 hit with D-155. Read the
+> remaining "Record D-15x" items as *record a decision*.
+
 
 **W8.2 — Snapshot format v3: bounded and checksummed.** Closes §3.3. bincode's
 `DefaultOptions` carries an `Infinite` limit; serde's cautious-capacity blunts
