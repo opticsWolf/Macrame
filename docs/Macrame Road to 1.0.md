@@ -296,12 +296,21 @@ branching lands.** This is the one item in this document I would cut first if
 | F-32 | No search surface filters concept valid time | Med | W9.4, W9.5 | 0.14.0 |
 | F-33 | The 2-D index question is unasked and the obvious answer does not fit | Med | W10.6 | 0.14.0 |
 | F-34 | No declarative surface; three qualifiers × four builders | Low | W13 | 0.15.0 |
+| F-35 | `load_subgraph_with` accepts an instant and reads the present | Med | W7.1 | 0.14.0 ✅ |
 
-Ten High-severity findings. **Eight close in 0.13.0.** The ninth, §3.1, is
-documented in 0.13.0 (W5.6) and broken correctly in 0.14.0 (W7.1) — see §0.1 for
-why that order and not the reverse. The tenth, F-31, was found after 0.13.0
-shipped and closes in 0.14.0; it is a live defect rather than a design gap, and
-it is the only High in this document that reached a released version unrecorded.
+Ten High-severity findings. **Eight close in 0.13.0.** The ninth, §3.1, was
+documented in 0.13.0 (W5.6) and broken correctly in **0.13.2** (W7.1, D-174) —
+see §0.1 for why that order and not the reverse. The tenth, F-31, was found after
+0.13.0 shipped and closes in 0.14.0; it is a live defect rather than a design
+gap, and it is the only High in this document that reached a released version
+unrecorded.
+
+**F-35 was found while closing W7.1 and closed in the same change.** It is listed
+because a finding discovered during a fix and repaired silently is a finding the
+next reader cannot learn from. `Database::load_subgraph_with` bound `now_ts`
+where the builder bound the traversal's own instant, so a historical builder
+passed to it returned the present with nothing said — F-31's shape in a third
+place. See D-175.
 
 ---
 
@@ -1160,6 +1169,32 @@ sometimes and the other thing otherwise is the mixing.
 > refused by name — and F-33/W10.6 is the question of what that costs, which is
 > why it is scheduled immediately after.
 
+> **✅ Shipped 0.13.2 ([D-174](../docs/architecture/s13-decision-register.md#d-174)).**
+> Expressible, not refused. `as_of` is gone; `as_of_valid` and `as_of_recorded`
+> are independent and compose, and setting both is the BCDM cell.
+>
+> The sharpening is what made the work large. The rename was the small half; the
+> large half is that `as_of_recorded` **had nowhere to read from** — valid time
+> was reachable from a traversal and transaction time only from `reconstruct`,
+> which folds the whole state and cannot be walked. So the walk now takes its
+> edges from one of two relations exposing the same six columns: `links_current`
+> under current belief, or a fold of `transaction_log` bounded at the instant.
+> The fold is exact because links are strictly append-only, so the last log row
+> per entity at or before `r` *is* what `links_current` held at `r`.
+>
+> It reads the **hot** log and refuses rather than guessing:
+> `RecordedInstantUnreachable` names the instant and names `reconstruct`, which
+> takes the archive path. Conservative by one bit — whether anything was *ever*
+> archived, not whether this instant survived it — because the cutoff is not
+> recorded hot-side (D-132 refused that marker).
+>
+> W10.6 now has something to measure, which it would not have had under the
+> refuse-by-name reading, and §14's acceptance item 11 is reachable.
+>
+> Two things found on the way and closed with it: `AtTime` never consulted a
+> concept's own valid interval (the smaller half of D-160, now bounded against
+> the interval the *payload* recorded), and F-35/D-175.
+
 **W7.2 — `write_annotations_atomic` goes through `classify`.** Closes §3.6. It
 bypasses the classification the non-atomic path applies, so the same input
 produces different stored state depending on which entry point was used. One of
@@ -1497,7 +1532,8 @@ finding.
     with no instant returns today's corpus. Both demonstrated on one fixture.
 11. The cross-axis predicate W7.1 enables has a recorded plan shape and an
     operation count, and W10.6's conclusion — index or no index — is a register
-    entry with the numbers in it.
+    entry with the numbers in it. *(W7.1 shipped 0.13.2 and made the predicate
+    expressible; the measurement is W10.6's.)*
 
 ---
 

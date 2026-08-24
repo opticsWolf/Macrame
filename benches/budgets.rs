@@ -52,7 +52,7 @@ use std::path::PathBuf;
 use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
 use macrame::graph::{astar, dijkstra, k_core, louvain, scc};
 use macrame::prelude::*;
-use macrame::temporal::{hydrate_attributes, reconstruct, save_snapshot};
+use macrame::temporal::{hydrate_attributes, reconstruct, save_snapshot, AsOf};
 
 const TS: &str = "2026-01-01T00:00:00.000000Z";
 const OPEN: &str = "9999-12-31T23:59:59.999999Z";
@@ -1141,7 +1141,7 @@ fn hydrate_scaling(c: &mut Criterion) {
         let ids: Vec<String> = (0..n).map(|i| format!("c{i:07}")).collect();
         group.bench_with_input(BenchmarkId::from_parameter(n), &ids, |b, ids| {
             b.to_async(&rt).iter(|| async {
-                hydrate_attributes(fx.db.read_conn(), ids, TS, AttributeMode::Current)
+                hydrate_attributes(fx.db.read_conn(), ids, &AsOf::now(), AttributeMode::Current)
                     .await
                     .unwrap()
             })

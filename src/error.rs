@@ -191,6 +191,35 @@ pub enum DbError {
         reason: String,
     },
 
+    /// [`crate::graph::TraversalBuilder::as_of_recorded`] named an instant the
+    /// hot log can no longer answer for (0.13.2, W7.1, D-174).
+    ///
+    /// A transaction-time traversal folds `transaction_log`, and
+    /// [`crate::Database::archive`] removes superseded rows from it. Once
+    /// anything has been archived, an instant below the cutoff is not *before
+    /// history*, it is *history that is in the other file* — and a traversal
+    /// takes a connection, not an archive path, so it cannot go and get it.
+    ///
+    /// **Conservative by one bit, deliberately.** The test is
+    /// `hot_log_is_intact`: whether anything was *ever* removed. It cannot ask
+    /// whether this particular instant is above the archive cutoff, because the
+    /// cutoff is not recorded in the hot log — that is exactly what the hot-side
+    /// marker D-132 refused would have carried. So an archived database
+    /// refuses every `as_of_recorded`, including instants it could in principle
+    /// have answered. The alternative is answering some of them from a partial
+    /// fold, which returns *nearly* the right topology, and on a ledger that is
+    /// the worst failure available.
+    ///
+    /// [`crate::temporal::reconstruct`] takes the archive path and answers the
+    /// same question, which is why the message names it.
+    #[error(
+        "transaction-time instant {ts} cannot be answered from the hot log: rows \
+         have been archived out of it and a traversal has no archive path. Use \
+         macrame::temporal::reconstruct(conn, ts, archive_path, snapshots_dir), \
+         which does"
+    )]
+    RecordedInstantUnreachable { ts: String },
+
     /// A timestamp that is not in canonical form (§4.1, D-029).
     ///
     /// **Distinct from [`Self::ReplayCorrupt`], which is what this used to be

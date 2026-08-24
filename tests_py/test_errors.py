@@ -96,6 +96,11 @@ EXPECTED: dict[str, tuple[str, str, dict]] = {
         "ValidationError",
         {"as_of": "2026-02-03T04:05:06.000007Z"},
     ),
+    "RecordedInstantUnreachable": (
+        "RecordedInstantUnreachableError",
+        "TemporalError",
+        {"ts": "2026-02-03T04:05:06.000007Z"},
+    ),
     # -- vector --
     "DimMismatch": (
         "DimMismatchError",

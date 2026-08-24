@@ -79,6 +79,7 @@ from ._macrame import (
     ArchiveSessionLeakedError,
     ArchiveViolationError,
     ArchiveWindowError,
+    RecordedInstantUnreachableError,
     AttributeMode,
     AttributeModeUnstatedError,
     BudgetError,
@@ -214,6 +215,7 @@ __all__ = [
     "PayloadVersionError",
     "ArchiveViolationError",
     "ArchiveWindowError",
+    "RecordedInstantUnreachableError",
     # writer
     "WriterUnavailableError",
     "WriterDroppedResponderError",

@@ -31,7 +31,7 @@ use macrame::graph::AttributeMode;
 use macrame::graph::EdgeAssertion;
 use macrame::graph::{dijkstra, k_core, louvain, scc};
 use macrame::schema::migrations;
-use macrame::temporal::hydrate_attributes;
+use macrame::temporal::{hydrate_attributes, AsOf};
 use macrame::{ConceptUpsert, Database};
 
 const T0: &str = "2026-01-01T00:00:00.000000Z";
@@ -88,7 +88,7 @@ async fn embedding_model_survives_every_temporal_read() {
     let at_time = hydrate_attributes(
         db.read_conn(),
         &["c1".to_string()],
-        NOW,
+        &AsOf::recorded_at(NOW),
         AttributeMode::AtTime,
     )
     .await
@@ -319,7 +319,7 @@ async fn all_three_readers_agree_a_retired_concept_is_not_visible() {
 
     let ids = vec!["c1".to_string()];
 
-    let current = hydrate_attributes(db.read_conn(), &ids, NOW, AttributeMode::Current)
+    let current = hydrate_attributes(db.read_conn(), &ids, &AsOf::now(), AttributeMode::Current)
         .await
         .unwrap();
     assert!(
@@ -327,7 +327,7 @@ async fn all_three_readers_agree_a_retired_concept_is_not_visible() {
         "Current: retired concept is not visible"
     );
 
-    let at_time = hydrate_attributes(db.read_conn(), &ids, NOW, AttributeMode::AtTime)
+    let at_time = hydrate_attributes(db.read_conn(), &ids, &AsOf::recorded_at(NOW), AttributeMode::AtTime)
         .await
         .unwrap();
     assert!(
@@ -376,7 +376,7 @@ async fn at_time_before_the_retirement_still_sees_the_concept() {
 
     let ids = vec!["c1".to_string()];
 
-    let before = hydrate_attributes(&conn, &ids, T1, AttributeMode::AtTime)
+    let before = hydrate_attributes(&conn, &ids, &AsOf::recorded_at(T1), AttributeMode::AtTime)
         .await
         .unwrap();
     assert_eq!(
@@ -385,7 +385,7 @@ async fn at_time_before_the_retirement_still_sees_the_concept() {
         "as believed at T1 the concept was not yet retired"
     );
 
-    let after = hydrate_attributes(&conn, &ids, NOW, AttributeMode::AtTime)
+    let after = hydrate_attributes(&conn, &ids, &AsOf::recorded_at(NOW), AttributeMode::AtTime)
         .await
         .unwrap();
     assert!(after.is_empty(), "and by NOW it is");
@@ -603,7 +603,7 @@ async fn hydrate_spans_more_than_one_chunk() {
             .unwrap();
     }
 
-    let attrs = hydrate_attributes(db.read_conn(), &ids, NOW, AttributeMode::Current)
+    let attrs = hydrate_attributes(db.read_conn(), &ids, &AsOf::now(), AttributeMode::Current)
         .await
         .unwrap();
     assert_eq!(attrs.len(), n, "every node comes back");

@@ -247,11 +247,27 @@ create_exception!(
     ValidationError,
     "A traversal asked about the past without saying which text it wanted. \
      Attribute: `as_of`.\n\n\
-     `as_of(t)` fixes the *topology* at `t`; node attributes are a second, \
-     independent question whose default answer is live text. Pass \
-     `AttributeMode.AT_TIME` for the past's text, or `AttributeMode.CURRENT` to \
-     confirm live text was meant. This used to be a log warning, which is \
-     invisible without a subscriber; it raises on purpose."
+     `as_of_valid(t)` or `as_of_recorded(t)` fixes the *topology*; node \
+     attributes are a second, independent question whose default answer is live \
+     text. Pass `AttributeMode.AT_TIME` for the past's text, or \
+     `AttributeMode.CURRENT` to confirm live text was meant. This used to be a \
+     log warning, which is invisible without a subscriber; it raises on purpose."
+);
+create_exception!(
+    macrame,
+    RecordedInstantUnreachableError,
+    TemporalError,
+    "`as_of_recorded` named an instant the hot log can no longer answer for. \
+     Attribute: `ts`.\n\n\
+     A transaction-time traversal folds `transaction_log`, and `archive()` \
+     removes superseded rows from it. A traversal takes a connection, not an \
+     archive path, so it cannot go and get what was moved. Call \
+     `reconstruct(ts, archive_path=...)`, which can.\n\n\
+     Conservative by one bit: the test is whether *anything* was ever archived, \
+     not whether this instant survived it, because the archive cutoff is not \
+     recorded hot-side. So an archived database refuses instants a fold might \
+     have got right — the alternative is answering from a partial fold, which \
+     returns nearly the right topology, and on a ledger that is worse."
 );
 
 // -- VectorError ------------------------------------------------------------
@@ -468,6 +484,10 @@ fn build(py: Python<'_>, err: DbError) -> PyErr {
             raise::<AttributeModeUnstatedError, _>(py, m, |e| e.setattr("as_of", as_of))
         }
 
+        DbError::RecordedInstantUnreachable { ts } => {
+            raise::<RecordedInstantUnreachableError, _>(py, m, |e| e.setattr("ts", ts))
+        }
+
         DbError::DiagnosticConn { path, reason } => raise::<DiagnosticConnError, _>(py, m, |e| {
             e.setattr("path", path)?;
             e.setattr("reason", reason)
@@ -600,6 +620,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
         PayloadVersionError,
         ArchiveViolationError,
         ArchiveWindowError,
+        RecordedInstantUnreachableError,
         // writer
         WriterUnavailableError,
         WriterDroppedResponderError,

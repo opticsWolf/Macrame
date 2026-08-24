@@ -5,7 +5,7 @@ covered by the Rust suite. What is new here is that the *pairing* rules survive
 the boundary — the ones that exist because a wrong answer would otherwise arrive
 looking like a right one:
 
-- ``as_of`` without a stated ``attribute_mode`` raises rather than defaulting
+- an instant without a stated ``attribute_mode`` raises rather than defaulting
   (D-085).
 - ``AttributeMode.OMIT`` on ``traverse`` is refused rather than answering with an
   empty list nobody can interpret.
@@ -101,7 +101,7 @@ def test_a_traversal_before_the_edges_existed_reaches_nothing(db):
 
 
 # --------------------------------------------------------------------------
-# traverse, and the as_of / attribute_mode pairing
+# traverse, and the as_of_* / attribute_mode pairing
 # --------------------------------------------------------------------------
 
 
@@ -113,20 +113,25 @@ def test_traverse_hydrates_attributes(db):
     assert got[0].embedding_model is None
 
 
-def test_attribute_mode_may_be_omitted_when_as_of_is(db):
-    # The requirement is on the *pairing*. A live traversal with no as_of has
-    # only one sensible reading, and D-085 did not make it an error.
+def test_attribute_mode_may_be_omitted_when_the_instants_are(db):
+    # The requirement is on the *pairing*. A live traversal with neither instant
+    # has only one sensible reading, and D-085 did not make it an error.
     assert [n.id for n in db.traverse("a", max_depth=1)] == ["a", "b", "d"]
 
 
-def test_as_of_without_an_attribute_mode_raises(db):
+@pytest.mark.parametrize("axis", ["as_of_valid", "as_of_recorded"])
+def test_an_instant_without_an_attribute_mode_raises(db, axis):
+    # Both axes ask the same question, and asking it on only one of them would
+    # be the same gap in a new place (W7.1).
     with pytest.raises(macrame.AttributeModeUnstatedError) as e:
-        db.traverse("a", as_of=T1)
+        db.traverse("a", **{axis: T1})
     assert e.value.as_of == T1
 
 
-def test_as_of_with_a_stated_mode_is_accepted(db):
-    got = db.traverse("a", max_depth=3, as_of=T1, attribute_mode=macrame.AttributeMode.CURRENT)
+def test_as_of_valid_with_a_stated_mode_is_accepted(db):
+    got = db.traverse(
+        "a", max_depth=3, as_of_valid=T1, attribute_mode=macrame.AttributeMode.CURRENT
+    )
     assert [n.id for n in got] == ["a", "b", "c", "d"]
 
 
@@ -137,36 +142,64 @@ def test_the_two_axes_are_visible_from_python(db):
     *recorded* when this test ran, in 2026-08. So at T1:
 
     - the topology is there, because the edges claim to have been true then;
-    - ``CURRENT`` hydrates it, because live text is live regardless of instant;
-    - ``AT_TIME`` finds nothing, because on 2026-06-01 nobody had written it
-      down yet.
+    - asking on the **valid-time** axis hydrates it, because under current
+      belief those concepts were valid then;
+    - asking on the **transaction-time** axis finds nothing, because on
+      2026-06-01 nobody had written it down yet.
 
     That is Doctrine II, and the empty list is the correct answer rather than a
-    gap. It is also the concrete reason D-085 refuses to default the mode: these
-    two calls differ by one keyword and disagree completely.
+    gap.
+
+    **This test is the reason W7.1 happened.** Until 0.13.2 both arms were spelt
+    ``as_of=T1`` and differed only by ``attribute_mode`` -- so the keyword that
+    selected the *clock* was the one named for the *text*, and a caller who
+    wanted valid-time attributes could not ask for them at all. The two arms now
+    name their axes, and the third assertion is the cell neither could reach.
     """
-    assert db.traverse_ids("a", max_depth=3, as_of=T1) == ["a", "b", "c", "d"]
-    live = db.traverse("a", max_depth=3, as_of=T1, attribute_mode=macrame.AttributeMode.CURRENT)
-    believed = db.traverse("a", max_depth=3, as_of=T1, attribute_mode=macrame.AttributeMode.AT_TIME)
+    assert db.traverse_ids("a", max_depth=3, as_of_valid=T1) == ["a", "b", "c", "d"]
+    live = db.traverse(
+        "a", max_depth=3, as_of_valid=T1, attribute_mode=macrame.AttributeMode.AT_TIME
+    )
+    believed = db.traverse(
+        "a", max_depth=3, as_of_recorded=T1, attribute_mode=macrame.AttributeMode.AT_TIME
+    )
     assert [n.id for n in live] == ["a", "b", "c", "d"]
     assert believed == []
 
+    # And the cell where they cross: what we believed at T1 about what was true
+    # at T1. Empty for the same reason ``believed`` is -- nothing was recorded
+    # yet -- but it is now a question the API can be asked.
+    both = db.traverse(
+        "a",
+        max_depth=3,
+        as_of_valid=T1,
+        as_of_recorded=T1,
+        attribute_mode=macrame.AttributeMode.AT_TIME,
+    )
+    assert both == []
 
-def test_as_of_accepts_an_aware_datetime(db):
+
+def test_as_of_valid_accepts_an_aware_datetime(db):
     got = db.traverse(
         "a",
         max_depth=1,
-        as_of=dt.datetime(2026, 6, 1, tzinfo=UTC),
+        as_of_valid=dt.datetime(2026, 6, 1, tzinfo=UTC),
         attribute_mode=macrame.AttributeMode.CURRENT,
     )
     assert [n.id for n in got] == ["a", "b", "d"]
 
 
-def test_a_naive_datetime_is_refused_on_as_of_too(db):
+@pytest.mark.parametrize("axis", ["as_of_valid", "as_of_recorded"])
+def test_a_naive_datetime_is_refused_on_both_instants(db, axis):
     # P3's rule is not re-implemented per call site; this asserts it reaches
-    # this one.
+    # both of them, which is the kind of coverage the split makes it easy to
+    # give one axis and not the other.
     with pytest.raises(macrame.InvalidTimestampError, match="naive"):
-        db.traverse("a", as_of=dt.datetime(2026, 6, 1), attribute_mode=macrame.AttributeMode.CURRENT)
+        db.traverse(
+            "a",
+            **{axis: dt.datetime(2026, 6, 1)},
+            attribute_mode=macrame.AttributeMode.CURRENT,
+        )
 
 
 def test_omit_on_traverse_is_refused_and_names_the_alternative(db):

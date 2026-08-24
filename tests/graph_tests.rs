@@ -629,17 +629,25 @@ async fn loading_scales_linearly_in_the_number_of_edges() {
 ///
 /// Three assertions, in the order that matters:
 ///
-///   1. defaulted mode + `as_of` is an **error**, not a guess;
-///   2. `AtTime` returns the title as it was — the answer most callers meant;
+///   1. defaulted mode + an instant is an **error**, not a guess;
+///   2. `as_of_recorded` + `AtTime` returns the title as it was believed;
 ///   3. `Current` returns today's title — still available, now stated.
+///
+/// **Arm 2 named `as_of` until 0.13.2 and now names `as_of_recorded`, and the
+/// rename is the finding.** "The title as it was" is a question about *belief*,
+/// answered by folding `transaction_log` — while the same parameter was
+/// simultaneously bounding the topology on *valid* time. The fixture below still
+/// has to arrange one value that satisfies both, which is what the comment about
+/// the clock is really about; after W7.1 it no longer has to.
 #[tokio::test]
 async fn a_historical_traversal_must_say_which_titles_it_wants() {
-    // The clock starts at the valid-time instant the fixture uses, because the
-    // single `as_of` value has to satisfy two different axes at once and the
-    // default epoch-1970 clock makes that impossible to arrange. The topology
-    // filter is **valid** time (`valid_from <= ts < valid_to`), while `AtTime`
-    // hydration is **transaction** time (what was believed as of `ts`). One
-    // parameter, two clocks — Doctrine II, met in a test fixture.
+    // The clock starts at the valid-time instant the fixture uses, because one
+    // instant has to satisfy two different axes at once and the default
+    // epoch-1970 clock makes that impossible to arrange. The topology filter is
+    // **valid** time (`valid_from <= ts < valid_to`), while `AtTime` hydration
+    // against `as_of_recorded` is **transaction** time. Two clocks — Doctrine
+    // II, met in a test fixture, and now met by two parameters rather than by
+    // a coincidence of fixture arithmetic.
     let tuesday = "2026-01-06T00:00:00.000000Z";
     let harness =
         TestHarness::starting_at(macrame::util::clock::parse_iso8601_utc(tuesday).unwrap());
@@ -677,7 +685,7 @@ async fn a_historical_traversal_must_say_which_titles_it_wants() {
     // 1. The combination that used to be a warn! is now a value.
     let err = TraversalBuilder::new("a")
         .max_depth(2)
-        .as_of(&as_of)
+        .as_of_valid(&as_of)
         .execute(conn, &now)
         .await
         .expect_err("as_of with a defaulted attribute mode must not guess");
@@ -686,10 +694,10 @@ async fn a_historical_traversal_must_say_which_titles_it_wants() {
         "got {err:?}"
     );
 
-    // 2. What the caller almost certainly meant.
+    // 2. What the caller almost certainly meant, and it now says which clock.
     let then = TraversalBuilder::new("a")
         .max_depth(2)
-        .as_of(&as_of)
+        .as_of_recorded(&as_of)
         .attribute_mode(AttributeMode::AtTime)
         .execute(conn, &now)
         .await
@@ -706,7 +714,7 @@ async fn a_historical_traversal_must_say_which_titles_it_wants() {
     //    meaning live and the error above is guarding nothing.
     let mixed = TraversalBuilder::new("a")
         .max_depth(2)
-        .as_of(&as_of)
+        .as_of_valid(&as_of)
         .attribute_mode(AttributeMode::Current)
         .execute(conn, &now)
         .await
@@ -1146,4 +1154,247 @@ fn modularity_prefers_a_merged_partition_over_the_true_one_at_scale() {
          measuring what it claims and the size needs re-checking against \
          examples/louvain_aggregation_probe.rs"
     );
+}
+
+// --------------------------------------------------------------------------
+// W7.1 — the two axes, separately and together (0.13.2, D-174)
+// --------------------------------------------------------------------------
+
+/// One fixture where the two clocks give different answers, asked four ways.
+///
+/// The concept `a` is **corrected**: asserted on Tuesday as "Typo A", and a week
+/// later corrected — still `valid_from` Tuesday — to "Fixed A". Nothing about
+/// the world changed; what changed is what the ledger believes about Tuesday.
+/// That is the retroactive correction a bitemporal ledger exists to record, and
+/// it is exactly the case where valid time and transaction time disagree.
+///
+/// | asked | answer | because |
+/// |---|---|---|
+/// | neither instant | `Fixed A` | live text |
+/// | `as_of_valid(tuesday)` | `Fixed A` | what was true then, as best we now know |
+/// | `as_of_recorded(before)` | `Typo A` | what we believed then |
+/// | both | `Typo A` | what we believed then about then |
+///
+/// Rows 2 and 3 are the ones that could not be told apart before W7.1: a single
+/// `as_of(tuesday)` produced row 3's answer under a name that promised row 2's.
+#[tokio::test]
+async fn the_two_axes_answer_differently_and_now_say_which() {
+    let tuesday = "2026-01-06T00:00:00.000000Z";
+    let harness =
+        TestHarness::starting_at(macrame::util::clock::parse_iso8601_utc(tuesday).unwrap());
+    let db = harness.db_with_fake_clock().await;
+
+    db.upsert_concept(macrame::ConceptUpsert::new("a", "Typo A").valid_from(tuesday))
+        .await
+        .unwrap();
+    db.upsert_concept(macrame::ConceptUpsert::new("b", "B").valid_from(tuesday))
+        .await
+        .unwrap();
+    db.assert_edge(
+        macrame::graph::EdgeAssertion::new("a", "b", "KNOWS")
+            .valid_from(tuesday)
+            .valid_to(OPEN),
+    )
+    .await
+    .unwrap();
+
+    // An instant after the original assertion and before the correction.
+    let before_the_fix = harness.clock.peek();
+
+    harness.advance(std::time::Duration::from_secs(86_400 * 7));
+    let now = harness.clock.peek();
+    db.upsert_concept(macrame::ConceptUpsert::new("a", "Fixed A").valid_from(tuesday))
+        .await
+        .unwrap();
+
+    let conn = db.read_conn();
+    let title_of = |v: Vec<macrame::temporal::NodeAttributes>| -> String {
+        v.into_iter()
+            .find(|n| n.id == "a")
+            .map(|n| n.title)
+            .unwrap_or_else(|| "<missing>".into())
+    };
+
+    let live = TraversalBuilder::new("a")
+        .max_depth(1)
+        .execute(conn, &now)
+        .await
+        .unwrap();
+    assert_eq!(title_of(live), "Fixed A", "no instant means live text");
+
+    let by_valid = TraversalBuilder::new("a")
+        .max_depth(1)
+        .as_of_valid(tuesday)
+        .attribute_mode(AttributeMode::AtTime)
+        .execute(conn, &now)
+        .await
+        .unwrap();
+    assert_eq!(
+        title_of(by_valid),
+        "Fixed A",
+        "valid time under current belief must return the correction — this is \
+         the answer the old `as_of` promised by its name and never gave"
+    );
+
+    let by_recorded = TraversalBuilder::new("a")
+        .max_depth(1)
+        .as_of_recorded(&before_the_fix)
+        .attribute_mode(AttributeMode::AtTime)
+        .execute(conn, &now)
+        .await
+        .unwrap();
+    assert_eq!(
+        title_of(by_recorded),
+        "Typo A",
+        "transaction time must return what was believed, typo included"
+    );
+
+    let both = TraversalBuilder::new("a")
+        .max_depth(1)
+        .as_of_valid(tuesday)
+        .as_of_recorded(&before_the_fix)
+        .attribute_mode(AttributeMode::AtTime)
+        .execute(conn, &now)
+        .await
+        .unwrap();
+    assert_eq!(
+        title_of(both),
+        "Typo A",
+        "the bitemporal cell: what we believed then about what was true then"
+    );
+
+    db.close().await.unwrap();
+}
+
+/// `as_of_recorded` reads the topology the ledger *held*, not the one it holds.
+///
+/// An edge is asserted, then expired by a later assertion that closes its
+/// `valid_to`. `links_current` carries only the closed row, so no query over it
+/// can see the graph as it stood before the expiry was recorded. Folding the log
+/// can, and that is the capability the parameter adds — the previous `as_of`
+/// bounded valid time only, so it could say *the edge was not valid then* and
+/// never *we did not know then that it had ended*.
+#[tokio::test]
+async fn a_recorded_instant_sees_topology_that_links_current_no_longer_holds() {
+    let tuesday = "2026-01-06T00:00:00.000000Z";
+    let harness =
+        TestHarness::starting_at(macrame::util::clock::parse_iso8601_utc(tuesday).unwrap());
+    let db = harness.db_with_fake_clock().await;
+
+    for id in ["a", "b"] {
+        db.upsert_concept(macrame::ConceptUpsert::new(id, id).valid_from(tuesday))
+            .await
+            .unwrap();
+    }
+    db.assert_edge(
+        macrame::graph::EdgeAssertion::new("a", "b", "KNOWS")
+            .valid_from(tuesday)
+            .valid_to(OPEN),
+    )
+    .await
+    .unwrap();
+
+    let while_open = harness.clock.peek();
+
+    // A week later the edge is retroactively closed as of Wednesday: it is now
+    // believed never to have been valid past Wednesday.
+    harness.advance(std::time::Duration::from_secs(86_400 * 7));
+    let now = harness.clock.peek();
+    let wednesday = "2026-01-07T00:00:00.000000Z";
+    db.assert_edge(
+        macrame::graph::EdgeAssertion::new("a", "b", "KNOWS")
+            .valid_from(tuesday)
+            .valid_to(wednesday),
+    )
+    .await
+    .unwrap();
+
+    let conn = db.read_conn();
+    let thursday = "2026-01-08T00:00:00.000000Z";
+
+    // Current belief about Thursday: the edge had ended, so `b` is unreachable.
+    let now_believes = TraversalBuilder::new("a")
+        .max_depth(1)
+        .as_of_valid(thursday)
+        .execute_ids(conn, &now)
+        .await
+        .unwrap();
+    assert_eq!(
+        now_believes,
+        vec!["a".to_string()],
+        "under current belief the edge had already ended by Thursday"
+    );
+
+    // Belief before the correction was recorded: the edge was open-ended, so
+    // Thursday was inside it. Same valid-time instant, different answer, and the
+    // difference is the whole of transaction time.
+    let then_believed = TraversalBuilder::new("a")
+        .max_depth(1)
+        .as_of_valid(thursday)
+        .as_of_recorded(&while_open)
+        .execute_ids(conn, &now)
+        .await
+        .unwrap();
+    assert_eq!(
+        then_believed,
+        vec!["a".to_string(), "b".to_string()],
+        "before the correction was recorded, the edge was believed still open"
+    );
+
+    db.close().await.unwrap();
+}
+
+/// A historical `load_subgraph_with` used to return the present, silently (F-35).
+///
+/// The loader bound `now_ts` at the placeholder the builder bound its own
+/// instant at, so every instant set on a builder passed here was discarded. The
+/// caller got a live subgraph and nothing said so — the same shape as defect Z
+/// and as F-31: a surface that accepts a qualifier and does not apply it.
+#[tokio::test]
+async fn load_subgraph_with_honours_the_traversals_instant() {
+    let tuesday = "2026-01-06T00:00:00.000000Z";
+    let harness =
+        TestHarness::starting_at(macrame::util::clock::parse_iso8601_utc(tuesday).unwrap());
+    let db = harness.db_with_fake_clock().await;
+
+    for id in ["a", "b"] {
+        db.upsert_concept(macrame::ConceptUpsert::new(id, id).valid_from(tuesday))
+            .await
+            .unwrap();
+    }
+    // Valid only for one day: open on Tuesday, closed by Thursday.
+    let wednesday = "2026-01-07T00:00:00.000000Z";
+    db.assert_edge(
+        macrame::graph::EdgeAssertion::new("a", "b", "KNOWS")
+            .valid_from(tuesday)
+            .valid_to(wednesday),
+    )
+    .await
+    .unwrap();
+
+    harness.advance(std::time::Duration::from_secs(86_400 * 7));
+    let now = harness.clock.peek();
+
+    let live = db
+        .load_subgraph_with(&TraversalBuilder::new("a").max_depth(1), &now, 1 << 20)
+        .await
+        .unwrap();
+    assert_eq!(live.edge_count(), 0, "by now the edge has long expired");
+
+    let historical = db
+        .load_subgraph_with(
+            &TraversalBuilder::new("a").max_depth(1).as_of_valid(tuesday),
+            &now,
+            1 << 20,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        historical.edge_count(),
+        1,
+        "the instant must reach the loader; before W7.1 this returned 0 and \
+         said nothing about having ignored the parameter"
+    );
+
+    db.close().await.unwrap();
 }

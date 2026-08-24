@@ -571,9 +571,19 @@ impl PyDatabase {
     ///
     /// This is the method to use with `AttributeMode.OMIT`'s intent: it says
     /// what it found, where `traverse` under that mode could not.
+    ///
+    /// `as_of_valid` bounds the edges by their own validity; `as_of_recorded`
+    /// folds `transaction_log` and reads the topology the ledger *held* at that
+    /// instant. Setting both asks the bitemporal question. See `traverse` and
+    /// the Rust `TraversalBuilder::as_of_valid` for why one parameter became two
+    /// in 0.13.2 (W7.1, D-174).
+    ///
+    /// `as_of_recorded` raises `RecordedInstantUnreachableError` when the hot log
+    /// has been archived below the instant asked for; `reconstruct` takes the
+    /// archive path and answers the same question.
     #[pyo3(signature = (
         start_node, *, max_depth = 2, edge_types = None, min_weight = 0.0,
-        as_of = None, now = None
+        as_of_valid = None, as_of_recorded = None, now = None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn traverse_ids(
@@ -583,12 +593,22 @@ impl PyDatabase {
         max_depth: usize,
         edge_types: Option<Vec<String>>,
         min_weight: f64,
-        as_of: Option<&Bound<'_, PyAny>>,
+        as_of_valid: Option<&Bound<'_, PyAny>>,
+        as_of_recorded: Option<&Bound<'_, PyAny>>,
         now: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Vec<String>> {
-        let as_of = as_of.map(|t| to_canonical(Some(t))).transpose()?;
+        let as_of_valid = as_of_valid.map(|t| to_canonical(Some(t))).transpose()?;
+        let as_of_recorded = as_of_recorded.map(|t| to_canonical(Some(t))).transpose()?;
         let now = self.instant(py, now)?;
-        let b = graph::builder(start_node, max_depth, edge_types, min_weight, None, as_of);
+        let b = graph::builder(
+            start_node,
+            max_depth,
+            edge_types,
+            min_weight,
+            None,
+            as_of_valid,
+            as_of_recorded,
+        );
         self.with_db(py, move |db| {
             runtime()
                 .block_on(b.execute_ids(db.read_conn(), &now))
@@ -598,12 +618,21 @@ impl PyDatabase {
 
     /// Traverse and hydrate attributes, as a list of `NodeAttributes` (§5.2).
     ///
-    /// `attribute_mode` decides *which text* comes back and `as_of` decides
-    /// *which topology*. They are independent questions, and setting `as_of`
-    /// without stating a mode raises `AttributeModeUnstatedError` rather than
-    /// defaulting (D-085): `as_of(t)` with live attributes returns the past's
-    /// graph wearing the present's titles — a legitimate thing to want and a
-    /// terrible thing to get by accident.
+    /// `attribute_mode` decides *which text* comes back and the two `as_of_*`
+    /// parameters decide *which topology*. They are independent questions, and
+    /// setting either instant without stating a mode raises
+    /// `AttributeModeUnstatedError` rather than defaulting (D-085): a historical
+    /// topology with live attributes returns the past's graph wearing the
+    /// present's titles — a legitimate thing to want and a terrible thing to get
+    /// by accident.
+    ///
+    /// **`as_of` became `as_of_valid` and `as_of_recorded` in 0.13.2 (W7.1,
+    /// D-174).** The old single parameter reached `links.valid_from`/`valid_to`
+    /// on the valid-time axis and `transaction_log.recorded_at` on the
+    /// transaction-time axis, so one keyword asked two questions. `as_of_valid`
+    /// is *what was true*; `as_of_recorded` is *what we believed*; setting both
+    /// asks what we believed then about what was true then, which no surface in
+    /// the crate could express before.
     ///
     /// `AttributeMode.OMIT` is **refused** here, with a message naming
     /// `traverse_ids`. Under that mode there are no attributes to hydrate, so
@@ -612,7 +641,8 @@ impl PyDatabase {
     /// is the one place the binding refuses what the library accepts.
     #[pyo3(signature = (
         start_node, *, max_depth = 2, edge_types = None, min_weight = 0.0,
-        attribute_mode = None, as_of = None, now = None
+        attribute_mode = None, as_of_valid = None, as_of_recorded = None,
+        now = None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn traverse(
@@ -623,7 +653,8 @@ impl PyDatabase {
         edge_types: Option<Vec<String>>,
         min_weight: f64,
         attribute_mode: Option<PyAttributeMode>,
-        as_of: Option<&Bound<'_, PyAny>>,
+        as_of_valid: Option<&Bound<'_, PyAny>>,
+        as_of_recorded: Option<&Bound<'_, PyAny>>,
         now: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Vec<graph::PyNodeAttributes>> {
         if attribute_mode == Some(PyAttributeMode::Omit) {
@@ -634,7 +665,8 @@ impl PyDatabase {
                  Use traverse_ids(), which returns the ids OMIT is for.",
             ));
         }
-        let as_of = as_of.map(|t| to_canonical(Some(t))).transpose()?;
+        let as_of_valid = as_of_valid.map(|t| to_canonical(Some(t))).transpose()?;
+        let as_of_recorded = as_of_recorded.map(|t| to_canonical(Some(t))).transpose()?;
         let now = self.instant(py, now)?;
         let b = graph::builder(
             start_node,
@@ -642,7 +674,8 @@ impl PyDatabase {
             edge_types,
             min_weight,
             attribute_mode,
-            as_of,
+            as_of_valid,
+            as_of_recorded,
         );
         let hydrated = self.with_db(py, move |db| {
             runtime()
@@ -691,9 +724,16 @@ impl PyDatabase {
     ///
     /// `traverse` is unaffected: it hydrates by `attribute_mode`, which asks a
     /// different question — *which* text, not *whether* (D-102).
+    ///
+    /// **The instants are honoured here as of 0.13.2 (W7.1, F-35).** They could
+    /// not be reached from this binding at all before, and the Rust loader
+    /// ignored them when they were set on a builder passed to it — a historical
+    /// subgraph load silently returned the present. Both halves are fixed
+    /// together because they were one bug.
     #[pyo3(signature = (
         start_node, max_hops, byte_budget, *, edge_types = None,
-        min_weight = None, now = None, content = false
+        min_weight = None, as_of_valid = None, as_of_recorded = None,
+        now = None, content = false
     ))]
     #[allow(clippy::too_many_arguments)]
     fn load_subgraph(
@@ -704,9 +744,13 @@ impl PyDatabase {
         byte_budget: usize,
         edge_types: Option<Vec<String>>,
         min_weight: Option<f64>,
+        as_of_valid: Option<&Bound<'_, PyAny>>,
+        as_of_recorded: Option<&Bound<'_, PyAny>>,
         now: Option<&Bound<'_, PyAny>>,
         content: bool,
     ) -> PyResult<graph::PySubgraph> {
+        let as_of_valid = as_of_valid.map(|t| to_canonical(Some(t))).transpose()?;
+        let as_of_recorded = as_of_recorded.map(|t| to_canonical(Some(t))).transpose()?;
         let now = self.instant(py, now)?;
         let b = graph::builder(
             start_node,
@@ -714,7 +758,8 @@ impl PyDatabase {
             edge_types,
             min_weight.unwrap_or(f64::NEG_INFINITY),
             None,
-            None,
+            as_of_valid,
+            as_of_recorded,
         )
         .content(content);
         let inner = self.with_db(py, move |db| {
@@ -1102,7 +1147,7 @@ impl PyDatabase {
         let model = vector::model_name(model)?;
         let query = crate::types::coerce_embedding(query)?;
         let now = self.instant(py, now)?;
-        let traversal = graph::builder(start_node, max_depth, edge_types, min_weight, None, None);
+        let traversal = graph::builder(start_node, max_depth, edge_types, min_weight, None, None, None);
 
         let mut search =
             macrame::graph::FilteredVectorSearch::new(model, query, traversal).top_k(top_k);

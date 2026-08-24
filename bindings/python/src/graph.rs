@@ -537,7 +537,8 @@ pub(crate) fn builder(
     edge_types: Option<Vec<String>>,
     min_weight: f64,
     attribute_mode: Option<PyAttributeMode>,
-    as_of: Option<String>,
+    as_of_valid: Option<String>,
+    as_of_recorded: Option<String>,
 ) -> macrame::graph::TraversalBuilder {
     let mut b = macrame::graph::TraversalBuilder::new(start_node)
         .max_depth(max_depth)
@@ -548,8 +549,11 @@ pub(crate) fn builder(
     if let Some(mode) = attribute_mode {
         b = b.attribute_mode(mode.into());
     }
-    if let Some(ts) = as_of {
-        b = b.as_of(ts);
+    if let Some(ts) = as_of_valid {
+        b = b.as_of_valid(ts);
+    }
+    if let Some(ts) = as_of_recorded {
+        b = b.as_of_recorded(ts);
     }
     b
 }

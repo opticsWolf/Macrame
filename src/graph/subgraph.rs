@@ -723,8 +723,23 @@ impl Database {
     /// Dijkstra and A* are unsound over negative weights. Pass
     /// `.min_weight(f64::NEG_INFINITY)` to get the guard with a filtered builder.
     ///
-    /// `attribute_mode` is ignored: hydration here is always the live concept
-    /// row, which is what a `Subgraph` has always carried.
+    /// # The traversal's instants are honoured (0.13.2, W7.1, F-35)
+    ///
+    /// They were not. This loader bound `now_ts` where the builder bound the
+    /// traversal's own instant, so a historical `TraversalBuilder` passed here
+    /// **silently returned the present** — the walk and the projection both read
+    /// live topology while the caller had asked for Tuesday's, with nothing said.
+    /// Found while splitting `as_of` and fixed in the same change, because the
+    /// fix is the same one: [`TraversalBuilder::bind_params`] is now the single
+    /// producer of the parameter list and both call sites take it, so the two
+    /// cannot bind different instants at `?3` again.
+    ///
+    /// [`TraversalBuilder::bind_params`]: super::TraversalBuilder::bind_params
+    ///
+    /// `attribute_mode` is still ignored: hydration here is always the live
+    /// concept row, which is what a `Subgraph` has always carried. That is a
+    /// narrower gap than the one above and a deliberate one — a `Subgraph` is
+    /// the input to the six algorithms, none of which reads a title.
     pub async fn load_subgraph_with(
         &self,
         traversal: &super::TraversalBuilder,
@@ -732,18 +747,22 @@ impl Database {
         byte_budget: usize,
     ) -> Result<Subgraph> {
         let start_node = traversal.start_node.as_str();
-        let max_hops = traversal.max_depth as u32;
         let conn = self.read_conn();
         let mut graph = Subgraph::default();
         // Running payload total, carried through the load and into `hydrate`.
         // See `estimated_bytes` for why this is not recomputed per row (D-047).
         let mut bytes = 0usize;
 
-        // `?1..?4` are start, depth, ts and min_weight; edge types take `?5`
-        // onwards. Bound, never spliced — an edge type is a value, and the only
-        // validation in the crate runs on the *write* path (D-039), so a
-        // traversal never passes through it.
+        // Placeholder layout is `TraversalBuilder`'s to decide and
+        // `bind_params` to fill; see `edge_type_base` for why it is computed
+        // there rather than agreed here.
         let edge_filter = traversal.edge_filter_sql();
+        let link_source = traversal.link_source();
+
+        // A transaction-time traversal folds the log, and the fold can be short.
+        // Checked before the query rather than after, so an unanswerable instant
+        // is a named refusal instead of a subgraph that is quietly missing edges.
+        traversal.check_recorded_reach(conn).await?;
 
         // Topology first. The recursion itself is `TraversalBuilder::walk_cte`
         // and is **not** duplicated here (T0.1): this file and `builder.rs` held
@@ -784,7 +803,7 @@ impl Database {
 -- every other edge type those nodes happen to have.
 SELECT DISTINCT l.source_id, l.target_id, l.edge_type, l.weight, l.valid_from, l.valid_to
 FROM walk w
-JOIN links_current l ON l.source_id = w.node_id
+JOIN {link_source} l ON l.source_id = w.node_id
 WHERE l.valid_from <= ?3 AND ?3 < l.valid_to
   AND l.weight >= ?4
   {edge_filter}
@@ -793,13 +812,7 @@ ORDER BY l.source_id, l.target_id, l.edge_type
             )
         );
 
-        let mut params: Vec<libsql::Value> = vec![
-            start_node.into(),
-            (max_hops as i64).into(),
-            now_ts.into(),
-            traversal.min_weight.into(),
-        ];
-        params.extend(traversal.edge_types.iter().map(|t| t.as_str().into()));
+        let params = traversal.bind_params(now_ts);
 
         let mut rows = conn.query(&sql, params).await?;
 

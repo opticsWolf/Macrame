@@ -135,16 +135,24 @@ let ids = TraversalBuilder::new(root)
     .max_depth(3)
     .edge_types(vec!["CITES".into()])
     .min_weight(0.5)
-    .as_of(past_ts)                                   // 0.6.0 (D-085): fixes the *topology*
+    .as_of_valid(past_ts)                             // 0.13.2 (D-174): what was TRUE then
+    .as_of_recorded(past_ts)                          // ...and what we BELIEVED then
     .attribute_mode(AttributeMode::AtTime)            // ...and this fixes the *text*
     .execute_ids(db.read_conn(), ts).await?;          // ids only
 
-// as_of without a stated attribute mode is an error, not a default
-// (0.6.0, D-085). The two are independent questions, and as_of(t) with a
-// defaulted Current returns the past's graph wearing the present's titles -- a
-// legitimate thing to want and a terrible thing to get by accident. It was a
-// tracing::warn! until 0.6.0, which reaches nobody without a subscriber.
-TraversalBuilder::new(root).as_of(past_ts)
+// Either instant alone is the ordinary case; both together is the bitemporal
+// cell. `as_of(ts)` was one parameter on two clocks through 0.13.1 and is gone
+// (D-174). `as_of_recorded` folds the hot log and raises
+// RecordedInstantUnreachable once rows have been archived out of it -- use
+// reconstruct(), which takes the archive path.
+
+// An instant without a stated attribute mode is an error, not a default
+// (0.6.0, D-085; extended to both axes in 0.13.2). The two are independent
+// questions, and a historical topology with a defaulted Current returns the
+// past's graph wearing the present's titles -- a legitimate thing to want and a
+// terrible thing to get by accident. It was a tracing::warn! until 0.6.0, which
+// reaches nobody without a subscriber.
+TraversalBuilder::new(root).as_of_valid(past_ts)
     .execute(db.read_conn(), ts).await;               // Err(AttributeModeUnstated)
 let rows = TraversalBuilder::new(root)
     .attribute_mode(AttributeMode::AtTime)

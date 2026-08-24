@@ -13,7 +13,7 @@ use macrame::graph::AttributeMode;
 use macrame::integrity::audit_current;
 use macrame::schema::migrations;
 use macrame::temporal::{
-    archive, hydrate_attributes, load_snapshot, reconstruct, save_snapshot, Interval,
+    archive, hydrate_attributes, load_snapshot, reconstruct, save_snapshot, AsOf, Interval,
     MaterializedState,
 };
 use std::path::Path;
@@ -69,19 +69,19 @@ async fn test_monday_wednesday_friday_scenario() {
     let tuesday_ts = "2026-01-06T00:00:00.000000Z";
 
     // AttributeMode::Current returns Wednesday title
-    let current_attrs = hydrate_attributes(&conn, &node_ids, tuesday_ts, AttributeMode::Current)
+    let current_attrs = hydrate_attributes(&conn, &node_ids, &AsOf::now(), AttributeMode::Current)
         .await
         .unwrap();
     assert_eq!(current_attrs[0].title, "Wednesday Title");
 
     // AttributeMode::AtTime returns Monday title as believed on Tuesday
-    let at_time_attrs = hydrate_attributes(&conn, &node_ids, tuesday_ts, AttributeMode::AtTime)
+    let at_time_attrs = hydrate_attributes(&conn, &node_ids, &AsOf::recorded_at(tuesday_ts), AttributeMode::AtTime)
         .await
         .unwrap();
     assert_eq!(at_time_attrs[0].title, "Monday Title");
 
     // AttributeMode::Omit returns no node attributes
-    let omit_attrs = hydrate_attributes(&conn, &node_ids, tuesday_ts, AttributeMode::Omit)
+    let omit_attrs = hydrate_attributes(&conn, &node_ids, &AsOf::now(), AttributeMode::Omit)
         .await
         .unwrap();
     assert!(omit_attrs.is_empty());
@@ -1005,4 +1005,84 @@ async fn a_rehydration_leaves_the_archive_hint_saying_exactly_what_it_said_befor
         reason.contains(&format!("begins at seq_id {horizon}")),
         "the round trip moved the horizon the hint reports (expected {horizon}): {reason}"
     );
+}
+
+/// `as_of_recorded` refuses once the hot log has been archived (W7.1, D-174).
+///
+/// A transaction-time traversal folds `transaction_log`, and `archive` removes
+/// superseded rows from it. A traversal takes a `Connection` and no archive path,
+/// so it cannot go and get what was moved — and a fold missing its superseded
+/// rows returns *nearly* the right topology, which is the failure a ledger can
+/// least afford and the one an assertion on non-emptiness will not catch.
+///
+/// The valid-time axis is unaffected, and that half of the assertion is the
+/// point: the refusal is scoped to the mechanism that actually reads the log,
+/// not applied to every historical query on an archived database.
+#[tokio::test]
+async fn a_recorded_instant_is_refused_once_rows_have_been_archived() {
+    use macrame::graph::TraversalBuilder;
+    use macrame::prelude::*;
+
+    let harness = TestHarness::new();
+    let db = macrame::Database::open(&harness.db_path).await.unwrap();
+
+    // Supersede a concept so there is something archivable: the newest row per
+    // entity never moves, so a single write would archive nothing at all.
+    for title in ["first", "second", "third"] {
+        db.upsert_concept(ConceptUpsert::new("c1", title).valid_from(CTS))
+            .await
+            .unwrap();
+    }
+    db.upsert_concept(ConceptUpsert::new("c2", "other").valid_from(CTS))
+        .await
+        .unwrap();
+    db.assert_edge(
+        macrame::graph::EdgeAssertion::new("c1", "c2", "KNOWS").valid_from(CTS),
+    )
+    .await
+    .unwrap();
+
+    let now = "2029-01-01T00:00:00.000000Z";
+    let instant = "2028-01-01T00:00:00.000000Z";
+
+    // Before archiving, the fold is answerable and the traversal works.
+    let before = TraversalBuilder::new("c1")
+        .max_depth(1)
+        .as_of_recorded(instant)
+        .execute_ids(db.read_conn(), now)
+        .await
+        .expect("an intact hot log answers for any instant");
+    assert_eq!(before, vec!["c1".to_string(), "c2".to_string()]);
+
+    let report = db.archive("2030-01-01T00:00:00.000000Z").await.unwrap();
+    assert!(
+        report.log_entries_archived >= 2,
+        "the fixture needs log rows to have actually moved: {report:?}"
+    );
+
+    // After archiving the same call refuses, by name, and names the instant.
+    let err = TraversalBuilder::new("c1")
+        .max_depth(1)
+        .as_of_recorded(instant)
+        .execute_ids(db.read_conn(), now)
+        .await
+        .expect_err("a short hot log must refuse rather than fold what is left");
+    match &err {
+        macrame::DbError::RecordedInstantUnreachable { ts } => assert_eq!(ts, instant),
+        other => panic!("got {other:?}"),
+    }
+    // And it must send the caller somewhere that can answer.
+    assert!(err.to_string().contains("reconstruct"), "{err}");
+
+    // The valid-time axis is untouched: it reads live tables and never the log,
+    // so archiving has nothing to do with it.
+    let by_valid = TraversalBuilder::new("c1")
+        .max_depth(1)
+        .as_of_valid(now)
+        .execute_ids(db.read_conn(), now)
+        .await
+        .expect("valid time does not read the log and must be unaffected");
+    assert_eq!(by_valid, vec!["c1".to_string(), "c2".to_string()]);
+
+    db.close().await.unwrap();
 }

@@ -5,7 +5,7 @@ pub mod replay;
 pub mod snapshot;
 
 pub use archive::{archivable_concepts, archive, rehydrate, ArchiveReport, RehydrateReport};
-pub use as_of::{hydrate_attributes, query_as_of_edges, NodeAttributes};
+pub use as_of::{hydrate_attributes, query_as_of_edges, AsOf, NodeAttributes};
 pub use interval::Interval;
 pub use replay::{reconstruct, verify_snapshot_chain, ChainCheck, MaterializedState};
 pub use snapshot::{

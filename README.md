@@ -19,7 +19,7 @@ Macrame stores concepts linked by typed, weighted relationships — where both c
 
 | Strength | What it means |
 |---|---|
-| **Bitemporal by design** | Two independent clocks per row — *valid time* (when a fact held in the world) and *transaction time* (when the database learned it). `reconstruct(ts)` answers "what did we believe?". `as_of(ts)` answers "what did the world look like?" **for topology, and mixes the two axes for concept attributes** — a known defect, written down in [D-160](docs/architecture/s13-decision-register.md#d-160) and scheduled for 0.14.0 (W7.1). See the note below. |
+| **Bitemporal by design** | Two independent clocks per row — *valid time* (when a fact held in the world) and *transaction time* (when the database learned it), each addressable on its own. `as_of_valid(ts)` answers "what did the world look like?"; `as_of_recorded(ts)` and `reconstruct(ts)` answer "what did we believe?"; setting both asks what we believed then about what was true then ([D-174](docs/architecture/s13-decision-register.md#d-174), 0.13.2). |
 | **Single file, embedded** | The entire database is one file on the local filesystem. Link it directly into your application. Run on Windows desktop, Linux, or macOS — the Rust suite runs on all three in CI. |
 | **Graph + vectors + search** | Recursive CTE traversal, native DiskANN vector search, FTS5 keyword search, and hybrid RRF fusion — all in one crate, no external graph library. |
 | **Five in-memory analytics** | Dijkstra, A*, SCC, k-core, and Louvain — operating on a typed `Subgraph` with zero external dependencies. |
@@ -27,18 +27,28 @@ Macrame stores concepts linked by typed, weighted relationships — where both c
 | **Archival path** | Closed intervals move to a cold database inside atomic sessions. Point-in-time reconstruction composes from snapshots plus anchored folds — fast because it doesn't fold from genesis. |
 | **Runtime safety** | One Write Actor serialises all writes; read connections carry `PRAGMA query_only = ON` enforced at the engine level. No raw SQL escapes the guard. |
 
-**`as_of` is not yet purely valid-time, and this table said it was.** The same `ts` is
-compared against `links.valid_from`/`valid_to` — valid time, the contract — for the graph's
-shape, and against `transaction_log.recorded_at` — transaction time — for concept
-attributes under `AttributeMode::AtTime`. So `as_of("2020-06-01")` returns the edges that
-held in 2020 labelled with *what was believed in 2020*, which means a title corrected today
-to fix a 2020 typo comes back uncorrected. Right answer to "what did we believe"; wrong
-answer to "what was true", and the method's name promises the second.
+**`as_of` became `as_of_valid` and `as_of_recorded` in 0.13.2, and this is a break.**
+Through 0.13.1 a single `ts` was compared against `links.valid_from`/`valid_to` — valid
+time — for the graph's shape and against `transaction_log.recorded_at` — transaction time —
+for concept attributes under `AttributeMode::AtTime`. So `as_of("2020-06-01")` returned the
+edges that held in 2020 labelled with *what was believed in 2020*: a title corrected today
+to fix a 2020 typo came back uncorrected. Right answer to "what did we believe"; wrong
+answer to "what was true", and the name promised the second.
 
-Stated a release before it is changed, deliberately: fixing it changes answers callers
-already depend on, so it belongs to a release allowed to break them
-([D-160](docs/architecture/s13-decision-register.md#d-160), 0.12.17). Topology-only
-traversals and `reconstruct()` are unaffected.
+The semantics were written down a release before they were changed, deliberately, so the
+change could be reviewed against a stated position rather than argued in the commit that
+made it ([D-160](docs/architecture/s13-decision-register.md#d-160), 0.12.17 →
+[D-174](docs/architecture/s13-decision-register.md#d-174), 0.13.2).
+
+**To migrate:** `as_of(t)` for topology-at-`t` under current belief is now
+`as_of_valid(t)`. `as_of(t)` paired with `AttributeMode::AtTime`, if what you wanted was
+*belief as of `t`*, is now `as_of_recorded(t)`. Setting both is new and asks the bitemporal
+question. `reconstruct()` is unchanged.
+
+`as_of_recorded` folds the hot `transaction_log`, so it raises `RecordedInstantUnreachable`
+on a database whose log has been archived — it takes a connection and no archive path, and
+answering from a partial fold would return *nearly* the right topology. `reconstruct()`
+takes the path and answers the same question.
 
 ---
 
@@ -116,7 +126,7 @@ Every design decision derives from these invariants:
 5. **No physical deletion in hot tables** — Rows leave through the archive path only. Ad-hoc `DELETE` aborts at the trigger layer.
 6. **Derivative state is disposable** — `links_current` is a rebuildable materialization. Drift is detectable, recoverable by rebuild.
 7. **Embeddings are immutable per version, excluded from the ledger** — Vectors live in per-model tables; they never appear in `transaction_log` payloads.
-8. **Fidelity is a parameter, never a silent default** — `as_of(ts)` and `reconstruct(ts)` say what they mean in their signatures.
+8. **Fidelity is a parameter, never a silent default** — `as_of_valid(ts)`, `as_of_recorded(ts)` and `reconstruct(ts)` say what they mean in their signatures.
 
 ### Concurrency Model
 

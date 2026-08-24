@@ -776,6 +776,24 @@ async fn hot_log_is_intact(conn: &libsql::Connection) -> Result<bool> {
     Ok(min == 1 && count == max)
 }
 
+/// Whether a connection alone can fold `transaction_log` at `ts` (W7.1, D-174).
+///
+/// The completeness question [`hot_log_reach`] answers, minus the archive file
+/// it does not have. [`crate::graph::TraversalBuilder::as_of_recorded`] is the
+/// caller: a traversal takes a `Connection`, so when the hot log is short it has
+/// nowhere to go and must refuse rather than fold what is left.
+///
+/// **One bit, and the conservative one.** `hot_log_is_intact` says whether
+/// anything was ever removed, not whether *this* instant survived the removal.
+/// The archive cutoff is not recorded hot-side — that is the marker D-132
+/// refused — so an archived database refuses every instant here, including ones
+/// a fold would have got right. `ts` is taken anyway rather than dropped from the
+/// signature, because the refusal names it and because a cutoff-aware version
+/// would need it.
+pub(crate) async fn hot_log_answers_for(conn: &libsql::Connection, _ts: &str) -> Result<bool> {
+    hot_log_is_intact(conn).await
+}
+
 /// Run one fold query from nothing — the unanchored path.
 async fn fold(conn: &libsql::Connection, ts: &str, query: &str) -> Result<MaterializedState> {
     let delta = fold_delta(conn, query, libsql::params![ts]).await?;

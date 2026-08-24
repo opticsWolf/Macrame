@@ -52,6 +52,7 @@ pub(crate) const DB_ERROR_VARIANTS: &[&str] = &[
     "PayloadVersion",
     "ArchiveViolation",
     "AttributeModeUnstated",
+    "RecordedInstantUnreachable",
     "DiagnosticConn",
     "ArchiveWindow",
     "InvalidTimestamp",
@@ -134,6 +135,9 @@ fn sample(name: &str) -> Option<DbError> {
         },
         "AttributeModeUnstated" => DbError::AttributeModeUnstated {
             as_of: "2026-02-03T04:05:06.000007Z".into(),
+        },
+        "RecordedInstantUnreachable" => DbError::RecordedInstantUnreachable {
+            ts: "2026-02-03T04:05:06.000007Z".into(),
         },
         "DiagnosticConn" => DbError::DiagnosticConn {
             path: "sample.db".into(),

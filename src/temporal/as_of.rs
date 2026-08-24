@@ -5,6 +5,53 @@ use crate::error::{DbError, Result};
 use crate::graph::builder::AttributeMode;
 use crate::temporal::replay::PAYLOAD_VERSION;
 
+/// The instant pair a temporal read is taken at (0.13.2, W7.1, D-174).
+///
+/// One field per axis, because [§3.1](../../docs/architecture/s0-s3-foundations.md)
+/// is what happens when there is one field for both. `None` on either axis means
+/// *the present* on that axis, and the two are independent: a read may fix valid
+/// time and float transaction time, or the reverse, or fix both — which is the
+/// cell Jensen and Snodgrass's BCDM defines a bitemporal database as answering,
+/// and which no surface in this crate could express before W7.1.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AsOf {
+    /// *What was true.* Bounds a row against its own `valid_from`/`valid_to`.
+    pub valid: Option<String>,
+    /// *What we believed.* Bounds `transaction_log.recorded_at`.
+    pub recorded: Option<String>,
+}
+
+impl AsOf {
+    /// Both axes at the present: live rows, current belief.
+    pub fn now() -> Self {
+        Self::default()
+    }
+
+    /// Fix valid time at `ts`, leaving belief at the present.
+    pub fn valid_at(ts: impl Into<String>) -> Self {
+        Self {
+            valid: Some(ts.into()),
+            recorded: None,
+        }
+    }
+
+    /// Fix belief at `ts`, leaving valid time at the present.
+    pub fn recorded_at(ts: impl Into<String>) -> Self {
+        Self {
+            valid: None,
+            recorded: Some(ts.into()),
+        }
+    }
+
+    /// Fix both — the bitemporal cell.
+    pub fn bitemporal(valid: impl Into<String>, recorded: impl Into<String>) -> Self {
+        Self {
+            valid: Some(valid.into()),
+            recorded: Some(recorded.into()),
+        }
+    }
+}
+
 /// Node attribute payload hydrated from concepts table or transaction_log.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeAttributes {
@@ -78,10 +125,32 @@ fn placeholders(first: usize, count: usize) -> String {
 /// order the rows arrive in, because a graph read that permuted its own output
 /// between runs would break the property suite's equality comparisons for a
 /// reason that has nothing to do with the property under test.
+///
+/// # `ts: &str` became `as_of: &AsOf` in 0.13.2 (W7.1, D-174)
+///
+/// The old parameter was one instant read on whichever clock the mode happened
+/// to use — `Current` ignored it, `AtTime` compared it to `recorded_at`, and
+/// neither ever compared it to a concept's own valid interval. So `AtTime`
+/// returned concepts whose validity had ended before the instant asked about,
+/// which is the smaller half of what [§3.1](../../docs/architecture/s0-s3-foundations.md)
+/// names and was recorded in `TraversalBuilder::as_of`'s rustdoc in 0.12.17.
+///
+/// [`AttributeMode::AtTime`] now dispatches on which axes are fixed:
+///
+/// | `as_of` | reads |
+/// |---|---|
+/// | neither | live `concepts`, retired filtered — identical to `Current` |
+/// | `valid` | live `concepts`, bounded by the row's own valid interval |
+/// | `recorded` | the payload believed at that instant |
+/// | both | the payload believed then, bounded by the validity it recorded |
+///
+/// [`AttributeMode::Current`] ignores both axes by definition — it is the
+/// *stated* choice to read live text under a historical topology, which
+/// `TraversalBuilder` makes the caller make rather than fall into (D-085).
 pub async fn hydrate_attributes(
     conn: &libsql::Connection,
     node_ids: &[String],
-    ts: &str,
+    as_of: &AsOf,
     mode: AttributeMode,
 ) -> Result<Vec<NodeAttributes>> {
     if node_ids.is_empty() {
@@ -91,14 +160,19 @@ pub async fn hydrate_attributes(
     let found: HashMap<String, NodeAttributes> = match mode {
         AttributeMode::Omit => return Ok(Vec::new()),
         // No warning here any more (T3.2, D-085). This function takes the mode
-        // as a parameter and cannot tell a historical query from a live one —
-        // `ts` is just an instant — so the warning fired on *every* `Current`
-        // hydrate, which is overwhelmingly the ordinary live case where it is
-        // exactly right. Loud where it did not matter and, being a log line,
-        // silent where it did. The decision now lives in `TraversalBuilder`,
-        // which knows whether `as_of` was set, and is a typed error.
-        AttributeMode::Current => hydrate_current(conn, node_ids).await?,
-        AttributeMode::AtTime => hydrate_at_time(conn, node_ids, ts).await?,
+        // as a parameter and cannot tell a historical query from a live one, so
+        // the warning fired on *every* `Current` hydrate, which is overwhelmingly
+        // the ordinary live case where it is exactly right. Loud where it did not
+        // matter and, being a log line, silent where it did. The decision now
+        // lives in `TraversalBuilder`, which knows whether an instant was set,
+        // and is a typed error.
+        AttributeMode::Current => hydrate_current(conn, node_ids, None).await?,
+        AttributeMode::AtTime => match as_of.recorded.as_deref() {
+            None => hydrate_current(conn, node_ids, as_of.valid.as_deref()).await?,
+            Some(recorded) => {
+                hydrate_at_time(conn, node_ids, recorded, as_of.valid.as_deref()).await?
+            }
+        },
     };
 
     // Caller order, and absences simply dropped — the signature returns a Vec
@@ -113,23 +187,38 @@ pub async fn hydrate_attributes(
     Ok(out)
 }
 
-/// Live attributes, filtered by retirement *now*.
+/// Live attributes under current belief, filtered by retirement *now* and — when
+/// `valid` is given — by the row's own valid interval (W7.1).
+///
+/// The valid-time bound is what `AttributeMode::Current` never had and could not
+/// have: `concepts` carries `valid_from`/`valid_to` and nothing read them, so a
+/// concept whose validity had ended still hydrated into a historical traversal.
+/// Passing `None` is the live read, unchanged, and is what `Current` still does —
+/// that mode's whole meaning is *today's text regardless of the instant*.
 async fn hydrate_current(
     conn: &libsql::Connection,
     node_ids: &[String],
+    valid: Option<&str>,
 ) -> Result<HashMap<String, NodeAttributes>> {
     let mut found = HashMap::new();
 
     for chunk in node_ids.chunks(HYDRATE_CHUNK) {
+        // The ids bind from `?1` when there is no instant and from `?2` when
+        // there is, so the instant can lead and the variadic part can trail.
+        let (first, valid_filter) = match valid {
+            Some(_) => (2, " AND valid_from <= ?1 AND ?1 < valid_to"),
+            None => (1, ""),
+        };
         let sql = format!(
             "SELECT id, title, content, embedding_model FROM concepts \
-             WHERE retired = 0 AND id IN ({})",
-            placeholders(1, chunk.len())
+             WHERE retired = 0{valid_filter} AND id IN ({})",
+            placeholders(first, chunk.len())
         );
-        let params: Vec<libsql::Value> = chunk
-            .iter()
-            .map(|id| libsql::Value::Text(id.clone()))
-            .collect();
+        let mut params: Vec<libsql::Value> = Vec::with_capacity(chunk.len() + 1);
+        if let Some(v) = valid {
+            params.push(libsql::Value::Text(v.to_string()));
+        }
+        params.extend(chunk.iter().map(|id| libsql::Value::Text(id.clone())));
 
         let mut rows = conn.query(&sql, params).await?;
         while let Some(row) = rows.next().await? {
@@ -149,7 +238,16 @@ async fn hydrate_current(
     Ok(found)
 }
 
-/// Attributes as recorded at `ts`, filtered by retirement *at* `ts`.
+/// Attributes as recorded at `ts`, filtered by retirement *at* `ts` and — when
+/// `valid` is given — by the validity the payload itself recorded (W7.1).
+///
+/// **The `valid` arm is the bitemporal cell.** The fold picks the row the ledger
+/// held at `ts`; the payload of that row carries the `valid_from`/`valid_to` the
+/// concept had *at that point in the ledger's belief*, so bounding against those
+/// answers *what did we believe at `recorded` about what was true at `valid`*.
+/// Reading the concept's valid interval from the live `concepts` table instead
+/// would answer something else entirely — today's belief about validity, wearing
+/// the past's title — which is the exact conflation W7.1 exists to end.
 ///
 /// The window partitions on `entity_id` alone and is sound doing so only because
 /// `table_name = 'concepts'` is already in the `WHERE` — the discriminator is
@@ -161,6 +259,7 @@ async fn hydrate_at_time(
     conn: &libsql::Connection,
     node_ids: &[String],
     ts: &str,
+    valid: Option<&str>,
 ) -> Result<HashMap<String, NodeAttributes>> {
     let mut found = HashMap::new();
 
@@ -210,6 +309,25 @@ async fn hydrate_at_time(
             // Retired as of `ts`: not visible, and not an error either.
             if payload.get("retired").and_then(|r| r.as_i64()).unwrap_or(0) != 0 {
                 continue;
+            }
+
+            // Outside its own valid interval at the instant asked about. Applied
+            // in Rust rather than in the `WHERE` because the interval lives
+            // inside the JSON payload and the fold has already narrowed to one
+            // row per entity — a `json_extract` in the outer filter would read
+            // the same bytes this arm already has in hand.
+            //
+            // A v1 payload carries no `valid_from`/`valid_to` (they arrived with
+            // v2), and an absent bound is treated as unbounded on that side: the
+            // row is from before the crate recorded validity in the log, and
+            // excluding it would report a gap in the ledger that is really a gap
+            // in the payload schema.
+            if let Some(v) = valid {
+                let from = payload.get("valid_from").and_then(|s| s.as_str());
+                let to = payload.get("valid_to").and_then(|s| s.as_str());
+                if from.is_some_and(|f| f > v) || to.is_some_and(|t| t <= v) {
+                    continue;
+                }
             }
 
             found.insert(

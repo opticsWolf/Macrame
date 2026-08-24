@@ -22,7 +22,8 @@ Delivered as a single Rust crate that an application links directly. The entire 
 
 ### Two Semantic Operations
 
-- **`as_of(ts)`** — *valid-time* question answered under current belief. Reports what the world looked like at `ts` given everything we know now, including corrections recorded after `ts`. A filtered read of live tables — cheap.
+- **`as_of_valid(ts)`** — *valid-time* question answered under current belief. Reports what the world looked like at `ts` given everything we know now, including corrections recorded after `ts`. A filtered read of live tables — cheap.
+- **`as_of_recorded(ts)`** — *transaction-time* question on a traversal (0.13.2, [D-174](architecture/s13-decision-register.md#d-174)). Folds `transaction_log` to `ts` and walks the topology the ledger held then. Setting it together with `as_of_valid` asks the bitemporal question — *what did we believe at `r` about what was true at `v`* — which nothing in the crate could express before. Raises `RecordedInstantUnreachable` once the hot log has been archived; `reconstruct` takes the archive path.
 - **`reconstruct(ts)`** — *transaction-time* question. Replays the log and reports what the database actually believed at `ts`, before later corrections arrived. A fold over history — costs what history costs.
 
 Both are correct answers to different questions. Conflating them is a defect.
@@ -69,7 +70,7 @@ A vector is a derived artifact of a specific model applied to specific content. 
 **Code:** `src/vector/registry.rs`, `src/vector/mod.rs`
 
 ### VIII. Fidelity is a parameter, never a silent default
-Queries that mix time axes say so in their signatures. `as_of(ts)` means valid time under current belief; `reconstruct(ts)` means belief as of `ts`. The gap between the two — retroactive assertions made after `ts` — is documented, pinned by tests, and surfaced at the type level.
+Queries that mix time axes say so in their signatures. `as_of_valid(ts)` means valid time under current belief; `as_of_recorded(ts)` and `reconstruct(ts)` mean belief as of `ts`. The gap between them — retroactive assertions made after `ts` — is documented, pinned by tests, and surfaced at the type level. Through 0.13.1 a single `as_of(ts)` carried both clocks, so this doctrine was stated and not met ([D-174](architecture/s13-decision-register.md#d-174)).
 
 **Code:** `src/temporal/as_of.rs`, `src/temporal/replay.rs`
 
@@ -279,7 +280,8 @@ pub struct TraversalBuilder {
     pub edge_types: Vec<String>,
     pub min_weight: f64,
     pub attribute_mode: Option<AttributeMode>,
-    pub as_of: Option<String>,
+    pub as_of_valid: Option<String>,
+    pub as_of_recorded: Option<String>,
 }
 
 impl TraversalBuilder {
@@ -288,7 +290,8 @@ impl TraversalBuilder {
     pub fn edge_types(mut self, types: Vec<String>) -> Self
     pub fn min_weight(mut self, weight: f64) -> Self
     pub fn attribute_mode(mut self, mode: AttributeMode) -> Self
-    pub fn as_of(mut self, ts: impl Into<String>) -> Self
+    pub fn as_of_valid(mut self, ts: impl Into<String>) -> Self
+    pub fn as_of_recorded(mut self, ts: impl Into<String>) -> Self
     pub fn build_sql(&self) -> String
     pub async fn execute_ids(&self, conn: &libsql::Connection, ts: Option<String>) -> Result<Vec<String>>
     pub async fn execute(&self, conn: &libsql::Connection, ts: Option<String>) -> Result<MaterializedState>
@@ -367,9 +370,11 @@ impl Database {
 }
 ```
 
-**`as_of(ts)`** (D-085): Sets a valid-time query on the *topology*. The traversal returns edges at `ts` under current belief. When `as_of` is set and `attribute_mode` is left unspecified, returns `DbError::AttributeModeUnstated` — the crate no longer silently defaults to `Current`.
+**`as_of_valid(ts)`** (D-085, D-174): Sets a valid-time query on the *topology*. The traversal returns edges valid at `ts` under current belief. When either instant is set and `attribute_mode` is left unspecified, returns `DbError::AttributeModeUnstated` — the crate no longer silently defaults to `Current`.
 
-**`attribute_mode`**: `Current` returns live attributes (fast, wrong for historical text). `AtTime` hydrates from `transaction_log` (correct for historical text). `Omit` returns topology only. `as_of(ts)` + `attribute_mode` are independent: `as_of` fixes the topology, `attribute_mode` fixes the text. Conflating them was the silent wrong answer D-085 corrected.
+**`as_of_recorded(ts)`** (0.13.2, D-174): Sets a *transaction-time* query. The walk leaves `links_current` and reads a fold of `transaction_log` bounded at `ts`, so it sees the topology the ledger held then — including edges a later correction has since closed. Setting both instants is the bitemporal cell. Raises `DbError::RecordedInstantUnreachable` once `archive` has removed rows from the hot log, because a traversal has no archive path and a partial fold returns *nearly* the right topology.
+
+**`attribute_mode`**: `Current` returns live attributes, ignoring both instants (fast, and a *stated* choice). `AtTime` follows the instants — live `concepts` bounded by their own valid interval when only `as_of_valid` is set, the payload believed at `ts` when `as_of_recorded` is, both when both are. `Omit` returns topology only. The instants fix *when*; `attribute_mode` fixes *whether the text follows*. Conflating them was the silent wrong answer D-085 corrected; one instant serving two clocks was the one D-174 corrected.
 
 **`TraversalBuilder` uses `UNION` not `UNION ALL`** (D-076): The recursive step dedupes on entry, bounding walk rows at `V × (depth+1)` rather than `V × (depth+1) × branching_factor`. The old `UNION ALL` form was a walk (one row per path); the current form is a traversal (one row per node).
 
@@ -768,7 +773,8 @@ The surface itself *is* pinned: `tests/doc_sync_tests.rs` fails the build when t
 | **One writer, not one entry point** | D-016 | A caller-held closure could hold the write lock arbitrarily long |
 | **`UNION` not `UNION ALL` in CTE** | D-076 | Bounds walk at `V × (depth+1)`; simple-path reachability equals walk reachability within D |
 | **`PostFilter` + `PreFilterCTE`, no `TwoPhaseTempTable`** | D-050 | `CREATE TEMP TABLE` fails on `query_only` connection; `vector_top_k` refuses 4th arg |
-| **`as_of(ts)` + `AttributeMode::Current` is error** | D-085 | `Current` returns live text; `AtTime` returns historical text; conflating them is wrong |
+| **an instant + unstated `attribute_mode` is an error** | D-085 | `Current` returns live text; `AtTime` returns historical text; conflating them is wrong |
+| **`as_of` split into `as_of_valid` / `as_of_recorded`** | D-174 | one parameter compared against two different clocks; the name promised valid time and the attribute half delivered transaction time |
 | **`raw()` is `#[doc(hidden)]`** | D-091 | Leaves three §4.7 gaps open; provoking a guard is its legitimate use |
 | **`write_bulk_atomic` uncapped** | D-014 | Capping breaks the guarantee the method exists to provide |
 | **Archive windowing not default** | D-080 | Windowing costs more total work; only pays when backlog is large |

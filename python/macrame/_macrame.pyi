@@ -98,10 +98,10 @@ def estimate_bulk_hold(edges: Sequence[EdgeAssertion]) -> timedelta:
 class AttributeMode:
     """Which text a temporal traversal returns (T3.2, D-085).
 
-    Leaving it unset on a traversal that also sets `as_of` raises
-    `AttributeModeUnstatedError`. `None` is *unstated*, not `CURRENT`, and that
-    difference is the whole mechanism: live text attached to a historical
-    topology is the wrong answer, delivered silently.
+    Leaving it unset on a traversal that sets either `as_of_valid` or
+    `as_of_recorded` raises `AttributeModeUnstatedError`. `None` is *unstated*,
+    not `CURRENT`, and that difference is the whole mechanism: live text attached
+    to a historical topology is the wrong answer, delivered silently.
 
     `OMIT` is deliberately absent from the traversal surface — see D-102.
     """
@@ -684,7 +684,8 @@ class Database:
         max_depth: int = 2,
         edge_types: Sequence[str] | None = None,
         min_weight: float = 0.0,
-        as_of: Timestamp | None = None,
+        as_of_valid: Timestamp | None = None,
+        as_of_recorded: Timestamp | None = None,
         now: Timestamp | None = None,
     ) -> list[str]: ...
     def traverse(
@@ -695,14 +696,21 @@ class Database:
         edge_types: Sequence[str] | None = None,
         min_weight: float = 0.0,
         attribute_mode: AttributeMode | None = None,
-        as_of: Timestamp | None = None,
+        as_of_valid: Timestamp | None = None,
+        as_of_recorded: Timestamp | None = None,
         now: Timestamp | None = None,
     ) -> list[NodeAttributes]:
         """Traverse and hydrate node text.
 
-        `attribute_mode` left unset alongside `as_of` raises
+        `attribute_mode` left unset alongside either instant raises
         `AttributeModeUnstatedError` rather than returning live text for a
         historical topology.
+
+        `as_of` became `as_of_valid` and `as_of_recorded` in 0.13.2 (W7.1). The
+        old keyword reached the valid-time columns for topology and the
+        transaction-time column for attributes, so one name asked two questions.
+        `as_of_valid` is *what was true*; `as_of_recorded` is *what we believed*;
+        setting both asks the bitemporal question.
         """
 
     def load_subgraph(
@@ -713,6 +721,8 @@ class Database:
         *,
         edge_types: Sequence[str] | None = None,
         min_weight: float | None = None,
+        as_of_valid: Timestamp | None = None,
+        as_of_recorded: Timestamp | None = None,
         now: Timestamp | None = None,
         content: bool = False,
     ) -> Subgraph:
@@ -910,6 +920,9 @@ class InvalidTimestampError(ValidationError):
 
 class AttributeModeUnstatedError(ValidationError):
     as_of: str
+
+class RecordedInstantUnreachableError(TemporalError):
+    ts: str
 
 class SingleOpenViolationError(IntegrityError):
     source_id: str
