@@ -362,6 +362,38 @@ pub enum WriteOp<'a> {
     Delete {
         table: &'a str,
     },
+    /// A derived annotation (0.13.3, W7.2, [`crate::Annotation`]).
+    ///
+    /// The only [`WriteOp`] whose failure is not a `RAISE(ABORT)`.
+    /// `analytics_annotations` carries no triggers at all — that is why it is
+    /// the cheapest bulk table and why its chunk ceiling is the largest
+    /// (D-058) — so the guard vocabulary [`abort_kind`] speaks has nothing to
+    /// say about it. What it does carry is a foreign key onto `concepts`, and
+    /// that is the failure a caller can actually cause.
+    Annotation { concept_id: &'a str },
+}
+
+/// `SQLITE_CONSTRAINT_FOREIGNKEY` — `SQLITE_CONSTRAINT | (3 << 8)`.
+///
+/// libSQL reports statement failures through
+/// `libsql::Error::SqliteFailure(extended_error_code(…), …)`, so this is the
+/// *extended* code and discriminates a foreign-key failure from the CHECK,
+/// PRIMARY KEY and NOT NULL failures that share primary code 19. Matching the
+/// primary code would classify a malformed `computed_at` — a different bug with
+/// a different fix — as a missing concept.
+const SQLITE_CONSTRAINT_FOREIGNKEY: std::ffi::c_int = 787;
+
+/// Recognise a foreign-key failure by its result code, not by its message.
+///
+/// The deliberate counterpart to [`abort_kind`]. That function matches text
+/// because it has no alternative: SQLite flattens every `RAISE(ABORT)` into one
+/// generic constraint failure and the message is the only thing left. A foreign
+/// key is enforced by the engine itself and carries a code of its own, so
+/// nothing here depends on wording — an upstream message change cannot degrade
+/// this classification, which is exactly the failure mode `abort_kind`'s
+/// rustdoc warns about and cannot escape.
+fn is_foreign_key_violation(err: &libsql::Error) -> bool {
+    matches!(err, libsql::Error::SqliteFailure(code, _) if *code == SQLITE_CONSTRAINT_FOREIGNKEY)
 }
 
 /// Turn an engine error into the typed error §7 specifies, where one applies.
@@ -394,6 +426,14 @@ pub async fn classify(conn: &libsql::Connection, err: libsql::Error, op: WriteOp
         (AbortKind::DeleteOutsideArchive, WriteOp::Delete { table }) => DbError::ArchiveViolation {
             table: table.to_string(),
         },
+        // An annotation naming a concept that is not there. The engine says
+        // "FOREIGN KEY constraint failed" and no more — not which row, and a
+        // rejected chunk may hold up to `chunk_rows::ANNOTATIONS` of them. The
+        // typed error names the concept, which is the fact the database
+        // actually knows and the one the caller has to act on.
+        (_, WriteOp::Annotation { concept_id }) if is_foreign_key_violation(&err) => {
+            DbError::NotFound(concept_id.to_string())
+        }
         // A guard fired for an operation it does not describe. Reporting the raw
         // error is honest; inventing a typed one from the wrong context is not.
         _ => DbError::Engine(err),

@@ -465,3 +465,105 @@ async fn write_back_annotations_routes_through_the_derivative_table() {
 async fn log_len(db: &Database) -> i64 {
     count(db, "SELECT COUNT(*) FROM transaction_log").await
 }
+
+/// An annotation naming a concept that is not there says which one (W7.2, D-176).
+///
+/// `write_annotations_atomic` was the one write path that returned the engine
+/// error raw. The reasoning that let it stay that way was that
+/// `analytics_annotations` carries no triggers, so no guard can fire on it and
+/// `classify` would hand back what it was given — true of the guards, and it
+/// overlooked the foreign key onto `concepts`, which SQLite enforces itself.
+///
+/// This is the failure a caller actually causes: an algorithm run against a
+/// graph read before a concept was archived out of the hot tables, or against
+/// ids that were never concepts. It arrived as `FOREIGN KEY constraint failed`
+/// with nothing to identify the row, out of a chunk of up to
+/// `chunk_rows::ANNOTATIONS`.
+#[tokio::test]
+async fn an_annotation_for_a_missing_concept_names_it() {
+    let harness = TestHarness::new();
+    let db = Database::open(&harness.db_path).await.unwrap();
+    db.upsert_concept(ConceptUpsert::new("A", "Node A").valid_from(T1))
+        .await
+        .unwrap();
+
+    // The good row is first, so the failure is reached mid-chunk and the
+    // rollback is doing real work rather than discarding an empty transaction.
+    let err = db
+        .write_analytics_annotations(vec![
+            Annotation::new("A", "louvain.community", "3"),
+            Annotation::new("ghost", "louvain.community", "4"),
+        ])
+        .await
+        .expect_err("a concept that does not exist cannot carry an annotation");
+
+    match &err {
+        DbError::NotFound(id) => assert_eq!(id, "ghost"),
+        other => panic!("expected the missing concept to be named, got {other:?}"),
+    }
+
+    // Atomic means atomic: the row that would have succeeded did not land.
+    let n: i64 = db
+        .read_conn()
+        .query("SELECT COUNT(*) FROM analytics_annotations", ())
+        .await
+        .unwrap()
+        .next()
+        .await
+        .unwrap()
+        .unwrap()
+        .get(0)
+        .unwrap();
+    assert_eq!(n, 0, "the chunk must roll back whole");
+
+    db.close().await.unwrap();
+}
+
+/// The classification is keyed on the result code, not on the message (D-176).
+///
+/// `abort_kind` matches engine error *text* because a `RAISE(ABORT)` leaves it
+/// nothing else, and its own rustdoc names the consequence: an upstream wording
+/// change silently degrades typed errors into opaque ones. A foreign key is not
+/// in that position — the engine gives it an extended result code of its own —
+/// so this classification is pinned to `SQLITE_CONSTRAINT_FOREIGNKEY` and a
+/// libSQL that rephrases its messages cannot touch it.
+///
+/// The test asserts the discrimination rather than the code: a CHECK failure on
+/// the same table shares primary code 19 and must *not* come back as a missing
+/// concept, which is what matching the primary code would have produced.
+#[tokio::test]
+async fn a_check_failure_on_the_same_table_is_not_a_missing_concept() {
+    let harness = TestHarness::new();
+    let db = Database::open(&harness.db_path).await.unwrap();
+    db.upsert_concept(ConceptUpsert::new("A", "Node A").valid_from(T1))
+        .await
+        .unwrap();
+
+    // Reach past the writer to the CHECK on `computed_at`, which the actor's
+    // own clock reading can never violate. The point is the classifier's
+    // discrimination, and there is no public path that produces this.
+    let err = db
+        .read_conn()
+        .execute(
+            "INSERT INTO analytics_annotations (concept_id, label, value, computed_at) \
+             VALUES ('A', 'l', 'v', 'not-a-timestamp')",
+            (),
+        )
+        .await
+        .expect_err("the canonical-timestamp CHECK must reject this");
+
+    assert_ne!(
+        macrame::error::classify(
+            db.read_conn(),
+            err,
+            macrame::error::WriteOp::Annotation { concept_id: "A" },
+        )
+        .await
+        .to_string(),
+        DbError::NotFound("A".to_string()).to_string(),
+        "a malformed computed_at is a different bug with a different fix"
+    );
+
+    db.close().await.unwrap();
+}
+

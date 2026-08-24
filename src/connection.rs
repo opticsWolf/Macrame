@@ -3510,6 +3510,22 @@ async fn write_edges_atomic(
 /// derivation last ran, on a table the ledger does not see. Rerunning an
 /// algorithm therefore replaces the row and advances the note, rather than
 /// versioning a concept the world did not change.
+///
+/// # Failures name the concept (0.13.3, W7.2, D-176)
+///
+/// This was the one write path in the crate that returned
+/// [`DbError::Engine`] raw, and the omission looked harmless: the table
+/// carries no triggers, so none of [`crate::error::AbortKind`]'s guards can
+/// fire on it and [`classify`] would have returned the same raw error it was
+/// given. What that reasoning missed is the foreign key onto `concepts`, which
+/// the engine enforces itself. Annotating a concept that does not exist is the
+/// one failure a caller can cause here, and it reported as
+/// `FOREIGN KEY constraint failed` with no row named — out of a chunk of up to
+/// [`chunk_rows::ANNOTATIONS`].
+///
+/// It now goes through [`classify`] with [`WriteOp::Annotation`] like every
+/// other write, and a missing concept returns [`DbError::NotFound`] carrying
+/// its id.
 async fn write_annotations_atomic(
     conn: &libsql::Connection,
     annotations: &[Annotation],
@@ -3543,9 +3559,17 @@ async fn write_annotations_atomic(
             ])
             .await;
         if let Err(e) = res {
+            let typed = classify(
+                &tx,
+                e,
+                WriteOp::Annotation {
+                    concept_id: &a.concept_id,
+                },
+            )
+            .await;
             drop(stmt);
             let _ = tx.rollback().await;
-            return Err(DbError::Engine(e));
+            return Err(typed);
         }
     }
 

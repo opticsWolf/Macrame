@@ -273,7 +273,7 @@ branching lands.** This is the one item in this document I would cut first if
 | 3.3 | Snapshot loader unbounded | Med | W8.2 | 0.14.0 |
 | 3.4 | Future `recorded_at` poisons the clock floor | Med | W7.4 | 0.14.0 |
 | 3.5 | `run_writer_actor` cannot return `Err` | Low | W7.3 | 0.14.0 |
-| 3.6 | `write_annotations_atomic` bypasses `classify` | Med | W7.2 | 0.14.0 |
+| 3.6 | `write_annotations_atomic` bypasses `classify` | Med | W7.2 | 0.13.3 ✅ |
 | 3.7 | Snapshot rename atomic but not durable | Med | W8.3 | 0.14.0 |
 | 4.1 | No anti-starvation floor on low-priority work | Med | W4.4 (counter), W10.4 (the floor itself) | 0.13.0 / 0.14.0 |
 | 4.2 | No cancellation or progress on bulk paths | Med | W7.6 | 0.14.0 |
@@ -1199,6 +1199,29 @@ sometimes and the other thing otherwise is the mixing.
 bypasses the classification the non-atomic path applies, so the same input
 produces different stored state depending on which entry point was used. One of
 the two is wrong; `classify` is the one with the tests.
+
+> **✅ Shipped 0.13.3 ([D-176](../docs/architecture/s13-decision-register.md#d-176)).**
+> It routes through `classify` with a new `WriteOp::Annotation`, and a missing
+> concept is now `DbError::NotFound(concept_id)` instead of a bare
+> `FOREIGN KEY constraint failed` out of a chunk of up to
+> `chunk_rows::ANNOTATIONS` rows.
+>
+> **The finding's stated consequence is wrong and the finding is still real.**
+> There is no non-atomic entry point — `write_analytics_annotations` is the only
+> way in — so stored state never differed. What differed was what the caller was
+> told, and that is enough.
+>
+> The omission had a *correct* argument behind it, which is why it survived:
+> `analytics_annotations` carries no triggers, so `abort_kind` can only answer
+> `NotAGuard` and `classify` would hand back what it was given. Sound about the
+> guards, silent about the foreign key onto `concepts`, which the engine enforces
+> itself. A guard vocabulary covering every guard is not one covering every
+> failure.
+>
+> The detector matches the **extended result code**, so nothing here depends on
+> wording — `abort_kind`'s one-place-for-text doctrine is unweakened rather than
+> extended. Extended and not primary: code 19 also covers the canonical-timestamp
+> CHECK on the same table, and a test pins that discrimination.
 
 **W7.3 — `run_writer_actor`'s `Err` path.** Closes §3.5. It returns
 `Result<()>` and can only ever return `Ok(())`
