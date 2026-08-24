@@ -40,14 +40,14 @@
 //! [`PyDatabase::with_db`] exists rather than each method taking its own guard.
 
 use std::path::PathBuf;
-use std::sync::{Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use pyo3::prelude::*;
-use pyo3::types::PyType;
+use pyo3::types::{PyDict, PyType};
 
 use macrame::prelude::*;
 
-use crate::errors::{closed_error, to_py};
+use crate::errors::{closed_error, to_py, to_py_bulk};
 use crate::graph;
 use crate::observe;
 use crate::rows;
@@ -56,6 +56,136 @@ use crate::temporal;
 use crate::timestamps::to_canonical;
 use crate::types::{PyAnnotation, PyAttributeMode, PyConceptUpsert, PyEdgeAssertion};
 use crate::vector;
+
+/// A flag another thread can raise to stop a running bulk write (0.13.8, W7.6).
+///
+/// `bulk_import`, `write_concepts`, `upsert_embeddings` and
+/// `write_analytics_annotations` hold the GIL released for their whole run, so
+/// the thread that called one cannot cancel it — some *other* thread has to,
+/// which is exactly what this is for. `cancel()` needs no lock beyond an atomic
+/// store and is safe to call from a signal handler, a UI callback, or a
+/// watchdog thread.
+///
+/// ```python
+/// token = macrame.CancelToken()
+/// threading.Timer(30.0, token.cancel).start()
+/// try:
+///     db.bulk_import(edges, cancel=token)
+/// except macrame.BulkCancelledError as e:
+///     print(f"stopped with {e.written} rows committed")
+/// ```
+///
+/// The stop happens at a chunk boundary. Nothing rolls back, and the rows that
+/// committed stay committed — the same boundary these four methods already
+/// have when a chunk fails.
+#[pyclass(name = "CancelToken", module = "macrame", frozen)]
+// No `Clone`: the *token* is cheap to clone and does so internally, but a
+// cloneable `#[pyclass]` opts into a by-value `FromPyObject`, and a token
+// copied on the way into a call would be a token whose `cancel()` reached
+// nothing. Taken as `PyRef` everywhere instead.
+#[derive(Default)]
+pub struct PyCancelToken {
+    pub(crate) inner: CancelToken,
+}
+
+#[pymethods]
+impl PyCancelToken {
+    #[new]
+    fn new() -> Self {
+        Self::default()
+    }
+
+    /// Ask the bulk write holding this token to stop at its next chunk
+    /// boundary. Idempotent; a token never un-cancels.
+    fn cancel(&self) {
+        self.inner.cancel();
+    }
+
+    /// Whether `cancel()` has been called.
+    #[getter]
+    fn cancelled(&self) -> bool {
+        self.inner.is_cancelled()
+    }
+
+    fn __repr__(&self) -> String {
+        format!("CancelToken(cancelled={})", self.inner.is_cancelled())
+    }
+}
+
+/// Assemble a [`BulkControl`] from the two optional keyword arguments the four
+/// chunked methods take (0.13.8, W7.6).
+///
+/// # The callback runs with the GIL re-acquired, on the ledger's thread
+///
+/// `with_db` detaches for the whole call, so a progress callback has to attach
+/// again — every chunk boundary therefore costs one GIL acquire, and the import
+/// is stalled for as long as the Python callable runs. That is the deal, it is
+/// the same deal any progress callback makes, and it is why the docstrings say
+/// to update a counter rather than write a file.
+///
+/// **A callback that raises stops the write.** The exception is captured, the
+/// token is cancelled so the loop stops at the next boundary, and it is
+/// re-raised in place of the `BulkCancelledError` that would otherwise be
+/// reported. Swallowing it was the alternative, and a progress bar whose
+/// failure silently becomes "the import finished" is worse than one that stops
+/// the import.
+fn bulk_control(
+    progress: Option<Py<PyAny>>,
+    cancel: Option<PyRef<'_, PyCancelToken>>,
+    raised: &Arc<Mutex<Option<PyErr>>>,
+) -> (BulkControl, CancelToken) {
+    // Always a real token, even when the caller passed none: the progress
+    // callback needs something to trip when it raises.
+    let token = cancel.map(|t| t.inner.clone()).unwrap_or_default();
+    let mut control = BulkControl::new().cancel_with(token.clone());
+
+    if let Some(callback) = progress {
+        let raised = Arc::clone(raised);
+        let token = token.clone();
+        control = control.on_progress(move |p| {
+            Python::attach(|py| {
+                let payload = PyDict::new(py);
+                let built = payload
+                    .set_item("written", p.written)
+                    .and_then(|()| payload.set_item("total", p.total))
+                    .and_then(|()| payload.set_item("rows", p.rows))
+                    .and_then(|()| payload.set_item("held_ms", p.held.as_secs_f64() * 1000.0))
+                    .and_then(|()| callback.call1(py, (payload,)).map(|_| ()));
+                if let Err(e) = built {
+                    *raised.lock().unwrap_or_else(|e| e.into_inner()) = Some(e);
+                    token.cancel();
+                }
+            });
+        });
+    }
+
+    (control, token)
+}
+
+/// Turn a bulk outcome into a `PyResult`, preferring an exception the progress
+/// callback raised over the cancellation it caused.
+fn bulk_result(
+    outcome: macrame::BulkResult<usize>,
+    raised: &Arc<Mutex<Option<PyErr>>>,
+) -> PyResult<usize> {
+    let callback_error = raised.lock().unwrap_or_else(|e| e.into_inner()).take();
+    match outcome {
+        Ok(n) => match callback_error {
+            // The last chunk committed before the cancellation could be seen,
+            // so the write genuinely succeeded -- but the caller's callback
+            // still blew up and they must hear about it.
+            Some(e) => Err(e),
+            None => Ok(n),
+        },
+        Err(interrupted) => Err(match callback_error {
+            Some(e) => {
+                let _ = Python::attach(|py| e.value(py).setattr("written", interrupted.written));
+                e
+            }
+            None => to_py_bulk(interrupted),
+        }),
+    }
+}
 
 /// A Macrame ledger handle.
 #[pyclass(name = "Database", module = "macrame", frozen)]
@@ -518,10 +648,36 @@ impl PyDatabase {
     /// stamp, and a reader mid-import still sees a prefix and never half a
     /// chunk — what is not promised is that two identical calls stamp
     /// identically. `write_bulk_atomic` is the escape hatch if you need that.
-    fn bulk_import(&self, py: Python<'_>, edges: Vec<PyEdgeAssertion>) -> PyResult<usize> {
+    ///
+    /// **On failure, the exception carries `written`** (0.13.8, W7.6): the
+    /// number of rows the chunks before the stop committed, which are still
+    /// committed. The exception *class* is still chosen by what went wrong, so
+    /// `except NotFoundError` catches the same thing it always did.
+    ///
+    /// `progress`, if given, is called after every chunk with one dict:
+    /// `written`, `total`, `rows`, `held_ms`. It runs on the ledger's thread
+    /// with the GIL re-acquired, so it is on the critical path — update a
+    /// counter, do not write a file. An exception raised there stops the
+    /// import and is what propagates.
+    ///
+    /// `cancel` takes a `CancelToken`. This call holds the GIL released for its
+    /// whole run, so the cancelling thread has to be a different one.
+    #[pyo3(signature = (edges, *, progress = None, cancel = None))]
+    fn bulk_import(
+        &self,
+        py: Python<'_>,
+        edges: Vec<PyEdgeAssertion>,
+        progress: Option<Py<PyAny>>,
+        cancel: Option<PyRef<'_, PyCancelToken>>,
+    ) -> PyResult<usize> {
         let edges: Vec<EdgeAssertion> = edges.into_iter().map(|e| e.inner).collect();
+        let raised = Arc::new(Mutex::new(None));
+        let (control, _token) = bulk_control(progress, cancel, &raised);
         self.with_db(py, move |db| {
-            runtime().block_on(db.bulk_import(edges)).map_err(to_py)
+            bulk_result(
+                runtime().block_on(db.bulk_import_with(edges, control)),
+                &raised,
+            )
         })
     }
 
@@ -530,12 +686,36 @@ impl PyDatabase {
     /// Every row written here is a **ledger** write: it versions the concept and
     /// lands in `transaction_log`. Derived analytics output does not belong here
     /// — see `write_analytics_annotations` and D-041.
-    fn write_concepts(&self, py: Python<'_>, concepts: Vec<PyConceptUpsert>) -> PyResult<usize> {
+    ///
+    /// **On failure, the exception carries `written`** (0.13.8, W7.6): the
+    /// number of rows the chunks before the stop committed, which are still
+    /// committed. The exception *class* is still chosen by what went wrong, so
+    /// `except NotFoundError` catches the same thing it always did.
+    ///
+    /// `progress`, if given, is called after every chunk with one dict:
+    /// `written`, `total`, `rows`, `held_ms`. It runs on the ledger's thread
+    /// with the GIL re-acquired, so it is on the critical path — update a
+    /// counter, do not write a file. An exception raised there stops the
+    /// import and is what propagates.
+    ///
+    /// `cancel` takes a `CancelToken`. This call holds the GIL released for its
+    /// whole run, so the cancelling thread has to be a different one.
+    #[pyo3(signature = (concepts, *, progress = None, cancel = None))]
+    fn write_concepts(
+        &self,
+        py: Python<'_>,
+        concepts: Vec<PyConceptUpsert>,
+        progress: Option<Py<PyAny>>,
+        cancel: Option<PyRef<'_, PyCancelToken>>,
+    ) -> PyResult<usize> {
         let concepts: Vec<ConceptUpsert> = concepts.into_iter().map(|c| c.inner).collect();
+        let raised = Arc::new(Mutex::new(None));
+        let (control, _token) = bulk_control(progress, cancel, &raised);
         self.with_db(py, move |db| {
-            runtime()
-                .block_on(db.write_concepts(concepts))
-                .map_err(to_py)
+            bulk_result(
+                runtime().block_on(db.write_concepts_with(concepts, control)),
+                &raised,
+            )
         })
     }
 
@@ -550,16 +730,33 @@ impl PyDatabase {
     /// from `ConceptUpsert`. Writing one as the other overwrote concept content
     /// with labels and recorded every analytics rerun as a fresh version of the
     /// world.
+    ///
+    /// **On failure, the exception carries `written`** (0.13.8, W7.6): the
+    /// number of rows the chunks before the stop committed, which are still
+    /// committed. The exception *class* is still chosen by what went wrong.
+    ///
+    /// `progress` is called after every chunk with one dict — `written`,
+    /// `total`, `rows`, `held_ms` — on the ledger's thread with the GIL
+    /// re-acquired, so it is on the critical path. An exception raised there
+    /// stops the write and is what propagates. `cancel` takes a `CancelToken`,
+    /// which some *other* thread must trip: this call runs with the GIL
+    /// released.
+    #[pyo3(signature = (annotations, *, progress = None, cancel = None))]
     fn write_analytics_annotations(
         &self,
         py: Python<'_>,
         annotations: Vec<PyAnnotation>,
+        progress: Option<Py<PyAny>>,
+        cancel: Option<PyRef<'_, PyCancelToken>>,
     ) -> PyResult<usize> {
         let annotations: Vec<Annotation> = annotations.into_iter().map(|a| a.inner).collect();
+        let raised = Arc::new(Mutex::new(None));
+        let (control, _token) = bulk_control(progress, cancel, &raised);
         self.with_db(py, move |db| {
-            runtime()
-                .block_on(db.write_analytics_annotations(annotations))
-                .map_err(to_py)
+            bulk_result(
+                runtime().block_on(db.write_analytics_annotations_with(annotations, control)),
+                &raised,
+            )
         })
     }
 
@@ -994,11 +1191,25 @@ impl PyDatabase {
     ///
     /// A vector whose length is not the model's declared dimension raises
     /// `DimMismatchError`, naming both.
+    ///
+    /// **On failure, the exception carries `written`** (0.13.8, W7.6): the
+    /// number of rows the chunks before the stop committed, which are still
+    /// committed. The exception *class* is still chosen by what went wrong.
+    ///
+    /// `progress` is called after every chunk with one dict — `written`,
+    /// `total`, `rows`, `held_ms` — on the ledger's thread with the GIL
+    /// re-acquired, so it is on the critical path. An exception raised there
+    /// stops the write and is what propagates. `cancel` takes a `CancelToken`,
+    /// which some *other* thread must trip: this call runs with the GIL
+    /// released.
+    #[pyo3(signature = (model, rows, *, progress = None, cancel = None))]
     fn upsert_embeddings(
         &self,
         py: Python<'_>,
         model: &str,
         rows: &Bound<'_, PyAny>,
+        progress: Option<Py<PyAny>>,
+        cancel: Option<PyRef<'_, PyCancelToken>>,
     ) -> PyResult<usize> {
         let model = vector::model_name(model)?;
         let mut decoded: Vec<(String, Vec<f32>)> = Vec::new();
@@ -1011,10 +1222,13 @@ impl PyDatabase {
             })?;
             decoded.push((id, crate::types::coerce_embedding(&embedding)?));
         }
+        let raised = Arc::new(Mutex::new(None));
+        let (control, _token) = bulk_control(progress, cancel, &raised);
         self.with_db(py, move |db| {
-            runtime()
-                .block_on(db.upsert_embeddings(&model, decoded))
-                .map_err(to_py)
+            bulk_result(
+                runtime().block_on(db.upsert_embeddings_with(&model, decoded, control)),
+                &raised,
+            )
         })
     }
 
@@ -1158,7 +1372,9 @@ impl PyDatabase {
         let model = vector::model_name(model)?;
         let query = crate::types::coerce_embedding(query)?;
         let now = self.instant(py, now)?;
-        let traversal = graph::builder(start_node, max_depth, edge_types, min_weight, None, None, None);
+        let traversal = graph::builder(
+            start_node, max_depth, edge_types, min_weight, None, None, None,
+        );
 
         let mut search =
             macrame::graph::FilteredVectorSearch::new(model, query, traversal).top_k(top_k);
@@ -1555,9 +1771,7 @@ fn to_wal_policy(obj: Option<&Bound<'_, PyAny>>) -> PyResult<macrame::WalCheckpo
 /// A negative tolerance is refused rather than saturated at zero: it can only
 /// come from arithmetic, and arithmetic that produced a negative duration has a
 /// sign error the caller should see.
-fn to_future_stamp_policy(
-    obj: Option<&Bound<'_, PyAny>>,
-) -> PyResult<macrame::FutureStampPolicy> {
+fn to_future_stamp_policy(obj: Option<&Bound<'_, PyAny>>) -> PyResult<macrame::FutureStampPolicy> {
     let Some(obj) = obj else {
         return Ok(macrame::FutureStampPolicy::Default);
     };

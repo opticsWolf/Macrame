@@ -407,3 +407,116 @@ def test_null_and_blob_cross_back_as_none_and_bytes(db):
 def test_explain_returns_the_plan(db):
     plan = db.explain("SELECT * FROM links_current WHERE source_id = 'n0'")
     assert plan and any("links_current" in line for line in plan)
+
+
+# --------------------------------------------------------------------------
+# Progress and cancellation on the chunked paths (W7.6, 0.13.8, D-181)
+# --------------------------------------------------------------------------
+
+
+def _many_concepts(n: int) -> list:
+    return [macrame.ConceptUpsert(f"b{i:05}", f"B{i}", valid_from=T0) for i in range(n)]
+
+
+def test_progress_is_reported_once_per_chunk_and_ends_at_the_total(db):
+    """The dict is the surface, so its keys are part of it."""
+    n = macrame.CHUNK_ROWS_CONCEPTS * 3
+    seen = []
+    written = db.write_concepts(_many_concepts(n), progress=seen.append)
+
+    assert written == n
+    assert len(seen) > 1, "one chunk means this is not watching a loop"
+    assert set(seen[0]) == {"written", "total", "rows", "held_ms"}
+    assert all(p["total"] == n for p in seen)
+    assert [p["written"] for p in seen] == sorted(p["written"] for p in seen)
+    assert sum(p["rows"] for p in seen) == n
+    assert seen[-1]["written"] == n
+    assert all(p["held_ms"] >= 0.0 for p in seen)
+
+
+def test_a_cancelled_token_stops_the_write_and_says_how_much_landed(db):
+    """Cancelled from the progress callback, so "after one chunk" is exact.
+
+    A timer would make this a statement about the machine, which is the mistake
+    the Rust side of this test paid for at 26 failures in 120 runs.
+    """
+    token = macrame.CancelToken()
+    n = macrame.CHUNK_ROWS_CONCEPTS * 3
+    seen = []
+
+    def watch(p):
+        seen.append(p)
+        token.cancel()
+
+    with pytest.raises(macrame.BulkCancelledError) as caught:
+        db.write_concepts(_many_concepts(n), progress=watch, cancel=token)
+
+    assert len(seen) == 1
+    assert caught.value.written == seen[0]["written"]
+    assert 0 < caught.value.written < n
+    # Cancellation is a boundary and not a rollback: the rows the exception
+    # claims are committed have to actually be there.
+    rows = db.diagnostic_query("SELECT COUNT(*) FROM concepts WHERE id LIKE 'b%'")
+    assert rows[0][0] == caught.value.written
+    assert token.cancelled is True
+
+
+def test_a_token_cancelled_before_the_call_writes_nothing(db):
+    token = macrame.CancelToken()
+    token.cancel()
+    with pytest.raises(macrame.BulkCancelledError) as caught:
+        db.write_concepts(_many_concepts(macrame.CHUNK_ROWS_CONCEPTS * 2), cancel=token)
+    assert caught.value.written == 0
+    assert db.diagnostic_query("SELECT COUNT(*) FROM concepts WHERE id LIKE 'b%'")[0][0] == 0
+
+
+def test_a_failure_partway_says_how_much_of_the_batch_survived(db):
+    """The §4.2 case, in the shape a caller meets it.
+
+    Two upserts of the same id in one chunk share a stamp, so the second is an
+    UPDATE whose `recorded_at` does not advance — `trg_concepts_monotonic_ra`.
+    Putting that pair last makes the earlier chunks commit first.
+    """
+    n = macrame.CHUNK_ROWS_CONCEPTS
+    batch = _many_concepts(n) + [
+        macrame.ConceptUpsert("dup", "First", valid_from=T0),
+        macrame.ConceptUpsert("dup", "Second", valid_from=T0),
+    ]
+    with pytest.raises(macrame.RecordedAtRegressionError) as caught:
+        db.write_concepts(batch)
+
+    # The class is still chosen by the cause -- `written` is added, not
+    # substituted, which is what keeps `except RecordedAtRegressionError`
+    # working across this change.
+    assert caught.value.written == n
+    assert db.diagnostic_query("SELECT COUNT(*) FROM concepts WHERE id = 'dup'")[0][0] == 0
+
+
+def test_a_progress_callback_that_raises_stops_the_write(db):
+    """...and propagates, rather than becoming a truncated import nobody sees."""
+    n = macrame.CHUNK_ROWS_CONCEPTS * 3
+
+    def explode(p):
+        raise ValueError("the progress bar broke")
+
+    with pytest.raises(ValueError, match="progress bar broke") as caught:
+        db.write_concepts(_many_concepts(n), progress=explode)
+
+    landed = db.diagnostic_query("SELECT COUNT(*) FROM concepts WHERE id LIKE 'b%'")[0][0]
+    assert 0 < landed < n, "the write must have stopped, not finished"
+    assert caught.value.written == landed
+
+
+def test_the_bulk_paths_take_progress_and_cancel_by_keyword_only(db):
+    """Positional would freeze the argument order of four unrelated methods."""
+    with pytest.raises(TypeError):
+        db.write_concepts(_many_concepts(2), lambda p: None)
+
+
+def test_a_cancel_token_reads_back_and_reprs(db):
+    token = macrame.CancelToken()
+    assert token.cancelled is False
+    assert "cancelled=false" in repr(token).lower()
+    token.cancel()
+    token.cancel()  # idempotent; a token never un-cancels
+    assert token.cancelled is True

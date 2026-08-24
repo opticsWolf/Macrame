@@ -242,7 +242,10 @@ async fn a_recorded_at_from_the_future_is_refused_at_open() {
     match &err {
         DbError::FutureRecordedAt { stamp, limit } => {
             assert!(stamp.starts_with("2065-"), "the stored stamp: {stamp}");
-            assert!(limit.as_str() > "2026-", "the limit must be a real timestamp: {limit}");
+            assert!(
+                limit.as_str() > "2026-",
+                "the limit must be a real timestamp: {limit}"
+            );
         }
         other => panic!("expected FutureRecordedAt, got {other:?}"),
     }
@@ -350,4 +353,3 @@ async fn a_zero_tolerance_refuses_a_stamp_that_the_default_would_accept() {
     };
     assert!(matches!(err, DbError::FutureRecordedAt { .. }), "{err:?}");
 }
-

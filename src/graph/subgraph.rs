@@ -9,7 +9,7 @@
 use std::collections::BTreeMap;
 
 use crate::connection::{Annotation, Database};
-use crate::error::{DbError, Result};
+use crate::error::{BulkResult, DbError, Result};
 
 /// Edges returned to a caller asking for a node with no edges in that direction.
 const NO_EDGES: &[EdgeRef] = &[];
@@ -616,12 +616,18 @@ impl Subgraph {
     /// label is not one.
     ///
     /// `values` is keyed by node id; nodes absent from it are not annotated.
+    ///
+    /// Inherits [`BulkInterrupted`](crate::BulkInterrupted) from the chunked
+    /// path it delegates to (0.13.8, W7.6): a write-back that fails partway has
+    /// annotated some of the nodes, and rerunning the algorithm over the whole
+    /// subgraph is only the right response because the caller can see that it
+    /// is.
     pub async fn write_back_annotations(
         &self,
         db: &Database,
         label: &str,
         values: &BTreeMap<String, String>,
-    ) -> Result<usize> {
+    ) -> BulkResult<usize> {
         let rows: Vec<Annotation> = self
             .nodes
             .keys()

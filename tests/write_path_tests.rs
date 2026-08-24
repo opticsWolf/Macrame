@@ -497,10 +497,11 @@ async fn an_annotation_for_a_missing_concept_names_it() {
         .await
         .expect_err("a concept that does not exist cannot carry an annotation");
 
-    match &err {
+    match &err.cause {
         DbError::NotFound(id) => assert_eq!(id, "ghost"),
         other => panic!("expected the missing concept to be named, got {other:?}"),
     }
+    assert_eq!(err.written, 0, "one chunk, rolled back whole");
 
     // Atomic means atomic: the row that would have succeeded did not land.
     let n: i64 = db
@@ -566,4 +567,3 @@ async fn a_check_failure_on_the_same_table_is_not_a_missing_concept() {
 
     db.close().await.unwrap();
 }
-

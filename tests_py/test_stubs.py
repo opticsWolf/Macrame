@@ -34,7 +34,10 @@ REPO = Path(__file__).resolve().parent.parent
 STUB = REPO / "python" / "macrame" / "_macrame.pyi"
 
 # Names the stub declares that have no runtime counterpart, deliberately.
-STUB_ONLY = {"Timestamp", "Embedding", "Edge"}
+# `BulkProgress` is a `TypedDict` describing the dict a `progress=` callback is
+# handed (0.13.8) — a shape a checker enforces at the call site, with no class
+# to export, which is the same reason `Timestamp` and `Embedding` are here.
+STUB_ONLY = {"Timestamp", "Embedding", "Edge", "BulkProgress"}
 
 # Inherited from `Exception`/`object`; every exception class has them and none
 # of them is this project's to describe.
@@ -117,6 +120,11 @@ def test_every_stubbed_class_matches_the_real_one_member_for_member(stub):
     """
     problems: list[str] = []
     for name, node in _classes(stub).items():
+        # A stub-only class describes a shape rather than an object — the
+        # `BulkProgress` TypedDict is the dict a `progress=` callback receives,
+        # and there is nothing at runtime to compare it against (0.13.8).
+        if name in STUB_ONLY:
+            continue
         cls = getattr(ext, name)
         # Exception attributes live on the instance, not the class — checked
         # against errors.rs by the next test instead.
@@ -158,6 +166,8 @@ def test_exception_attributes_match_the_mapping_layer(stub):
 
     problems: list[str] = []
     for name, node in _classes(stub).items():
+        if name in STUB_ONLY:
+            continue
         cls = getattr(ext, name)
         if not issubclass(cls, Exception):
             continue

@@ -49,7 +49,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyType;
 use pyo3::{create_exception, PyErr, PyTypeInfo};
 
-use macrame::DbError;
+use macrame::{BulkInterrupted, DbError};
 
 // The module name is `macrame`, not `_macrame`: it is what shows up in a
 // traceback and in `repr(exc)`, and the extension module is an implementation
@@ -366,6 +366,23 @@ create_exception!(
      is not optional."
 );
 
+// -- cancellation -----------------------------------------------------------
+
+create_exception!(
+    macrame,
+    BulkCancelledError,
+    MacrameError,
+    "A chunked bulk write stopped because a `CancelToken` handed to it was \
+     cancelled (0.13.8).\n\n\
+     Not a fault, and the only Macrame exception a caller raises on purpose. \
+     Nothing rolled back: the chunks that committed before the token was seen \
+     are committed, and `written` says how many rows those were.\n\n\
+     It is deliberately *not* an `IntegrityError` — nothing about the ledger is \
+     wrong — and deliberately not `KeyboardInterrupt` or `CancelledError`, \
+     which mean something specific to the interpreter and to asyncio \
+     respectively and are not what happened."
+);
+
 // -- BudgetError ------------------------------------------------------------
 
 create_exception!(
@@ -409,6 +426,23 @@ pub(crate) fn to_py(err: DbError) -> PyErr {
     Python::attach(|py| build(py, err))
 }
 
+/// Convert a *chunked* bulk failure, attaching `written` (0.13.8, W7.6, D-181).
+///
+/// The exception class is still chosen by the cause, so `except NotFoundError`
+/// keeps catching a missing concept whether it came from `upsert_concept` or
+/// from the middle of a 20,000-row `write_concepts`. What changes is that the
+/// instance carries the partial count — which is why this is a separate
+/// function rather than a field on every exception: the count only exists on
+/// the four paths that can commit part of a batch, and putting `written = 0` on
+/// the rest would be a claim about atomicity that no other path makes.
+pub(crate) fn to_py_bulk(err: BulkInterrupted) -> PyErr {
+    Python::attach(|py| {
+        let e = build(py, err.cause);
+        let _ = e.value(py).setattr("written", err.written);
+        e
+    })
+}
+
 /// The mapping. **No wildcard arm** — see the module docs.
 fn build(py: Python<'_>, err: DbError) -> PyErr {
     // Taken before the fields are moved out, so every exception's `str()` is
@@ -438,6 +472,14 @@ fn build(py: Python<'_>, err: DbError) -> PyErr {
         }),
 
         DbError::NotFound(id) => raise::<NotFoundError, _>(py, m, |e| e.setattr("id", id)),
+
+        // `written` is set here as well as in `to_py_bulk`, which overwrites
+        // it with the real count. Only a chunked path can raise this, so the
+        // attribute is always present -- and a cancellation with no bulk
+        // context behind it wrote nothing, which is what 0 says.
+        DbError::BulkCancelled => {
+            raise::<BulkCancelledError, _>(py, m, |e| e.setattr("written", 0usize))
+        }
 
         DbError::DimMismatch {
             got,
@@ -624,6 +666,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
         MigrationError,
         NotFoundError,
         DiagnosticConnError,
+        BulkCancelledError,
         // integrity
         OverlappingIntervalError,
         SingleOpenViolationError,

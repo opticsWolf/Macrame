@@ -636,7 +636,11 @@ async fn a_dimension_mismatch_rolls_back_its_whole_chunk() {
         )
         .await
         .unwrap_err();
-    assert!(matches!(err, DbError::DimMismatch { .. }), "got {err:?}");
+    assert!(
+        matches!(err.cause, DbError::DimMismatch { .. }),
+        "got {err:?}"
+    );
+    assert_eq!(err.written, 0, "the batch was one chunk and it rolled back");
 
     let mut rows = db
         .read_conn()
@@ -662,7 +666,7 @@ async fn embedding_an_unregistered_model_is_refused_by_name() {
         .await
         .unwrap_err();
     assert!(
-        matches!(err, DbError::ModelNotRegistered { .. }),
+        matches!(err.cause, DbError::ModelNotRegistered { .. }),
         "got {err:?}"
     );
 }

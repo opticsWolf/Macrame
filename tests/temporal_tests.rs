@@ -75,9 +75,14 @@ async fn test_monday_wednesday_friday_scenario() {
     assert_eq!(current_attrs[0].title, "Wednesday Title");
 
     // AttributeMode::AtTime returns Monday title as believed on Tuesday
-    let at_time_attrs = hydrate_attributes(&conn, &node_ids, &AsOf::recorded_at(tuesday_ts), AttributeMode::AtTime)
-        .await
-        .unwrap();
+    let at_time_attrs = hydrate_attributes(
+        &conn,
+        &node_ids,
+        &AsOf::recorded_at(tuesday_ts),
+        AttributeMode::AtTime,
+    )
+    .await
+    .unwrap();
     assert_eq!(at_time_attrs[0].title, "Monday Title");
 
     // AttributeMode::Omit returns no node attributes
@@ -1036,11 +1041,9 @@ async fn a_recorded_instant_is_refused_once_rows_have_been_archived() {
     db.upsert_concept(ConceptUpsert::new("c2", "other").valid_from(CTS))
         .await
         .unwrap();
-    db.assert_edge(
-        macrame::graph::EdgeAssertion::new("c1", "c2", "KNOWS").valid_from(CTS),
-    )
-    .await
-    .unwrap();
+    db.assert_edge(macrame::graph::EdgeAssertion::new("c1", "c2", "KNOWS").valid_from(CTS))
+        .await
+        .unwrap();
 
     let now = "2029-01-01T00:00:00.000000Z";
     let instant = "2028-01-01T00:00:00.000000Z";

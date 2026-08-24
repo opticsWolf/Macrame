@@ -115,8 +115,15 @@ async fn high_priority_writes_are_serviced_before_a_low_priority_backlog() {
     let mut backlog: Vec<Pin<Box<dyn Future<Output = Result<usize>>>>> = (0..BACKLOG)
         .map(|i| {
             let target = format!("B{i}");
-            Box::pin(db.bulk_import(vec![edge("SRC", &target, "BACKLOG", T1)]))
-                as Pin<Box<dyn Future<Output = _>>>
+            let db = &db;
+            // `map_err` rather than a second future type: this list only
+            // cares that the command was *queued*, and `BulkInterrupted`'s
+            // partial count says nothing about a one-chunk import (0.13.8).
+            Box::pin(async move {
+                db.bulk_import(vec![edge("SRC", &target, "BACKLOG", T1)])
+                    .await
+                    .map_err(DbError::from)
+            }) as Pin<Box<dyn Future<Output = _>>>
         })
         .collect();
     poll_once_each(&mut backlog).await;
@@ -218,8 +225,15 @@ async fn a_lone_high_priority_write_is_still_serviced_before_a_saturated_backlog
     let mut backlog: Vec<Pin<Box<dyn Future<Output = Result<usize>>>>> = (0..BACKLOG)
         .map(|i| {
             let target = format!("B{i}");
-            Box::pin(db.bulk_import(vec![edge("SRC", &target, "BACKLOG", T1)]))
-                as Pin<Box<dyn Future<Output = _>>>
+            let db = &db;
+            // `map_err` rather than a second future type: this list only
+            // cares that the command was *queued*, and `BulkInterrupted`'s
+            // partial count says nothing about a one-chunk import (0.13.8).
+            Box::pin(async move {
+                db.bulk_import(vec![edge("SRC", &target, "BACKLOG", T1)])
+                    .await
+                    .map_err(DbError::from)
+            }) as Pin<Box<dyn Future<Output = _>>>
         })
         .collect();
     poll_once_each(&mut backlog).await;
@@ -329,11 +343,18 @@ async fn bulk_import_is_atomic_per_chunk_not_overall() {
     let edge_count = edges.len();
     let err = db.bulk_import(edges).await.unwrap_err();
     assert!(
-        matches!(err, DbError::SingleOpenViolation { .. }),
+        matches!(err.cause, DbError::SingleOpenViolation { .. }),
         "got {err:?}"
     );
 
     let committed = count(&db, "SELECT COUNT(*) FROM links").await;
+    // W7.6: the error says how much landed, and the table is what says whether
+    // it said so truthfully. Before 0.13.8 the count existed inside the chunk
+    // loop and was discarded at the `?`, so this line could not be written.
+    assert_eq!(
+        err.written as i64, committed,
+        "the error's partial count and the committed rows must be the same          number, or the count is worse than not having one"
+    );
     assert!(
         committed > 0,
         "nothing committed -- `bulk_import` is not all-or-nothing, so a failure \
@@ -418,8 +439,12 @@ async fn a_violation_in_a_single_chunk_batch_commits_nothing() {
     ];
     let err = db.bulk_import(edges).await.unwrap_err();
     assert!(
-        matches!(err, DbError::SingleOpenViolation { .. }),
+        matches!(err.cause, DbError::SingleOpenViolation { .. }),
         "got {err:?}"
+    );
+    assert_eq!(
+        err.written, 0,
+        "one chunk failed and it was the only chunk, so nothing was written"
     );
     assert_eq!(
         count(&db, "SELECT COUNT(*) FROM links").await,
@@ -450,8 +475,12 @@ async fn write_concepts_commits_earlier_chunks_when_a_later_one_fails() {
 
     let err = db.write_concepts(concepts).await.unwrap_err();
     assert!(
-        matches!(err, DbError::RecordedAtRegression { .. }),
+        matches!(err.cause, DbError::RecordedAtRegression { .. }),
         "got {err:?}"
+    );
+    assert_eq!(
+        err.written, n,
+        "chunk one committed {n} rows and the error must say so (W7.6)"
     );
 
     assert_eq!(
@@ -601,4 +630,218 @@ async fn open_readers_do_not_block_the_writer() {
     // A fresh read sees everything the writer committed.
     assert_eq!(count(&db, "SELECT COUNT(*) FROM links").await, 32 + 1 + 32);
     assert_eq!(audit_current(db.read_conn()).await.unwrap(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// W7.6 (0.13.8, D-181): the chunk boundary the loop already has, exposed.
+// ---------------------------------------------------------------------------
+
+/// Enough edges that the loop cannot finish in one chunk at any size the
+/// controller may choose. The first chunk is always the ceiling, so three
+/// ceilings' worth is at least three chunks and usually many more.
+fn multi_chunk_edges(n: usize) -> (Vec<String>, Vec<EdgeAssertion>) {
+    let nodes: Vec<String> = std::iter::once("SRC".to_string())
+        .chain((0..n).map(|i| format!("T{i}")))
+        .collect();
+    let edges = (0..n)
+        .map(|i| edge("SRC", &format!("T{i}"), "KNOWS", T1))
+        .collect();
+    (nodes, edges)
+}
+
+/// Cancellation stops the import and the error says how much of it landed.
+///
+/// The cancel is tripped **from the progress callback**, not from a timer:
+/// "after exactly one chunk" is a fact the loop can be held to, and "after
+/// roughly 50 ms" is a fact about the machine. This is the same lesson
+/// `bulk_import_is_atomic_per_chunk_not_overall` above paid 26 failures in 120
+/// runs to learn.
+#[tokio::test]
+async fn a_cancelled_token_stops_the_import_at_the_next_chunk_boundary() {
+    let harness = TestHarness::new();
+    let db = Database::open(&harness.db_path).await.unwrap();
+
+    let (nodes, edges) = multi_chunk_edges(chunk_rows::EDGES * 3);
+    let total = edges.len();
+    seed_nodes(&db, nodes).await;
+
+    let token = CancelToken::new();
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<BulkProgress>::new()));
+    let control = BulkControl::new().cancel_with(token.clone()).on_progress({
+        let seen = std::sync::Arc::clone(&seen);
+        move |p| {
+            seen.lock().unwrap().push(p);
+            token.cancel();
+        }
+    });
+
+    let err = db.bulk_import_with(edges, control).await.unwrap_err();
+    assert!(err.was_cancelled(), "got {err:?}");
+
+    // Copied out rather than held: the guard is a `std::sync::Mutex` and the
+    // count query below is an await point.
+    let seen: Vec<BulkProgress> = seen.lock().unwrap().clone();
+    assert_eq!(
+        seen.len(),
+        1,
+        "the token was cancelled from the first chunk's callback, so the loop \
+         must not have sent a second chunk"
+    );
+    assert_eq!(
+        err.written, seen[0].written,
+        "the error's count and the last progress report are the same number"
+    );
+    assert!(
+        err.written > 0 && err.written < total,
+        "{} of {total} rows -- a cancellation that wrote nothing, or wrote \
+         everything, is not testing the boundary",
+        err.written
+    );
+    assert_eq!(
+        count(&db, "SELECT COUNT(*) FROM links").await,
+        err.written as i64,
+        "the rows the error claims are committed must actually be committed: \
+         cancellation is a boundary, not a rollback"
+    );
+    assert_eq!(audit_current(db.read_conn()).await.unwrap(), 0);
+}
+
+/// Progress arrives once per chunk, never goes backwards, and ends at the total.
+#[tokio::test]
+async fn progress_covers_every_row_exactly_once_and_ends_at_the_total() {
+    let harness = TestHarness::new();
+    let db = Database::open(&harness.db_path).await.unwrap();
+
+    let (nodes, edges) = multi_chunk_edges(chunk_rows::EDGES * 3);
+    let total = edges.len();
+    seed_nodes(&db, nodes).await;
+
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<BulkProgress>::new()));
+    let control = BulkControl::new().on_progress({
+        let seen = std::sync::Arc::clone(&seen);
+        move |p| seen.lock().unwrap().push(p)
+    });
+
+    let written = db.bulk_import_with(edges, control).await.unwrap();
+    assert_eq!(written, total);
+
+    let seen = seen.lock().unwrap();
+    assert!(
+        seen.len() > 1,
+        "{total} rows arrived in one chunk, so this test is not watching a loop"
+    );
+    for report in seen.iter() {
+        assert_eq!(
+            report.total, total,
+            "`total` is the batch, and does not move"
+        );
+    }
+    for pair in seen.windows(2) {
+        assert!(
+            pair[1].written > pair[0].written,
+            "progress went backwards or stalled: {pair:?}"
+        );
+    }
+    assert_eq!(
+        seen.iter().map(|p| p.rows).sum::<usize>(),
+        total,
+        "the per-chunk counts must partition the batch"
+    );
+    assert_eq!(
+        seen.last().unwrap().written,
+        total,
+        "the last report is the one a progress bar finishes on"
+    );
+}
+
+/// A token already cancelled writes nothing, and says nothing was written.
+#[tokio::test]
+async fn a_token_cancelled_before_the_call_commits_nothing() {
+    let harness = TestHarness::new();
+    let db = Database::open(&harness.db_path).await.unwrap();
+
+    let (nodes, edges) = multi_chunk_edges(chunk_rows::EDGES * 2);
+    seed_nodes(&db, nodes).await;
+
+    let token = CancelToken::new();
+    token.cancel();
+    let err = db
+        .bulk_import_with(edges, BulkControl::new().cancel_with(token))
+        .await
+        .unwrap_err();
+
+    assert!(err.was_cancelled(), "got {err:?}");
+    assert_eq!(err.written, 0);
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM links").await, 0);
+}
+
+/// Cancelling work that is already finished is not a failure.
+///
+/// An empty batch is the version of that the test can state without racing:
+/// there is no chunk left to stop, so the loop reports the truth, which is that
+/// it wrote everything it was given. The same arm covers a token tripped after
+/// the last chunk committed, which is otherwise a coin toss between two of the
+/// caller's own threads.
+#[tokio::test]
+async fn cancelling_a_batch_with_no_work_left_still_succeeds() {
+    let harness = TestHarness::new();
+    let db = Database::open(&harness.db_path).await.unwrap();
+
+    let token = CancelToken::new();
+    token.cancel();
+    let written = db
+        .bulk_import_with(vec![], BulkControl::new().cancel_with(token))
+        .await
+        .expect("an empty batch has nothing to cancel");
+    assert_eq!(written, 0);
+}
+
+/// The other three chunked paths carry the same count, so the guarantee is the
+/// loop's and not `bulk_import`'s.
+#[tokio::test]
+async fn every_chunked_path_reports_its_partial_count() {
+    let harness = TestHarness::new();
+    let db = Database::open(&harness.db_path).await.unwrap();
+
+    let n = chunk_rows::ANNOTATIONS * 2;
+    let concepts: Vec<ConceptUpsert> = (0..n)
+        .map(|i| ConceptUpsert::new(format!("C{i}"), format!("Concept {i}")).valid_from(T1))
+        .collect();
+
+    let token = CancelToken::new();
+    let control = BulkControl::new().cancel_with(token.clone()).on_progress({
+        let token = token.clone();
+        move |_| token.cancel()
+    });
+    let err = db.write_concepts_with(concepts, control).await.unwrap_err();
+    assert!(err.was_cancelled(), "got {err:?}");
+    assert_eq!(
+        count(&db, "SELECT COUNT(*) FROM concepts").await,
+        err.written as i64
+    );
+
+    // Annotations hang off concepts, and `ANNOTATIONS` is by far the largest
+    // of the four ceilings -- so the rest of the concepts have to land before
+    // there are enough rows for the annotation write to be more than one chunk.
+    let rest: Vec<ConceptUpsert> = (err.written..n)
+        .map(|i| ConceptUpsert::new(format!("C{i}"), format!("Concept {i}")).valid_from(T1))
+        .collect();
+    db.write_concepts(rest).await.unwrap();
+    let annotations: Vec<Annotation> = (0..n)
+        .map(|i| Annotation::new(format!("C{i}"), "louvain.community", "7"))
+        .collect();
+    let token = CancelToken::new();
+    let control = BulkControl::new().cancel_with(token.clone()).on_progress({
+        let token = token.clone();
+        move |_| token.cancel()
+    });
+    let err = db
+        .write_analytics_annotations_with(annotations, control)
+        .await
+        .unwrap_err();
+    assert!(err.was_cancelled(), "got {err:?}");
+    assert_eq!(
+        count(&db, "SELECT COUNT(*) FROM analytics_annotations").await,
+        err.written as i64
+    );
 }

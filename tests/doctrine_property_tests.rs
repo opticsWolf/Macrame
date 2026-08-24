@@ -865,7 +865,7 @@ proptest! {
                             );
                         } else {
                             prop_assert!(
-                                matches!(res, Err(DbError::DimMismatch { .. })),
+                                matches!(&res, Err(e) if matches!(e.cause, DbError::DimMismatch { .. })),
                                 "a {}-wide vector was accepted for {} (declared {}): {:?}",
                                 dim, MODELS[model].0, MODELS[model].1, res
                             );

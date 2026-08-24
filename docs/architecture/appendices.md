@@ -117,8 +117,34 @@ let held: Duration = estimated_bulk_hold(&edges);   // ~33 ms / 500 rows, ~2.2 s
 if held > BULK_ATOMIC_WARN_HOLD { /* 250 ms; the call warns above this */ }
 
 db.write_bulk_atomic(edges).await?;    // one transaction, one stamp, one stall
+
+// The four chunked paths return Result<usize, BulkInterrupted>, not Result<usize>
+// (0.13.8, W7.6, D-181). Atomic per chunk means a failure leaves a prefix
+// committed, so the error carries `written` -- the count of rows that are in
+// the database and staying there. `?` into a Result<_, DbError> still compiles
+// and drops the count, which is the caller saying they will not act on it.
 db.bulk_import(edges).await?;          // chunked up to chunk_rows::EDGES, atomic per chunk
 db.write_concepts(concepts).await?;    // chunked up to chunk_rows::CONCEPTS, atomic per chunk
+
+// ...and each has a `_with` sibling taking a BulkControl, which is how a
+// chunked write is cancelled or watched. Both act at chunk boundaries, which
+// is the seam the adaptive loop already has: bulk_import_with,
+// write_concepts_with, upsert_embeddings_with, write_analytics_annotations_with.
+let token = CancelToken::new();        // .cancel() from any thread or task
+let control = BulkControl::new()       // ...or BulkControl::new() for neither
+    .cancel_with(token.clone())        // stops at the next boundary; nothing rolls back
+    .on_progress(|p: BulkProgress| {   // p.written / p.total / p.rows / p.held
+        eprintln!("{}/{}", p.written, p.total);
+    });
+match db.bulk_import_with(more_edges, control).await {
+    Ok(n) => { /* n rows, all of them */ }
+    Err(e) => {
+        // e.written rows landed and stayed. e.was_cancelled() separates "I
+        // stopped it" from "it broke"; e.cause is the DbError either way, and
+        // CancelToken::is_cancelled reads a token back.
+        eprintln!("stopped after {}: {}", e.written, e.cause);
+    }
+}
 
 // The four constants are per-path and measured, not one shared number
 // (0.5.6, D-058), and since 0.12.0 they are CEILINGS rather than sizes

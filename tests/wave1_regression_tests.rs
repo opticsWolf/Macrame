@@ -327,9 +327,14 @@ async fn all_three_readers_agree_a_retired_concept_is_not_visible() {
         "Current: retired concept is not visible"
     );
 
-    let at_time = hydrate_attributes(db.read_conn(), &ids, &AsOf::recorded_at(NOW), AttributeMode::AtTime)
-        .await
-        .unwrap();
+    let at_time = hydrate_attributes(
+        db.read_conn(),
+        &ids,
+        &AsOf::recorded_at(NOW),
+        AttributeMode::AtTime,
+    )
+    .await
+    .unwrap();
     assert!(
         at_time.is_empty(),
         "defect AB: AtTime returned a concept retired before ts"

@@ -33,7 +33,7 @@ Conventions, applied throughout:
 
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Callable, Final, Iterator, Sequence
+from typing import Any, Callable, Final, Iterator, Sequence, TypedDict
 
 __version__: str
 
@@ -594,6 +594,42 @@ class MetricsSnapshot:
 
     def __repr__(self) -> str: ...
 
+class BulkProgress(TypedDict):
+    """One chunk's worth of progress, passed to a `progress=` callback (0.13.8).
+
+    Reported *after* the chunk commits, so `written` counts rows that are in
+    the database and will stay there even if the next chunk fails.
+    """
+
+    written: int
+    total: int
+    rows: int
+    held_ms: float
+
+class CancelToken:
+    """A flag another thread raises to stop a running chunked write (0.13.8).
+
+    The four chunked methods hold the GIL released for their whole run, so the
+    thread that called one cannot cancel it — some *other* thread has to, which
+    is what this is for. `cancel()` is an atomic store and is safe from a signal
+    handler, a UI callback, or a watchdog.
+
+        token = macrame.CancelToken()
+        threading.Timer(30.0, token.cancel).start()
+        try:
+            db.bulk_import(edges, cancel=token)
+        except macrame.BulkCancelledError as e:
+            print(f"stopped with {e.written} rows committed")
+
+    The stop lands at a chunk boundary. Nothing rolls back.
+    """
+
+    def __init__(self) -> None: ...
+    def cancel(self) -> None: ...
+    @property
+    def cancelled(self) -> bool: ...
+    def __repr__(self) -> str: ...
+
 # ----------------------------------------------------------------- the handle ---
 
 class Database:
@@ -690,9 +726,57 @@ class Database:
         overall.
         """
 
-    def bulk_import(self, edges: Sequence[EdgeAssertion]) -> int: ...
-    def write_concepts(self, concepts: Sequence[ConceptUpsert]) -> int: ...
-    def write_analytics_annotations(self, annotations: Sequence[Annotation]) -> int: ...
+    def bulk_import(
+        self,
+        edges: Sequence[EdgeAssertion],
+        *,
+        progress: Callable[[BulkProgress], object] | None = None,
+        cancel: CancelToken | None = None,
+    ) -> int:
+        """Import edges on the background channel, chunked and **atomic per
+        chunk, not overall** (D-011).
+
+        A failure partway leaves the chunks before it committed, so every
+        exception this raises carries `written`: the number of rows that are in
+        the database and staying there (0.13.8, D-181). The exception class is
+        still chosen by what went wrong — `except SingleOpenViolationError`
+        catches the same thing it always did.
+
+        `progress` is called after every chunk with one dict. It runs on the
+        ledger's thread with the GIL re-acquired, so it is on the critical path:
+        update a counter, do not write a file. An exception raised there stops
+        the import and is what propagates.
+
+        `cancel` stops the import at the next chunk boundary. Nothing rolls
+        back. This call runs with the GIL released, so whatever calls
+        `token.cancel()` has to be another thread.
+        """
+
+    def write_concepts(
+        self,
+        concepts: Sequence[ConceptUpsert],
+        *,
+        progress: Callable[[BulkProgress], object] | None = None,
+        cancel: CancelToken | None = None,
+    ) -> int:
+        """Upsert many concepts on the background channel, chunked (D-011).
+
+        Every row is a ledger write. Chunked, so see `bulk_import` for what
+        `written`, `progress` and `cancel` mean — they are the chunk loop's
+        properties and not this method's.
+        """
+
+    def write_analytics_annotations(
+        self,
+        annotations: Sequence[Annotation],
+        *,
+        progress: Callable[[BulkProgress], object] | None = None,
+        cancel: CancelToken | None = None,
+    ) -> int:
+        """Write derived analytics results, chunked and off-ledger (D-041).
+
+        Chunked, so see `bulk_import` for `written`, `progress` and `cancel`.
+        """
 
     # -- reads -----------------------------------------------------------------
     def traverse_ids(
@@ -827,8 +911,20 @@ class Database:
         """
 
     def upsert_embeddings(
-        self, model: str, rows: Sequence[tuple[str, Embedding]]
-    ) -> int: ...
+        self,
+        model: str,
+        rows: Sequence[tuple[str, Embedding]],
+        *,
+        progress: Callable[[BulkProgress], object] | None = None,
+        cancel: CancelToken | None = None,
+    ) -> int:
+        """Store or replace vectors for `model`, chunked (D-048).
+
+        The longest-running write the crate has — DiskANN maintenance makes an
+        embedding its most expensive row — and therefore the one most likely to
+        want `cancel`. See `bulk_import` for what `written`, `progress` and
+        `cancel` mean.
+        """
     def search_vector(
         self, model: str, query: Embedding, *, top_k: int = 10
     ) -> list[VectorHit]: ...
@@ -921,6 +1017,16 @@ class NotFoundError(MacrameError):
 class DiagnosticConnError(MacrameError):
     path: str
     reason: str
+
+class BulkCancelledError(MacrameError):
+    """A chunked bulk write stopped because a `CancelToken` was cancelled.
+
+    Not a fault, and the only Macrame exception a caller raises on purpose.
+    Nothing rolled back: `written` is how many rows the chunks before the stop
+    committed, and they are still committed (0.13.8).
+    """
+
+    written: int
 
 class InvalidEdgeTypeError(ValidationError):
     edge_type: str

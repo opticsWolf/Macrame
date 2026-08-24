@@ -420,9 +420,7 @@ ORDER BY w.node_id;
         if crate::temporal::replay::hot_log_answers_for(conn, ts).await? {
             return Ok(());
         }
-        Err(crate::error::DbError::RecordedInstantUnreachable {
-            ts: ts.to_string(),
-        })
+        Err(crate::error::DbError::RecordedInstantUnreachable { ts: ts.to_string() })
     }
 
     /// The recursive `walk` CTE — **the one copy** (T0.1).
@@ -655,7 +653,10 @@ mod tests {
             .as_of_recorded(TUE)
             .resolved_mode()
             .expect_err("past belief plus present text must not be a default");
-        assert!(matches!(err, DbError::AttributeModeUnstated { .. }), "{err:?}");
+        assert!(
+            matches!(err, DbError::AttributeModeUnstated { .. }),
+            "{err:?}"
+        );
     }
 
     /// A traversal about now still defaults, so no existing caller changes.
@@ -678,7 +679,9 @@ mod tests {
         let now = "2026-06-01T00:00:00.000000Z";
         assert_eq!(TraversalBuilder::new("a").valid_instant(now), now);
         assert_eq!(
-            TraversalBuilder::new("a").as_of_valid(TUE).valid_instant(now),
+            TraversalBuilder::new("a")
+                .as_of_valid(TUE)
+                .valid_instant(now),
             TUE
         );
         assert_eq!(
@@ -737,12 +740,20 @@ mod tests {
 
         let plain = TraversalBuilder::new("a").edge_types(vec!["CITES".into()]);
         assert_eq!(plain.edge_type_base(), 5);
-        assert!(plain.edge_filter_sql().contains("?5"), "{}", plain.edge_filter_sql());
+        assert!(
+            plain.edge_filter_sql().contains("?5"),
+            "{}",
+            plain.edge_filter_sql()
+        );
         assert_eq!(plain.bind_params(now).len(), 5);
 
         let folded = plain.clone().as_of_recorded(TUE);
         assert_eq!(folded.edge_type_base(), 6);
-        assert!(folded.edge_filter_sql().contains("?6"), "{}", folded.edge_filter_sql());
+        assert!(
+            folded.edge_filter_sql().contains("?6"),
+            "{}",
+            folded.edge_filter_sql()
+        );
         assert_eq!(folded.bind_params(now).len(), 6);
     }
 

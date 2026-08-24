@@ -41,6 +41,10 @@ EXPECTED: dict[str, tuple[str, str, dict]] = {
         "MacrameError",
         {"path": "sample.db", "reason": "sample-reason"},
     ),
+    # Cancellation is not an integrity failure, so it hangs off the base class
+    # directly (0.13.8, D-181). `written` is set by the four chunked paths that
+    # can raise it, not by the sample, which is why it is not listed here.
+    "BulkCancelled": ("BulkCancelledError", "MacrameError", {}),
     # -- integrity --
     "OverlappingInterval": (
         "OverlappingIntervalError",

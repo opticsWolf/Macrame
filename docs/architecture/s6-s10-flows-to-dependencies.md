@@ -192,8 +192,14 @@ pub enum DbError {
     // -- 0.13.5: the clock floor --
     #[error("the newest recorded_at in this database is {stamp}, past the limit {limit} …")]
     FutureRecordedAt { stamp: String, limit: String },
+
+    // -- 0.13.8: the caller's own stop --
+    #[error("the bulk write was cancelled between chunks")]
+    BulkCancelled,
 }
 ```
+
+**The four chunked paths do not return this enum bare (0.13.8, W7.6, [D-181](s13-decision-register.md#d-181)).** `bulk_import`, `write_concepts`, `upsert_embeddings` and `write_analytics_annotations` are atomic per chunk and not overall, so a failure partway leaves a committed prefix — and until 0.13.8 they said only *that* it failed. The count existed inside the chunk loop, was used to size the next chunk, and was discarded at the `?`. They now return `Result<usize, BulkInterrupted>`, where `BulkInterrupted` is that same `DbError` plus the `written` count; `From<BulkInterrupted> for DbError` keeps `?` working in a function returning `Result<T>`, at the cost of the count, which is the caller's decision to take rather than the crate's to make for them. `BulkCancelled` is the one variant a caller produces deliberately — a `CancelToken` read at a chunk boundary — and it is a stop, not a fault: nothing rolls back, and `written` is where the import got to.
 
 The error philosophy is threefold. Nothing panics across the API boundary — every public method returns Result, and internal invariant breaches are debugassert!-only. Trigger-raised aborts are parsed at the connection layer into their typed variants, so a caller catching SingleOpenViolation never string-matches a SQLite message. And errors that describe data carry the coordinates of that data — ReplayCorrupt names its seq_id, CurrentDrift names its count — because an error a maintainer cannot act on is decoration.
 

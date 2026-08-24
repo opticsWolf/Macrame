@@ -360,9 +360,97 @@ pub enum DbError {
          it and inspect it; that inherits the floor rather than repairing it"
     )]
     FutureRecordedAt { stamp: String, limit: String },
+
+    /// A chunked bulk write stopped because its caller asked it to (0.13.8,
+    /// W7.6, [D-181]).
+    ///
+    /// Not a failure of the ledger, and the only [`DbError`] a caller can
+    /// *cause on purpose*. Nothing is rolled back: the chunks that committed
+    /// before the token was seen are committed, which is the same per-chunk
+    /// boundary [`crate::Database::bulk_import`] already documents. How many
+    /// rows those were is on [`BulkInterrupted::written`], the error this
+    /// arrives inside.
+    ///
+    /// It carries no count of its own precisely so that there is one place to
+    /// read the count from, whether the stop was a cancellation or a
+    /// constraint.
+    ///
+    /// [D-181]: ../../docs/architecture/s13-decision-register.md#d-181
+    #[error("the bulk write was cancelled between chunks")]
+    BulkCancelled,
 }
 
 pub type Result<T> = std::result::Result<T, DbError>;
+
+/// A chunked bulk write that stopped partway, and how much of it landed
+/// (0.13.8, W7.6, [D-181]).
+///
+/// The four chunked paths — [`crate::Database::bulk_import`],
+/// [`write_concepts`], [`upsert_embeddings`] and
+/// [`write_analytics_annotations`] — are atomic per chunk and not overall, so a
+/// failure at row 19,000 of 20,000 leaves the first 18,000-odd rows committed.
+/// Until 0.13.8 they returned a bare [`DbError`] and the caller was told only
+/// that it failed: the count was computed, used to size the next chunk, and
+/// dropped on the floor at the `?`. A caller who then retried the whole batch
+/// re-wrote everything that had already landed, and one who skipped it lost the
+/// tail.
+///
+/// This is why those four return `Result<usize, BulkInterrupted>` rather than
+/// [`Result`]. `From<BulkInterrupted> for DbError` exists so `?` still works in
+/// a function returning [`Result`] — that conversion is how a caller says the
+/// count does not interest them, and it says so at the call site instead of
+/// silently.
+///
+/// [`write_concepts`]: crate::Database::write_concepts
+/// [`upsert_embeddings`]: crate::Database::upsert_embeddings
+/// [`write_analytics_annotations`]: crate::Database::write_analytics_annotations
+/// [D-181]: ../../docs/architecture/s13-decision-register.md#d-181
+#[derive(Debug)]
+pub struct BulkInterrupted {
+    /// Rows the chunks that finished before the stop committed, and which are
+    /// still committed. Zero is an ordinary value: the first chunk can fail.
+    pub written: usize,
+    /// Why it stopped. [`DbError::BulkCancelled`] if the caller asked;
+    /// otherwise whatever the failing chunk raised, unchanged — this is not a
+    /// new error, it is the same one with the count attached.
+    pub cause: DbError,
+}
+
+impl std::fmt::Display for BulkInterrupted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} ({} row(s) committed before the stop, and still committed)",
+            self.cause, self.written
+        )
+    }
+}
+
+impl std::error::Error for BulkInterrupted {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.cause)
+    }
+}
+
+impl From<BulkInterrupted> for DbError {
+    /// Discards `written`. That is the point: a caller writing `?` into a
+    /// function returning [`Result`] has decided the partial count is not
+    /// something they will act on, and this puts that decision at the place it
+    /// is taken rather than inside the crate.
+    fn from(e: BulkInterrupted) -> Self {
+        e.cause
+    }
+}
+
+impl BulkInterrupted {
+    /// Whether the stop was the caller's own cancellation rather than a fault.
+    pub fn was_cancelled(&self) -> bool {
+        matches!(self.cause, DbError::BulkCancelled)
+    }
+}
+
+/// What the four chunked bulk paths return (0.13.8, W7.6).
+pub type BulkResult<T> = std::result::Result<T, BulkInterrupted>;
 
 /// A guard abort recognised by its message (§4.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -423,7 +511,9 @@ pub enum WriteOp<'a> {
     /// (D-058) — so the guard vocabulary [`abort_kind`] speaks has nothing to
     /// say about it. What it does carry is a foreign key onto `concepts`, and
     /// that is the failure a caller can actually cause.
-    Annotation { concept_id: &'a str },
+    Annotation {
+        concept_id: &'a str,
+    },
 }
 
 /// `SQLITE_CONSTRAINT_FOREIGNKEY` — `SQLITE_CONSTRAINT | (3 << 8)`.
@@ -566,7 +656,72 @@ mod tests {
         assert!(!stored.contains("batch"), "{stored}");
 
         let in_batch = sample_overlap(true).to_string();
-        assert!(in_batch.contains("this same batch also asserts"), "{in_batch}");
+        assert!(
+            in_batch.contains("this same batch also asserts"),
+            "{in_batch}"
+        );
         assert!(!in_batch.contains("recorded"), "{in_batch}");
+    }
+
+    /// The count is the whole reason this type exists, so it has to be in the
+    /// sentence a caller sees, not only in a field they have to know about
+    /// (0.13.8, W7.6).
+    #[test]
+    fn a_partial_bulk_failure_says_how_much_landed() {
+        let e = BulkInterrupted {
+            written: 18_935,
+            cause: DbError::NotFound("ghost".into()),
+        };
+        let text = e.to_string();
+        assert!(text.contains("node ghost not found"), "{text}");
+        assert!(text.contains("18935"), "{text}");
+    }
+
+    /// Cancellation is not a fault, and the type says which it was without the
+    /// caller matching on a variant.
+    #[test]
+    fn cancellation_is_distinguishable_from_a_failure() {
+        assert!(BulkInterrupted {
+            written: 7,
+            cause: DbError::BulkCancelled,
+        }
+        .was_cancelled());
+        assert!(!BulkInterrupted {
+            written: 7,
+            cause: DbError::WriterUnavailable,
+        }
+        .was_cancelled());
+    }
+
+    /// `?` into a `Result<_, DbError>` keeps the cause and drops the count.
+    /// Both halves of that are deliberate; this pins them.
+    #[test]
+    fn converting_to_a_db_error_keeps_the_cause_and_loses_the_count() {
+        let e = BulkInterrupted {
+            written: 400,
+            cause: DbError::SingleOpenViolation {
+                source_id: "a".into(),
+                target_id: "b".into(),
+                edge_type: "KNOWS".into(),
+            },
+        };
+        let cause: DbError = e.into();
+        assert!(matches!(cause, DbError::SingleOpenViolation { .. }));
+        assert!(!cause.to_string().contains("400"));
+    }
+
+    /// The error chain reaches the cause, so `anyhow`-style reporters print
+    /// both lines rather than only the wrapper's.
+    #[test]
+    fn the_cause_is_reachable_as_an_error_source() {
+        use std::error::Error;
+        let e = BulkInterrupted {
+            written: 1,
+            cause: DbError::BulkCancelled,
+        };
+        assert_eq!(
+            e.source().map(ToString::to_string).as_deref(),
+            Some("the bulk write was cancelled between chunks")
+        );
     }
 }

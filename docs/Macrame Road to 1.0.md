@@ -276,7 +276,7 @@ branching lands.** This is the one item in this document I would cut first if
 | 3.6 | `write_annotations_atomic` bypasses `classify` | Med | W7.2 | 0.13.3 ✅ |
 | 3.7 | Snapshot rename atomic but not durable | Med | W8.3 | 0.14.0 |
 | 4.1 | No anti-starvation floor on low-priority work | Med | W4.4 (counter), W10.4 (the floor itself) | 0.13.0 / 0.14.0 |
-| 4.2 | No cancellation or progress on bulk paths | Med | W7.6 | 0.14.0 |
+| 4.2 | No cancellation or progress on bulk paths | Med | W7.6 | 0.14.0 ✅ |
 | 4.3 | `metrics` off by default | High | W4.5 | 0.13.0 |
 | 4.4 | Metrics surface frozen by accident | High | W4.2, W4.3 | 0.13.0 |
 | 4.5 | No WAL / checkpoint surface | Med | W5.2 | 0.13.0 |
@@ -1324,6 +1324,41 @@ so a caller whose 20,000-row import fails at row 19,000 is told only that it
 failed. Return the partial count in the error. Cancellation is the larger half —
 a `CancellationToken` checked between chunks, which the chunk loop's shape
 already makes natural.
+
+> **✅ Shipped 0.13.8 ([D-181](../docs/architecture/s13-decision-register.md#d-181)).**
+> Both halves, on all four chunked paths — `bulk_import`, `write_concepts`,
+> `upsert_embeddings` and `write_analytics_annotations` — because the defect is
+> `low_chunked`'s and not `bulk_import`'s.
+>
+> **The count comes back in a new error type, not the existing enum.** The four
+> now return `Result<usize, BulkInterrupted>`, where `BulkInterrupted` is
+> `{ written, cause }`. A new `DbError` variant was the obvious move and is the
+> wrong one: every existing `matches!(err, DbError::SingleOpenViolation { .. })`
+> would keep compiling and quietly stop matching, which is the worst outcome
+> available to a change whose point is that callers should see *more*. A
+> distinct type breaks those call sites at compile time instead — four of them
+> in this repo's own suite, each of which wanted `.cause`. `From<BulkInterrupted>
+> for DbError` keeps `?` working and drops the count, which puts the decision to
+> ignore it at the call site.
+>
+> **Cancellation turned out to be the smaller half, not the larger one.** The
+> chunk loop is already between transactions several times a second, so a
+> `CancelToken` is one atomic load per chunk and needs no dependency — the item
+> guessed right about the loop's shape. What the item did not anticipate is that
+> the check has to sit *after* the "no rows left" test: a token tripped once the
+> last chunk has committed reports success, because a race between two of the
+> caller's own threads should not decide whether a finished import counts as one.
+>
+> `BulkProgress` (`written`, `total`, `rows`, `held`) after every commit, with
+> `held` being the actor's own measurement — the number the D-058 controller
+> steers on, not a wall-clock approximation of it.
+>
+> Python gets `progress=` and `cancel=` keyword-only on all four, a `CancelToken`
+> class, `BulkCancelledError`, and a `written` attribute on every exception these
+> paths raise. Two facts are the binding's own: the call holds the GIL released
+> for its whole run, so the cancelling thread is by construction a different one;
+> and a progress callback that raises cancels the write and propagates, rather
+> than letting a broken progress bar read as a finished import.
 
 **W7.7 — Record D-155:** which axis `as_of` now means, and what a caller who
 wants the other one calls instead.

@@ -120,6 +120,7 @@ fn _macrame(m: &Bound<'_, PyModule>) -> PyResult<()> {
     vector::register(m)?;
 
     m.add_class::<database::PyDatabase>()?;
+    m.add_class::<database::PyCancelToken>()?;
 
     // convention (D-068/D-091): `Database::raw()` is deliberately NOT on this
     // list and must not be added. It hands back a write-capable connection the

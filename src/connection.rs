@@ -2,14 +2,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::error::{classify, DbError, Result, WriteOp};
-use crate::util::clock::FutureStampPolicy;
+use crate::error::{classify, BulkInterrupted, BulkResult, DbError, Result, WriteOp};
 use crate::graph::edge::EdgeAssertion;
 use crate::integrity::{rebuild_current, RebuildReport};
 use crate::schema::migrations;
 use crate::temporal::archive::{archive, rehydrate, ArchiveReport, RehydrateReport};
 use crate::temporal::interval::Interval;
 use crate::temporal::snapshot::{self, SnapshotCadence};
+use crate::util::clock::FutureStampPolicy;
 use crate::util::clock::{Clock, SystemClock};
 use crate::util::timestamp;
 use crate::vector::ModelName;
@@ -181,6 +181,147 @@ pub struct ChunkOutcome {
     pub rows: usize,
     /// How long the actor held the write lock for them.
     pub held: std::time::Duration,
+}
+
+/// A flag a caller can raise to stop a chunked bulk write (0.13.8, W7.6, D-181).
+///
+/// Cheap to clone and safe to set from any thread, which is the whole point: the
+/// task running the import is the one thing that cannot cancel it. Hand a clone
+/// to whatever *can* — a signal handler, a UI thread, a timeout task — and it
+/// takes effect at the next chunk boundary.
+///
+/// **A boundary, not an abort.** Nothing rolls back and no in-flight
+/// transaction is interrupted: the loop notices between chunks and stops
+/// sending. The chunks that committed stay committed, and
+/// [`BulkInterrupted::written`](crate::BulkInterrupted::written) says how many
+/// rows those were. That is the same per-chunk boundary
+/// [`Database::bulk_import`] already documents, so cancellation adds a reason to
+/// stop and no new failure mode.
+///
+/// Setting it after the last chunk has committed does nothing — a finished
+/// write reports success, because it succeeded.
+#[derive(Clone, Debug, Default)]
+pub struct CancelToken(Arc<std::sync::atomic::AtomicBool>);
+
+impl CancelToken {
+    /// A token that has not been cancelled.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Ask the bulk write holding a clone of this token to stop at its next
+    /// chunk boundary. Idempotent; a token never un-cancels.
+    pub fn cancel(&self) {
+        // `Relaxed` on both sides is sufficient and deliberate: nothing is
+        // published *through* this flag. The rows are ordered by the database
+        // and the chunk results by the response channel, so the only thing the
+        // reader needs is to observe the store eventually, which every ordering
+        // guarantees.
+        self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Whether [`Self::cancel`] has been called on this token or any clone.
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+/// One chunk's worth of progress, handed to the callback on
+/// [`BulkControl::on_progress`] (0.13.8, W7.6).
+///
+/// Reported *after* the chunk has committed, so `written` is a count of rows
+/// that are in the database and will stay there even if the next chunk fails.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BulkProgress {
+    /// Rows committed so far, across every chunk including this one.
+    pub written: usize,
+    /// Rows in the batch the caller passed. `written` reaching this means the
+    /// last chunk has committed.
+    pub total: usize,
+    /// Rows this chunk wrote. Not a constant: the loop resizes chunks against
+    /// [`CHUNK_BUDGET`] as it measures them (D-058).
+    pub rows: usize,
+    /// How long the actor held the write lock for this chunk — the same figure
+    /// the controller steers on, measured inside the actor (see
+    /// [`ChunkOutcome`]).
+    pub held: std::time::Duration,
+}
+
+/// Cancellation and progress for the four chunked bulk paths (0.13.8, W7.6,
+/// D-181).
+///
+/// Default is "neither", which is what [`Database::bulk_import`] and its three
+/// siblings pass. The `_with` variants take one of these:
+///
+/// ```no_run
+/// # use macrame::{BulkControl, CancelToken, Database};
+/// # async fn f(db: &Database, edges: Vec<macrame::prelude::EdgeAssertion>) {
+/// let token = CancelToken::new();
+/// let stopper = token.clone();
+/// tokio::spawn(async move {
+///     tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+///     stopper.cancel();
+/// });
+///
+/// let control = BulkControl::new()
+///     .cancel_with(token)
+///     .on_progress(|p| println!("{}/{} rows", p.written, p.total));
+///
+/// match db.bulk_import_with(edges, control).await {
+///     Ok(n) => println!("imported {n}"),
+///     Err(e) => println!("stopped after {}: {}", e.written, e.cause),
+/// }
+/// # }
+/// ```
+///
+/// **The callback runs on the importing task, between chunks.** It is therefore
+/// on the critical path: whatever it does is time the next chunk is not being
+/// sent in. Printing or updating a counter is what it is for; a blocking write
+/// is not, and neither is anything that calls back into the same `Database`,
+/// which would deadlock the loop against a channel it is itself draining.
+#[derive(Default, Clone)]
+pub struct BulkControl {
+    cancel: Option<CancelToken>,
+    on_progress: Option<Arc<dyn Fn(BulkProgress) + Send + Sync>>,
+}
+
+impl std::fmt::Debug for BulkControl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BulkControl")
+            .field("cancel", &self.cancel)
+            .field("on_progress", &self.on_progress.is_some())
+            .finish()
+    }
+}
+
+impl BulkControl {
+    /// Neither cancellation nor progress — what the plain bulk methods pass.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Stop at the next chunk boundary when `token` is cancelled.
+    pub fn cancel_with(mut self, token: CancelToken) -> Self {
+        self.cancel = Some(token);
+        self
+    }
+
+    /// Call `f` after every chunk commits. See the note on [`BulkControl`]
+    /// about what this closure is allowed to do.
+    pub fn on_progress(mut self, f: impl Fn(BulkProgress) + Send + Sync + 'static) -> Self {
+        self.on_progress = Some(Arc::new(f));
+        self
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancel.as_ref().is_some_and(CancelToken::is_cancelled)
+    }
+
+    fn report(&self, progress: BulkProgress) {
+        if let Some(f) = &self.on_progress {
+            f(progress);
+        }
+    }
 }
 
 /// Smallest chunk the adaptive loop will fall to (0.12.0, W2).
@@ -1855,9 +1996,30 @@ impl Database {
     /// A consequence worth planning for: the chunk boundaries — and so the
     /// `recorded_at` stamps this import writes — depend on how fast the machine
     /// was, not only on how many edges were passed (§5.1.6).
-    pub async fn bulk_import(&self, edges: Vec<EdgeAssertion>) -> Result<usize> {
-        let edges = normalize_all(edges)?;
-        self.low_chunked(edges, chunk_rows::EDGES, |chunk, responder| {
+    ///
+    /// Returns [`BulkInterrupted`] rather than [`DbError`] on failure, because
+    /// a path that is not all-or-nothing owes its caller the count of what
+    /// landed (0.13.8, W7.6). `?` into a `Result<_, DbError>` still compiles
+    /// and drops the count, which is the caller's decision to take.
+    ///
+    /// [`Self::bulk_import_with`] adds cancellation and per-chunk progress.
+    pub async fn bulk_import(&self, edges: Vec<EdgeAssertion>) -> BulkResult<usize> {
+        self.bulk_import_with(edges, BulkControl::new()).await
+    }
+
+    /// [`Self::bulk_import`] with cancellation and progress (0.13.8, W7.6,
+    /// D-181).
+    ///
+    /// The chunk boundaries this path already has are what make both possible:
+    /// the loop is between transactions several times a second, which is where
+    /// a token can be read and a callback run without holding anything.
+    pub async fn bulk_import_with(
+        &self,
+        edges: Vec<EdgeAssertion>,
+        control: BulkControl,
+    ) -> BulkResult<usize> {
+        let edges = normalize_all(edges).map_err(before_any_chunk)?;
+        self.low_chunked(edges, chunk_rows::EDGES, control, |chunk, responder| {
             LowPriCommand::BulkImportChunk { chunk, responder }
         })
         .await
@@ -1875,14 +2037,31 @@ impl Database {
     /// releases, so the crate had a `write_annotations` that wrote concepts
     /// sitting beside a `write_analytics_annotations` that wrote annotations
     /// (D-075).
-    pub async fn write_concepts(&self, concepts: Vec<ConceptUpsert>) -> Result<usize> {
+    ///
+    /// Chunked, so it returns [`BulkInterrupted`] and its `written` count on
+    /// failure (0.13.8, W7.6); [`Self::write_concepts_with`] adds cancellation
+    /// and progress.
+    pub async fn write_concepts(&self, concepts: Vec<ConceptUpsert>) -> BulkResult<usize> {
+        self.write_concepts_with(concepts, BulkControl::new()).await
+    }
+
+    /// [`Self::write_concepts`] with cancellation and progress (0.13.8, W7.6).
+    pub async fn write_concepts_with(
+        &self,
+        concepts: Vec<ConceptUpsert>,
+        control: BulkControl,
+    ) -> BulkResult<usize> {
         let concepts: Vec<ConceptUpsert> = concepts
             .into_iter()
             .map(ConceptUpsert::normalized)
-            .collect::<Result<_>>()?;
-        self.low_chunked(concepts, chunk_rows::CONCEPTS, |chunk, responder| {
-            LowPriCommand::WriteConceptsChunk { chunk, responder }
-        })
+            .collect::<Result<_>>()
+            .map_err(before_any_chunk)?;
+        self.low_chunked(
+            concepts,
+            chunk_rows::CONCEPTS,
+            control,
+            |chunk, responder| LowPriCommand::WriteConceptsChunk { chunk, responder },
+        )
         .await
     }
 
@@ -1955,12 +2134,29 @@ impl Database {
     /// [`DbError::DimMismatch`] if a vector's length is not the declared
     /// dimension. The dimension is read from the schema once per chunk (D-037):
     /// the crate keeps no registry of its own to fall out of date.
+    ///
+    /// Chunked, so it returns [`BulkInterrupted`] and its `written` count on
+    /// failure (0.13.8, W7.6). A 50,000-vector backfill is the longest-running
+    /// write the crate has, which makes it the one most likely to be cancelled
+    /// — [`Self::upsert_embeddings_with`] is how.
     pub async fn upsert_embeddings(
         &self,
         model: &ModelName,
         rows: Vec<(String, Vec<f32>)>,
-    ) -> Result<usize> {
-        self.low_chunked(rows, chunk_rows::EMBEDDINGS, |chunk, responder| {
+    ) -> BulkResult<usize> {
+        self.upsert_embeddings_with(model, rows, BulkControl::new())
+            .await
+    }
+
+    /// [`Self::upsert_embeddings`] with cancellation and progress (0.13.8,
+    /// W7.6).
+    pub async fn upsert_embeddings_with(
+        &self,
+        model: &ModelName,
+        rows: Vec<(String, Vec<f32>)>,
+        control: BulkControl,
+    ) -> BulkResult<usize> {
+        self.low_chunked(rows, chunk_rows::EMBEDDINGS, control, |chunk, responder| {
             LowPriCommand::UpsertEmbeddingChunk {
                 model: model.clone(),
                 chunk,
@@ -2096,10 +2292,31 @@ impl Database {
     /// per-chunk fidelity boundary of §5.1.6 — a partially written pass is
     /// recoverable by rerunning, which is the property that makes derived state
     /// safe to write this way and assertions not.
-    pub async fn write_analytics_annotations(&self, annotations: Vec<Annotation>) -> Result<usize> {
-        self.low_chunked(annotations, chunk_rows::ANNOTATIONS, |chunk, responder| {
-            LowPriCommand::WriteAnalyticsChunk { chunk, responder }
-        })
+    ///
+    /// Chunked, so it returns [`BulkInterrupted`] and its `written` count on
+    /// failure (0.13.8, W7.6); [`Self::write_analytics_annotations_with`] adds
+    /// cancellation and progress.
+    pub async fn write_analytics_annotations(
+        &self,
+        annotations: Vec<Annotation>,
+    ) -> BulkResult<usize> {
+        self.write_analytics_annotations_with(annotations, BulkControl::new())
+            .await
+    }
+
+    /// [`Self::write_analytics_annotations`] with cancellation and progress
+    /// (0.13.8, W7.6).
+    pub async fn write_analytics_annotations_with(
+        &self,
+        annotations: Vec<Annotation>,
+        control: BulkControl,
+    ) -> BulkResult<usize> {
+        self.low_chunked(
+            annotations,
+            chunk_rows::ANNOTATIONS,
+            control,
+            |chunk, responder| LowPriCommand::WriteAnalyticsChunk { chunk, responder },
+        )
         .await
     }
 
@@ -2366,27 +2583,64 @@ impl Database {
     /// bound being a duration rather than a promise.
     ///
     /// The last chunk's outcome is discarded, there being no next chunk to size.
+    /// The chunk loop behind all four bulk paths.
+    ///
+    /// **Every exit carries `written`** (0.13.8, W7.6, D-181). It used to
+    /// carry it only out of the success arm: the three error paths were `?` on
+    /// a [`DbError`], which discards the local, so a caller whose 20,000-row
+    /// import failed in the last chunk learned that it failed and not that
+    /// 19,000 rows were already in the database. The count was never expensive
+    /// to keep — it is right there, and the loop needs it anyway to size the
+    /// next chunk.
     async fn low_chunked<T>(
         &self,
         items: Vec<T>,
         ceiling: usize,
+        control: BulkControl,
         make: impl Fn(Vec<T>, oneshot::Sender<Result<ChunkOutcome>>) -> LowPriCommand,
-    ) -> Result<usize> {
+    ) -> BulkResult<usize> {
+        let total = items.len();
         let mut items = items.into_iter();
         let mut size = ceiling.max(1);
         let mut written = 0usize;
         loop {
             let chunk: Vec<T> = items.by_ref().take(size).collect();
             if chunk.is_empty() {
+                // Emptiness is checked before cancellation on purpose: a token
+                // raised after the last chunk committed is asking to stop work
+                // that is already done, and reporting that as a failure would
+                // make a race between the caller's two threads decide whether a
+                // complete import counts as one.
                 return Ok(written);
             }
+            // Between chunks, never inside one. Nothing is rolled back and no
+            // transaction is interrupted -- the loop simply stops sending, and
+            // the prefix that committed is the same kind of prefix a failure
+            // would have left.
+            if control.is_cancelled() {
+                return Err(BulkInterrupted {
+                    written,
+                    cause: DbError::BulkCancelled,
+                });
+            }
+            let stop = |cause: DbError| BulkInterrupted { written, cause };
             let (tx, rx) = oneshot::channel();
             self.lowpri_tx
                 .send(make(chunk, tx))
                 .await
-                .map_err(|_| DbError::WriterUnavailable)?;
-            let outcome = rx.await.map_err(|_| DbError::WriterDroppedResponder)??;
+                .map_err(|_| stop(DbError::WriterUnavailable))?;
+            let outcome = match rx.await {
+                Err(_) => return Err(stop(DbError::WriterDroppedResponder)),
+                Ok(Err(e)) => return Err(stop(e)),
+                Ok(Ok(outcome)) => outcome,
+            };
             written += outcome.rows;
+            control.report(BulkProgress {
+                written,
+                total,
+                rows: outcome.rows,
+                held: outcome.held,
+            });
             size = next_chunk_size(size, outcome.held, CHUNK_BUDGET, CHUNK_FLOOR, ceiling);
         }
     }
@@ -2528,6 +2782,16 @@ impl Drop for Database {
             );
         }
     }
+}
+
+/// A failure before the first chunk was sent, which committed nothing.
+///
+/// Normalisation runs over the whole batch up front, so its errors are the one
+/// class the chunk loop never sees — and they are still [`BulkInterrupted`],
+/// because a caller matching on one error type should not have to match on two
+/// to find out that nothing landed (0.13.8, W7.6).
+fn before_any_chunk(cause: DbError) -> BulkInterrupted {
+    BulkInterrupted { written: 0, cause }
 }
 
 fn normalize_all(edges: Vec<EdgeAssertion>) -> Result<Vec<EdgeAssertion>> {
@@ -2779,9 +3043,7 @@ async fn run_writer_actor(
 /// means something outside the crate reached in and stopped it. That is not a
 /// gentler condition than a panic and must not read as one.
 fn writer_exit(joined: std::result::Result<(), tokio::task::JoinError>) -> Result<()> {
-    joined.map_err(|e| {
-        DbError::WriterStopped(format!("the write actor did not exit cleanly: {e}"))
-    })
+    joined.map_err(|e| DbError::WriterStopped(format!("the write actor did not exit cleanly: {e}")))
 }
 
 /// One command's hold: the timer, its label, and the counters it reports to.
@@ -4161,7 +4423,10 @@ mod tests {
         let joined = handle.await;
         std::panic::set_hook(prev);
 
-        assert!(joined.is_err(), "the task must have panicked for this to test anything");
+        assert!(
+            joined.is_err(),
+            "the task must have panicked for this to test anything"
+        );
 
         match writer_exit(joined) {
             Err(DbError::WriterStopped(reason)) => {
@@ -4183,5 +4448,55 @@ mod tests {
     async fn a_writer_that_finished_normally_closes_clean() {
         let handle = tokio::spawn(async {});
         assert!(writer_exit(handle.await).is_ok());
+    }
+
+    /// A token is a handle to one flag, not a value that is copied (0.13.8,
+    /// W7.6). The clone the caller keeps and the clone the import holds have to
+    /// be the same flag, or `cancel()` reaches nothing.
+    #[test]
+    fn a_cloned_token_cancels_the_original() {
+        let token = CancelToken::new();
+        let held_by_the_import = token.clone();
+        assert!(!held_by_the_import.is_cancelled());
+        token.cancel();
+        assert!(held_by_the_import.is_cancelled());
+        // And it stays cancelled: there is no un-cancel, deliberately, because
+        // a token that could be reset would let a second import inherit a
+        // decision made about the first.
+        token.cancel();
+        assert!(held_by_the_import.is_cancelled());
+    }
+
+    /// The default control is the one the plain bulk methods pass, and it must
+    /// never stop a write.
+    #[test]
+    fn the_default_control_neither_cancels_nor_reports() {
+        let control = BulkControl::new();
+        assert!(!control.is_cancelled());
+        // No callback, so this is a no-op rather than a panic on an `unwrap`.
+        control.report(BulkProgress {
+            written: 1,
+            total: 1,
+            rows: 1,
+            held: std::time::Duration::ZERO,
+        });
+    }
+
+    /// The callback receives what it was promised, once per call to `report`.
+    #[test]
+    fn progress_reaches_the_callback_unchanged() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let control = BulkControl::new().on_progress({
+            let seen = Arc::clone(&seen);
+            move |p| seen.lock().unwrap().push(p)
+        });
+        let sample = BulkProgress {
+            written: 180,
+            total: 900,
+            rows: 90,
+            held: std::time::Duration::from_millis(12),
+        };
+        control.report(sample);
+        assert_eq!(*seen.lock().unwrap(), vec![sample]);
     }
 }

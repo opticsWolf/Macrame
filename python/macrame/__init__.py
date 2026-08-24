@@ -84,6 +84,8 @@ from ._macrame import (
     AttributeMode,
     AttributeModeUnstatedError,
     BudgetError,
+    BulkCancelledError,
+    CancelToken,
     ChainCheck,
     CheckpointReport,
     ConceptUpsert,
@@ -141,6 +143,8 @@ from ._macrame import (
 __all__ = [
     # handle
     "Database",
+    # bulk control (W7.6)
+    "CancelToken",
     # value types
     "ConceptUpsert",
     "EdgeAssertion",
@@ -194,6 +198,7 @@ __all__ = [
     "DiagnosticConnError",
     # integrity
     "OverlappingIntervalError",
+    "BulkCancelledError",
     "SingleOpenViolationError",
     "NegativeEdgeWeightError",
     "CurrentDriftError",

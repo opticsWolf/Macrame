@@ -67,6 +67,7 @@ pub(crate) const DB_ERROR_VARIANTS: &[&str] = &[
     "WriterStopped",
     "RecordedAtRegression",
     "ArchiveSessionLeaked",
+    "BulkCancelled",
 ];
 
 #[pyfunction]
@@ -188,6 +189,7 @@ fn sample(name: &str) -> Option<DbError> {
         // tells the reader to `DROP TABLE <marker>`, so a sample carrying a
         // fake name would make the remedy assertion pass against a string no
         // user could ever run.
+        "BulkCancelled" => DbError::BulkCancelled,
         "ArchiveSessionLeaked" => DbError::ArchiveSessionLeaked {
             marker: "macrame_archive_session".into(),
         },
