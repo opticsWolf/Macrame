@@ -1222,6 +1222,16 @@ the two is wrong; `classify` is the one with the tests.
 > wording — `abort_kind`'s one-place-for-text doctrine is unweakened rather than
 > extended. Extended and not primary: code 19 also covers the canonical-timestamp
 > CHECK on the same table, and a test pins that discrimination.
+>
+> **Carried, not closed: this covers the annotation path only.** `links` and
+> `concepts` carry foreign keys too, and a violation on either still surfaces as
+> the engine's own `FOREIGN KEY constraint failed` naming no row. §3.6 named one
+> path and this closes that path; the argument for closing it applies to the
+> other two unchanged, and they were left because each has its own guards and
+> its own tests and W7.2's scope was this one. Recorded here as well as in
+> [D-176](../docs/architecture/s13-decision-register.md#d-176), because a
+> rejection inside a register entry is reasoned but not tracked, and this one
+> should be picked up rather than rediscovered.
 
 **W7.3 — `run_writer_actor`'s `Err` path.** Closes §3.5. It returns
 `Result<()>` and can only ever return `Ok(())`
