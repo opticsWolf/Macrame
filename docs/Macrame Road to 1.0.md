@@ -292,7 +292,7 @@ branching lands.** This is the one item in this document I would cut first if
 | F-28 | No `ANALYZE`; planner runs on default selectivity | High | W2.1, W2.2 | 0.13.0 |
 | F-29 | Plan-pinning fixture has no rows and no statistics | High | W2.4 | 0.13.0 |
 | F-30 | Autocheckpoint perturbs the chunk controller | Med | W5.3 | 0.13.0 |
-| F-31 | `search_vector` returns retired concepts; `keyword_search` does not | High | W9.3 | 0.14.0 |
+| F-31 | `search_vector` returns retired concepts; `keyword_search` does not | High | W9.3 | 0.13.18 ✅ |
 | F-32 | No search surface filters concept valid time | Med | W9.4, W9.5 | 0.14.0 |
 | F-33 | The 2-D index question is unasked and the obvious answer does not fit | Med | W10.6 | 0.14.0 |
 | F-34 | No declarative surface; three qualifiers × four builders | Low | W13 | 0.15.0 |
@@ -1732,6 +1732,36 @@ the retired rows — the escalation `FilteredVectorSearch::run_post_filter`
 already implements for exactly this problem — or `top_k` becomes a ceiling
 rather than a count. The former, because the latter is a silent behaviour change
 for every existing caller, and because the machinery exists two modules away.
+
+
+> **✅ Shipped 0.13.18 (recorded as
+> [D-191](../docs/architecture/s13-decision-register.md#d-191)).**
+>
+> **The plan's design, taken as written.** `search_vector` joins `concepts` and
+> applies one predicate, so `hybrid_search`'s vector arm and `PostFilter` are
+> fixed by construction rather than by being remembered.
+>
+> **There were three readers, not two — the item's finding rather than its
+> implementation.** `FilteredVectorSearch::run_pre_filter` scores candidate
+> rows straight out of the embedding table and never touches `search_vector`.
+> Fixing only `search_vector` would have left `search_filtered` honouring a
+> retirement under `PostFilter` and ignoring it under `PreFilterCTE` — a wrong
+> answer selected by a byte estimate, which reproduces on one machine and not
+> the next. The predicate is a spliced constant and the third reader splices it
+> too; with that arm reverted the gate fails at k=1 with the two strategies
+> returning different concepts.
+>
+> **`top_k` is a count and stays one.** The escalation is a loop rather than
+> the up-front selectivity estimate, because nothing else on this path needs
+> the corpus size and computing it up front would put a `COUNT(*)` on every
+> vector search to serve the case that almost never arises. Termination is by
+> exhaustion: k′ doubles until the index has been asked for the whole table, at
+> which point what came back **is** every visible neighbour.
+>
+> **Deferred deliberately:** `hybrid_search`'s inheritance is asserted in W9.6,
+> which covers all four surfaces at once. `quickref` also carried two stale
+> signatures in the same block — `keyword_search` and `reciprocal_rank_fusion`
+> — corrected here.
 
 **W9.4 — search reads at an instant, or says it does not.** Closes F-32.
 `search_vector`, `keyword_search` and `hybrid_search` gain an optional valid-time

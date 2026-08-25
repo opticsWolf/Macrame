@@ -702,3 +702,78 @@ async fn a_backfill_larger_than_one_chunk_lands_completely() {
     let stored: i64 = got.next().await.unwrap().unwrap().get(0).unwrap();
     assert_eq!(stored as usize, n);
 }
+
+/// **A retired concept is not a search result, and `top_k` is still a count**
+/// (W9.3, F-31).
+///
+/// `keyword_search` has carried `AND c.retired = 0` since it was written;
+/// `search_vector` never did, so the same retirement was invisible to one arm
+/// of `hybrid_search` and plainly visible to the other. The ledger says
+/// retirement is what *stops belief* in a concept, and a reader that returns it
+/// anyway is reporting something the ledger says is not there.
+///
+/// **The second assertion is the one with a design decision behind it.**
+/// `vector_top_k` chooses `k` rows before any predicate of ours can see them,
+/// so filtering afterwards returns fewer than `k` — and `top_k` quietly
+/// becoming a ceiling is a behaviour change for every existing caller. Asking
+/// for 2 with a retired concept sitting second must return **two** live
+/// neighbours, which is only possible if the index was asked for more than two.
+#[tokio::test]
+async fn a_retired_concept_is_not_a_vector_search_result() {
+    const LATER: &str = "2026-02-01T00:00:00.000000Z";
+
+    let harness = TestHarness::new();
+    let (_db, conn) = seeded(&harness).await;
+    let m = model();
+    register_model(&conn, &m, 4).await.unwrap();
+
+    // Nearest to farthest: c0, c1, c2.
+    upsert_embedding(&conn, &m, "c0", &[1.0, 0.0, 0.0, 0.0])
+        .await
+        .unwrap();
+    upsert_embedding(&conn, &m, "c1", &[0.9, 0.1, 0.0, 0.0])
+        .await
+        .unwrap();
+    upsert_embedding(&conn, &m, "c2", &[0.5, 0.5, 0.0, 0.0])
+        .await
+        .unwrap();
+
+    // The interesting position: second-nearest, so it is inside any top-2 the
+    // index would choose and outside nothing.
+    conn.execute(
+        "UPDATE concepts SET retired = 1, recorded_at = ?1 WHERE id = 'c1'",
+        libsql::params![LATER],
+    )
+    .await
+    .unwrap();
+
+    let all = search_vector(&conn, &[1.0, 0.0, 0.0, 0.0], &m, 3)
+        .await
+        .unwrap();
+    assert_eq!(
+        all.iter()
+            .map(|h| h.concept_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["c0", "c2"],
+        "a retired concept is not a result"
+    );
+
+    let two = search_vector(&conn, &[1.0, 0.0, 0.0, 0.0], &m, 2)
+        .await
+        .unwrap();
+    assert_eq!(
+        two.iter()
+            .map(|h| h.concept_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["c0", "c2"],
+        "top_k is a count, not a ceiling: the index must be asked for more than \
+         k when the filter takes rows out of it"
+    );
+
+    // And the embedding is still there. Retirement is a statement about belief
+    // in the concept, not a licence to delete a derived row (Doctrine VII).
+    assert_eq!(
+        count(&conn, &format!("SELECT COUNT(*) FROM {}", m.table())).await,
+        3
+    );
+}

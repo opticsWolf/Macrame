@@ -425,6 +425,17 @@ impl FilteredVectorSearch {
 
     /// Exact distances over the candidate rows, ordered, limited to `top_k`.
     ///
+    /// **It joins `concepts` for the same reason `search_vector` does** (0.13.18,
+    /// W9.3, [D-191](../../docs/architecture/s13-decision-register.md#d-191)).
+    /// This is the *third* reader of an embedding table, and the plan that
+    /// closed F-31 named two — the argument for one predicate applied where the
+    /// join is holds here exactly, and without it the two strategies would
+    /// disagree about a retired concept, which is worse than both being wrong.
+    /// `the_strategy_never_changes_the_answer` is the gate that says so.
+    ///
+    /// No `k'` inflation is needed on this path: the filter and the `LIMIT` are
+    /// in one statement, so the limit already applies to survivors.
+    ///
     /// Candidate ids are carried in the statement as bound parameters, never
     /// spliced. A TEMP table would be the natural staging and is unavailable
     /// under `PRAGMA query_only` (measured: `SQLITE_READONLY (8)`); a bound
@@ -451,11 +462,14 @@ impl FilteredVectorSearch {
             let sql = format!(
                 "SELECT e.concept_id, vector_distance_cos(e.embedding, ?1)
                    FROM {table} AS e
+                   JOIN concepts AS c ON c.id = e.concept_id
                   WHERE e.concept_id IN ({ids})
+                    AND {visible}
                   ORDER BY 2 ASC
                   LIMIT {k}",
                 table = self.model.table(),
                 ids = placeholders.join(", "),
+                visible = crate::vector::search::VISIBLE_CONCEPT,
                 k = self.top_k,
             );
 

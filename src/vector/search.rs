@@ -123,7 +123,22 @@ pub(crate) async fn upsert_embedding_chunk(
     }
 }
 
-/// Top-k nearest neighbours for `query_vec` under `model` (§5.9).
+/// **The visibility predicate every vector read applies** (0.13.18, W9.3,
+/// [D-191](../../docs/architecture/s13-decision-register.md#d-191)).
+///
+/// Written once and spliced, because the alternative is what produced F-31:
+/// [`crate::vector::keyword_search`] carried `AND c.retired = 0` from the day it
+/// was written and nothing propagated the obligation to the vector arm, so one
+/// half of `hybrid_search` saw a retirement and the other did not.
+///
+/// It is bound to the alias **`c`**, and every query splicing it joins
+/// `concepts AS c`. That join is an inner join and is not a second filter: the
+/// embedding tables carry a foreign key to `concepts` ([§4.6](../../docs/architecture/s4-schema.md)),
+/// so a vector with no concept behind it cannot exist and the join drops
+/// nothing on its own.
+pub(crate) const VISIBLE_CONCEPT: &str = "c.retired = 0";
+
+/// Top-k nearest **visible** neighbours for `query_vec` under `model` (§5.9).
 ///
 /// Goes through `vector_top_k`, which consults the DiskANN index, rather than
 /// scanning the table and sorting: the index is what §9's "top-10 over 100K
@@ -131,6 +146,30 @@ pub(crate) async fn upsert_embedding_chunk(
 /// over the whole table is linear in the corpus no matter how small `k` is.
 /// `vector_top_k` yields base-table rowids, so the distance is recomputed on the
 /// k rows it selects — k distance evaluations, not one per concept.
+///
+/// # `top_k` is a count, and keeping it one is the whole of the loop
+///
+/// The index chooses its `k` rows before the visibility predicate can see them,
+/// so a filter applied afterwards returns fewer than `k` whenever a retired
+/// concept is among them. Letting `top_k` become a *ceiling* would be a silent
+/// behaviour change for every existing caller, so the index is asked for a
+/// larger `k'` instead — the escalation
+/// [`crate::graph::FilteredVectorSearch`] already performs against the same
+/// problem, and the inflation `CostEstimator::k_prime` computes from
+/// selectivity.
+///
+/// It runs **only when the first pass comes up short**, which is the case where
+/// something was actually filtered out. A corpus with nothing retired — the
+/// overwhelmingly common one — pays one query and no count, which is why the
+/// loop is here rather than a selectivity estimate computed up front: that
+/// would put two `COUNT(*)`s on every search to serve the case that almost
+/// never arises.
+///
+/// Termination is by exhaustion, not by a retry budget. `k'` doubles until the
+/// index has been asked for the whole table, and a `k'` at or above the row
+/// count means what came back **is** every visible neighbour — a complete
+/// answer, not a truncated one. The row count is read at most once and only on
+/// the escalating path.
 pub async fn search_vector(
     conn: &libsql::Connection,
     query_vec: &[f32],
@@ -142,29 +181,77 @@ pub async fn search_vector(
     }
     let blob = encode_for_model(conn, model, query_vec).await?;
 
+    // `?2` is what the index is asked for and `?3` is what the caller asked
+    // for; they are the same on the first pass and diverge on escalation.
     let sql = format!(
         "SELECT e.concept_id, vector_distance_cos(e.embedding, ?1)
            FROM vector_top_k('{index}', ?1, ?2) AS t
            JOIN {table} AS e ON e.rowid = t.id
-          ORDER BY 2 ASC",
+           JOIN concepts AS c ON c.id = e.concept_id
+          WHERE {VISIBLE_CONCEPT}
+          ORDER BY 2 ASC
+          LIMIT ?3",
         index = model.index(),
         table = model.table(),
     );
 
-    let mut rows = conn
-        .query(&sql, libsql::params![blob, top_k as i64])
-        .await?;
+    let mut k_prime = top_k;
+    let mut indexed: Option<usize> = None;
 
-    let mut results = Vec::new();
-    while let Some(row) = rows.next().await? {
-        results.push(VectorSearchResult {
-            concept_id: row.get(0)?,
-            // The distance is computed by the engine over a non-null F32_BLOB
-            // column, so a null here would mean the schema is not what we think.
-            score: row.get::<f64>(1)? as f32,
-        });
+    loop {
+        let mut rows = conn
+            .query(
+                &sql,
+                libsql::params![blob.clone(), k_prime as i64, top_k as i64],
+            )
+            .await?;
+
+        let mut results = Vec::new();
+        while let Some(row) = rows.next().await? {
+            results.push(VectorSearchResult {
+                concept_id: row.get(0)?,
+                // The distance is computed by the engine over a non-null
+                // F32_BLOB column, so a null here would mean the schema is not
+                // what we think.
+                score: row.get::<f64>(1)? as f32,
+            });
+        }
+
+        if results.len() >= top_k {
+            return Ok(results);
+        }
+
+        let n = match indexed {
+            Some(n) => n,
+            None => {
+                let n = indexed_rows(conn, model).await?;
+                indexed = Some(n);
+                n
+            }
+        };
+        // The index has already been asked for everything it holds, so this is
+        // every visible neighbour there is.
+        if k_prime >= n {
+            return Ok(results);
+        }
+        k_prime = k_prime.saturating_mul(2).min(n);
     }
-    Ok(results)
+}
+
+/// How many vectors `model` holds — the ceiling `search_vector` escalates to.
+///
+/// Read lazily and at most once per search: see [`search_vector`] for why it is
+/// not computed up front.
+async fn indexed_rows(conn: &libsql::Connection, model: &ModelName) -> Result<usize> {
+    let n: i64 = conn
+        .query(&format!("SELECT COUNT(*) FROM {}", model.table()), ())
+        .await?
+        .next()
+        .await?
+        .map(|row| row.get(0))
+        .transpose()?
+        .unwrap_or(0);
+    Ok(n.max(0) as usize)
 }
 
 /// Validate a vector against the model's declared dimension, then encode it.

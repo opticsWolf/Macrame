@@ -557,14 +557,14 @@ impl HybridSearch {
     pub async fn execute(&self, conn) -> Result<Vec<HybridHit>>
 }
 
-pub fn reciprocal_rank_fusion(vector_ranks, keyword_ranks, corpus_size) -> Result<Vec<HybridHit>>
-pub async fn keyword_search(conn, query, model, k, ts) -> Result<Vec<HybridHit>>
+pub fn reciprocal_rank_fusion(vector_ranks, keyword_ranks, rrf_k) -> Vec<(String, f64)>
+pub async fn keyword_search(conn, query, top_k) -> Result<Vec<(String, f64)>>
 pub fn escape_fts5_query(input: &str) -> String
 ```
 
 **`register_model()`**: Creates per-model embedding table + DiskANN index in one transaction. Model names are validated as SQL identifiers.
 
-**`search_vector()`**: Calls `vector_top_k` and `vector_distance_cos`. Returns cosine distances.
+**`search_vector()`**: Calls `vector_top_k` and `vector_distance_cos`. Returns cosine distances. Joins `concepts` and excludes retired ones (0.13.18, [D-191](architecture/s13-decision-register.md#d-191)); `top_k` remains a count, so the index is re-asked for a larger k′ when the filter takes rows out of a pass. `hybrid_search` inherits this because its vector arm *is* `search_vector`; `PreFilterCTE` splices the same predicate rather than inheriting it.
 
 **`FilteredVectorSearch`**: Two strategies — `PostFilter` (retrieve generous k′, then post-filter) and `PreFilterCTE` (materialize candidate set, then exact distance scan). `TwoPhaseTempTable` removed (D-050). Strategy chosen by `CostEstimator` based on byte budget. Strategy may never change the answer.
 

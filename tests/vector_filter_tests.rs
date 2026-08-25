@@ -395,3 +395,83 @@ async fn an_unreachable_filter_returns_nothing_rather_than_everything() {
     assert!(got.is_empty(), "a filter matching nothing returned {got:?}");
     db.close().await.unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// Visibility: the acceptance gate above, with a retirement in it (W9.3, F-31)
+// ---------------------------------------------------------------------------
+
+/// **A retirement is invisible to the strategy choice, because it is applied
+/// where the join is** (W9.3, F-31).
+///
+/// F-31 is that `search_vector` returned retired concepts while `keyword_search`
+/// did not. Fixing only `search_vector` would have moved the inconsistency
+/// rather than removed it: `run_pre_filter` is a **third** reader of an
+/// embedding table, it never goes through `search_vector`, and a filtered
+/// search would then have answered differently depending on which strategy the
+/// cost model happened to pick. Two readers disagreeing is a bug; two readers
+/// disagreeing *as a function of a byte estimate* is a bug that reproduces on
+/// one machine and not the next.
+///
+/// The retired nodes are the **nearest** reachable ones, so they are inside
+/// every `top_k` here rather than sitting harmlessly past the cut, and `top_k`
+/// is still required to be a count: k live neighbours, not k minus however many
+/// were retired.
+#[tokio::test]
+async fn a_retirement_is_invisible_to_the_strategy_choice() {
+    let reachable: Vec<usize> = (0..20).collect();
+    let retired = [0usize, 1, 2];
+
+    let harness = TestHarness::new();
+    let db = fixture(&harness, &reachable).await;
+    db.write_concepts(
+        retired
+            .iter()
+            .map(|&i| {
+                ConceptUpsert::new(node_id(i), "N")
+                    .valid_from(TS)
+                    .retired(true)
+            })
+            .collect(),
+    )
+    .await
+    .unwrap();
+
+    for k in [1usize, 3, 10] {
+        let base = search(query()).top_k(k);
+
+        let post = base
+            .clone()
+            .strategy(VectorFilterStrategy::PostFilter)
+            .execute(db.read_conn(), TS)
+            .await
+            .unwrap();
+        let pre = base
+            .clone()
+            .strategy(VectorFilterStrategy::PreFilterCTE)
+            .execute(db.read_conn(), TS)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            ids(&post),
+            ids(&pre),
+            "the strategies disagree about a retired concept at k={k}"
+        );
+
+        // The nearest `k` reachable nodes that are still believed in.
+        let expected: Vec<String> = reachable
+            .iter()
+            .filter(|i| !retired.contains(i))
+            .take(k)
+            .map(|&i| node_id(i))
+            .collect();
+        assert_eq!(
+            ids(&pre),
+            expected,
+            "retired concepts must be absent and top_k must still be a count \
+             (k={k})"
+        );
+    }
+
+    db.close().await.unwrap();
+}
