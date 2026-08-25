@@ -147,6 +147,14 @@ fn placeholders(first: usize, count: usize) -> String {
 /// [`AttributeMode::Current`] ignores both axes by definition — it is the
 /// *stated* choice to read live text under a historical topology, which
 /// `TraversalBuilder` makes the caller make rather than fall into (D-085).
+///
+/// # Errors
+///
+/// [`DbError::RecordedInstantUnreachable`] when `as_of.recorded` is set under
+/// [`AttributeMode::AtTime`] and rows have been archived out of the hot log
+/// (0.13.16, W9.1, [D-189](../../docs/architecture/s13-decision-register.md#d-189)).
+/// Only the `recorded` row of the table above can raise it; the other three
+/// read live `concepts` and never the log, so an archive cannot shorten them.
 pub async fn hydrate_attributes(
     conn: &libsql::Connection,
     node_ids: &[String],
@@ -249,6 +257,11 @@ async fn hydrate_current(
 /// would answer something else entirely — today's belief about validity, wearing
 /// the past's title — which is the exact conflation W7.1 exists to end.
 ///
+/// **It reads the hot log only, and refuses what the hot log cannot answer**
+/// (0.13.16, W9.1). See the guard at the top of the body: this is the same
+/// refusal [`crate::graph::TraversalBuilder::as_of_recorded`] makes, at the
+/// second surface that folds `transaction_log`.
+///
 /// The window partitions on `entity_id` alone and is sound doing so only because
 /// `table_name = 'concepts'` is already in the `WHERE` — the discriminator is
 /// applied by the filter instead of by the partition, so the concept/link
@@ -261,6 +274,21 @@ async fn hydrate_at_time(
     ts: &str,
     valid: Option<&str>,
 ) -> Result<HashMap<String, NodeAttributes>> {
+    // §3.2, closed in 0.13.16 (W9.1, D-189). The fold below reads the *hot*
+    // log, and `archive` physically moves superseded rows out of it -- which is
+    // precisely the rows a past instant asks for. Without this the answer was a
+    // shorter `Vec`, and a missing element here is indistinguishable from
+    // retired and from never having existed.
+    //
+    // Applied where the read is rather than at whichever caller remembered.
+    // `TraversalBuilder::execute_ids` already checks before its own fold, so
+    // `execute` now pays for two, and that is the right way round: the two
+    // folds are separately reachable, and a guard that lives at the caller is
+    // one the next caller does not inherit.
+    if !crate::temporal::replay::hot_log_answers_for(conn, ts).await? {
+        return Err(DbError::RecordedInstantUnreachable { ts: ts.to_string() });
+    }
+
     let mut found = HashMap::new();
 
     for chunk in node_ids.chunks(HYDRATE_CHUNK) {

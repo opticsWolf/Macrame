@@ -269,7 +269,7 @@ branching lands.** This is the one item in this document I would cut first if
 | 2.5 | `Subgraph` string-keyed adjacency | Low | W10.3 | 0.14.0 |
 | 2.6 | `reject_overlaps_within` O(n²) | Med | W7.5 | 0.13.6 ✅ |
 | 3.1 | `as_of` mixes valid time and transaction time | High | W5.6 / W7.1 | both |
-| 3.2 | `AtTime` degrades silently after archive | Med | W9.1 | 0.14.0 |
+| 3.2 | `AtTime` degrades silently after archive | Med | W9.1 | 0.13.16 ✅ |
 | 3.3 | Snapshot loader unbounded | Med | W8.2 | 0.13.12 ✅ |
 | 3.4 | Future `recorded_at` poisons the clock floor | Med | W7.4 | 0.13.5 ✅ |
 | 3.5 | `run_writer_actor` cannot return `Err` | Low | W7.3 | 0.13.4 ✅ |
@@ -1641,6 +1641,37 @@ union the cold log into the fold, or return a named horizon error. **The error
 is acceptable and silence is not** — Doctrine III says assertions are superseded,
 not deleted, and a reconstruction that quietly omits superseded state is
 reporting something the doctrine says cannot happen.
+
+
+> **✅ Shipped 0.13.16 (recorded as
+> [D-189](../docs/architecture/s13-decision-register.md#d-189)).**
+>
+> **The error, as the item says.** `hydrate_at_time` folds the hot
+> `transaction_log`; `archive` moves *superseded* rows out of it, which is
+> exactly what a past instant asks for. The newest row per entity never moves,
+> so `reconstruct(now)` is safe by construction and this arm looked safe with
+> it. For a `ts` back in an archived generation the fold found nothing, the
+> entity was dropped, and the return type is a `Vec` in which absent means
+> retired, means never existed, and means *the answer is in the other file*.
+>
+> **Nothing new was invented.** `hot_log_answers_for` and
+> `RecordedInstantUnreachable` are W7.1's, written in 0.13.2 for
+> `TraversalBuilder::as_of_recorded`. The crate had the right refusal and one
+> of the two surfaces that fold the log had it — the one that arrived first.
+> The guard now sits at the read rather than at the caller, so `execute` pays
+> the reach test twice; `hydrate_attributes` is `pub` and reachable without any
+> traversal, and a guard that lives at the caller is one the next caller does
+> not inherit.
+>
+> **Scoped to the arm that folds.** `AtTime` has four cells and three of them
+> read live `concepts`, which an archive cannot shorten — a concept is
+> archivable only when retired, and the live arms filter retired. The test
+> asserts that half too.
+>
+> **§5.6 had three stale claims**, all corrected here: *"never touches the
+> log"*, the pre-0.13.2 `ts` signature, and a `tracing::warn!` D-085 replaced
+> with a typed error in 0.6.0. `quickref` carried the same signature and the
+> wrong return type.
 
 **W9.2 — Prove it.** A test that archives, then reconstructs across the horizon,
 and asserts the chosen behaviour. This is the finding most likely to be

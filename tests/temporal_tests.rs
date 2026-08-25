@@ -1089,3 +1089,93 @@ async fn a_recorded_instant_is_refused_once_rows_have_been_archived() {
 
     db.close().await.unwrap();
 }
+
+/// **`AttributeMode::AtTime` must not answer from a log the archive has taken
+/// rows out of** (W9.1, §3.2).
+///
+/// The fixture is the one shape that makes the failure visible: three
+/// generations of one concept an hour of transaction time apart, an archive
+/// cutoff between the second and the third, and an instant back in the *first*
+/// generation. `LOG_ARCHIVABLE` keeps the newest row per entity, so the hot log
+/// is left holding only `third` — and a fold bounded at `00:30` finds nothing
+/// at all, because the row that was true then is in the other file.
+///
+/// The pre-fix behaviour was `Ok(vec![])`: a concept that exists, was not
+/// retired, and had a title at the instant asked about, reported as absent by
+/// being missing from a `Vec`. Indistinguishable at the call site from retired
+/// and from never having existed.
+#[tokio::test]
+async fn hydrating_at_a_recorded_instant_refuses_once_rows_have_been_archived() {
+    use macrame::prelude::*;
+    use std::time::Duration;
+
+    const EPOCH: &str = "1970-01-01T00:00:00.000000Z";
+    /// Inside the first generation: what was believed here is archived.
+    const INSTANT: &str = "1970-01-01T00:30:00.000000Z";
+    /// Between the second generation and the third.
+    const CUTOFF: &str = "1970-01-01T01:30:00.000000Z";
+
+    let harness = TestHarness::new();
+    let db = harness.db_with_fake_clock().await;
+
+    for title in ["first", "second", "third"] {
+        db.upsert_concept(ConceptUpsert::new("c1", title).valid_from(EPOCH))
+            .await
+            .unwrap();
+        harness.advance(Duration::from_secs(3_600));
+    }
+
+    let ids = vec!["c1".to_string()];
+
+    // Before archiving, the hot log holds all three and the instant is
+    // answerable — the assertion that keeps the fix from being "always refuse".
+    let before = hydrate_attributes(
+        db.read_conn(),
+        &ids,
+        &AsOf::recorded_at(INSTANT),
+        AttributeMode::AtTime,
+    )
+    .await
+    .expect("an intact hot log answers for any instant");
+    assert_eq!(
+        before.iter().map(|a| a.title.as_str()).collect::<Vec<_>>(),
+        vec!["first"],
+        "at {INSTANT} the ledger held the first generation"
+    );
+
+    let report = db.archive(CUTOFF).await.unwrap();
+    assert!(
+        report.log_entries_archived >= 2,
+        "the fixture needs the superseded rows to have actually moved: {report:?}"
+    );
+
+    // After archiving the same call refuses, by name, and names the instant.
+    let err = hydrate_attributes(
+        db.read_conn(),
+        &ids,
+        &AsOf::recorded_at(INSTANT),
+        AttributeMode::AtTime,
+    )
+    .await
+    .expect_err("a short hot log must refuse rather than return a shorter Vec");
+    match &err {
+        macrame::DbError::RecordedInstantUnreachable { ts } => assert_eq!(ts, INSTANT),
+        other => panic!("got {other:?}"),
+    }
+    assert!(err.to_string().contains("reconstruct"), "{err}");
+
+    // The other three cells of the dispatch table read live `concepts` and
+    // never the log, so archiving has nothing to do with them.
+    for as_of in [AsOf::now(), AsOf::valid_at(INSTANT)] {
+        let live = hydrate_attributes(db.read_conn(), &ids, &as_of, AttributeMode::AtTime)
+            .await
+            .expect("the live arms do not read the log and must be unaffected");
+        assert_eq!(
+            live.iter().map(|a| a.title.as_str()).collect::<Vec<_>>(),
+            vec!["third"],
+            "live text, whichever instant the valid axis names"
+        );
+    }
+
+    db.close().await.unwrap();
+}

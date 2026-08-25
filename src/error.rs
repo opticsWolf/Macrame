@@ -335,14 +335,21 @@ pub enum DbError {
         reason: String,
     },
 
-    /// [`crate::graph::TraversalBuilder::as_of_recorded`] named an instant the
-    /// hot log can no longer answer for (0.13.2, W7.1, D-174).
+    /// A read named a transaction-time instant the hot log can no longer answer
+    /// for (0.13.2, W7.1, D-174; extended 0.13.16, W9.1, D-189).
     ///
-    /// A transaction-time traversal folds `transaction_log`, and
+    /// A transaction-time read folds `transaction_log`, and
     /// [`crate::Database::archive`] removes superseded rows from it. Once
     /// anything has been archived, an instant below the cutoff is not *before
-    /// history*, it is *history that is in the other file* — and a traversal
-    /// takes a connection, not an archive path, so it cannot go and get it.
+    /// history*, it is *history that is in the other file* — and these readers
+    /// take a connection, not an archive path, so they cannot go and get it.
+    ///
+    /// **Two surfaces fold the log and both raise this.**
+    /// [`crate::graph::TraversalBuilder::as_of_recorded`] folds it for topology;
+    /// [`crate::temporal::hydrate_attributes`] folds it for the text under
+    /// [`crate::graph::AttributeMode::AtTime`]. The second was added in 0.13.16
+    /// (W9.1), where it had been returning a quietly shorter `Vec` — §3.2 of the
+    /// review, and the same silence in the same wave as the first.
     ///
     /// **Conservative by one bit, deliberately.** The test is
     /// `hot_log_is_intact`: whether anything was *ever* removed. It cannot ask
@@ -358,7 +365,7 @@ pub enum DbError {
     /// same question, which is why the message names it.
     #[error(
         "transaction-time instant {ts} cannot be answered from the hot log: rows \
-         have been archived out of it and a traversal has no archive path. Use \
+         have been archived out of it and this read has no archive path. Use \
          macrame::temporal::reconstruct(conn, ts, archive_path, snapshots_dir), \
          which does"
     )]

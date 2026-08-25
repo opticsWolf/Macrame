@@ -813,9 +813,12 @@ async fn hot_log_is_intact(conn: &libsql::Connection) -> Result<bool> {
 /// Whether a connection alone can fold `transaction_log` at `ts` (W7.1, D-174).
 ///
 /// The completeness question [`hot_log_reach`] answers, minus the archive file
-/// it does not have. [`crate::graph::TraversalBuilder::as_of_recorded`] is the
-/// caller: a traversal takes a `Connection`, so when the hot log is short it has
-/// nowhere to go and must refuse rather than fold what is left.
+/// it does not have. Both callers take a `Connection`, so when the hot log is
+/// short they have nowhere to go and must refuse rather than fold what is left:
+/// [`crate::graph::TraversalBuilder::as_of_recorded`] folds for topology, and
+/// [`crate::temporal::hydrate_attributes`] folds for the text (0.13.16, W9.1,
+/// [D-189](../../docs/architecture/s13-decision-register.md#d-189)). The second
+/// was folding without asking, which is what §3.2 was.
 ///
 /// **One bit, and the conservative one.** `hot_log_is_intact` says whether
 /// anything was ever removed, not whether *this* instant survived the removal.

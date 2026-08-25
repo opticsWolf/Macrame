@@ -47,8 +47,9 @@ question. `reconstruct()` is unchanged.
 
 `as_of_recorded` folds the hot `transaction_log`, so it raises `RecordedInstantUnreachable`
 on a database whose log has been archived — it takes a connection and no archive path, and
-answering from a partial fold would return *nearly* the right topology. `reconstruct()`
-takes the path and answers the same question.
+answering from a partial fold would return *nearly* the right topology. `AttributeMode::AtTime`
+folds the same log for the *text* and raises the same error for the same reason (0.13.16).
+`reconstruct()` takes the path and answers the same question.
 
 ---
 

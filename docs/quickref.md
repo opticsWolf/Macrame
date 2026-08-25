@@ -446,7 +446,7 @@ pub async fn cleanup_expired_snapshots(snapshots_dir) -> Result<usize>
 pub async fn audit_current(conn) -> Result<i64>
 pub async fn rebuild_current() -> Result<RebuildReport>
 pub async fn rebuild_current_chunked() -> Result<RebuildReport>
-pub async fn hydrate_attributes(conn, ids, ts, mode) -> Result<HashMap<String, NodeAttributes>>
+pub async fn hydrate_attributes(conn, ids, as_of: &AsOf, mode) -> Result<Vec<NodeAttributes>>
 
 // Handle methods
 impl Database {
@@ -456,6 +456,8 @@ impl Database {
 ```
 
 **`query_as_of_edges()`**: Valid-time query over `links_current`. Returns topology at `ts` under current belief.
+
+**`hydrate_attributes()`**: Attributes for a result set, per `AttributeMode`. Under `AtTime` with `as_of.recorded` set it folds the hot `transaction_log`, so it raises `RecordedInstantUnreachable` once rows have been archived out of it (0.13.16, [D-189](architecture/s13-decision-register.md#d-189)) — the same refusal `as_of_recorded` makes, at the surface that fixes the *text* rather than the topology. The other three cells read live `concepts` and are unaffected.
 
 **`reconstruct()`**: Transaction-time replay from `transaction_log`. Composes from newest snapshot at or before `ts` plus anchored fold. Requires `archive_path` if history extends before the archive cutoff.
 
