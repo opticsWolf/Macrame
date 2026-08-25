@@ -134,9 +134,12 @@ macrame/
 │       │                       #   OPEN_SENTINEL (D-029)
 │       ├── limits.rs           # §5.11 — engine ceilings, not tuning choices:
 │       │                       #   HYDRATE_CHUNK under SQLITE_MAX_VARIABLE_NUMBER
-│       └── clock.rs            # Clock trait; SystemClock (monotonic floor + strict parser),
-│                               #   FakeClock (Send + Sync interior)
-├── tests/                      # 28 integration targets; the shape, not the list
+│       ├── clock.rs            # Clock trait; SystemClock (monotonic floor + strict parser),
+│       │                       #   FakeClock (Send + Sync interior)
+│       └── crc32.rs            # §5.11 — CRC-32 over the v3 snapshot header and
+│                               #   payload; forty lines rather than a dependency
+│                               #   (0.13.12, D-185)
+├── tests/                      # integration targets; the shape, not the list
 │   ├── common/                 #   harness.rs (temp-dir fixtures, FakeClock wiring),
 │   │                           #   fixtures.rs (the D-088 shape matrix)
 │   ├── graph_tests.rs          #   …and temporal_, vector_, integrity_,
@@ -146,6 +149,10 @@ macrame/
 │                               #   fixture_matrix_, packaging_ (D-089, D-139)
 ├── benches/budgets.rs          # §9, criterion, every group carries control/select_1 (D-090)
 ├── examples/                   # diagnostics that are not tests — r15_soak, readonly_open_probe
+├── fuzz/                       # §8 — three cargo-fuzz targets over the v3 snapshot
+│                               #   container and the seed generator; nightly and
+│                               #   libFuzzer only, and deliberately not a
+│                               #   workspace member (0.13.14, D-187)
 ├── bindings/python/src/        # §14 — pyo3 0.29, maturin; the wheel `macrame-db`
 │   ├── lib.rs                  #   module init and the exported surface
 │   ├── database.rs             #   the handle: frozen pyclass over RwLock<Option<Database>>
@@ -156,6 +163,8 @@ macrame/
 ```
 
 **The `tests/` and `bindings/` entries are shapes rather than inventories**, and deliberately so after 0.10.0 (W4.7): this tree listed five test files for years while the suite grew to twenty-eight, and a list that is wrong is worse than a shape that is right. `python scripts/run_rust_suite.py` enumerates the real set.
+
+**Everything else here is an inventory, and 0.13.15 made that a gate ([D-188](s13-decision-register.md#d-188)).** The distinction above is only worth drawing if the entries that are *not* shapes can be relied on, and they could not be: `util/crc32.rs` shipped in 0.13.12 and reached neither this tree nor [§5.11](s5-modules.md#511-util--ids-clocks-timestamps-checksums-and-engine-ceilings)'s heading, `fuzz/` shipped in 0.13.14 and reached neither, and every gate stayed green through both. That is the failure `tests/doc_sync_tests.rs` was written for in 0.7.0, one document over: something was added to the code and nobody added it here. `every_module_in_src_is_named_in_the_crate_layout_tree` now walks `src/` and requires each module's file name to appear in the block above — shallow on purpose, because a check that fails on a reworded comment gets relaxed the first time it cries wolf. The `tests/` line went the other way: it said **28** while the directory held 35, so the entry that had been converted to a shape was still carrying an inventory in its one number, and the number is gone rather than corrected.
 
 Each module owns one concern and one failure mode. graph/builder.rs is the only place SQL strings for traversal are constructed; temporal/replay.rs is the only place the log is folded; integrity/ is the only place links_current is written outside the trigger path; and connection.rs is the only place a write-capable connection exists. This concentration is deliberate: when a class of bug has exactly one address, it can be tested there and nowhere else needs to worry.
 

@@ -33,6 +33,7 @@ const ERROR_RS: &str = include_str!("../src/error.rs");
 const CONNECTION_RS: &str = include_str!("../src/connection.rs");
 const SECTION_7: &str = include_str!("../docs/architecture/s6-s10-flows-to-dependencies.md");
 const APPENDIX_A: &str = include_str!("../docs/architecture/appendices.md");
+const SECTION_0_3: &str = include_str!("../docs/architecture/s0-s3-foundations.md");
 
 /// The body of `braced` block that follows `header`, brace-matched.
 fn block_after<'a>(text: &'a str, header: &str) -> &'a str {
@@ -954,5 +955,81 @@ fn every_public_database_method_has_a_doc_comment() {
          wrong from 0.12.13 to 0.12.24.\n\n\
          Appendix A naming the method is not this check: being listed in a \
          document and having a doc comment are different facts."
+    );
+}
+
+/// The body of the first fenced block after `header`.
+fn fenced_block_after<'a>(text: &'a str, header: &str) -> &'a str {
+    let start = text
+        .find(header)
+        .unwrap_or_else(|| panic!("{header:?} not found"))
+        + header.len();
+    let rest = &text[start..];
+    let open = rest.find("```").expect("no fenced block after the header");
+    let body = &rest[open + 3..];
+    let close = body.find("```").expect("unterminated fenced block");
+    &body[..close]
+}
+
+/// **Every module under `src/` is named in §3's crate-layout tree.**
+///
+/// §3 says outright that its `tests/` and `bindings/` entries are *shapes
+/// rather than inventories*, which is what makes every other entry a claim
+/// about what is on disk. `util/crc32.rs` shipped in 0.13.12 and reached
+/// neither that tree nor §5.11's heading, and three releases went past with
+/// every gate green ([D-188](../docs/architecture/s13-decision-register.md#d-188)).
+///
+/// Deliberately shallow, in this file's own idiom: the file *name* has to
+/// appear somewhere in the block. That is enough to catch the failure that
+/// actually happened — a module was added and nobody added it here — and it
+/// does not fail on a reworded comment or a redrawn box.
+///
+/// **One direction only.** The tree names `checkpoint.rs` in a parenthetical
+/// about a 0.5.0 rename, so a name in the block with no file behind it is not
+/// evidence of drift. A file with no name in the block is.
+#[test]
+fn every_module_in_src_is_named_in_the_crate_layout_tree() {
+    let tree = fenced_block_after(SECTION_0_3, "## §3 Crate Layout");
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+
+    let mut missing = Vec::new();
+    let mut checked = 0usize;
+    let mut stack = vec![root.clone()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).expect("src/ is missing").flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            // The tree lists directories; `mod.rs` is the directory's entry.
+            if !name.ends_with(".rs") || name == "mod.rs" {
+                continue;
+            }
+            checked += 1;
+            if !tree.contains(name) {
+                let shown = path.strip_prefix(&root).unwrap_or(&path);
+                missing.push(shown.display().to_string().replace('\\', "/"));
+            }
+        }
+    }
+
+    assert!(
+        checked >= 25,
+        "only {checked} modules found under src/ — the walk has broken, not \
+         the docs"
+    );
+    missing.sort();
+    assert!(
+        missing.is_empty(),
+        "module(s) under src/ that §3's crate-layout tree does not name: \
+         {missing:?}\n\n\
+         The tree is an inventory everywhere it is not explicitly a shape, and \
+         a reader uses it to find out what exists. Add the file to it, and \
+         check whether the §5 section that owns the directory still describes \
+         its own contents."
     );
 }

@@ -870,7 +870,7 @@ One correction landed with it: `reciprocal_rank_fusion` sorted on the fused scor
 
 Buckets are fixed at `BUCKET_BOUNDS_MICROS` rather than computed. A histogram whose bucket edges move between builds cannot be compared across them, and comparison across builds is the only reason to keep the numbers.
 
-### 5.11 util/ — ids, clocks, timestamps, and engine ceilings
+### 5.11 util/ — ids, clocks, timestamps, checksums, and engine ceilings
 
 `ids.rs` generates and validates ULIDs. Validation is not cosmetic: a link's `transaction_log.entity_id` concatenates `source|target|type|valid_from`, so an id containing the separator makes the row unattributable on replay ([D-061](s13-decision-register.md#d-061)). A rejected id is [`DbError::InvalidId`](s6-s10-flows-to-dependencies.md#7-errors) — *refused*, not *missing*, which is why it is not `NotFound`: telling a caller the thing does not exist invites them to create it with the same id and be refused again.
 
@@ -883,3 +883,7 @@ Buckets are fixed at `BUCKET_BOUNDS_MICROS` rather than computed. A histogram wh
 It was defined twice before T3.1 — in `graph::subgraph` and `temporal::as_of`, both 400, one carrying the reasoning and the other a `// See as_of::HYDRATE_CHUNK` comment. That works until someone tunes one of them, at which point two constants that must be equal silently are not, and the symptom is a driver error on one code path and not the other. The cross-reference comment was evidence the duplication was known and being managed by convention; a shared constant is what replaces a convention.
 
 The relationship is asserted at **compile time**, not in a test: `const _: () = assert!(HYDRATE_CHUNK * 2 < SQLITE_MAX_VARIABLE_NUMBER)`. A `#[test]` was the first form, and clippy was right to object — both sides are constants, so the assertion has a constant value. A const block fails the build rather than a test run, which matters because the failure it guards is someone raising `HYDRATE_CHUNK`, plausibly in a release build, plausibly without running the suite.
+
+`crc32.rs` is the checksum the v3 snapshot header carries (0.13.12, [D-185](s13-decision-register.md#d-185), [§5.5](s5-modules.md#55-temporalreplayrs-and-temporalsnapshotrs--reconstruction-and-snapshots)): the standard polynomial, a table generated at compile time so there is nothing transcribed to get wrong, and the standard check vector asserted. It is forty lines here rather than `crc32fast` because the input is one payload per save and per load, on a path already dominated by zstd and bincode, and a dependency has to be audited and kept compatible for as long as the project lives.
+
+**It was absent from this section and from [§3](s0-s3-foundations.md#3-crate-layout)'s tree from 0.13.12 until 0.13.15** ([D-188](s13-decision-register.md#d-188)). The heading above is an enumeration — *ids, clocks, timestamps, engine ceilings* — which is the kind of sentence that stops being true without anyone editing it, and nothing was checking. Something is now: `tests/doc_sync_tests.rs` fails the build when a module under `src/` is not named in §3.

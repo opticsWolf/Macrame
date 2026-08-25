@@ -1594,6 +1594,42 @@ produce a named error, never a panic and never an allocation storm.
 **W8.5 — Record D-156:** the v3 header, and why a format that a corrupt stream
 can walk to exhaustion is not acceptable in a file the crash path depends on.
 
+
+> **✅ Shipped 0.13.15 (recorded as
+> [D-188](../docs/architecture/s13-decision-register.md#d-188)).**
+>
+> **The decision this item names was written when the work landed.** It is
+> [D-185](../docs/architecture/s13-decision-register.md#d-185), from 0.13.12,
+> and the number above is wrong for the second time in two waves — D-156 is
+> 0.12.13's `checkpoint()`. **D-157 is `wal_autocheckpoint`, so W11.5's number
+> is taken as well.**
+>
+> **So the item became the audit it implies, and the audit found something.**
+> The wave's four items produced four entries, all cross-linked, and every
+> coverage row names the release that closed it. What no gate covered was the
+> crate's own shape: §3's layout tree lost `util/crc32.rs` in 0.13.12 and never
+> gained `fuzz/` in 0.13.14 — three releases, every gate green, in the document
+> a reader opens to find out what exists. The tree states its own exemption
+> (*"the `tests/` and `bindings/` entries are shapes rather than inventories"*),
+> which is a claim that everything else is a list, and it was not one. The same
+> entry still said **28** integration targets against 35 on disk, so the line
+> converted to a shape was carrying an inventory in its only number; the number
+> is removed rather than corrected.
+>
+> **Fifth documentation finding of the wave, and the first one a gate could
+> have caught.** The other four were found by writing the next version of a
+> passage and checking the current one — a method that works and only inspects
+> what someone happens to be rewriting. `doc_sync_tests` now walks `src/` and
+> requires every module's file name to appear in §3's block: shallow on
+> purpose, one direction only, and red on its first run with
+> `["util/crc32.rs"]`.
+>
+> **It covers one of the two things found, and D-188 says so.** `fuzz/` is a
+> directory, and a rule over the top level needs an exemption list — a second
+> place for the same drift to hide — to guard an event that has happened twice
+> in fourteen months.
+
+
 ---
 
 ## 11. W9 — Temporal and visibility completeness
