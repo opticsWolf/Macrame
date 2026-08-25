@@ -125,6 +125,28 @@ pub enum CommandKind {
     ///
     /// **Appended at the end**, per [`CommandKind::index`].
     Checkpoint,
+    /// `PRAGMA optimize` — re-analysing only what SQLite believes has drifted
+    /// (0.13.24, W10.5, D-197).
+    ///
+    /// Split out of [`CommandKind::Analyze`], which covered both from 0.12.4 to
+    /// 0.13.23. The split is [`CommandKind::Rehydrate`]'s lesson applied before
+    /// the fact rather than after it: [D-168] refused to decide `Analyze`'s
+    /// budget exemption *because* the kind was shared, since a judgement made
+    /// about the explicit call would have landed on the automatic one —
+    /// `close()` runs `optimize()` unconditionally — without ever being made
+    /// about it.
+    ///
+    /// The two also have genuinely different hold distributions, which is the
+    /// same argument [`CommandKind::ShadowRebuild`] is separate on.
+    /// [`crate::Database::analyze`] does the work unconditionally and its hold
+    /// tracks the table. This one is a no-op when nothing has moved, so its
+    /// distribution is bimodal by design and averaging the two together
+    /// describes neither.
+    ///
+    /// **Appended at the end**, per [`CommandKind::index`].
+    ///
+    /// [D-168]: ../docs/architecture/s13-decision-register.md#d-168
+    Optimize,
 }
 
 impl CommandKind {
@@ -149,6 +171,7 @@ impl CommandKind {
         CommandKind::Analyze,
         CommandKind::Rehydrate,
         CommandKind::Checkpoint,
+        CommandKind::Optimize,
     ];
 
     pub const COUNT: usize = CommandKind::ALL.len();
@@ -197,6 +220,7 @@ impl CommandKind {
             CommandKind::Analyze => "analyze",
             CommandKind::Rehydrate => "rehydrate",
             CommandKind::Checkpoint => "checkpoint",
+            CommandKind::Optimize => "optimize",
         }
     }
 
@@ -238,41 +262,53 @@ impl CommandKind {
     /// that it is bulk movement with no latency bound, and that the caller asked
     /// for it explicitly.
     ///
-    /// # [`CommandKind::Analyze`] is **not** exempt, and that is a decision
-    /// (0.12.25, D-168)
+    /// # Neither [`CommandKind::Analyze`] nor [`CommandKind::Optimize`] is
+    /// exempt, and since 0.13.24 those are two decisions (W10.5, D-197)
     ///
-    /// It looks like it belongs here. `ANALYZE` is one indivisible statement —
-    /// there is no smaller unit to chunk into — and its cost is set by data
-    /// volume, so it cannot meet the budget on a populated ledger. Measured
-    /// (`examples/analyze_hold.rs`): **5.26 ms at 10,000 edges, 19.1 ms at
-    /// 40,000**, against 3 ms. Every call is a violation and always will be.
+    /// They were one kind from 0.12.4 to 0.13.23, and [D-168] declined to decide
+    /// the exemption *because* they were: `Analyze` covered
+    /// [`crate::Database::optimize`] too, `close()` calls that unconditionally,
+    /// and so a judgement made about the explicit call would have landed on the
+    /// automatic one without ever being made about it. That is
+    /// [`CommandKind::Rehydrate`]'s lesson above arriving from the other
+    /// direction — there a shared kind *granted* an exemption nobody had
+    /// decided; here one would have *laundered* one. W10.5 split the kind so
+    /// each could be answered on its own evidence. Both answers came back the
+    /// same and the reasons are different, which is the whole reason the split
+    /// had to come first.
     ///
-    /// It stays counted for two reasons.
+    /// **[`CommandKind::Analyze`] cannot state a `Bound`, so it cannot have a
+    /// row.** `ANALYZE` is one indivisible statement whose cost is set by data
+    /// volume — measured at **5.26 ms at 10,000 edges and 19.1 ms at 40,000**
+    /// against a 3 ms budget (`examples/analyze_hold.rs`, [D-166]). Every call
+    /// is a violation and always will be. `Checkpoint`'s bound is frames
+    /// accumulated since the last one; `Archive`'s is the session's row count.
+    /// The honest entry here would be "the size of the table, damped 3–4× by
+    /// `analysis_limit`", which is not a bound but the absence of one, and a
+    /// row that cannot fill that column is this table admitting the thing it
+    /// exists to prevent.
     ///
-    /// **The table has a `Bound` column, and this kind cannot fill it in.**
-    /// `Checkpoint`'s bound is frames accumulated since the last one;
-    /// `Archive`'s is the session's row count. The honest entry here would be
-    /// "the size of the table, damped 3–4× by `analysis_limit`", which is not a
-    /// bound but the absence of one. A row that cannot state its bound is this
-    /// table admitting the thing it exists to prevent.
+    /// **[`CommandKind::Optimize`] is not exempt for the opposite reason: its
+    /// violations are rare and they are the informative ones.** Measured
+    /// (`examples/optimize_hold.rs`, 40,000 edges): **10.7 ms the first time on
+    /// a database that has never been analysed, and 90–220 µs every time
+    /// after** — comfortably inside the budget, including immediately after a
+    /// bulk load that doubled the ledger. It is over budget only when it
+    /// actually re-analyses something, and then it is over by a lot: **460 ms**
+    /// once the table had grown 25× and SQLite's staleness ratio finally
+    /// fired. So the count is bimodal by construction and it is *reporting*
+    /// rather than complaining: an `optimize` in `budget_violations()` marks
+    /// the calls that did work, which is exactly what an operator wants to
+    /// know and exactly what exempting the kind would delete.
     ///
-    /// **And this kind is two callers wearing one name.** `Analyze` covers
-    /// [`crate::Database::optimize`] as well as [`crate::Database::analyze`],
-    /// and `close()` calls `optimize()` unconditionally. Exempting the kind
-    /// would silence the *automatic* path — every handle close on a large
-    /// ledger holding ~19 ms with nothing reporting it — which is exactly the
-    /// call nobody chose to make. That is [`CommandKind::Rehydrate`]'s lesson
-    /// above, arriving from the other direction: there, a shared kind granted
-    /// an exemption nobody had decided; here, a shared kind would launder one.
+    /// **The violations are expected and must not be "fixed" by lowering
+    /// [`crate::schema::ddl::ANALYSIS_LIMIT`].** That would buy the number by
+    /// sampling too little to separate the two `source_id`-leading indices,
+    /// which is the entire purpose of having statistics ([D-149]).
     ///
-    /// **So the violation is expected, permanent, and must not be "fixed" by
-    /// lowering [`crate::schema::ddl::ANALYSIS_LIMIT`].** That would buy the
-    /// number by sampling too little to separate the two `source_id`-leading
-    /// indices, which is the entire purpose of having statistics
-    /// ([D-149](../docs/architecture/s13-decision-register.md#d-149)).
-    ///
-    /// Splitting the kind is scheduled as **W10.5, 0.14.0**; the exemption
-    /// question is answerable per-caller once it is split, and not before.
+    /// [D-149]: ../docs/architecture/s13-decision-register.md#d-149
+    /// [D-166]: ../docs/architecture/s13-decision-register.md#d-166
+    /// [D-168]: ../docs/architecture/s13-decision-register.md#d-168
     pub const fn exempt_from_budget(self) -> bool {
         matches!(
             self,

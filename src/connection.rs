@@ -2218,6 +2218,11 @@ impl Database {
     /// the hold is what it is. Prefer [`optimize`], which does nothing when
     /// nothing has moved.
     ///
+    /// **Since 0.13.24 the counter is this call and not also [`optimize`]**
+    /// (W10.5, [D-197]). The two shared `CommandKind::Analyze` until then, which
+    /// is why an `analyze` row in `budget_violations()` used to be unreadable:
+    /// it could have been an explicit call or a handle close.
+    ///
     /// # When to call it
     ///
     /// After a bulk import, and after anything that changes a table's shape by
@@ -2249,6 +2254,26 @@ impl Database {
     /// That property is the whole point: it is safe to call on a schedule, where
     /// [`analyze`] is not. `close()` runs it, so a process that opens, works and
     /// closes keeps its statistics current without anybody arranging it.
+    ///
+    /// # What it costs, measured, and the threshold it applies rather than takes
+    /// (0.13.24, W10.5, [D-197])
+    ///
+    /// `examples/optimize_hold.rs`, on a 40,000-edge ledger: **10.7 ms the
+    /// first time on a database that has never been analysed** — there is
+    /// nothing incremental about the first call — and **90–220 µs every time
+    /// after**, well inside [`crate::CHUNK_BUDGET`].
+    ///
+    /// **The staleness test is SQLite's and it is a ratio, not a row count.**
+    /// Measured by reading `sqlite_stat1` across the call rather than by timing
+    /// it: growth of 2× and 5× both left the statistics **untouched**, and
+    /// only at 25× did it re-analyse — for a 460 ms hold. So this is not a
+    /// cheaper `analyze()` and calling it after a bulk load is not a way to
+    /// refresh statistics the load invalidated: below the ratio it declines,
+    /// and above it it costs what [`analyze`] costs. It reports as
+    /// [`crate::metrics::CommandKind::Optimize`] since 0.13.24, which is what
+    /// makes those two outcomes distinguishable in the metrics at all.
+    ///
+    /// [D-197]: ../docs/architecture/s13-decision-register.md#d-197
     ///
     /// [D-149]: ../docs/architecture/s13-decision-register.md#d-149
     /// [`analyze`]: Database::analyze
@@ -3330,7 +3355,16 @@ impl LowPriCommand {
             // breaking addition; `#[non_exhaustive]` (W4.2) removed that.
             LowPriCommand::Rehydrate { .. } => K::Rehydrate,
             LowPriCommand::RebuildFts { .. } => K::RebuildFts,
-            LowPriCommand::Analyze { .. } => K::Analyze,
+            // Two kinds out of one variant since 0.13.24 (W10.5, D-197). The
+            // command carries the flag; the counter has to carry it too, or the
+            // budget exemption for either half is decided about both (D-168).
+            LowPriCommand::Analyze { incremental, .. } => {
+                if *incremental {
+                    K::Optimize
+                } else {
+                    K::Analyze
+                }
+            }
             LowPriCommand::ShadowRebuild { .. } => K::ShadowRebuild,
         }
     }

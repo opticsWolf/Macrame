@@ -871,16 +871,28 @@ class Database:
     def analyze(self) -> None:
         """Refresh the planner's statistics unconditionally (`ANALYZE`).
 
-        Bounded by `PRAGMA analysis_limit`, so the hold scales with the index
-        count rather than with the table. Call after a bulk import; prefer
-        `optimize()` for routine upkeep.
+        `PRAGMA analysis_limit` damps the hold by 3-4x; it does not make it
+        independent of the table, which this docstring claimed until 0.13.24.
+        Measured: 5.26 ms at 10,000 edges, 19.1 ms at 40,000, against a 3 ms
+        chunk budget -- so every call appears in `metrics().violations()` under
+        the kind `"analyze"`, permanently and by design (D-166, D-197).
+
+        Call after a bulk import; prefer `optimize()` for routine upkeep.
         """
 
     def optimize(self) -> None:
         """Re-analyse only what has gone stale (`PRAGMA optimize`).
 
         A no-op on an idle database, which is what makes it safe on a schedule.
-        `close()` already runs it.
+        `close()` already runs it. Reported as its own kind, `"optimize"`,
+        since 0.13.24.
+
+        **Not a cheaper `analyze()`.** The staleness test is SQLite's own and it
+        is a *ratio*: measured, growth of 2x and 5x left the statistics
+        untouched and only 25x rewrote them. Below that it declines in ~0.1 ms;
+        above it, it costs what `analyze()` costs. So a bulk load does not make
+        this refresh the statistics it invalidated -- use `analyze()` when you
+        need that (D-197).
         """
 
     def checkpoint(self) -> CheckpointReport:

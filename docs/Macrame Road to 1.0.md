@@ -2041,6 +2041,43 @@ lowering the limit is not the fix — that would buy the number by sampling too
 little to separate the two `source_id`-leading indices, which is the whole
 reason for having statistics.
 
+> **✅ Shipped 0.13.24 (recorded as
+> [D-197](../docs/architecture/s13-decision-register.md#d-197), which settles
+> [D-168](../docs/architecture/s13-decision-register.md#d-168)).**
+>
+> **1. The kind is split.** `Optimize` is appended at the end of the enum and of
+> `ALL`, per the declaration-order contract; `LowPriCommand::kind()` now reads
+> the `incremental` flag it was already carrying.
+> `analyze_and_optimize_are_counted_apart` checks each call against **both**
+> counters at the moment it runs, because the two regressions a split like this
+> has — both arms landing on one kind, and the flag read backwards — are
+> invisible in a total.
+>
+> **2. Both decided on their merits, and both stay counted — for opposite
+> reasons.** `Analyze` cannot fill in the `Bound` column: 19.1 ms at 40,000
+> edges, and "the size of the table, damped 3–4×" is the absence of a bound.
+> `Optimize` is the other case entirely — measured at **90–220 µs whenever it
+> declines**, which is nearly always, **10.7 ms cold**, and **460 ms** when it
+> actually re-analyses. Its violations are a report, not a complaint: they name
+> the handle closes that cost something. Exempting it deletes that.
+>
+> **3. The `Bound` column did its job.** The item said "if no honest bound
+> exists, that is an argument against exempting rather than a formatting
+> problem", and that is what happened to `Analyze`. `CHUNK_BUDGET`'s table names
+> neither kind, so `the_budget_exemptions_and_their_documented_table_agree`
+> holds across the split without an edit.
+>
+> **And one thing this measurement broke that belongs to another item.**
+> `PRAGMA optimize`'s staleness test is a **ratio**, not a row count, and a
+> large one: read off `sqlite_stat1` rather than inferred from a timing, growth
+> of 2× and 5× left the statistics *untouched* and only 25× rewrote them. So
+> **W2.2's "after bulk load, above a threshold picked by measurement" cannot
+> work as written** — a threshold on the run does not reach the ratio
+> `PRAGMA optimize` applies. Recorded, deliberately not acted on: it is W10.2's
+> decision and taking it here would answer one item's question inside another.
+> `examples/optimize_hold.rs` is the sweep.
+
+
 **W10.3 — `Subgraph` interior, if measurement justifies it.** Closes §2.5.
 String-keyed adjacency; index-based would be faster. **Benchmark first, and be
 prepared to close this as "not worth it".** A `Subgraph` big enough for this to

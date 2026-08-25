@@ -533,6 +533,11 @@ pub const OPTIMIZE: &str = "PRAGMA optimize;";
 /// holds the write lock for ~19 ms, about 6× [`crate::CHUNK_BUDGET`], and
 /// [`crate::metrics::CommandKind::Analyze`] is **not** budget-exempt — it
 /// appears in `metrics().budget_violations()` and always had.
+///
+/// Since 0.13.24 that kind is `analyze()` alone; `optimize()` reports as
+/// [`crate::metrics::CommandKind::Optimize`] and is separately, deliberately
+/// not exempt (W10.5,
+/// [D-197](../../docs/architecture/s13-decision-register.md#d-197)).
 pub const ANALYSIS_LIMIT: &str = "PRAGMA analysis_limit = 400";
 
 /// Every index the schema declares.

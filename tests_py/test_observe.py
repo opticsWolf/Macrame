@@ -144,6 +144,28 @@ def test_a_rebuild_shows_up_as_its_own_kind(db):
     assert "shadow_rebuild" in kinds
 
 
+def test_analyze_and_optimize_are_separate_kinds(db):
+    """Split in 0.13.24 (D-197), and the Python strings move with the enum.
+
+    The kind names cross the boundary as strings built by position from
+    `CommandKind::ALL`, so a Rust-side reorder relabels axes in a language the
+    Rust compiler is not looking at. Asserting both names here is what makes
+    that a red test on this side too.
+
+    Both are checked against both counters, because the regression the split can
+    have -- the `incremental` flag read backwards -- swaps the names and leaves
+    every total correct. `.get(..., 0)` rather than `[...]`: this surface drops
+    kinds with no turns, so a kind that has not run is absent rather than zero.
+    """
+    db.analyze()
+    counts = {k.kind: k.turns for k in db.metrics().kinds}
+    assert (counts.get("analyze", 0), counts.get("optimize", 0)) == (1, 0), counts
+
+    db.optimize()
+    counts = {k.kind: k.turns for k in db.metrics().kinds}
+    assert (counts.get("analyze", 0), counts.get("optimize", 0)) == (1, 1), counts
+
+
 def test_metrics_accumulate_rather_than_reset(db):
     before = db.metrics().turns
     db.upsert_concept(macrame.ConceptUpsert("d", "D", valid_from=T0))

@@ -473,40 +473,106 @@ async fn the_starvation_counter_distinguishes_a_backlog_from_a_quiet_actor() {
     Arc::into_inner(db).unwrap().close().await.unwrap();
 }
 
-/// **`Analyze` is deliberately not budget-exempt, and this pins that** (D-168).
+/// **`analyze()` and `optimize()` are attributed to different kinds, and the
+/// flag is not inverted** (0.13.24, W10.5, D-197).
 ///
-/// It is the strongest candidate for the exemption list that is not on it.
-/// `ANALYZE` is one indivisible statement whose cost tracks the data, so it
-/// cannot meet the 3 ms budget on a populated ledger — measured at **19.1 ms
-/// for 40,000 edges** (`examples/analyze_hold.rs`). Every call counts as a
-/// violation, permanently.
+/// The split's own regression, in the two shapes it can take: both arms mapping
+/// to one kind (the split never reached `LowPriCommand::kind`) or the
+/// `incremental` flag read the wrong way round (the counts are right and the
+/// names are swapped). Neither is visible in a total, so each call is checked
+/// against **both** counters at the moment it runs.
 ///
-/// The temptation, on seeing `analyze` in `budget_violations()` forever, is to
-/// make it go away. Two ways to do that are wrong and this test blocks one of
-/// them outright:
+/// This is not a re-run of `every_write_method_is_attributed_to_its_own_command_kind`.
+/// That one reads a snapshot after the fact, and a swapped pair survives it.
+#[tokio::test]
+async fn analyze_and_optimize_are_counted_apart() {
+    let harness = TestHarness::new();
+    let db = Database::open_with_cadence(&harness.db_path, None)
+        .await
+        .unwrap();
+
+    db.upsert_concept(ConceptUpsert::new("a", "A").valid_from(T0))
+        .await
+        .unwrap();
+
+    db.analyze().await.unwrap();
+    let snap = db.metrics();
+    assert_eq!(
+        (
+            turns_for(&snap, CommandKind::Analyze),
+            turns_for(&snap, CommandKind::Optimize)
+        ),
+        (1, 0),
+        "`analyze()` is not attributed to `Analyze` alone. Either the two          kinds are still one, or `LowPriCommand::kind` reads `incremental`          backwards (W10.5, D-197)"
+    );
+
+    db.optimize().await.unwrap();
+    let snap = db.metrics();
+    assert_eq!(
+        (
+            turns_for(&snap, CommandKind::Analyze),
+            turns_for(&snap, CommandKind::Optimize)
+        ),
+        (1, 1),
+        "`optimize()` did not land on `Optimize`, or it moved `Analyze` as          well. The point of the split is that `close()`'s automatic call is          distinguishable from an explicit one (W10.5, D-197)"
+    );
+
+    // And `close()` runs one more, which is the automatic path the split
+    // exists to make visible. Asserted through a fresh handle, since the
+    // metrics of a closed one are gone with it.
+    db.close().await.unwrap();
+
+    let db = Database::open_with_cadence(&harness.db_path, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        turns_for(&db.metrics(), CommandKind::Optimize),
+        0,
+        "a freshly opened handle has already run an optimize; `open()` is not          supposed to touch statistics (D-149)"
+    );
+    db.close().await.unwrap();
+}
+
+/// **Neither `Analyze` nor `Optimize` is budget-exempt, and since 0.13.24 those
+/// are two decisions** (W10.5, D-197; was D-168).
 ///
-/// - **Exempting the kind** hides the automatic path. `Analyze` covers
-///   `optimize()` too, and `close()` calls that unconditionally — so the
-///   exemption would silence a ~19 ms hold on every handle close, which is the
-///   one call nobody chose to make.
-/// - **Lowering `analysis_limit`** buys the number by sampling too little to
-///   separate the two `source_id`-leading indices, which is the whole purpose
-///   of having statistics (D-149). Not checkable here; named so the reader of
-///   this test meets it.
+/// They were one kind until 0.13.23, and D-168 declined to decide the exemption
+/// *because* they were: a judgement about the explicit call would have landed on
+/// `close()`'s automatic one without being made about it. W10.5 split them. Both
+/// answers came back the same; the reasons did not, and this test carries both
+/// so the next person to reach for the exemption meets the right one.
 ///
-/// Splitting the kind so each caller can be judged on its own is scheduled as
-/// W10.5, 0.14.0. Until then, exempting `Analyze` means editing this test, and
-/// the message is the argument it has to answer.
+/// - **`Analyze` cannot state a `Bound`.** One indivisible statement whose cost
+///   tracks the data — 19.1 ms at 40,000 edges against 3 ms
+///   (`examples/analyze_hold.rs`). Every call is a violation, permanently, and
+///   the exemption table's `Bound` column is what it cannot fill in.
+/// - **`Optimize`'s violations are the informative ones.** 90–220 µs when it
+///   declines, which is almost always; 10.7 ms on a never-analysed database and
+///   460 ms once the table has grown past SQLite's staleness ratio
+///   (`examples/optimize_hold.rs`). Exempting it would delete the signal that
+///   says which calls did work.
+/// - **Lowering `analysis_limit`** is the third wrong fix and is not checkable
+///   here; it buys the number by sampling too little to separate the two
+///   `source_id`-leading indices, which is the whole purpose of having
+///   statistics (D-149). Named so the reader of this test meets it.
 #[test]
 fn analyze_is_not_budget_exempt_and_that_is_deliberate() {
     assert!(
         !CommandKind::Analyze.exempt_from_budget(),
-        "`Analyze` was added to the budget exemptions. That silences \
-         `optimize()` as well as `analyze()` — and `close()` calls `optimize()` \
-         unconditionally, so a ~19 ms hold on every handle close would stop \
-         being reported. If the exemption is right, it is right *after* the \
-         kind is split (W10.5, 0.14.0), not before, and the exemption table \
-         needs a `Bound` this kind can honestly state."
+        "`Analyze` was added to the budget exemptions. The exemption table has \
+         a `Bound` column and this kind cannot fill it in: the honest entry is \
+         \"the size of the table, damped 3–4x\", which is the absence of a \
+         bound rather than one. Every call being a violation is the intended \
+         reading, not the defect (D-166, D-197)."
+    );
+
+    assert!(
+        !CommandKind::Optimize.exempt_from_budget(),
+        "`Optimize` was added to the budget exemptions. It is under budget \
+         whenever it declines to re-analyse, which is nearly always — so its \
+         violations are not noise, they are the calls that actually did work \
+         (10.7 ms cold, 460 ms once the table had grown 25x). Exempting it \
+         deletes the one signal that distinguishes the two (D-197)."
     );
 
     // The exemption list is a judgement per kind, so the sibling that shares

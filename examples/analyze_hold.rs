@@ -73,9 +73,9 @@ async fn build(dir: &std::path::Path, edges: usize) -> (std::path::PathBuf, Data
 /// The actor's own hold for one `analyze()`, with the turn counts that say it
 /// is *this* call.
 ///
-/// `CommandKind::Analyze` covers `optimize()` too, and the bulk paths may run
-/// one — so reading `longest` without checking that the count went 0 → 1 would
-/// happily attribute somebody else's hold to this call.
+/// The turn counts are still checked even though `CommandKind::Analyze` stopped
+/// covering `optimize()` in 0.13.24 (W10.5, D-197): the guard is about *this
+/// call* being the only `analyze()`, which the split does not establish.
 async fn crate_hold(db: &Database) -> (u64, u64, std::time::Duration) {
     let before = analyze_turns(db);
     db.analyze().await.unwrap();
