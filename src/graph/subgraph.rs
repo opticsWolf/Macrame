@@ -63,6 +63,36 @@ const NO_EDGES: &[EdgeRef] = &[];
 ///
 /// Accessors return borrowed views, so nothing here costs an allocation that
 /// field access did not.
+///
+/// # The interior is measured, and it is changing (0.13.27, W10.3, [D-200])
+///
+/// The three maps above are still keyed by `String`, and every traversal of an
+/// edge is therefore a `BTreeMap<String, _>` descent with a full comparison at
+/// each level. §2.5 of the 0.12.0 review estimated 5–20× from a dense
+/// index-based interior and stated that it had read the code rather than
+/// benchmarked it. `examples/subgraph_interior.rs` benchmarks it: with the
+/// conversion excluded, a CSR transcription of `louvain` runs **9.6×–15.3×**
+/// faster and one of `dijkstra` **12×–25×**, from 48 nodes to the 49,152-node
+/// budget ceiling, under both short and ULID-shaped ids. On realistic
+/// two-to-four-hop neighbourhoods the algorithms are **a third to two thirds**
+/// of what a caller waits for, so this is not a small term.
+///
+/// What the measurement changed is *where* the dense view is built. §2.5
+/// proposed building it at the boundary; done there the conversion costs one
+/// string lookup per **edge endpoint** — the very cost being removed — and the
+/// whole operation is a **loss** for `dijkstra`, which has a single pass to earn
+/// the build back. In-crate it costs one lookup per **node**, because [D-115]
+/// already interned everything an [`EdgeRef`] carries, and that asymmetry is why
+/// the change belongs here rather than in a caller.
+///
+/// The rewrite lands in 0.13.28. It is held to everything above — the closure
+/// invariant, the node order, the adjacency order — and to
+/// `the_interior_may_change_but_these_answers_may_not`, which pins all six
+/// algorithms' exact output so a moved answer fails loudly rather than arriving
+/// as an improvement.
+///
+/// [D-115]: ../../docs/architecture/s13-decision-register.md#d-115
+/// [D-200]: ../../docs/architecture/s13-decision-register.md#d-200
 #[derive(Debug, Clone, Default)]
 pub struct Subgraph {
     nodes: BTreeMap<String, NodeData>,

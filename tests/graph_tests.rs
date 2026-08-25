@@ -484,6 +484,147 @@ fn louvain_on_an_edgeless_graph_is_all_singletons() {
     assert_ne!(comms["A"], comms["B"]);
 }
 
+/// **The interior may change; these answers may not** (0.13.27, W10.3, D-200).
+///
+/// W10.3 measured section 2.5's proposal — replace `Subgraph`'s string-keyed
+/// adjacency with a dense index-based interior — and the measurement says build
+/// it: 10x-25x on the algorithms themselves, over a third to two thirds of what
+/// a caller waits for. `examples/subgraph_interior.rs` is the reading.
+///
+/// A representation change that big needs its observable behaviour written down
+/// **before** it starts, or "the answers moved" and "the answers improved" are
+/// indistinguishable afterwards. Every other algorithm test here pins a
+/// property — louvain beats singletons, scc finds the cycle, k_core peels the
+/// fringe — and a property is exactly what a subtly different traversal order
+/// can keep while changing the answer.
+///
+/// So this pins the answers themselves, on one fixture that exercises all six:
+/// three mutually reachable cliques joined by one-way bridges too thin to merge
+/// them, plus a fringe node for `k_core` to peel. If this goes red during the
+/// interior rewrite, the rewrite changed something a caller can see, and that
+/// is a decision to take deliberately rather than to discover.
+///
+/// It is **not** a claim that these outputs are the only correct ones. It is a
+/// claim that they are what 0.13.27 returned.
+#[test]
+fn the_interior_may_change_but_these_answers_may_not() {
+    let mut edges: Vec<(&str, &str, f64)> = Vec::new();
+    const CLIQUES: [[&str; 4]; 3] = [
+        ["A1", "A2", "A3", "A4"],
+        ["B1", "B2", "B3", "B4"],
+        ["C1", "C2", "C3", "C4"],
+    ];
+    for clique in CLIQUES {
+        for i in 0..4 {
+            for j in 0..4 {
+                if i != j {
+                    edges.push((clique[i], clique[j], 1.0));
+                }
+            }
+        }
+    }
+    // One-way, and thin enough that merging two cliques loses modularity.
+    edges.push(("A1", "B1", 0.05));
+    edges.push(("B1", "C1", 0.05));
+    // The fringe `k_core` exists to remove.
+    edges.push(("A1", "D1", 1.0));
+
+    let g = graph_of(&edges);
+    assert_eq!(g.node_count(), 13);
+    assert_eq!(g.edge_count(), 39);
+
+    // -- Louvain: one community per clique, the fringe attached to its only
+    // -- neighbour's.
+    let comms = louvain(&g);
+    let distinct: std::collections::BTreeSet<usize> = comms.values().copied().collect();
+    assert_eq!(
+        distinct.len(),
+        3,
+        "expected one community per clique: {comms:?}"
+    );
+    for clique in CLIQUES {
+        for id in clique {
+            assert_eq!(
+                comms[id], comms[clique[0]],
+                "{id} left its clique's community"
+            );
+        }
+    }
+    assert_eq!(comms["D1"], comms["A1"], "the fringe joined the wrong side");
+    assert_ne!(comms["A1"], comms["B1"]);
+    assert_ne!(comms["B1"], comms["C1"]);
+
+    // -- Modularity of that partition, to five places.
+    let q = modularity(&g, &comms);
+    assert!(
+        (q - 0.66350).abs() < 5e-6,
+        "modularity of the pinned partition moved: {q}"
+    );
+
+    // -- Dijkstra from A1: within-clique 1.0, across a bridge 0.05 then 1.0.
+    let dist = dijkstra(&g, "A1");
+    let want: &[(&str, f64)] = &[
+        ("A1", 0.0),
+        ("A2", 1.0),
+        ("A3", 1.0),
+        ("A4", 1.0),
+        ("B1", 0.05),
+        ("B2", 1.05),
+        ("B3", 1.05),
+        ("B4", 1.05),
+        ("C1", 0.10),
+        ("C2", 1.10),
+        ("C3", 1.10),
+        ("C4", 1.10),
+        ("D1", 1.0),
+    ];
+    assert_eq!(dist.len(), want.len(), "reachability changed: {dist:?}");
+    for (id, d) in want {
+        assert!(
+            (dist[*id] - d).abs() < 1e-12,
+            "dijkstra to {id}: {} != {d}",
+            dist[*id]
+        );
+    }
+
+    // -- SCC: the bridges are one-way, so nothing merges. Order is the
+    // -- algorithm's, and pinning it is the point.
+    assert_eq!(
+        scc(&g),
+        vec![
+            vec![
+                "A1".to_string(),
+                "A2".to_string(),
+                "A3".to_string(),
+                "A4".to_string()
+            ],
+            vec![
+                "B1".to_string(),
+                "B2".to_string(),
+                "B3".to_string(),
+                "B4".to_string()
+            ],
+            vec![
+                "C1".to_string(),
+                "C2".to_string(),
+                "C3".to_string(),
+                "C4".to_string()
+            ],
+            vec!["D1".to_string()],
+        ],
+        "scc changed its components or the order it reports them in"
+    );
+
+    // -- k_core: the fringe goes, the cliques stay.
+    let core: Vec<String> = k_core(&g, 3).into_iter().collect();
+    assert_eq!(
+        core,
+        vec!["A1", "A2", "A3", "A4", "B1", "B2", "B3", "B4", "C1", "C2", "C3", "C4"],
+        "the 3-core moved"
+    );
+    assert!(k_core(&g, 7).is_empty(), "the 7-core is not empty");
+}
+
 /// The whole point of the BTreeMap choice: same graph, same answer, every run.
 #[test]
 fn the_algorithms_are_deterministic_across_repeated_runs() {

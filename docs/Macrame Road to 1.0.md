@@ -266,7 +266,7 @@ branching lands.** This is the one item in this document I would cut first if
 | 2.2 | `CONCEPTS_ARCHIVABLE` quadratic on `links.target_id` | High | W3.2 | 0.13.0 |
 | 2.3 | Per-transaction overhead ~0.8 ms; singular paths pay it per row | Med | W3.4 | 0.13.0 |
 | 2.4 | Snapshot work runs on a tokio worker | Med | W8.1 | 0.13.11 ✅ |
-| 2.5 | `Subgraph` string-keyed adjacency | Low | W10.3 | 0.14.0 |
+| 2.5 | `Subgraph` string-keyed adjacency | Low | W10.3 (measured), W10.3b (built) | 0.14.0 |
 | 2.6 | `reject_overlaps_within` O(n²) | Med | W7.5 | 0.13.6 ✅ |
 | 3.1 | `as_of` mixes valid time and transaction time | High | W5.6 / W7.1 | both |
 | 3.2 | `AtTime` degrades silently after archive | Med | W9.1 | 0.13.16 ✅ |
@@ -2172,6 +2172,64 @@ String-keyed adjacency; index-based would be faster. **Benchmark first, and be
 prepared to close this as "not worth it".** A `Subgraph` big enough for this to
 matter may be rarer than the finding assumes, and this is the lowest-value item
 in either release.
+
+> **✅ Benchmarked and decided in 0.13.27 (recorded as
+> [D-200](../docs/architecture/s13-decision-register.md#d-200)).
+> **Not** closed as "not worth it" — the measurement refuses that answer. The
+> rewrite is justified, its design is *not* the one §2.5 proposed, and it lands
+> in 0.13.28.**
+>
+> **1. §2.5's ratio is right.** `examples/subgraph_interior.rs` transcribes
+> `louvain` and `dijkstra` onto a CSR view — same `dQ`, same epsilon, same
+> tie-breaks, checked partition-for-partition and distance-for-distance against
+> the crate's at every size — over a chain of 12-cliques from 48 to the
+> 49,152-node budget ceiling, under short and ULID-shaped ids. With the
+> conversion excluded the dense arms run **9.6×–15.3× (Louvain)** and
+> **12×–25× (Dijkstra)** faster. §2.5 estimated 5–20× and said it had read
+> rather than benchmarked; it had read correctly.
+>
+> **2. §2.5's mechanism is wrong, and shipping it as written would have made
+> Dijkstra slower.** "Build a dense view once, run, translate back" done *at
+> the boundary* — the only place a caller can build it — is **1.8×–2.1× on
+> Louvain and 0.19×–0.50× on Dijkstra**. The build costs one
+> `BTreeMap<&str, _>` lookup per edge endpoint: the exact cost being removed,
+> paid once for the graph instead of once per sweep. Louvain sweeps enough to
+> earn it back. Dijkstra is one pass and does not.
+>
+> **3. The fix is that the view belongs inside the crate.** D-115 already
+> interned every string an `EdgeRef` carries, so in-crate the conversion is one
+> string lookup **per node** plus integer work per edge — not one per edge
+> endpoint. That gap is the whole difference between the probe's two ratio
+> columns, and D-114 took the API break in 0.8.0 expressly to make this
+> possible.
+>
+> **4. And the interior is a large enough share to be worth it.** On the shape
+> `load_subgraph`'s own rustdoc names — 10,000 concepts at out-degree 8,
+> neighbourhoods of one node — the algorithms are **34% / 60–64% / 45–54%** of
+> load-plus-algorithms at two, three and four hops, almost all of it Louvain.
+> (Two readings; a range rather than a point, because these are wall-clock
+> figures on one machine — D-147.)
+> *The item's premise that "a `Subgraph` big enough for this to matter may be
+> rarer than the finding assumes" is the part that did not survive.*
+>
+> **The first share fixture is recorded because its number would have closed
+> the item.** Reusing the clique chain put the algorithms at **0.7%** — timing
+> a 256-hop recursive walk no caller runs. A fixture chosen for a dense inner
+> loop had been carried into a question about load cost, and it printed a
+> plausible number that agreed with this item's expectation.
+>
+> The answers are pinned before the representation moves:
+> `the_interior_may_change_but_these_answers_may_not` fixes all six algorithms'
+> exact output on one fixture, `scc`'s component order included.
+
+**W10.3b — the in-crate dense interior.** 0.13.28, per
+[D-200](../docs/architecture/s13-decision-register.md#d-200). Key `nodes`,
+`out_adj` and `in_adj` by pool index behind the unchanged public API; rewrite
+the six algorithms on it; hold the result to
+`the_interior_may_change_but_these_answers_may_not` and to the determinism
+guarantees of §5.4. **Measure the in-crate build**, because D-200's upper bound
+is a structural argument and not yet a reading — if the rewrite does not
+approach it, the decision comes back.
 
 **W10.6 — The two-dimensional index question, measured before it is answered.**
 Closes F-33. W7.1 makes bitemporal predicates expressible; this asks what they
