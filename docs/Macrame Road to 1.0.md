@@ -289,7 +289,7 @@ branching lands.** This is the one item in this document I would cut first if
 | 6.1 | Release history table stops at 0.9.0 | Low | W11.3 | 0.14.0 |
 | 6.2 | `Cargo.toml` metrics cost model is false | Med | W4.1 | 0.13.0 |
 | 6.3 | Comment-to-code ratio | — | W11.4 | 0.14.0 |
-| F-28 | No `ANALYZE`; planner runs on default selectivity | High | W2.1, W2.2 | 0.13.0 |
+| F-28 | No `ANALYZE`; planner runs on default selectivity | High | W2.1, W2.2 | 0.13.0 ✅ |
 | F-29 | Plan-pinning fixture has no rows and no statistics | High | W2.4 | 0.13.0 |
 | F-30 | Autocheckpoint perturbs the chunk controller | Med | W5.3 | 0.13.0 |
 | F-31 | `search_vector` returns retired concepts; `keyword_search` does not | High | W9.3 | 0.13.18 ✅ |
@@ -451,6 +451,15 @@ form: SQLite re-analyses only tables whose statistics it believes are stale, and
 is a no-op otherwise. Two call sites — `Database::close`, and at the end of
 `write_concepts` / the bulk edge path when a run exceeds a threshold worth
 picking by measurement rather than by taste.
+
+> **Done in two halves.** The `close()` call site shipped 0.12.4
+> ([D-149](../docs/architecture/s13-decision-register.md#d-149)). The bulk-load
+> one was carried to **W10.2** for its threshold and closed there in 0.13.25 as
+> **not built** — measured, the statistics it would write change no plan this
+> crate has ([D-198](../docs/architecture/s13-decision-register.md#d-198)). The
+> "no-op otherwise" above is also narrower than written: the staleness test is a
+> *ratio* and a large one, not a row count
+> ([D-197](../docs/architecture/s13-decision-register.md#d-197)).
 
 **W2.3 — The registry gets a second direction.** Closes §5.2. Today
 `index_plan_tests` is keyed by index: every index names a query. The inverse
@@ -1963,6 +1972,44 @@ D-055; it observes that D-055's reasoning was about timings specifically.
 
 **W10.2 — `PRAGMA optimize` gets a scheduled call site.** Whatever W2.2's
 measurement recommended, made real and tested.
+
+> **✅ Shipped 0.13.25 (recorded as
+> [D-198](../docs/architecture/s13-decision-register.md#d-198)). Closed as *no
+> call site* — not what this item expected, and what it measured.**
+>
+> **The threshold question has no answer because the call has no reader.**
+> [D-197](../docs/architecture/s13-decision-register.md#d-197) had already shown
+> a threshold on the *run* cannot reach the ratio `PRAGMA optimize` applies —
+> but on a **fresh** database the first call is a full analysis and the ratio
+> never applies, so the call site would have fired exactly where a bulk load
+> most plausibly matters. That made it look justified, and the only question
+> left was what the caller gets.
+>
+> **Nothing.** `examples/bulk_optimize.rs`, fresh database, 90 / 500 / 5,000 /
+> 40,000 edges: `sqlite_stat1` goes 0 → 7 rows every time, for **0.26% to 21%
+> of the import's own cost**, and **no plan and no opcode count moves** —
+> across the six queries the registry justifies an index with, plus a join whose
+> order the planner is free to choose. A maintenance call whose output nothing
+> reads is [D-089](../docs/architecture/s13-decision-register.md#d-089)'s unread
+> index in a different costume.
+>
+> **And that is structural.** `index_plan_tests` already asserts every registry
+> query gets its index on an empty database *and* on a populated analysed one —
+> the same fact from the other side: one reader per index, each shaped to seek.
+> Where there is one candidate path, statistics have nothing to choose between.
+>
+> **[D-149](../docs/architecture/s13-decision-register.md#d-149) is not
+> overturned.** `close()`'s call is ~0.1 ms on an idle database and buys correct
+> estimates for the query nobody has written yet. What is refuted is the
+> narrower thing this item scheduled: a *second, automatic* call site.
+>
+> `tests/statistics_effect_tests.rs` pins it, against a **third fixture** added
+> for the purpose — the same rows with no `ANALYZE`, so the comparison isolates
+> statistics instead of confounding them with row count the way `migrated`
+> against `populated_and_analysed` does. Plan text **and** W10.1's opcode
+> triple, both directions of the fixture guarded, and a second test confirming
+> the fingerprint can see a difference when there is one.
+
 
 **W10.4 — Decide the low-priority fairness floor, on evidence that is not a
 synthetic burst.** Added 0.12.10, after W4.4's counter falsified the premise

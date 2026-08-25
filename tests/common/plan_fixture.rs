@@ -67,6 +67,25 @@ pub async fn migrated(db_path: &std::path::Path) -> libsql::Connection {
 /// planner that actually runs. A gate that quietly stops testing the thing it
 /// names is worse than no gate.
 pub async fn populated_and_analysed(db_path: &std::path::Path) -> libsql::Connection {
+    let conn = populated_without_statistics(db_path).await;
+    let _ = conn.query(ddl::ANALYZE, ()).await.unwrap();
+    conn
+}
+
+/// The same rows, with **no** `ANALYZE` (0.13.25, W10.2, [D-198]).
+///
+/// The third fixture, and it exists to isolate one variable. [`migrated`] and
+/// [`populated_and_analysed`] differ in *two* things — rows and statistics —
+/// so a plan that differs between them says nothing about which one caused it.
+/// This one against that one differs in statistics alone, which is what
+/// `tests/statistics_effect_tests.rs` needs in order to ask whether statistics
+/// change any plan the crate has.
+///
+/// It is also a real state, not just an instrument: it is what a process holds
+/// between a bulk load and its first `optimize()`.
+///
+/// [D-198]: ../../docs/architecture/s13-decision-register.md#d-198
+pub async fn populated_without_statistics(db_path: &std::path::Path) -> libsql::Connection {
     let conn = migrated(db_path).await;
 
     // Matches `Database::configure`. A fixture analysed without the limit would
@@ -92,8 +111,6 @@ pub async fn populated_and_analysed(db_path: &std::path::Path) -> libsql::Connec
         insert_edge(&conn, &format!("c{i:04}"), &format!("c{:04}", i + 1)).await;
     }
     conn.execute("COMMIT", ()).await.unwrap();
-
-    let _ = conn.query(ddl::ANALYZE, ()).await.unwrap();
     conn
 }
 
