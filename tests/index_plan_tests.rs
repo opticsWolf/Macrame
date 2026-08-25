@@ -35,10 +35,12 @@
 
 #[path = "common/harness.rs"]
 mod harness;
+#[path = "common/plan_fixture.rs"]
+mod plan_fixture;
 
 use harness::TestHarness;
-use libsql::Builder;
-use macrame::schema::{ddl, migrations};
+use macrame::schema::ddl;
+use plan_fixture::{assert_has_statistics, migrated, plan_of, populated_and_analysed};
 
 /// Why an index exists.
 enum Justification {
@@ -157,93 +159,6 @@ const REGISTRY: &[(&str, Justification)] = &[
     // asks for. `ddl::CREATE_INDICES` states the distinction at length.
 ];
 
-async fn migrated(harness: &TestHarness) -> libsql::Connection {
-    let db = Builder::new_local(&harness.db_path).build().await.unwrap();
-    let conn = db.connect().unwrap();
-    migrations::run(&conn).await.unwrap();
-    conn
-}
-
-/// A fixture with rows and statistics — the shape production has since D-149.
-///
-/// # Why this had to exist the moment `ANALYZE` shipped
-///
-/// Through 0.12.3 every test here ran against [`migrated`]: a freshly migrated,
-/// entirely **empty** database. That was *faithful*, because production had no
-/// statistics either — nothing in the crate ran `ANALYZE`, so `sqlite_stat1`
-/// existed nowhere and SQLite costed every plan against built-in defaults on
-/// both sides.
-///
-/// D-149 ended that, and it ends it **silently**: the empty fixture still
-/// passes, still asserts a plan, and no longer asserts anything about the
-/// planner that actually runs. A gate that quietly stops testing the thing it
-/// names is worse than no gate, which is the argument this whole file is built
-/// on one level up.
-///
-/// # The skew is the point
-///
-/// One hub with 150 edges against 60 single-edge leaves. Uniform data is
-/// precisely where measured statistics and SQLite's default guesses agree, so a
-/// uniform fixture would pass whether or not `ANALYZE` had ever run and would
-/// prove nothing about either. Skew is also what a code graph actually is, and
-/// what D-059's 4.4 ms → 1.06 s spread was measured on.
-async fn populated_and_analysed(harness: &TestHarness) -> libsql::Connection {
-    let conn = migrated(harness).await;
-
-    // Matches `Database::configure`. A fixture analysed without the limit would
-    // hold statistics production never computes.
-    let _ = conn.query(ddl::ANALYSIS_LIMIT, ()).await.unwrap();
-
-    conn.execute("BEGIN", ()).await.unwrap();
-    for i in 0..260 {
-        conn.execute(
-            "INSERT INTO concepts (id, title, content, valid_from, valid_to, \
-             recorded_at, retired) VALUES (?1, ?2, '', ?3, ?4, ?3, 0)",
-            libsql::params![format!("c{i:04}"), format!("C{i}"), TS, OPEN],
-        )
-        .await
-        .unwrap();
-    }
-    // The hub.
-    for i in 1..151 {
-        insert_edge(&conn, "c0000", &format!("c{i:04}")).await;
-    }
-    // The leaves.
-    for i in 151..211 {
-        insert_edge(&conn, &format!("c{i:04}"), &format!("c{:04}", i + 1)).await;
-    }
-    conn.execute("COMMIT", ()).await.unwrap();
-
-    let _ = conn.query(ddl::ANALYZE, ()).await.unwrap();
-    conn
-}
-
-async fn insert_edge(conn: &libsql::Connection, source: &str, target: &str) {
-    conn.execute(
-        "INSERT INTO links (source_id, target_id, edge_type, valid_from, \
-         valid_to, weight, properties, recorded_at) \
-         VALUES (?1, ?2, 'LINKS', ?3, ?4, 1.0, '{}', ?3)",
-        libsql::params![source, target, TS, OPEN],
-    )
-    .await
-    .unwrap();
-}
-
-const TS: &str = "2026-01-01T00:00:00.000000Z";
-const OPEN: &str = "9999-12-31T23:59:59.999999Z";
-
-async fn plan_of(conn: &libsql::Connection, sql: &str) -> String {
-    let mut rows = conn
-        .query(&format!("EXPLAIN QUERY PLAN {sql}"), ())
-        .await
-        .unwrap();
-    let mut lines = Vec::new();
-    while let Some(r) = rows.next().await.unwrap() {
-        lines.push(r.get::<String>(3).unwrap());
-    }
-    lines.join(" | ")
-}
-
 /// Every declared index appears in the registry, and nothing else does.
 ///
 /// The test that makes this a category. Adding an index without stating what
@@ -287,21 +202,12 @@ fn every_index_is_justified() {
 #[tokio::test]
 async fn every_justified_index_is_the_one_the_planner_picks_with_statistics() {
     let harness = TestHarness::new();
-    let conn = populated_and_analysed(&harness).await;
+    let conn = populated_and_analysed(&harness.db_path).await;
 
-    // Guard the fixture itself. If `ANALYZE` silently did nothing, every
-    // assertion below would still pass and would be testing the empty-database
-    // planner under a name claiming otherwise.
-    let mut rows = conn
-        .query("SELECT COUNT(*) FROM sqlite_stat1", ())
-        .await
-        .expect("sqlite_stat1 missing: ANALYZE did not run on this fixture");
-    let stats: i64 = rows.next().await.unwrap().unwrap().get(0).unwrap();
-    assert!(
-        stats > 0,
-        "the fixture analysed to zero statistics rows, so this test is the \
-         empty-database case wearing the populated one's name (D-150)"
-    );
+    // Guard the fixture itself: without this, every assertion below would
+    // still pass while testing the empty-database planner under a name
+    // claiming otherwise.
+    assert_has_statistics(&conn).await;
 
     for (name, j) in REGISTRY {
         let Query { label, sql, .. } = j else {
@@ -432,7 +338,7 @@ struct Expect {
 #[tokio::test]
 async fn every_registered_query_gets_the_plan_it_is_recorded_as_getting() {
     let harness = TestHarness::new();
-    let conn = populated_and_analysed(&harness).await;
+    let conn = populated_and_analysed(&harness.db_path).await;
 
     for (label, sql, expect) in QUERY_REGISTRY {
         let plan = plan_of(&conn, sql).await;
@@ -459,7 +365,7 @@ async fn every_registered_query_gets_the_plan_it_is_recorded_as_getting() {
 #[tokio::test]
 async fn every_justified_index_is_the_one_the_planner_picks_when_empty() {
     let harness = TestHarness::new();
-    let conn = migrated(&harness).await;
+    let conn = migrated(&harness.db_path).await;
 
     for (name, j) in REGISTRY {
         let Query { label, sql, .. } = j else {

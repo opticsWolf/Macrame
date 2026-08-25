@@ -284,7 +284,7 @@ branching lands.** This is the one item in this document I would cut first if
 | 4.7 | `Database` is not `Clone` | Low | W11.1 | 0.14.0 |
 | 5.1 | R15 reaches the main suite | High | W1 | 0.13.0 |
 | 5.2 | Index registry is one-directional | Med | W2.3 | 0.13.0 |
-| 5.3 | No performance regression detection | Med | W10.1 | 0.14.0 |
+| 5.3 | No performance regression detection | Med | W10.1 | 0.14.0 ✅ |
 | 5.4 | No snapshot fuzzing | Low | W8.4 | 0.13.14 ✅ |
 | 6.1 | Release history table stops at 0.9.0 | Low | W11.3 | 0.14.0 |
 | 6.2 | `Cargo.toml` metrics cost model is false | Med | W4.1 | 0.13.0 |
@@ -1919,6 +1919,47 @@ are stable enough to assert:
 
 Wall-clock benchmarks stay advisory, as D-055 says. This wave does not overturn
 D-055; it observes that D-055's reasoning was about timings specifically.
+
+> **✅ Shipped 0.13.22 (recorded as
+> [D-195](../docs/architecture/s13-decision-register.md#d-195)).**
+>
+> **The plan-shape half already existed**, in `index_plan_tests`, against the
+> populated and analysed fixture W2.4 built. What this release adds is the
+> operation-count half and one thing the plan asserted about the item: that
+> "rows scanned" is not available. `sqlite3_stmt_scanstatus` needs
+> `SQLITE_ENABLE_STMT_SCANSTATUS`, and `PRAGMA compile_options` on the vendored
+> engine does not list it — measured, in `examples/opcode_probe.rs`, not
+> assumed. The honest substitute is the **program** that would do the scanning.
+>
+> **`EXPLAIN` gives three integers that move with the plan and with nothing
+> else**: cursors opened, seeks issued, b-tree rewinds. `tests/operation_count_
+> tests.rs` pins the triple for the six queries `index_plan_tests` justifies an
+> index with, plus a control that no index serves.
+>
+> **No single one of the three means what it looks like it means.** An index
+> range scan with an open-ended bound rewinds its cursor exactly as a table scan
+> does: the fold's `recorded_at <= ?1` carries `(2, 0, 1)` and the control
+> carries `(1, 0, 1)`. The **triple** separates them and no component does,
+> which is asserted rather than left implied — otherwise someone eventually
+> simplifies the gate to `rewinds == 0` on a query where a rewind is correct.
+>
+> **The gate is strictly finer than the registry's assertion, demonstrated
+> rather than claimed.** Add one column the covering index does not carry: the
+> same index is still picked, `plan.contains(name)` still passes, and `opens`
+> goes 1 → 2 because the row now has to be read. That gap *is* D-042's class —
+> an index that captures a query without covering it. `EXPLAIN QUERY PLAN` does
+> print the word `COVERING`, so a plan assertion could have caught this one;
+> the registry keys on the index name on purpose, and an integer is a better
+> instrument than a word for *how much* is read when coverage is lost.
+>
+> **The fixture moved to `tests/common/plan_fixture.rs`** and both files use it.
+> Two costs are only comparable if the rows and the statistics behind them are
+> the same rows and statistics, which is [D-088](../docs/architecture/s13-decision-register.md#d-088)'s
+> rule; a copied fixture is how "the populated fixture" quietly becomes two.
+>
+> **D-055 is not overturned.** Wall-clock benchmarks stay advisory, exactly as
+> it says. This observes that its reasoning was about timings.
+
 
 **W10.2 — `PRAGMA optimize` gets a scheduled call site.** Whatever W2.2's
 measurement recommended, made real and tested.
