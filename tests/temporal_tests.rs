@@ -1104,27 +1104,40 @@ async fn a_recorded_instant_is_refused_once_rows_have_been_archived() {
 /// retired, and had a title at the instant asked about, reported as absent by
 /// being missing from a `Vec`. Indistinguishable at the call site from retired
 /// and from never having existed.
-#[tokio::test]
-async fn hydrating_at_a_recorded_instant_refuses_once_rows_have_been_archived() {
+/// The valid time every generation of the fixture concept is asserted over.
+const HORIZON_VALID_FROM: &str = "1970-01-01T00:00:00.000000Z";
+/// Inside the first generation: what was believed here goes to the cold file.
+const HORIZON_INSTANT: &str = "1970-01-01T00:30:00.000000Z";
+/// Between the second generation and the third.
+const HORIZON_CUTOFF: &str = "1970-01-01T01:30:00.000000Z";
+
+/// Three generations of one concept an hour of transaction time apart, with an
+/// archive cutoff between the second and the third — the one shape that puts
+/// [`HORIZON_INSTANT`] on the far side of the horizon.
+///
+/// A `FakeClock` drives it because the windows are bounds on *transaction*
+/// time: with the wall clock supplying `recorded_at`, three writes land in the
+/// same microsecond, no cutoff can fall between them, and the fixture would
+/// pass while demonstrating nothing.
+async fn a_ledger_archived_across_a_horizon(harness: &TestHarness) -> macrame::Database {
     use macrame::prelude::*;
-    use std::time::Duration;
 
-    const EPOCH: &str = "1970-01-01T00:00:00.000000Z";
-    /// Inside the first generation: what was believed here is archived.
-    const INSTANT: &str = "1970-01-01T00:30:00.000000Z";
-    /// Between the second generation and the third.
-    const CUTOFF: &str = "1970-01-01T01:30:00.000000Z";
-
-    let harness = TestHarness::new();
     let db = harness.db_with_fake_clock().await;
-
     for title in ["first", "second", "third"] {
-        db.upsert_concept(ConceptUpsert::new("c1", title).valid_from(EPOCH))
+        db.upsert_concept(ConceptUpsert::new("c1", title).valid_from(HORIZON_VALID_FROM))
             .await
             .unwrap();
-        harness.advance(Duration::from_secs(3_600));
+        harness.advance(std::time::Duration::from_secs(3_600));
     }
+    db
+}
 
+#[tokio::test]
+async fn hydrating_at_a_recorded_instant_refuses_once_rows_have_been_archived() {
+    const INSTANT: &str = HORIZON_INSTANT;
+
+    let harness = TestHarness::new();
+    let db = a_ledger_archived_across_a_horizon(&harness).await;
     let ids = vec!["c1".to_string()];
 
     // Before archiving, the hot log holds all three and the instant is
@@ -1143,7 +1156,7 @@ async fn hydrating_at_a_recorded_instant_refuses_once_rows_have_been_archived() 
         "at {INSTANT} the ledger held the first generation"
     );
 
-    let report = db.archive(CUTOFF).await.unwrap();
+    let report = db.archive(HORIZON_CUTOFF).await.unwrap();
     assert!(
         report.log_entries_archived >= 2,
         "the fixture needs the superseded rows to have actually moved: {report:?}"
@@ -1176,6 +1189,96 @@ async fn hydrating_at_a_recorded_instant_refuses_once_rows_have_been_archived() 
             "live text, whichever instant the valid axis names"
         );
     }
+
+    db.close().await.unwrap();
+}
+
+/// **The refusal names `reconstruct`, and `reconstruct` must actually answer**
+/// (W9.2, §3.2).
+///
+/// W9.1 chose the error over unioning the cold log into the fold, and an
+/// error is only the right choice if the operation it redirects to gives the
+/// caller the same answer. Nothing checked that. This is the finding the plan
+/// calls *the one most likely to be "fixed" by a change nobody can
+/// demonstrate*, and the demonstration is the round trip rather than the
+/// branch: the fixture is archived across the horizon, `hydrate_attributes`
+/// refuses, and `reconstruct` with the archive path returns exactly what
+/// `hydrate_attributes` returned before the archive ran.
+///
+/// **The pre-archive reading is taken first and compared against, not
+/// asserted twice.** A test that hard-codes `"first"` in both places passes if
+/// both readers are wrong in the same way. Taking the live answer while the hot
+/// log is still intact and then requiring the cold path to reproduce *that
+/// value* is what makes the archive the only variable.
+///
+/// The last arm is the horizon itself: without the archive path the same
+/// `reconstruct` fails rather than folding what is left, so the refusal above
+/// is a property of the ledger and not an artifact of one reader.
+#[tokio::test]
+async fn what_the_hot_log_refuses_the_archive_path_still_answers() {
+    let harness = TestHarness::new();
+    let db = a_ledger_archived_across_a_horizon(&harness).await;
+    let ids = vec!["c1".to_string()];
+
+    // The truth, read while everything is still hot. Not a literal: see above.
+    let truth = hydrate_attributes(
+        db.read_conn(),
+        &ids,
+        &AsOf::recorded_at(HORIZON_INSTANT),
+        AttributeMode::AtTime,
+    )
+    .await
+    .expect("an intact hot log answers for any instant")
+    .pop()
+    .expect("the concept existed at the instant");
+
+    let before = reconstruct(db.read_conn(), HORIZON_INSTANT, None, None)
+        .await
+        .expect("an intact hot log needs no archive");
+    assert_eq!(
+        before.concepts.get("c1"),
+        Some(&truth),
+        "the two readers must already agree before the archive splits them"
+    );
+
+    let report = db.archive(HORIZON_CUTOFF).await.unwrap();
+    assert!(
+        report.log_entries_archived >= 2,
+        "the fixture needs the superseded rows to have actually moved: {report:?}"
+    );
+
+    // What the hot log can no longer answer.
+    let err = hydrate_attributes(
+        db.read_conn(),
+        &ids,
+        &AsOf::recorded_at(HORIZON_INSTANT),
+        AttributeMode::AtTime,
+    )
+    .await
+    .expect_err("the instant is past the horizon now");
+    assert!(err.to_string().contains("reconstruct"), "{err}");
+
+    // ...and what the operation it names does answer, from the same connection
+    // plus the path the error says is the missing ingredient.
+    let after = db
+        .reconstruct(HORIZON_INSTANT)
+        .await
+        .expect("reconstruct takes the archive path and must answer");
+    assert_eq!(
+        after.concepts.get("c1"),
+        Some(&truth),
+        "the archive moved the row, it did not change what was believed"
+    );
+
+    // The horizon is real: the same call without the path refuses rather than
+    // folding what the archive left behind.
+    let err = reconstruct(db.read_conn(), HORIZON_INSTANT, None, None)
+        .await
+        .expect_err("a short hot log and no archive path is not answerable");
+    assert!(
+        matches!(err, macrame::DbError::ReplayCorrupt { .. }),
+        "got {err:?}"
+    );
 
     db.close().await.unwrap();
 }

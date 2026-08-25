@@ -1677,6 +1677,34 @@ reporting something the doctrine says cannot happen.
 and asserts the chosen behaviour. This is the finding most likely to be
 "fixed" by a change nobody can demonstrate.
 
+> **✅ Shipped 0.13.17 (recorded as
+> [D-190](../docs/architecture/s13-decision-register.md#d-190)).**
+>
+> **The error names `reconstruct`, so the test is about `reconstruct`.** W9.1
+> took the second exit — refuse, and redirect — which is only the right choice
+> if the operation it redirects to answers. 0.13.16 shipped without anything
+> checking that. A refusal that redirects is a claim about another operation,
+> and the claim is the testable part.
+>
+> **The round trip, not the branch.** `what_the_hot_log_refuses_the_archive_
+> path_still_answers` archives across the horizon, requires the refusal, then
+> requires `db.reconstruct(instant)` — same connection, plus the archive path
+> the error says is missing — to return what the hot reader returned *before*
+> the archive ran. That value is read and compared against, never written as a
+> literal in both places: a literal passes when both readers are wrong the same
+> way.
+>
+> **Mutation-discriminated.** Forcing `hot_log_reach` to answer `Covers`
+> unconditionally — the plausible wrong fix — fails it with `left: None`, which
+> is §3.2's own shape one layer down.
+>
+> **The last arm is the horizon.** `reconstruct` with no archive path refuses
+> too, so the boundary is a property of the ledger and not of one reader. The
+> fixture is a `FakeClock` and could not be anything else — under the wall
+> clock all three generations land in one microsecond and no cutoff falls
+> between them — and it is now shared with W9.1's test.
+
+
 W9.3 to W9.6 were added in 0.13.1 and close F-31 and F-32. They are in this wave
 rather than W7 because they are the same claim as W9.1 pointed at a different
 surface: **a read that quietly omits — or quietly includes — what the ledger says
