@@ -926,10 +926,31 @@ class Database:
         `cancel` mean.
         """
     def search_vector(
-        self, model: str, query: Embedding, *, top_k: int = 10
-    ) -> list[VectorHit]: ...
+        self,
+        model: str,
+        query: Embedding,
+        *,
+        top_k: int = 10,
+        as_of_valid: Timestamp | None = None,
+    ) -> list[VectorHit]:
+        """Nearest `top_k` concepts by cosine distance. Smaller score is closer.
+
+        `as_of_valid` reads the corpus as it was: a concept is a result only
+        while its own valid interval contains that instant. Absent, the search
+        is over what is true now (0.13.19, D-192).
+
+        Valid time only. The index keeps one row per concept and no history of
+        what its vector used to be, so there is nothing to read at a past
+        `recorded_at` — that question goes to `reconstruct`.
+        """
+
     def keyword_search(
-        self, query: str, *, top_k: int = 10, raw: bool = False
+        self,
+        query: str,
+        *,
+        top_k: int = 10,
+        raw: bool = False,
+        as_of_valid: Timestamp | None = None,
     ) -> list[tuple[str, float]]: ...
     def hybrid_search(
         self,
@@ -941,7 +962,14 @@ class Database:
         depth: int | None = None,
         rrf_k: int | None = None,
         raw: bool = False,
-    ) -> list[VectorHit]: ...
+        as_of_valid: Timestamp | None = None,
+    ) -> list[VectorHit]:
+        """Vector and keyword arms, fused by reciprocal rank. Larger is better.
+
+        `as_of_valid` applies to **both** arms. It could not apply to one: RRF
+        fuses two rank lists, and bounding only the vector arm would fuse what
+        was true then with what is true now into a single list that is neither.
+        """
     def search_filtered(
         self,
         model: str,
@@ -956,11 +984,17 @@ class Database:
         probe_cap: int | None = None,
         strategy: FilterStrategy | None = None,
         now: Timestamp | None = None,
+        as_of_valid: Timestamp | None = None,
     ) -> tuple[list[VectorHit], CostEstimate]:
         """Vector search restricted to a traversed neighbourhood.
 
         Returns the hits *and* the plan that produced them: which strategy was
         chosen and the byte estimates it was chosen on.
+
+        `as_of_valid` bounds the traversal **and** the ranking, because it is
+        one instant rather than two: a past neighbourhood scored against the
+        present corpus is the bug this parameter exists to prevent, not a
+        configuration (0.13.19, D-192). Absent, both read the present.
         """
 
     def rebuild_fts(self) -> None: ...

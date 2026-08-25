@@ -1237,16 +1237,18 @@ impl PyDatabase {
     /// Goes through the DiskANN index rather than scanning: an
     /// `ORDER BY vector_distance_cos(…)` over the table is linear in the corpus
     /// however small `top_k` is. Results ascend — **smaller score is closer**.
-    #[pyo3(signature = (model, query, *, top_k = 10))]
+    #[pyo3(signature = (model, query, *, top_k = 10, as_of_valid = None))]
     fn search_vector(
         &self,
         py: Python<'_>,
         model: &str,
         query: &Bound<'_, PyAny>,
         top_k: usize,
+        as_of_valid: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Vec<vector::PyVectorHit>> {
         let model = vector::model_name(model)?;
         let query = crate::types::coerce_embedding(query)?;
+        let as_of_valid = as_of_valid.map(|t| to_canonical(Some(t))).transpose()?;
         let hits = self.with_db(py, move |db| {
             runtime()
                 .block_on(macrame::vector::search_vector(
@@ -1254,6 +1256,7 @@ impl PyDatabase {
                     &query,
                     &model,
                     top_k,
+                    as_of_valid.as_deref(),
                 ))
                 .map_err(to_py)
         })?;
@@ -1270,25 +1273,28 @@ impl PyDatabase {
     /// string is an FTS5 syntax error rather than a literal, so it is escaped
     /// here unless `raw` is set — which is the same choice `hybrid_search`
     /// makes, for the same reason.
-    #[pyo3(signature = (query, *, top_k = 10, raw = false))]
+    #[pyo3(signature = (query, *, top_k = 10, raw = false, as_of_valid = None))]
     fn keyword_search(
         &self,
         py: Python<'_>,
         query: &str,
         top_k: usize,
         raw: bool,
+        as_of_valid: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Vec<(String, f64)>> {
         let expr = if raw {
             query.to_string()
         } else {
             macrame::vector::escape_fts5_query(query)
         };
+        let as_of_valid = as_of_valid.map(|t| to_canonical(Some(t))).transpose()?;
         self.with_db(py, move |db| {
             runtime()
                 .block_on(macrame::vector::keyword_search(
                     db.read_conn(),
                     &expr,
                     top_k,
+                    as_of_valid.as_deref(),
                 ))
                 .map_err(to_py)
         })
@@ -1306,7 +1312,7 @@ impl PyDatabase {
     /// `max(5 * top_k, 50)`. An unregistered model raises rather than degrading
     /// to keyword-only: a caller who named a model that does not exist asked a
     /// question this cannot answer.
-    #[pyo3(signature = (model, query_text, query_vector, *, top_k = 10, depth = None, rrf_k = None, raw = false))]
+    #[pyo3(signature = (model, query_text, query_vector, *, top_k = 10, depth = None, rrf_k = None, raw = false, as_of_valid = None))]
     #[allow(clippy::too_many_arguments)]
     fn hybrid_search(
         &self,
@@ -1318,6 +1324,7 @@ impl PyDatabase {
         depth: Option<usize>,
         rrf_k: Option<usize>,
         raw: bool,
+        as_of_valid: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Vec<vector::PyVectorHit>> {
         let model = vector::model_name(model)?;
         let query_vector = crate::types::coerce_embedding(query_vector)?;
@@ -1329,6 +1336,9 @@ impl PyDatabase {
         }
         if let Some(k) = rrf_k {
             search = search.rrf_k(k);
+        }
+        if let Some(t) = as_of_valid {
+            search = search.as_of_valid(to_canonical(Some(t))?);
         }
         let hits = self.with_db(py, move |db| {
             runtime()
@@ -1348,10 +1358,15 @@ impl PyDatabase {
     /// `strategy` forces one, bypassing it — for tests and diagnosis, not for
     /// production code, which should not be second-guessing a measurement it
     /// can read.
+    ///
+    /// `as_of_valid` bounds the traversal **and** the ranking, because it is one
+    /// instant rather than two (0.13.19, W9.4, D-192). A past neighbourhood
+    /// scored against the present corpus is the defect F-32 describes, so it is
+    /// not offered as a setting.
     #[pyo3(signature = (
         model, query, start_node, *, max_depth = 2, edge_types = None,
         min_weight = 0.0, top_k = 10, byte_budget = None, probe_cap = None,
-        strategy = None, now = None
+        strategy = None, now = None, as_of_valid = None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn search_filtered(
@@ -1368,12 +1383,22 @@ impl PyDatabase {
         probe_cap: Option<usize>,
         strategy: Option<vector::PyFilterStrategy>,
         now: Option<&Bound<'_, PyAny>>,
+        as_of_valid: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<(Vec<vector::PyVectorHit>, vector::PyCostEstimate)> {
         let model = vector::model_name(model)?;
         let query = crate::types::coerce_embedding(query)?;
         let now = self.instant(py, now)?;
+        let as_of_valid = as_of_valid.map(|t| to_canonical(Some(t))).transpose()?;
+        // One instant, reaching the walk and the ranking together: the whole
+        // point of W9.4 is that those two cannot disagree (D-192).
         let traversal = graph::builder(
-            start_node, max_depth, edge_types, min_weight, None, None, None,
+            start_node,
+            max_depth,
+            edge_types,
+            min_weight,
+            None,
+            as_of_valid,
+            None,
         );
 
         let mut search =

@@ -226,7 +226,8 @@ db.upsert_embeddings(&model, vec![                     // low-pri, chunked
 
 let dim  = declared_dimension(db.read_conn(), &model).await?;
 let all  = registered_models(db.read_conn()).await?;
-let hits = search_vector(db.read_conn(), &query_vec, &model, 10).await?;
+let hits = search_vector(db.read_conn(), &query_vec, &model, 10, None).await?;
+let then = search_vector(db.read_conn(), &query_vec, &model, 10, Some(ts)).await?;  // D-192
 let fused = reciprocal_rank_fusion(&vector_ranks, &keyword_ranks, 60);
 
 // -- Analytics --
@@ -338,7 +339,7 @@ Recorded so that "the API says so" cannot be cited against the code. Each line i
 | `db.traverse(root)…run()` | No `traverse` on the handle. `TraversalBuilder::new(root)…execute(conn, ts)`. |
 | `db.reconstruct(ts)` | **Closed in 0.5.4 ([D-049](s13-decision-register.md#d-049))** — the handle method exists and supplies the archive path and snapshot directory itself, which is what makes composition the default. The free function remains, with two more arguments. |
 | `state.node_at` / `edge_at` / `neighbors` / `load_subgraph` | `MaterializedState` exposes public fields (`concepts`, `edges`), not query methods. The claim that it "answers with signatures identical to the live `Database`" is not true today. |
-| `db.vector_search(model, &v).top_k(10)` | Free function `search_vector(conn, &v, &model, k)`. No builder, no `active_only`. |
+| `db.vector_search(model, &v).top_k(10)` | Free function `search_vector(conn, &v, &model, k, as_of_valid)`. No builder, no `active_only`; `as_of_valid` arrived in 0.13.19 ([D-192](s13-decision-register.md#d-192)) and is the only qualifier it takes. |
 | `db.hybrid_search(text, &v).rrf_k(60)` | **Closed in 0.5.5 ([D-051](s13-decision-register.md#d-051))**, as a builder rather than a handle method: `HybridSearch::new(model, text, vector).rrf_k(60).top_k(k).execute(conn)`. Hybrid search is a read, and reads are served from `read_conn` without traversing the actor, so it follows `TraversalBuilder` and `FilteredVectorSearch` rather than hanging off the handle. `rrf_k` is spelled as the sketch proposed. |
 | `db.set_embedding(id, model, vec)` | **Closed in 0.5.4 ([D-048](s13-decision-register.md#d-048))**, under a different name and shape: `db.upsert_embeddings(&model, rows)`, plural and chunked, because a single-vector method invites a per-row loop that is a channel round trip per vector. `db.register_model(&model, dim)` came with it. |
 | `db.audit_current()` | Free function `audit_current(conn)`. |

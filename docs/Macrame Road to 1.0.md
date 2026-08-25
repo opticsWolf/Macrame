@@ -293,7 +293,7 @@ branching lands.** This is the one item in this document I would cut first if
 | F-29 | Plan-pinning fixture has no rows and no statistics | High | W2.4 | 0.13.0 |
 | F-30 | Autocheckpoint perturbs the chunk controller | Med | W5.3 | 0.13.0 |
 | F-31 | `search_vector` returns retired concepts; `keyword_search` does not | High | W9.3 | 0.13.18 ✅ |
-| F-32 | No search surface filters concept valid time | Med | W9.4, W9.5 | 0.14.0 |
+| F-32 | No search surface filters concept valid time | Med | W9.4, W9.5 | 0.14.0 ✅ |
 | F-33 | The 2-D index question is unasked and the obvious answer does not fit | Med | W10.6 | 0.14.0 |
 | F-34 | No declarative surface; three qualifiers × four builders | Low | W13 | 0.15.0 |
 | F-35 | `load_subgraph_with` accepts an instant and reads the present | Med | W7.1 | 0.14.0 ✅ |
@@ -1774,6 +1774,39 @@ mechanism alone.
 ordering argument for W9 following W7: adding a time parameter to search before
 the crate has settled what a time parameter *means* would ship a third spelling
 of the axis confusion 3.1 exists to end.
+
+> **✅ Shipped 0.13.19 (recorded as
+> [D-192](../docs/architecture/s13-decision-register.md#d-192)).**
+>
+> **The plan's design, taken as written.** All three surfaces take an optional
+> `as_of_valid`, and with it set the `concepts` join W9.3 introduced also bounds
+> `c.valid_from <= t AND t < c.valid_to`. Absent, the statement is byte-for-byte
+> 0.13.18's.
+>
+> **The constant became a function of the parameter index.** The instant binds
+> at `?4` in the vector search, `?3` in the keyword search, and after a variadic
+> candidate chunk in `PreFilterCTE`, so one spliced string could not serve all
+> three. It is the *index* that is spliced and never the timestamp, which stays
+> a bound parameter on every path. `keyword_search`'s own `AND c.retired = 0` —
+> the copy W9.3 left behind — folds into the shared clause in the same edit,
+> because this is exactly the release that would have made the two disagree.
+>
+> **There were four readers.** `FilteredVectorSearch` takes no instant of its
+> own; it reads the traversal's `as_of_valid`. A knob here would permit a
+> filtered search whose filter is historical and whose ranking is not — the
+> axis confusion §3.1 exists to end, with a setting attached. And it is the
+> *stated* instant rather than `execute`'s `now_ts`, because `now_ts` is always
+> present and binding it would valid-time-bound every filtered search ever
+> written.
+>
+> **Transaction time is refused, not deferred.** The DiskANN index holds one row
+> per concept and keeps no history, so there is no past vector to search at an
+> `as_of_recorded`. That question goes to the ledger.
+>
+> Red first at the value on both gates. The discriminating arm is the instant
+> *inside* the closed interval: a bound written as `valid_to = the sentinel`
+> passes "absent" and "after" and fails only there.
+
 
 **W9.5 — decay, once the instant exists.** The survey's §6.3 identifies
 agent-memory retrieval that carries temporal context as the field's emptiest

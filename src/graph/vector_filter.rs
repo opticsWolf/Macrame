@@ -436,6 +436,11 @@ impl FilteredVectorSearch {
     /// No `k'` inflation is needed on this path: the filter and the `LIMIT` are
     /// in one statement, so the limit already applies to survivors.
     ///
+    /// **The instant comes from the traversal** (0.13.19, W9.4,
+    /// [D-192](../../docs/architecture/s13-decision-register.md#d-192)), and it
+    /// binds after the candidate chunk because the chunk is variadic and the
+    /// instant is not.
+    ///
     /// Candidate ids are carried in the statement as bound parameters, never
     /// spliced. A TEMP table would be the natural staging and is unavailable
     /// under `PRAGMA query_only` (measured: `SQLITE_READONLY (8)`); a bound
@@ -448,6 +453,7 @@ impl FilteredVectorSearch {
         candidates: &[String],
     ) -> Result<Vec<VectorSearchResult>> {
         let blob = self.encoded_query(conn).await?;
+        let at = self.traversal.as_of_valid.as_deref();
         let mut out: Vec<VectorSearchResult> = Vec::new();
 
         // SQLITE_MAX_VARIABLE_NUMBER bounds one statement's parameter count, so
@@ -469,12 +475,15 @@ impl FilteredVectorSearch {
                   LIMIT {k}",
                 table = self.model.table(),
                 ids = placeholders.join(", "),
-                visible = crate::vector::search::VISIBLE_CONCEPT,
+                visible = crate::vector::search::visible_concept(at.map(|_| chunk.len() + 2)),
                 k = self.top_k,
             );
 
             let mut params: Vec<libsql::Value> = vec![blob.clone().into()];
             params.extend(chunk.iter().map(|id| id.as_str().into()));
+            if let Some(t) = at {
+                params.push(t.into());
+            }
 
             let mut rows = conn.query(&sql, params).await?;
             while let Some(row) = rows.next().await? {
@@ -504,13 +513,25 @@ impl FilteredVectorSearch {
     /// Returns the survivors and whether the index scan was *saturated* — it
     /// returned every row it was asked for, so there were more it did not
     /// return. Saturation is what makes a short result inconclusive.
+    ///
+    /// It passes the traversal's instant down for the same reason it passes the
+    /// model down: this arm's answer has to be the other arm's answer, and the
+    /// gate that says so is `a_validity_that_ended_is_invisible_to_the_
+    /// strategy_choice`.
     async fn run_post_filter(
         &self,
         conn: &libsql::Connection,
         candidates: &[String],
         k_prime: usize,
     ) -> Result<(Vec<VectorSearchResult>, bool)> {
-        let hits = crate::vector::search_vector(conn, &self.query, &self.model, k_prime).await?;
+        let hits = crate::vector::search_vector(
+            conn,
+            &self.query,
+            &self.model,
+            k_prime,
+            self.traversal.as_of_valid.as_deref(),
+        )
+        .await?;
         let saturated = hits.len() >= k_prime;
 
         let allow: std::collections::HashSet<&str> =

@@ -12,6 +12,9 @@ use macrame::prelude::*;
 
 const TS: &str = "2026-01-01T00:00:00.000000Z";
 const OPEN: &str = "9999-12-31T23:59:59.999999Z";
+/// When the nearest three stop being true, and an instant after it.
+const ENDED: &str = "2026-01-05T00:00:00.000000Z";
+const AFTER: &str = "2026-01-06T00:00:00.000000Z";
 const CORPUS: usize = 60;
 
 /// Ids per statement in `run_pre_filter`'s chunked exact scan. Mirrored here so
@@ -472,6 +475,90 @@ async fn a_retirement_is_invisible_to_the_strategy_choice() {
              (k={k})"
         );
     }
+
+    db.close().await.unwrap();
+}
+
+/// **A validity that has ended is invisible to the strategy choice, for exactly
+/// the reason a retirement is** (0.13.19, W9.4, F-32).
+///
+/// W9.4 gives the vector surfaces an instant, and `FilteredVectorSearch` does
+/// not take one — it reads the traversal's, because a filtered search whose
+/// filter is historical and whose ranking is not is the axis confusion §3.1
+/// exists to end. That propagation is a *fourth* place the predicate has to
+/// reach, and it reaches two access paths that share nothing, so the gate is
+/// the same one W9.3 needed: the strategies must agree.
+///
+/// The expired nodes are the **nearest** reachable ones, so they are inside
+/// every `top_k` here rather than past the cut.
+#[tokio::test]
+async fn a_validity_that_ended_is_invisible_to_the_strategy_choice() {
+    let reachable: Vec<usize> = (0..20).collect();
+    let expired = [0usize, 1, 2];
+
+    let harness = TestHarness::new();
+    let db = fixture(&harness, &reachable).await;
+    db.write_concepts(
+        expired
+            .iter()
+            .map(|&i| {
+                ConceptUpsert::new(node_id(i), "N")
+                    .valid_from(TS)
+                    .valid_to(ENDED)
+            })
+            .collect(),
+    )
+    .await
+    .unwrap();
+
+    for k in [1usize, 3, 10] {
+        let base = FilteredVectorSearch::new(model(), query(), walk().as_of_valid(AFTER)).top_k(k);
+
+        let post = base
+            .clone()
+            .strategy(VectorFilterStrategy::PostFilter)
+            .execute(db.read_conn(), AFTER)
+            .await
+            .unwrap();
+        let pre = base
+            .clone()
+            .strategy(VectorFilterStrategy::PreFilterCTE)
+            .execute(db.read_conn(), AFTER)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            ids(&post),
+            ids(&pre),
+            "the strategies disagree about an ended validity at k={k}"
+        );
+
+        let expected: Vec<String> = reachable
+            .iter()
+            .filter(|i| !expired.contains(i))
+            .take(k)
+            .map(|&i| node_id(i))
+            .collect();
+        assert_eq!(
+            ids(&pre),
+            expected,
+            "a concept that stopped being true is not a result at a later \
+             instant, and top_k is still a count (k={k})"
+        );
+    }
+
+    // A traversal that states no instant reads the corpus, at the same `now_ts`
+    // that just excluded these three. The knob is what changes the answer.
+    let unstated = search(query())
+        .top_k(3)
+        .execute(db.read_conn(), AFTER)
+        .await
+        .unwrap();
+    assert_eq!(
+        ids(&unstated),
+        expired.iter().map(|&i| node_id(i)).collect::<Vec<_>>(),
+        "with no instant stated the filtered search reads the corpus"
+    );
 
     db.close().await.unwrap();
 }

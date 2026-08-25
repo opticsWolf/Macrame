@@ -83,6 +83,21 @@ pub fn escape_fts5_query(input: &str) -> String {
 /// filter on `retired` itself because external-content FTS5 indexes only the
 /// columns it was declared over.
 ///
+/// **The visibility predicate is the vector arm's, spliced rather than
+/// repeated** (0.13.19, W9.4,
+/// [D-192](../../docs/architecture/s13-decision-register.md#d-192)). This
+/// function carried its own `AND c.retired = 0` from the day it was written,
+/// and W9.3 wrote the shared constant without folding this copy into it. Two
+/// literals that must agree is [D-030](../../docs/architecture/s13-decision-register.md#d-030)'s
+/// failure class, and W9.4 is the release that would have made them disagree:
+/// adding the valid-time bound to one and not the other is F-31 again with a
+/// different column.
+///
+/// `as_of_valid` bounds each hit against its own valid interval. Absent, the
+/// statement is what 0.13.18 issued. FTS5 is not consulted about it either way:
+/// the MATCH selects on text and the bound is applied to the joined `concepts`
+/// row, which is the only place either fact lives.
+///
 /// The join names `c.rowid_pk` rather than `c.rowid` (v8, D-119). They are the
 /// same value — an `INTEGER PRIMARY KEY` *is* the rowid — but `concepts_fts`
 /// declares `content_rowid='rowid_pk'`, and the join should say which key it is
@@ -91,22 +106,28 @@ pub async fn keyword_search(
     conn: &libsql::Connection,
     query: &str,
     top_k: usize,
+    as_of_valid: Option<&str>,
 ) -> Result<Vec<(String, f64)>> {
     if top_k == 0 || query.trim().is_empty() {
         return Ok(Vec::new());
     }
 
-    let sql = "SELECT c.id, bm25(concepts_fts) AS rank
-                 FROM concepts_fts
-                 JOIN concepts c ON c.rowid_pk = concepts_fts.rowid
-                WHERE concepts_fts MATCH ?1
-                  AND c.retired = 0
-                ORDER BY rank ASC, c.id ASC
-                LIMIT ?2";
+    let sql = format!(
+        "SELECT c.id, bm25(concepts_fts) AS rank
+           FROM concepts_fts
+           JOIN concepts c ON c.rowid_pk = concepts_fts.rowid
+          WHERE concepts_fts MATCH ?1
+            AND {visible}
+          ORDER BY rank ASC, c.id ASC
+          LIMIT ?2",
+        visible = crate::vector::search::visible_concept(as_of_valid.map(|_| 3)),
+    );
 
-    let mut rows = conn
-        .query(sql, libsql::params![query, top_k as i64])
-        .await?;
+    let mut params: Vec<libsql::Value> = vec![query.into(), (top_k as i64).into()];
+    if let Some(t) = as_of_valid {
+        params.push(t.into());
+    }
+    let mut rows = conn.query(&sql, params).await?;
     let mut out = Vec::new();
     while let Some(row) = rows.next().await? {
         out.push((row.get(0)?, row.get::<f64>(1)?));
@@ -127,6 +148,7 @@ pub struct HybridSearch {
     depth: Option<usize>,
     rrf_k: usize,
     raw_match: bool,
+    as_of_valid: Option<String>,
 }
 
 impl HybridSearch {
@@ -143,6 +165,7 @@ impl HybridSearch {
             depth: None,
             rrf_k: RRF_K,
             raw_match: false,
+            as_of_valid: None,
         }
     }
 
@@ -180,6 +203,23 @@ impl HybridSearch {
         self
     }
 
+    /// Read both arms at a valid-time instant (0.13.19, W9.4, F-32).
+    ///
+    /// **Both, and it could not be one.** RRF fuses two rank lists, so an
+    /// instant applied to one arm and not the other would fuse what was true
+    /// then with what is true now and return a single ranked list that is
+    /// neither — the fused score cannot say which arm the anachronism came
+    /// from, which is the property that makes a half-applied bound worse here
+    /// than on either arm alone.
+    ///
+    /// Named for [`crate::graph::TraversalBuilder::as_of_valid`], and it is the
+    /// same axis: *what was true*, bounded by the concept's own interval.
+    /// Absent, both arms read the corpus, unchanged.
+    pub fn as_of_valid(mut self, ts: impl Into<String>) -> Self {
+        self.as_of_valid = Some(ts.into());
+        self
+    }
+
     fn effective_depth(&self) -> usize {
         self.depth.unwrap_or_else(|| (self.top_k * 5).max(50))
     }
@@ -194,15 +234,16 @@ impl HybridSearch {
         // The vector arm. An unregistered model is a typed error from here, and
         // is deliberately not softened into "no vector results": a caller who
         // named a model that does not exist asked a question this cannot answer.
+        let at = self.as_of_valid.as_deref();
         let vector: Vec<VectorSearchResult> =
-            search_vector(conn, &self.query_vector, &self.model, depth).await?;
+            search_vector(conn, &self.query_vector, &self.model, depth, at).await?;
 
         let match_expr = if self.raw_match {
             self.query_text.clone()
         } else {
             escape_fts5_query(&self.query_text)
         };
-        let keyword = keyword_search(conn, &match_expr, depth).await?;
+        let keyword = keyword_search(conn, &match_expr, depth, at).await?;
 
         let vector_ids: Vec<String> = vector.iter().map(|v| v.concept_id.clone()).collect();
         let keyword_ids: Vec<String> = keyword.iter().map(|(id, _)| id.clone()).collect();

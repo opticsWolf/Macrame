@@ -138,6 +138,30 @@ pub(crate) async fn upsert_embedding_chunk(
 /// nothing on its own.
 pub(crate) const VISIBLE_CONCEPT: &str = "c.retired = 0";
 
+/// [`VISIBLE_CONCEPT`], and the valid-time bound when the read states an instant
+/// (0.13.19, W9.4, [D-192](../../docs/architecture/s13-decision-register.md#d-192)).
+///
+/// `at_param` is the **1-based statement parameter** the instant is bound to,
+/// which differs per query and so cannot be baked into a constant: the vector
+/// search has three parameters ahead of it, the keyword search two, and the
+/// pre-filter's is a function of the candidate chunk. Passing the index rather
+/// than the value keeps the instant a bound parameter on every path.
+///
+/// `None` yields the retirement predicate alone and nothing else changes, which
+/// is [D-155](../../docs/architecture/s13-decision-register.md#d-155)'s rule:
+/// an absent knob leaves the mechanism alone. The bound is the crate's
+/// half-open interval — `valid_from <= t AND t < valid_to`, the same one
+/// `hydrate_current` and the traversal CTE apply — so a row whose validity has
+/// just ended at `t` is out and one whose validity begins at `t` is in.
+pub(crate) fn visible_concept(at_param: Option<usize>) -> String {
+    match at_param {
+        None => VISIBLE_CONCEPT.to_string(),
+        Some(p) => {
+            format!("{VISIBLE_CONCEPT} AND c.valid_from <= ?{p} AND ?{p} < c.valid_to")
+        }
+    }
+}
+
 /// Top-k nearest **visible** neighbours for `query_vec` under `model` (§5.9).
 ///
 /// Goes through `vector_top_k`, which consults the DiskANN index, rather than
@@ -170,11 +194,33 @@ pub(crate) const VISIBLE_CONCEPT: &str = "c.retired = 0";
 /// count means what came back **is** every visible neighbour — a complete
 /// answer, not a truncated one. The row count is read at most once and only on
 /// the escalating path.
+///
+/// # `as_of_valid`: what was true then, or the corpus (0.13.19, W9.4, F-32)
+///
+/// With an instant, a concept is a result only while its own valid interval
+/// contains it — the half-open bound the whole crate uses, and the same clause
+/// the visibility predicate already carries, so it costs no extra join. Without
+/// one, the statement is byte-for-byte what 0.13.18 issued: an absent knob
+/// leaves the mechanism alone
+/// ([D-155](../../docs/architecture/s13-decision-register.md#d-155)).
+///
+/// It is `as_of_valid` and not `as_of` because
+/// [`crate::graph::TraversalBuilder::as_of_valid`] split that word into two
+/// axes in 0.13.2, and one spelling per axis is the point of having split it.
+/// **Transaction time is deliberately not offered here**: reading the index as
+/// it stood at a past `recorded_at` would mean searching vectors that have
+/// since been replaced, and the DiskANN index holds one row per concept with no
+/// history to search. A caller who wants that asks the ledger, not the index.
+///
+/// The escalation above needs no adjustment for it. It keys on a pass coming up
+/// short and not on **why** it came up short, so a corpus thinned by valid time
+/// re-asks the index exactly as one thinned by retirement does.
 pub async fn search_vector(
     conn: &libsql::Connection,
     query_vec: &[f32],
     model: &ModelName,
     top_k: usize,
+    as_of_valid: Option<&str>,
 ) -> Result<Vec<VectorSearchResult>> {
     if top_k == 0 {
         return Ok(Vec::new());
@@ -188,23 +234,27 @@ pub async fn search_vector(
            FROM vector_top_k('{index}', ?1, ?2) AS t
            JOIN {table} AS e ON e.rowid = t.id
            JOIN concepts AS c ON c.id = e.concept_id
-          WHERE {VISIBLE_CONCEPT}
+          WHERE {visible}
           ORDER BY 2 ASC
           LIMIT ?3",
         index = model.index(),
         table = model.table(),
+        visible = visible_concept(as_of_valid.map(|_| 4)),
     );
 
     let mut k_prime = top_k;
     let mut indexed: Option<usize> = None;
 
     loop {
-        let mut rows = conn
-            .query(
-                &sql,
-                libsql::params![blob.clone(), k_prime as i64, top_k as i64],
-            )
-            .await?;
+        let mut params: Vec<libsql::Value> = vec![
+            blob.clone().into(),
+            (k_prime as i64).into(),
+            (top_k as i64).into(),
+        ];
+        if let Some(t) = as_of_valid {
+            params.push(t.into());
+        }
+        let mut rows = conn.query(&sql, params).await?;
 
         let mut results = Vec::new();
         while let Some(row) = rows.next().await? {

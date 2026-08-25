@@ -226,6 +226,51 @@ def test_a_retired_concept_is_not_a_search_result(db):
     assert "c" not in [cid for cid, _ in db.keyword_search("delta")]
 
 
+# Ends `c`'s validity, and two instants either side of it.
+T_END = "2026-01-05T00:00:00.000000Z"
+T_WITHIN = "2026-01-03T00:00:00.000000Z"
+T_AFTER = "2026-01-06T00:00:00.000000Z"
+
+
+def test_an_instant_reaches_every_search_surface(db):
+    """0.13.19 (W9.4, D-192): F-32 was that none of them could take one.
+
+    `c` is the nearest vector to the query, holds the only occurrence of
+    "delta", and is the far end of the traversal — so it is in every surface's
+    answer, and closing its valid interval has to be visible in all four.
+
+    The `T_WITHIN` arm is the one that discriminates. A bound written as "the
+    interval is still open" passes the absent case and the `T_AFTER` case and
+    fails only here.
+    """
+    q = [0.0, 0.0, 1.0, 0.0]
+    db.upsert_concept(
+        macrame.ConceptUpsert(
+            "c", "Charlie", valid_from=T0, valid_to=T_END, content="charlie delta"
+        )
+    )
+
+    assert "c" in [cid for cid, _ in db.keyword_search("delta")]
+    assert "c" not in [cid for cid, _ in db.keyword_search("delta", as_of_valid=T_AFTER)]
+    assert "c" in [cid for cid, _ in db.keyword_search("delta", as_of_valid=T_WITHIN)]
+
+    assert db.search_vector("mini", q, top_k=1)[0].concept_id == "c"
+    assert "c" not in [h.concept_id for h in db.search_vector("mini", q, as_of_valid=T_AFTER)]
+    assert "c" in [h.concept_id for h in db.search_vector("mini", q, as_of_valid=T_WITHIN)]
+
+    assert "c" in [h.concept_id for h in db.hybrid_search("mini", "delta", q)]
+    assert "c" not in [
+        h.concept_id for h in db.hybrid_search("mini", "delta", q, as_of_valid=T_AFTER)
+    ]
+
+    # `search_filtered` has no instant of its own: `as_of_valid` reaches the
+    # walk and the ranking together, and `now` alone leaves both in the present.
+    hits, _ = db.search_filtered("mini", q, "a", max_depth=3, now=T_AFTER)
+    assert "c" in [h.concept_id for h in hits]
+    hits, _ = db.search_filtered("mini", q, "a", max_depth=3, now=T_AFTER, as_of_valid=T_AFTER)
+    assert "c" not in [h.concept_id for h in hits]
+
+
 # --------------------------------------------------------------------------
 # hybrid_search — larger is better, the other way round
 # --------------------------------------------------------------------------

@@ -13,6 +13,10 @@ use harness::TestHarness;
 use macrame::prelude::*;
 
 const TS: &str = "2026-01-01T00:00:00.000000Z";
+/// When `both` stops being true, and two instants either side of it.
+const ENDED: &str = "2026-01-05T00:00:00.000000Z";
+const WITHIN: &str = "2026-01-03T00:00:00.000000Z";
+const AFTER: &str = "2026-01-06T00:00:00.000000Z";
 
 fn model() -> ModelName {
     ModelName::new("hybrid_v1").unwrap()
@@ -92,7 +96,7 @@ async fn the_fusion_returns_what_neither_arm_finds_alone() {
     let db = fixture(&harness).await;
 
     // Vector arm alone: nearest first, and the rare-term document is last.
-    let vector_only = search_vector(db.read_conn(), &query_vec(), &model(), 3)
+    let vector_only = search_vector(db.read_conn(), &query_vec(), &model(), 3, None)
         .await
         .unwrap();
     let vector_ids: Vec<&str> = vector_only.iter().map(|r| r.concept_id.as_str()).collect();
@@ -103,7 +107,7 @@ async fn the_fusion_returns_what_neither_arm_finds_alone() {
     );
 
     // Keyword arm alone: only the documents containing the term.
-    let keyword_only = keyword_search(db.read_conn(), &escape_fts5_query("zygomorphic"), 10)
+    let keyword_only = keyword_search(db.read_conn(), &escape_fts5_query("zygomorphic"), 10, None)
         .await
         .unwrap();
     let keyword_ids: Vec<&str> = keyword_only.iter().map(|(id, _)| id.as_str()).collect();
@@ -187,7 +191,7 @@ async fn rewriting_a_concept_retracts_its_old_terms() {
     let harness = TestHarness::new();
     let db = fixture(&harness).await;
 
-    let before = keyword_search(db.read_conn(), &escape_fts5_query("zygomorphic"), 10)
+    let before = keyword_search(db.read_conn(), &escape_fts5_query("zygomorphic"), 10, None)
         .await
         .unwrap();
     assert!(before.iter().any(|(id, _)| id == "lexical"));
@@ -201,7 +205,7 @@ async fn rewriting_a_concept_retracts_its_old_terms() {
     .await
     .unwrap();
 
-    let after = keyword_search(db.read_conn(), &escape_fts5_query("zygomorphic"), 10)
+    let after = keyword_search(db.read_conn(), &escape_fts5_query("zygomorphic"), 10, None)
         .await
         .unwrap();
     assert!(
@@ -209,7 +213,7 @@ async fn rewriting_a_concept_retracts_its_old_terms() {
         "the index still matches a word the concept no longer contains: {after:?}"
     );
 
-    let new_term = keyword_search(db.read_conn(), &escape_fts5_query("brachiopod"), 10)
+    let new_term = keyword_search(db.read_conn(), &escape_fts5_query("brachiopod"), 10, None)
         .await
         .unwrap();
     assert!(
@@ -231,7 +235,7 @@ async fn the_index_can_be_rebuilt_from_the_ledger() {
     let harness = TestHarness::new();
     let db = fixture(&harness).await;
 
-    let expected = keyword_search(db.read_conn(), &escape_fts5_query("zygomorphic"), 10)
+    let expected = keyword_search(db.read_conn(), &escape_fts5_query("zygomorphic"), 10, None)
         .await
         .unwrap();
     assert!(!expected.is_empty(), "fixture must match something to lose");
@@ -247,14 +251,14 @@ async fn the_index_can_be_rebuilt_from_the_ledger() {
         conn.execute("DELETE FROM concepts_fts", ()).await.unwrap();
     }
 
-    let damaged = keyword_search(db.read_conn(), &escape_fts5_query("zygomorphic"), 10)
+    let damaged = keyword_search(db.read_conn(), &escape_fts5_query("zygomorphic"), 10, None)
         .await
         .unwrap();
     assert!(damaged.is_empty(), "the damage did not take: {damaged:?}");
 
     db.rebuild_fts().await.unwrap();
 
-    let restored = keyword_search(db.read_conn(), &escape_fts5_query("zygomorphic"), 10)
+    let restored = keyword_search(db.read_conn(), &escape_fts5_query("zygomorphic"), 10, None)
         .await
         .unwrap();
     assert_eq!(
@@ -289,7 +293,7 @@ async fn a_retired_concept_leaves_the_results() {
     .await
     .unwrap();
 
-    let hits = keyword_search(db.read_conn(), &escape_fts5_query("zygomorphic"), 10)
+    let hits = keyword_search(db.read_conn(), &escape_fts5_query("zygomorphic"), 10, None)
         .await
         .unwrap();
     assert!(
@@ -469,6 +473,119 @@ async fn asking_for_nothing_returns_nothing() {
         .await
         .unwrap();
     assert!(hits.is_empty());
+
+    db.close().await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Valid time: what the corpus was, rather than what it is (W9.4, F-32)
+// ---------------------------------------------------------------------------
+
+/// **Every arm reads at the instant it was given, and none of them reads at one
+/// it was not** (0.13.19, W9.4, F-32).
+///
+/// `both` is the document all three surfaces return: second-nearest in vector
+/// space and one of the two holding the rare term. Ending its validity is
+/// therefore visible everywhere, which is what makes one fixture enough for
+/// three assertions instead of three fixtures that each prove one.
+///
+/// Three arms, and the third is the one that matters. Absent, the answer is
+/// today's corpus unchanged — an absent knob leaves the mechanism alone
+/// (D-155). At `AFTER`, `both` is gone. At `WITHIN` it is back, because the
+/// predicate is an interval containing the instant and not "a closed interval
+/// is invisible" — a bound written as `valid_to = the sentinel` passes the
+/// first two arms and fails this one.
+#[tokio::test]
+async fn each_search_arm_reads_at_the_instant_it_was_given() {
+    let harness = TestHarness::new();
+    let db = fixture(&harness).await;
+
+    // A corrective write that closes the interval. `both` keeps its text and
+    // its vector: nothing is deleted, it simply stopped being true.
+    db.write_concepts(vec![ConceptUpsert::new("both", "Both")
+        .content("zygomorphic paraphrase")
+        .valid_from(TS)
+        .valid_to(ENDED)])
+        .await
+        .unwrap();
+
+    async fn vector(db: &Database, at: Option<&str>) -> Vec<String> {
+        search_vector(db.read_conn(), &query_vec(), &model(), 3, at)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| r.concept_id)
+            .collect()
+    }
+    async fn keyword(db: &Database, at: Option<&str>) -> Vec<String> {
+        keyword_search(db.read_conn(), &escape_fts5_query("zygomorphic"), 10, at)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect()
+    }
+    async fn hybrid(db: &Database, at: Option<&str>) -> Vec<String> {
+        let mut search = HybridSearch::new(model(), "zygomorphic", query_vec()).top_k(6);
+        if let Some(t) = at {
+            search = search.as_of_valid(t);
+        }
+        ids(&search.execute(db.read_conn()).await.unwrap())
+    }
+
+    // No instant: today's corpus, and `both` is in all three answers. This is
+    // also the fixture check — if it were not here, the arms below could be
+    // passing because `both` was never a result in the first place.
+    let (v, k, h) = (
+        vector(&db, None).await,
+        keyword(&db, None).await,
+        hybrid(&db, None).await,
+    );
+    assert!(
+        v.contains(&"both".to_string()),
+        "vector arm, no instant: {v:?}"
+    );
+    assert!(
+        k.contains(&"both".to_string()),
+        "keyword arm, no instant: {k:?}"
+    );
+    assert!(h.contains(&"both".to_string()), "fused, no instant: {h:?}");
+
+    // After its validity ended: absent from all three.
+    let (v, k, h) = (
+        vector(&db, Some(AFTER)).await,
+        keyword(&db, Some(AFTER)).await,
+        hybrid(&db, Some(AFTER)).await,
+    );
+    assert!(
+        !v.contains(&"both".to_string()),
+        "vector arm at AFTER: {v:?}"
+    );
+    assert!(
+        !k.contains(&"both".to_string()),
+        "keyword arm at AFTER: {k:?}"
+    );
+    assert!(!h.contains(&"both".to_string()), "fused at AFTER: {h:?}");
+
+    // And `top_k` is still a count: the vector arm was asked for three and
+    // three live neighbours exist, so three is what it must return.
+    assert_eq!(v.len(), 3, "top_k is a count, not a ceiling: {v:?}");
+
+    // Inside the interval: back, in every arm.
+    let (v, k, h) = (
+        vector(&db, Some(WITHIN)).await,
+        keyword(&db, Some(WITHIN)).await,
+        hybrid(&db, Some(WITHIN)).await,
+    );
+    assert!(
+        v.contains(&"both".to_string()),
+        "vector arm at WITHIN: {v:?}"
+    );
+    assert!(
+        k.contains(&"both".to_string()),
+        "keyword arm at WITHIN: {k:?}"
+    );
+    assert!(h.contains(&"both".to_string()), "fused at WITHIN: {h:?}");
 
     db.close().await.unwrap();
 }
