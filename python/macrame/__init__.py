@@ -83,6 +83,7 @@ from ._macrame import (
     FutureRecordedAtError,
     AttributeMode,
     AttributeModeUnstatedError,
+    HalfLifeWithoutInstantError,
     BudgetError,
     BulkCancelledError,
     CancelToken,
@@ -213,6 +214,7 @@ __all__ = [
     "InvalidTimestampError",
     "InvalidModelNameError",
     "AttributeModeUnstatedError",
+    "HalfLifeWithoutInstantError",
     # vector
     "DimMismatchError",
     "ModelNotRegisteredError",

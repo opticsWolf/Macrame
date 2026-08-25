@@ -1,6 +1,7 @@
 use std::collections::HashMap;
+use std::time::Duration;
 
-use crate::error::Result;
+use crate::error::{DbError, Result};
 use crate::vector::registry::declared_dimension;
 use crate::vector::{EmbeddingCodec, ModelName};
 
@@ -162,6 +163,64 @@ pub(crate) fn visible_concept(at_param: Option<usize>) -> String {
     }
 }
 
+/// How deep a surface must read before it re-ranks, given a final `top_k`.
+///
+/// `max(5 × top_k, 50)` — [`crate::vector::HybridSearch::depth`]'s rule,
+/// promoted to a function in 0.13.20 because decay needs it for the same
+/// reason fusion does: **re-ranking a top-k is not the top-k of the
+/// re-ranking.** A row the index ranked eleventh can outrank one it ranked
+/// first once age is priced in, and it is invisible if the list was never read
+/// past ten.
+///
+/// It is a bound and not a guarantee, and saying so is the honest form. Decay
+/// only ever *demotes*, so a row outside the pool enters the answer only if
+/// five times as many rows ahead of it were pushed below it — the same trade
+/// `depth` has made since 0.5.5, priced as one larger `LIMIT` rather than a
+/// second round trip.
+pub(crate) fn rerank_depth(top_k: usize) -> usize {
+    (top_k * 5).max(50)
+}
+
+/// `0.5 ^ (age / half_life)`: **1.0 at zero age, 0.5 at one half-life**, and
+/// asymptotically zero after that.
+///
+/// `reference` is the instant age is measured *from* and `valid_from` is when
+/// the concept became true, both canonical. A `valid_from` after `reference`
+/// cannot arise where this is called — the same instant bounds the query —
+/// and is clamped to zero age rather than trusted to underflow.
+///
+/// A zero half-life is the defined limit of the formula rather than an error:
+/// anything with any age at all is fully decayed, and only what became true at
+/// the instant itself survives. That is a strange thing to ask for and an
+/// unambiguous one, which is the bar for not adding a refusal.
+pub(crate) fn decay_factor(reference: &str, valid_from: &str, half_life: Duration) -> Result<f64> {
+    let age = crate::util::timestamp::parse(reference)?
+        .duration_since(crate::util::timestamp::parse(valid_from)?)
+        .unwrap_or(Duration::ZERO);
+    if half_life.is_zero() {
+        return Ok(if age.is_zero() { 1.0 } else { 0.0 });
+    }
+    Ok(0.5f64.powf(age.as_secs_f64() / half_life.as_secs_f64()))
+}
+
+/// A cosine **distance**, decayed, still a distance (0.13.20, W9.5, D-193).
+///
+/// **This is the sign trap, and it is a conversion rather than a multiply.** A
+/// decay factor in (0, 1] multiplied into a *similarity* penalises age
+/// correctly; multiplied into a *distance* it makes stale rows look nearer.
+/// `vector_distance_cos` returns `1 - cosθ` in [0, 2], so similarity is
+/// `(2 - d) / 2` in [0, 1] — mapped to a non-negative range **before** the
+/// multiply, because scaling a negative similarity toward zero would improve
+/// it, which is the same trap wearing a second face.
+///
+/// The result is a distance again, so the surface's contract is unchanged:
+/// smaller is better and the list still ascends. At `factor == 1.0` this is the
+/// identity, which is the property `decay_is_the_identity_at_zero_age` pins.
+pub(crate) fn decayed_distance(distance: f32, factor: f64) -> f32 {
+    let similarity = ((2.0 - distance as f64) / 2.0).clamp(0.0, 1.0);
+    (2.0 - 2.0 * similarity * factor) as f32
+}
+
 /// Top-k nearest **visible** neighbours for `query_vec` under `model` (§5.9).
 ///
 /// Goes through `vector_top_k`, which consults the DiskANN index, rather than
@@ -221,16 +280,37 @@ pub async fn search_vector(
     model: &ModelName,
     top_k: usize,
     as_of_valid: Option<&str>,
+    half_life: Option<Duration>,
 ) -> Result<Vec<VectorSearchResult>> {
     if top_k == 0 {
         return Ok(Vec::new());
     }
+    // Age is measured from the instant the search reads at, and there is no
+    // other instant on this path to fall back to.
+    let reference = match (half_life, as_of_valid) {
+        (Some(_), None) => return Err(DbError::HalfLifeWithoutInstant),
+        (Some(_), Some(t)) => Some(t),
+        (None, _) => None,
+    };
     let blob = encode_for_model(conn, model, query_vec).await?;
 
-    // `?2` is what the index is asked for and `?3` is what the caller asked
-    // for; they are the same on the first pass and diverge on escalation.
+    // Decay reorders, so the pool that gets ranked has to be deeper than the
+    // answer. With no half-life this is `top_k` and the statement is what
+    // 0.13.19 issued, `valid_from` included.
+    let want = match half_life {
+        Some(_) => rerank_depth(top_k),
+        None => top_k,
+    };
+    let age_column = if half_life.is_some() {
+        ", c.valid_from"
+    } else {
+        ""
+    };
+
+    // `?2` is what the index is asked for and `?3` is what the ranking pool
+    // needs; they are the same on the first pass and diverge on escalation.
     let sql = format!(
-        "SELECT e.concept_id, vector_distance_cos(e.embedding, ?1)
+        "SELECT e.concept_id, vector_distance_cos(e.embedding, ?1){age_column}
            FROM vector_top_k('{index}', ?1, ?2) AS t
            JOIN {table} AS e ON e.rowid = t.id
            JOIN concepts AS c ON c.id = e.concept_id
@@ -242,14 +322,14 @@ pub async fn search_vector(
         visible = visible_concept(as_of_valid.map(|_| 4)),
     );
 
-    let mut k_prime = top_k;
+    let mut k_prime = want;
     let mut indexed: Option<usize> = None;
 
     loop {
         let mut params: Vec<libsql::Value> = vec![
             blob.clone().into(),
             (k_prime as i64).into(),
-            (top_k as i64).into(),
+            (want as i64).into(),
         ];
         if let Some(t) = as_of_valid {
             params.push(t.into());
@@ -258,17 +338,22 @@ pub async fn search_vector(
 
         let mut results = Vec::new();
         while let Some(row) = rows.next().await? {
-            results.push(VectorSearchResult {
+            let hit = VectorSearchResult {
                 concept_id: row.get(0)?,
                 // The distance is computed by the engine over a non-null
                 // F32_BLOB column, so a null here would mean the schema is not
                 // what we think.
                 score: row.get::<f64>(1)? as f32,
-            });
+            };
+            let valid_from: Option<String> = match reference {
+                Some(_) => Some(row.get(2)?),
+                None => None,
+            };
+            results.push((hit, valid_from));
         }
 
-        if results.len() >= top_k {
-            return Ok(results);
+        if results.len() >= want {
+            return rank_by_age(results, reference, half_life, top_k);
         }
 
         let n = match indexed {
@@ -282,10 +367,49 @@ pub async fn search_vector(
         // The index has already been asked for everything it holds, so this is
         // every visible neighbour there is.
         if k_prime >= n {
-            return Ok(results);
+            return rank_by_age(results, reference, half_life, top_k);
         }
         k_prime = k_prime.saturating_mul(2).min(n);
     }
+}
+
+/// Apply decay to a retrieved pool, reorder, and cut it to `top_k`.
+///
+/// With no half-life this is the identity but for the truncation, and the
+/// truncation is already the `LIMIT`: the rows arrive ordered from the engine
+/// and are handed back untouched, which is what keeps 0.13.19's answer exactly
+/// 0.13.19's answer.
+///
+/// With one, the sort breaks ties on the id. Two rows at an identical decayed
+/// distance must not swap between runs, or the same query answers differently
+/// on two machines — `run_pre_filter` merges its chunks under the same rule.
+fn rank_by_age(
+    results: Vec<(VectorSearchResult, Option<String>)>,
+    reference: Option<&str>,
+    half_life: Option<Duration>,
+    top_k: usize,
+) -> Result<Vec<VectorSearchResult>> {
+    let (Some(reference), Some(half_life)) = (reference, half_life) else {
+        return Ok(results.into_iter().map(|(hit, _)| hit).collect());
+    };
+
+    let mut out = Vec::with_capacity(results.len());
+    for (mut hit, valid_from) in results {
+        // Selected on this path and only on this path, so its absence is a
+        // programming error rather than a row that lacks a validity.
+        let valid_from = valid_from.unwrap_or_default();
+        let factor = decay_factor(reference, &valid_from, half_life)?;
+        hit.score = decayed_distance(hit.score, factor);
+        out.push(hit);
+    }
+    out.sort_by(|a, b| {
+        a.score
+            .partial_cmp(&b.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.concept_id.cmp(&b.concept_id))
+    });
+    out.truncate(top_k);
+    Ok(out)
 }
 
 /// How many vectors `model` holds — the ceiling `search_vector` escalates to.
@@ -354,4 +478,59 @@ pub fn reciprocal_rank_fusion(
             .then_with(|| a.0.cmp(&b.0))
     });
     sorted
+}
+
+#[cfg(test)]
+mod decay_tests {
+    use super::*;
+
+    const HOUR: Duration = Duration::from_secs(3600);
+    const T0: &str = "2026-01-01T00:00:00.000000Z";
+    const T1: &str = "2026-01-01T01:00:00.000000Z";
+    const T2: &str = "2026-01-01T02:00:00.000000Z";
+
+    /// The definition, at the two points where it is a definition rather than
+    /// an interpolation.
+    #[test]
+    fn a_half_life_halves_at_a_half_life() {
+        assert_eq!(decay_factor(T0, T0, HOUR).unwrap(), 1.0);
+        assert_eq!(decay_factor(T1, T0, HOUR).unwrap(), 0.5);
+        assert_eq!(decay_factor(T2, T0, HOUR).unwrap(), 0.25);
+    }
+
+    /// A concept that becomes true after the instant the search reads at cannot
+    /// reach this on any real path — the same instant bounds the query — and
+    /// clamps rather than underflowing if one ever does.
+    #[test]
+    fn a_future_validity_is_zero_age_rather_than_negative() {
+        assert_eq!(decay_factor(T0, T1, HOUR).unwrap(), 1.0);
+    }
+
+    /// The limit of the formula, defined rather than refused: everything with
+    /// any age at all is gone, and only what began at the instant survives.
+    #[test]
+    fn a_zero_half_life_is_the_limit_and_not_a_nan() {
+        assert_eq!(decay_factor(T0, T0, Duration::ZERO).unwrap(), 1.0);
+        assert_eq!(decay_factor(T1, T0, Duration::ZERO).unwrap(), 0.0);
+    }
+
+    /// **The sign, stated as arithmetic.** An undecayed hit is unchanged, and a
+    /// decayed one is *further away* — never nearer, which is what multiplying
+    /// the distance would have produced.
+    #[test]
+    fn decay_moves_a_hit_away_and_never_toward() {
+        let near = 0.2_f32;
+        assert_eq!(decayed_distance(near, 1.0), near);
+        assert!(decayed_distance(near, 0.5) > near);
+        assert!(decayed_distance(near, 0.01) > decayed_distance(near, 0.5));
+        // Bounded by the far end of the cosine range rather than running away.
+        assert!(decayed_distance(near, 0.0) <= 2.0);
+    }
+
+    /// Order within one age is the raw order: decay reprices, it does not
+    /// reshuffle what it has not aged differently.
+    #[test]
+    fn one_factor_preserves_the_distance_order() {
+        assert!(decayed_distance(0.1, 0.7) < decayed_distance(0.9, 0.7));
+    }
 }

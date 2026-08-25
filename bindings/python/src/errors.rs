@@ -275,6 +275,18 @@ create_exception!(
 );
 create_exception!(
     macrame,
+    HalfLifeWithoutInstantError,
+    ValidationError,
+    "A search asked for decay and did not say what age is measured from. No \
+     attributes.\n\n\
+     `half_life` weights a hit by how old what it matched is, and \"old\" is \
+     relative to an instant. Pass `as_of_valid=` on the same call — the \
+     instant the search reads at is the one age is measured from — or drop \
+     `half_life`. It is not defaulted to now: that would make every decayed \
+     search quietly a search about the present."
+);
+create_exception!(
+    macrame,
     RecordedInstantUnreachableError,
     TemporalError,
     "`as_of_recorded` named an instant the hot log can no longer answer for. \
@@ -593,6 +605,12 @@ fn build(py: Python<'_>, err: DbError) -> PyErr {
             })
         }
 
+        // No attributes: there is nothing to carry. The caller passed one knob
+        // too few, and which one is in the sentence.
+        DbError::HalfLifeWithoutInstant => {
+            raise::<HalfLifeWithoutInstantError, _>(py, m, |_| Ok(()))
+        }
+
         DbError::RecordedInstantUnreachable { ts } => {
             raise::<RecordedInstantUnreachableError, _>(py, m, |e| e.setattr("ts", ts))
         }
@@ -740,6 +758,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
         InvalidTimestampError,
         InvalidModelNameError,
         AttributeModeUnstatedError,
+        HalfLifeWithoutInstantError,
         // vector
         DimMismatchError,
         ModelNotRegisteredError,

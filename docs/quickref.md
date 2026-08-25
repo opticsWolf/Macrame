@@ -509,7 +509,8 @@ impl Database {
 pub async fn registered_models(conn) -> Result<Vec<ModelName>>
 pub async fn declared_dimension(conn, model) -> Result<usize>
 pub async fn upsert_embedding(conn, model, concept_id, vector: &[f32]) -> Result<()>
-pub async fn search_vector(conn, query_vec, model, top_k, as_of_valid: Option<&str>)
+pub async fn search_vector(conn, query_vec, model, top_k,
+                           as_of_valid: Option<&str>, half_life: Option<Duration>)
     -> Result<Vec<VectorSearchResult>>
 
 // Filtered vector search
@@ -558,11 +559,13 @@ impl HybridSearch {
     pub fn rrf_k(mut self, k: usize) -> Self
     pub fn raw_match(mut self, raw: bool) -> Self
     pub fn as_of_valid(mut self, ts: impl Into<String>) -> Self
+    pub fn half_life(mut self, half_life: Duration) -> Self
     pub async fn execute(&self, conn) -> Result<Vec<HybridHit>>
 }
 
 pub fn reciprocal_rank_fusion(vector_ranks, keyword_ranks, rrf_k) -> Vec<(String, f64)>
-pub async fn keyword_search(conn, query, top_k, as_of_valid: Option<&str>)
+pub async fn keyword_search(conn, query, top_k,
+                            as_of_valid: Option<&str>, half_life: Option<Duration>)
     -> Result<Vec<(String, f64)>>
 pub fn escape_fts5_query(input: &str) -> String
 ```
@@ -572,6 +575,8 @@ pub fn escape_fts5_query(input: &str) -> String
 **`search_vector()`**: Calls `vector_top_k` and `vector_distance_cos`. Returns cosine distances. Joins `concepts` and excludes retired ones (0.13.18, [D-191](architecture/s13-decision-register.md#d-191)); `top_k` remains a count, so the index is re-asked for a larger k′ when the filter takes rows out of a pass. `hybrid_search` inherits this because its vector arm *is* `search_vector`; `PreFilterCTE` splices the same predicate rather than inheriting it.
 
 **`as_of_valid`** (0.13.19, [D-192](architecture/s13-decision-register.md#d-192)): with an instant, the same join also bounds `c.valid_from <= t AND t < c.valid_to`; without one, the statement is unchanged. `HybridSearch::as_of_valid` applies it to **both** arms. `FilteredVectorSearch` has no such parameter — it reads the traversal's `as_of_valid`, so a filtered search cannot rank a past neighbourhood against the present corpus. Valid time only: the index keeps one row per concept, so there is no past vector to read at an `as_of_recorded`.
+
+**`half_life`** (0.13.20, [D-193](architecture/s13-decision-register.md#d-193)): weights a hit by the age of what it matched, `0.5 ^ (age / half_life)`, measured from `as_of_valid` — which it therefore requires, raising `HalfLifeWithoutInstant` rather than defaulting to now. **The sign lands on one surface only**: `search_vector` converts its distance to a similarity and back, `keyword_search` multiplies bm25 directly because bm25 is a negated similarity already. `HybridSearch` decays each arm *before* the fusion, since RRF reads ranks. A decaying surface reads `max(5×top_k, 50)` before reordering. `search_filtered` does not take it: the two strategies hold different pools, so it would make the answer a function of the byte estimate.
 
 **`FilteredVectorSearch`**: Two strategies — `PostFilter` (retrieve generous k′, then post-filter) and `PreFilterCTE` (materialize candidate set, then exact distance scan). `TwoPhaseTempTable` removed (D-050). Strategy chosen by `CostEstimator` based on byte budget. Strategy may never change the answer.
 

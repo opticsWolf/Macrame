@@ -932,6 +932,7 @@ class Database:
         *,
         top_k: int = 10,
         as_of_valid: Timestamp | None = None,
+        half_life: timedelta | float | None = None,
     ) -> list[VectorHit]:
         """Nearest `top_k` concepts by cosine distance. Smaller score is closer.
 
@@ -942,6 +943,14 @@ class Database:
         Valid time only. The index keeps one row per concept and no history of
         what its vector used to be, so there is nothing to read at a past
         `recorded_at` — that question goes to `reconstruct`.
+
+        `half_life` weights a hit by the age of what it matched, `0.5 ** (age /
+        half_life)`, measured from `as_of_valid` — which it therefore requires,
+        raising `HalfLifeWithoutInstantError` rather than defaulting to now. The
+        returned score is still a distance, so the list still ascends: decay
+        moves a stale hit *away*, never nearer. A decaying search reads
+        `max(5 * top_k, 50)` candidates before reordering, because re-ranking a
+        top-k is not the top-k of the re-ranking (0.13.20, D-193).
         """
 
     def keyword_search(
@@ -951,6 +960,7 @@ class Database:
         top_k: int = 10,
         raw: bool = False,
         as_of_valid: Timestamp | None = None,
+        half_life: timedelta | float | None = None,
     ) -> list[tuple[str, float]]: ...
     def hybrid_search(
         self,
@@ -963,12 +973,17 @@ class Database:
         rrf_k: int | None = None,
         raw: bool = False,
         as_of_valid: Timestamp | None = None,
+        half_life: timedelta | float | None = None,
     ) -> list[VectorHit]:
         """Vector and keyword arms, fused by reciprocal rank. Larger is better.
 
         `as_of_valid` applies to **both** arms. It could not apply to one: RRF
         fuses two rank lists, and bounding only the vector arm would fuse what
         was true then with what is true now into a single list that is neither.
+
+        `half_life` applies to both arms too, and *before* the fusion: RRF adds
+        ranks, so a factor on the fused score would leave both orderings — the
+        only thing it reads — exactly as they were (0.13.20, D-193).
         """
     def search_filtered(
         self,
@@ -1105,6 +1120,15 @@ class AttributeModeUnstatedError(ValidationError):
 
     as_of_valid: str | None
     as_of_recorded: str | None
+
+class HalfLifeWithoutInstantError(ValidationError):
+    """A search set `half_life` and left `as_of_valid` unstated.
+
+    No attributes: the caller passed one knob too few and the sentence says
+    which. Age is relative to an instant, and the crate reads no wall clock on a
+    read path — defaulting to now would make every decayed search quietly a
+    search about the present (0.13.20).
+    """
 
 class RecordedInstantUnreachableError(TemporalError):
     ts: str

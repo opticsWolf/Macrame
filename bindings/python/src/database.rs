@@ -359,6 +359,9 @@ impl PyDatabase {
         reader_cache_size = None,
         future_stamps = None,
     ))]
+    // Keyword-only tuning knobs, one per thing that can be tuned: the same
+    // reason the other signatures in this file carry this allow.
+    #[allow(clippy::too_many_arguments)]
     fn open(
         py: Python<'_>,
         path: PathBuf,
@@ -1237,7 +1240,7 @@ impl PyDatabase {
     /// Goes through the DiskANN index rather than scanning: an
     /// `ORDER BY vector_distance_cos(…)` over the table is linear in the corpus
     /// however small `top_k` is. Results ascend — **smaller score is closer**.
-    #[pyo3(signature = (model, query, *, top_k = 10, as_of_valid = None))]
+    #[pyo3(signature = (model, query, *, top_k = 10, as_of_valid = None, half_life = None))]
     fn search_vector(
         &self,
         py: Python<'_>,
@@ -1245,10 +1248,12 @@ impl PyDatabase {
         query: &Bound<'_, PyAny>,
         top_k: usize,
         as_of_valid: Option<&Bound<'_, PyAny>>,
+        half_life: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Vec<vector::PyVectorHit>> {
         let model = vector::model_name(model)?;
         let query = crate::types::coerce_embedding(query)?;
         let as_of_valid = as_of_valid.map(|t| to_canonical(Some(t))).transpose()?;
+        let half_life = crate::timestamps::to_duration(half_life)?;
         let hits = self.with_db(py, move |db| {
             runtime()
                 .block_on(macrame::vector::search_vector(
@@ -1257,6 +1262,7 @@ impl PyDatabase {
                     &model,
                     top_k,
                     as_of_valid.as_deref(),
+                    half_life,
                 ))
                 .map_err(to_py)
         })?;
@@ -1273,7 +1279,8 @@ impl PyDatabase {
     /// string is an FTS5 syntax error rather than a literal, so it is escaped
     /// here unless `raw` is set — which is the same choice `hybrid_search`
     /// makes, for the same reason.
-    #[pyo3(signature = (query, *, top_k = 10, raw = false, as_of_valid = None))]
+    #[pyo3(signature = (query, *, top_k = 10, raw = false, as_of_valid = None, half_life = None))]
+    #[allow(clippy::too_many_arguments)]
     fn keyword_search(
         &self,
         py: Python<'_>,
@@ -1281,6 +1288,7 @@ impl PyDatabase {
         top_k: usize,
         raw: bool,
         as_of_valid: Option<&Bound<'_, PyAny>>,
+        half_life: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Vec<(String, f64)>> {
         let expr = if raw {
             query.to_string()
@@ -1288,6 +1296,7 @@ impl PyDatabase {
             macrame::vector::escape_fts5_query(query)
         };
         let as_of_valid = as_of_valid.map(|t| to_canonical(Some(t))).transpose()?;
+        let half_life = crate::timestamps::to_duration(half_life)?;
         self.with_db(py, move |db| {
             runtime()
                 .block_on(macrame::vector::keyword_search(
@@ -1295,6 +1304,7 @@ impl PyDatabase {
                     &expr,
                     top_k,
                     as_of_valid.as_deref(),
+                    half_life,
                 ))
                 .map_err(to_py)
         })
@@ -1312,7 +1322,7 @@ impl PyDatabase {
     /// `max(5 * top_k, 50)`. An unregistered model raises rather than degrading
     /// to keyword-only: a caller who named a model that does not exist asked a
     /// question this cannot answer.
-    #[pyo3(signature = (model, query_text, query_vector, *, top_k = 10, depth = None, rrf_k = None, raw = false, as_of_valid = None))]
+    #[pyo3(signature = (model, query_text, query_vector, *, top_k = 10, depth = None, rrf_k = None, raw = false, as_of_valid = None, half_life = None))]
     #[allow(clippy::too_many_arguments)]
     fn hybrid_search(
         &self,
@@ -1325,6 +1335,7 @@ impl PyDatabase {
         rrf_k: Option<usize>,
         raw: bool,
         as_of_valid: Option<&Bound<'_, PyAny>>,
+        half_life: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Vec<vector::PyVectorHit>> {
         let model = vector::model_name(model)?;
         let query_vector = crate::types::coerce_embedding(query_vector)?;
@@ -1339,6 +1350,9 @@ impl PyDatabase {
         }
         if let Some(t) = as_of_valid {
             search = search.as_of_valid(to_canonical(Some(t))?);
+        }
+        if let Some(h) = crate::timestamps::to_duration(half_life)? {
+            search = search.half_life(h);
         }
         let hits = self.with_db(py, move |db| {
             runtime()

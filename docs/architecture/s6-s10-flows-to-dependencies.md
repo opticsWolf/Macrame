@@ -148,6 +148,13 @@ pub enum DbError {
          which does"
     )]
     RecordedInstantUnreachable { ts: String },
+    #[error(
+        "a half-life was given without a valid-time instant to measure age \
+         from: decay ranks a hit by how old what it matched is, and \"old\" is \
+         relative to the instant the search reads at. State it — \
+         `as_of_valid(t)` on the same search — or drop the half-life"
+    )]
+    HalfLifeWithoutInstant,
     #[error("cannot open {path} read-only for diagnostics: {reason}")]
     DiagnosticConn { path: String, reason: String },
     #[error("archive window {window:?} is unusable: {reason}")]
@@ -218,6 +225,8 @@ The 0.5.0 RecordedAtRegression variant surfaces the concept monotonicity trigger
 **Three variants, three subjects, and the third arrived in 0.13.12 ([D-185](s13-decision-register.md#d-185)).** `SnapshotIncompatible` says *another build wrote this*, which is ordinary after an upgrade. `ReplayCorrupt` says **the ledger is damaged**, which is the worst thing this library can report about itself. `SnapshotCorrupt` says the *cache* is damaged and the ledger is not — deleting the file restores correctness and costs a slower reconstruction, because [Doctrine VI](s0-s3-foundations.md#doctrine-vi) makes a snapshot derivative and disposable. Until v3 there was no third name, so every failure of `load_snapshot` — a bad read, a failed decompression, a refused deserialization — came back as `ReplayCorrupt { seq: 0 }`: the wrong subject, carrying a sequence number that cannot exist because `AUTOINCREMENT` starts at 1. That is the same placeholder the paragraph above records [D-069](s13-decision-register.md#d-069) removing from `InvalidTimestamp`, left in the snapshot path because nothing had cause to look at it. Nothing in normal operation raises the new variant to a caller: a damaged snapshot is skipped by the scan and the fold runs from the log.
 
 **`AttributeModeUnstated` names the axis, and until 0.13.10 it named a method instead ([D-183](s13-decision-register.md#d-183)).** The variant carried `as_of: String` and rendered it as `as_of(…)` — the method [D-174](s13-decision-register.md#d-174) removed in 0.13.2 when it split the axes. Both instants reached that field through an `.or()`, so a caller who set `as_of_recorded` was told about `as_of`, a caller who set both was told about one of them, and neither learned which clock they had asked about. It now carries `StatedInstants` — `Valid`, `Recorded` or `Both`, and never neither, because this error exists *because* an instant was set — rendered as the calls that produce them. The remedy it offers is a keyword on the same call, so naming the keyword is the whole of its job.
+
+**`HalfLifeWithoutInstant` is the fourth category's other shape: a knob that needs a companion (0.13.20, W9.5, [D-193](s13-decision-register.md#d-193)).** It is `AttributeModeUnstated`'s sibling and sits under `ValidationError` for the same reason — nothing is wrong with the ledger, the call is short one parameter. Decay ranks a hit by the age of what it matched, and *age* is relative to an instant; no read path in this crate reads a wall clock, which is what lets the suite pin these answers under a `FakeClock`. Defaulting to *now* would make every decayed search quietly a search about the present, which is F-35's shape. It carries no attributes, because there is nothing to carry: the remedy is a keyword on the same call and the message names it.
 
 **`RecordedInstantUnreachable` names a question the surface cannot reach, which is a fourth category (0.13.2, W7.1, [D-174](s13-decision-register.md#d-174)).** `TraversalBuilder::as_of_recorded` folds `transaction_log`, and `archive` removes superseded rows from it; a traversal takes a `Connection` and not an archive path, so once anything has been archived it cannot go and get what was moved. The variant exists rather than a silent partial fold because a fold missing its superseded rows returns *nearly* the right topology — the failure mode a ledger can least afford and the one a non-empty-result assertion will not catch. It is **conservative by one bit**: the test is whether anything was *ever* archived, not whether this instant survived it, because the archive cutoff is not recorded hot-side ([D-132](s13-decision-register.md#d-132) refused the marker that would have carried it, outright rather than deferred). So it refuses instants a fold might have answered, and says in its message which operation can.
 

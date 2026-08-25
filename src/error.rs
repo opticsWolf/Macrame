@@ -335,6 +335,24 @@ pub enum DbError {
         reason: String,
     },
 
+    /// A search asked for decay without saying what age is measured from
+    /// (0.13.20, W9.5, D-193).
+    ///
+    /// Decay ranks a hit by how old the thing it matched is, and *old* is only
+    /// meaningful relative to an instant. The crate does not read a wall clock
+    /// on a read path — that is what makes the suite's `FakeClock` able to
+    /// pin these answers at all — so the instant has to be stated, and the one
+    /// to state is the one the search is already bounded by.
+    ///
+    /// Refusing rather than defaulting to *now*: a default here would silently
+    /// make every decayed search a search about the present, which is exactly
+    /// the class of quiet substitution F-35 and
+    /// [D-175](../docs/architecture/s13-decision-register.md#d-175) were about.
+    #[error(
+        "a half-life was given without a valid-time instant to measure age          from: decay ranks a hit by how old what it matched is, and \"old\" is          relative to the instant the search reads at. State it —          `as_of_valid(t)` on the same search — or drop the half-life"
+    )]
+    HalfLifeWithoutInstant,
+
     /// A read named a transaction-time instant the hot log can no longer answer
     /// for (0.13.2, W7.1, D-174; extended 0.13.16, W9.1, D-189).
     ///

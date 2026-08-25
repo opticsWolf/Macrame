@@ -518,6 +518,15 @@ impl FilteredVectorSearch {
     /// model down: this arm's answer has to be the other arm's answer, and the
     /// gate that says so is `a_validity_that_ended_is_invisible_to_the_
     /// strategy_choice`.
+    ///
+    /// **It passes no half-life, and that is a decision** (0.13.20, W9.5,
+    /// [D-193](../../docs/architecture/s13-decision-register.md#d-193)). Decay
+    /// reorders whatever pool it is handed, and these two strategies do not
+    /// hold the same pool: this one gets the k' the cost model priced, while
+    /// `run_pre_filter` scores every candidate the traversal returned. Ranking
+    /// by age inside each would make the answer a function of the byte estimate
+    /// — which is the one thing [D-050](../../docs/architecture/s13-decision-register.md#d-050)
+    /// forbids, and the property that makes having a planner safe at all.
     async fn run_post_filter(
         &self,
         conn: &libsql::Connection,
@@ -530,6 +539,7 @@ impl FilteredVectorSearch {
             &self.model,
             k_prime,
             self.traversal.as_of_valid.as_deref(),
+            None,
         )
         .await?;
         let saturated = hits.len() >= k_prime;

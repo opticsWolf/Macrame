@@ -1828,6 +1828,40 @@ Scope discipline: one `half_life` parameter, defaulting to off, applied at
 ranking and never at storage. Nothing about an embedding changes because time
 passed; only its rank does.
 
+> **✅ Shipped 0.13.20 (recorded as
+> [D-193](../docs/architecture/s13-decision-register.md#d-193)).**
+>
+> **The trap is real on one surface and not the other, and that is the
+> finding.** `search_vector` returns a distance, so it converts — similarity
+> is `(2 - d) / 2`, clamped non-negative before the multiply, converted back so
+> the score is still a distance. `keyword_search` returns bm25, which arrives
+> *negative* with magnitude growing in relevance: it is a negated similarity
+> already, so the plain multiply is correct there. **The operation that would
+> have been the bug on the vector surface is the right one on the keyword
+> surface**, which is why they are two functions with two tests rather than one
+> shared helper written once and wrong in one place.
+>
+> **A half-life without an instant is refused**, `HalfLifeWithoutInstant`, with
+> the fix in the sentence. Age is relative to something and no read path here
+> reads a wall clock — that is what makes these answers pinnable at all.
+>
+> **Re-ranking a top-k is not the top-k of the re-ranking.** A decaying surface
+> reads `rerank_depth(top_k) = max(5 × top_k, 50)` first — `HybridSearch::depth`'s
+> rule, promoted to a shared function. A bound, not a guarantee, and stated as
+> one. In `HybridSearch` the decay reaches each **arm**, because RRF adds ranks
+> and a factor on the fused score would leave both orderings untouched.
+>
+> **`search_filtered` is not offered it.** The two strategies hold different
+> pools, so decay inside each would make the answer a function of the byte
+> estimate — the one thing D-050 forbids.
+>
+> Mutation-discriminated on both surfaces, with two different mutations:
+> multiplying the distance fails the vector assertion, and dropping decay from
+> the keyword arm fails the keyword one. The *sign* mutation on the keyword arm
+> fails nothing, because there it is not a mutation — finding that out
+> corrected this item's first draft.
+
+
 **W9.6 — prove all three the way W9.2 proves W9.1.** A fixture with a retired
 concept nearest the query and a valid-time-expired concept second, asserted
 across all four search surfaces including `search_filtered` — whose safety is

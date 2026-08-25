@@ -57,6 +57,8 @@
 //! zero, which would silently produce a non-canonical string for every
 //! timestamp landing exactly on a second.
 
+use std::time::Duration;
+
 use pyo3::prelude::*;
 use pyo3::types::{PyDate, PyDateTime, PyString, PyTzInfo, PyTzInfoAccess};
 
@@ -79,6 +81,40 @@ fn invalid(value: String, reason: &str) -> PyErr {
 }
 
 /// Python value → canonical string. `None` means the open sentinel.
+/// A **span**, not an instant: `timedelta` or a number of seconds (0.13.20).
+///
+/// Both spellings, because both are ones a caller already has. `timedelta` is
+/// what the standard library gives for "thirty days" and a float is what a
+/// config file gives; refusing either would be refusing the caller's own units
+/// for no reason — and unlike an instant, a span has no canonical form in the
+/// ledger to be strict about.
+///
+/// Rejected is what cannot mean a duration: a negative or non-finite number.
+/// A negative half-life would make age *increase* a hit's score, which is the
+/// sign trap arriving through the front door.
+pub(crate) fn to_duration(obj: Option<&Bound<'_, PyAny>>) -> PyResult<Option<Duration>> {
+    let Some(obj) = obj else {
+        return Ok(None);
+    };
+    if obj.is_none() {
+        return Ok(None);
+    }
+    if let Ok(d) = obj.extract::<Duration>() {
+        return Ok(Some(d));
+    }
+    let seconds: f64 = obj.extract().map_err(|_| {
+        pyo3::exceptions::PyTypeError::new_err(
+            "half_life must be a datetime.timedelta or a number of seconds",
+        )
+    })?;
+    if !seconds.is_finite() || seconds < 0.0 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "half_life must be a finite, non-negative span",
+        ));
+    }
+    Ok(Some(Duration::from_secs_f64(seconds)))
+}
+
 pub(crate) fn to_canonical(obj: Option<&Bound<'_, PyAny>>) -> PyResult<String> {
     let Some(obj) = obj else {
         return Ok(OPEN_SENTINEL.to_string());

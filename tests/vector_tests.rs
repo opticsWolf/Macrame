@@ -154,7 +154,7 @@ async fn a_wrong_dimension_is_refused_with_the_declared_dimension() {
         other => panic!("expected DimMismatch, got {other:?}"),
     }
 
-    let err = search_vector(&conn, &[1.0, 2.0, 3.0], &m, 5, None)
+    let err = search_vector(&conn, &[1.0, 2.0, 3.0], &m, 5, None, None)
         .await
         .unwrap_err();
     assert!(
@@ -250,7 +250,7 @@ async fn search_returns_neighbours_nearest_first() {
         .await
         .unwrap();
 
-    let hits = search_vector(&conn, &[1.0, 0.0, 0.0, 0.0], &m, 3, None)
+    let hits = search_vector(&conn, &[1.0, 0.0, 0.0, 0.0], &m, 3, None, None)
         .await
         .unwrap();
     assert_eq!(hits.len(), 3);
@@ -259,16 +259,18 @@ async fn search_returns_neighbours_nearest_first() {
     assert_eq!(hits[2].concept_id, "c2");
     assert!(hits[0].score <= hits[1].score && hits[1].score <= hits[2].score);
 
-    let top1 = search_vector(&conn, &[0.0, 0.0, 0.0, 1.0], &m, 1, None)
+    let top1 = search_vector(&conn, &[0.0, 0.0, 0.0, 1.0], &m, 1, None, None)
         .await
         .unwrap();
     assert_eq!(top1.len(), 1);
     assert_eq!(top1[0].concept_id, "c2");
 
-    assert!(search_vector(&conn, &[1.0, 0.0, 0.0, 0.0], &m, 0, None)
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(
+        search_vector(&conn, &[1.0, 0.0, 0.0, 0.0], &m, 0, None, None)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 /// Re-embedding replaces the vector: one row per concept per model, because an
@@ -291,7 +293,7 @@ async fn re_embedding_replaces_rather_than_accumulates() {
         count(&conn, &format!("SELECT COUNT(*) FROM {}", m.table())).await,
         1
     );
-    let hits = search_vector(&conn, &[0.0, 0.0, 0.0, 1.0], &m, 1, None)
+    let hits = search_vector(&conn, &[0.0, 0.0, 0.0, 1.0], &m, 1, None, None)
         .await
         .unwrap();
     assert_eq!(hits[0].concept_id, "c0");
@@ -365,7 +367,7 @@ async fn an_unregistered_model_is_a_typed_error() {
     let (_db, conn) = seeded(&harness).await;
     let m = ModelName::new("never_registered").unwrap();
 
-    match search_vector(&conn, &[1.0, 0.0], &m, 3, None)
+    match search_vector(&conn, &[1.0, 0.0], &m, 3, None, None)
         .await
         .unwrap_err()
     {
@@ -558,7 +560,7 @@ async fn an_application_can_register_and_embed_through_the_handle_alone() {
     assert_eq!(written, 2);
 
     // Reads still go direct, which is the point: they never traverse the actor.
-    let hits = search_vector(db.read_conn(), &[1.0, 0.0, 0.0, 0.0], &m, 2, None)
+    let hits = search_vector(db.read_conn(), &[1.0, 0.0, 0.0, 0.0], &m, 2, None, None)
         .await
         .unwrap();
     assert_eq!(
@@ -750,7 +752,7 @@ async fn a_retired_concept_is_not_a_vector_search_result() {
     .await
     .unwrap();
 
-    let all = search_vector(&conn, &[1.0, 0.0, 0.0, 0.0], &m, 3, None)
+    let all = search_vector(&conn, &[1.0, 0.0, 0.0, 0.0], &m, 3, None, None)
         .await
         .unwrap();
     assert_eq!(
@@ -761,7 +763,7 @@ async fn a_retired_concept_is_not_a_vector_search_result() {
         "a retired concept is not a result"
     );
 
-    let two = search_vector(&conn, &[1.0, 0.0, 0.0, 0.0], &m, 2, None)
+    let two = search_vector(&conn, &[1.0, 0.0, 0.0, 0.0], &m, 2, None, None)
         .await
         .unwrap();
     assert_eq!(

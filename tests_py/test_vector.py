@@ -10,12 +10,16 @@ in the two search directions and each list arrives already sorted the right way.
 from __future__ import annotations
 
 import struct
+from datetime import timedelta
 
 import pytest
 
 import macrame
 
 T0 = "2026-01-01T00:00:00.000000Z"
+# A later validity and an instant after both, for the decay tests.
+T_LATER = "2026-06-29T00:00:00.000000Z"
+T_NOW = "2026-06-30T00:00:00.000000Z"
 DIM = 4
 
 
@@ -269,6 +273,51 @@ def test_an_instant_reaches_every_search_surface(db):
     assert "c" in [h.concept_id for h in hits]
     hits, _ = db.search_filtered("mini", q, "a", max_depth=3, now=T_AFTER, as_of_valid=T_AFTER)
     assert "c" not in [h.concept_id for h in hits]
+
+
+def test_a_half_life_prices_age_into_the_ranking(db):
+    """0.13.20 (W9.5, D-193): one parameter, off by default, at ranking only.
+
+    `c` is the nearer vector and the older concept; `b` is farther and
+    newer. Undecayed the near one wins, and with a half-life short against the
+    gap in their ages the fresh one does — the reversal, not merely a change,
+    because a decay applied with the wrong sign also changes the order.
+    """
+    # Between `b` and `c`, and closer to `c`: the fixture's vectors are
+    # orthogonal, so a query along one of them leaves the other two tied and
+    # the second place decided by an id tie-break rather than by distance.
+    q = [0.0, 0.6, 0.8, 0.0]
+    # `b` becomes true a day before the instant; `a` and `c` stay at T0, half a
+    # year older. Nothing else about any of them changes.
+    db.upsert_concept(
+        macrame.ConceptUpsert("b", "Bravo", valid_from=T_LATER, content="bravo charlie")
+    )
+
+    def ids(**kw):
+        return [h.concept_id for h in db.search_vector("mini", q, top_k=2, **kw)]
+
+    assert ids(as_of_valid=T_NOW) == ["c", "b"]
+    assert ids(as_of_valid=T_NOW, half_life=timedelta(days=30)) == ["b", "c"]
+    # Seconds are the same span said differently.
+    assert ids(as_of_valid=T_NOW, half_life=30 * 86400.0) == ["b", "c"]
+    # Off by default: the parameter is what changes the answer.
+    assert ids(as_of_valid=T_NOW, half_life=None) == ["c", "b"]
+
+
+def test_a_half_life_without_an_instant_raises(db):
+    with pytest.raises(macrame.HalfLifeWithoutInstantError, match="as_of_valid"):
+        db.search_vector("mini", [1.0, 0.0, 0.0, 0.0], half_life=timedelta(days=1))
+    with pytest.raises(macrame.HalfLifeWithoutInstantError):
+        db.keyword_search("charlie", half_life=1.0)
+    with pytest.raises(macrame.HalfLifeWithoutInstantError):
+        db.hybrid_search("mini", "charlie", [1.0, 0.0, 0.0, 0.0], half_life=1.0)
+
+
+def test_a_half_life_that_cannot_be_a_span_is_refused(db):
+    with pytest.raises(TypeError, match="timedelta"):
+        db.search_vector("mini", [1.0, 0.0, 0.0, 0.0], as_of_valid=T_NOW, half_life="a week")
+    with pytest.raises(ValueError):
+        db.search_vector("mini", [1.0, 0.0, 0.0, 0.0], as_of_valid=T_NOW, half_life=-1.0)
 
 
 # --------------------------------------------------------------------------

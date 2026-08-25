@@ -108,6 +108,9 @@ EXPECTED: dict[str, tuple[str, str, dict]] = {
             "as_of_recorded": "2026-04-05T06:07:08.000009Z",
         },
     ),
+    # No attributes, and that is the assertion: the remedy is a keyword on the
+    # same call, so there is nothing to carry (0.13.20, D-193).
+    "HalfLifeWithoutInstant": ("HalfLifeWithoutInstantError", "ValidationError", {}),
     "RecordedInstantUnreachable": (
         "RecordedInstantUnreachableError",
         "TemporalError",

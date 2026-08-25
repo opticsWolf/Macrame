@@ -54,6 +54,7 @@ pub(crate) const DB_ERROR_VARIANTS: &[&str] = &[
     "ArchiveViolation",
     "AttributeModeUnstated",
     "RecordedInstantUnreachable",
+    "HalfLifeWithoutInstant",
     "FutureRecordedAt",
     "DiagnosticConn",
     "ArchiveWindow",
@@ -148,6 +149,9 @@ fn sample(name: &str) -> Option<DbError> {
                 recorded: "2026-04-05T06:07:08.000009Z".into(),
             },
         },
+        // No fields: the caller passed one knob too few and the message says
+        // which (0.13.20, D-193).
+        "HalfLifeWithoutInstant" => DbError::HalfLifeWithoutInstant,
         "RecordedInstantUnreachable" => DbError::RecordedInstantUnreachable {
             ts: "2026-02-03T04:05:06.000007Z".into(),
         },

@@ -10,6 +10,7 @@
 mod harness;
 
 use harness::TestHarness;
+use macrame::error::DbError;
 use macrame::prelude::*;
 
 const TS: &str = "2026-01-01T00:00:00.000000Z";
@@ -96,7 +97,7 @@ async fn the_fusion_returns_what_neither_arm_finds_alone() {
     let db = fixture(&harness).await;
 
     // Vector arm alone: nearest first, and the rare-term document is last.
-    let vector_only = search_vector(db.read_conn(), &query_vec(), &model(), 3, None)
+    let vector_only = search_vector(db.read_conn(), &query_vec(), &model(), 3, None, None)
         .await
         .unwrap();
     let vector_ids: Vec<&str> = vector_only.iter().map(|r| r.concept_id.as_str()).collect();
@@ -107,9 +108,15 @@ async fn the_fusion_returns_what_neither_arm_finds_alone() {
     );
 
     // Keyword arm alone: only the documents containing the term.
-    let keyword_only = keyword_search(db.read_conn(), &escape_fts5_query("zygomorphic"), 10, None)
-        .await
-        .unwrap();
+    let keyword_only = keyword_search(
+        db.read_conn(),
+        &escape_fts5_query("zygomorphic"),
+        10,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
     let keyword_ids: Vec<&str> = keyword_only.iter().map(|(id, _)| id.as_str()).collect();
     assert!(
         !keyword_ids.contains(&"semantic"),
@@ -191,9 +198,15 @@ async fn rewriting_a_concept_retracts_its_old_terms() {
     let harness = TestHarness::new();
     let db = fixture(&harness).await;
 
-    let before = keyword_search(db.read_conn(), &escape_fts5_query("zygomorphic"), 10, None)
-        .await
-        .unwrap();
+    let before = keyword_search(
+        db.read_conn(),
+        &escape_fts5_query("zygomorphic"),
+        10,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
     assert!(before.iter().any(|(id, _)| id == "lexical"));
 
     // Same concept, new text. The rare term is gone; a new one takes its place.
@@ -205,17 +218,29 @@ async fn rewriting_a_concept_retracts_its_old_terms() {
     .await
     .unwrap();
 
-    let after = keyword_search(db.read_conn(), &escape_fts5_query("zygomorphic"), 10, None)
-        .await
-        .unwrap();
+    let after = keyword_search(
+        db.read_conn(),
+        &escape_fts5_query("zygomorphic"),
+        10,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
     assert!(
         !after.iter().any(|(id, _)| id == "lexical"),
         "the index still matches a word the concept no longer contains: {after:?}"
     );
 
-    let new_term = keyword_search(db.read_conn(), &escape_fts5_query("brachiopod"), 10, None)
-        .await
-        .unwrap();
+    let new_term = keyword_search(
+        db.read_conn(),
+        &escape_fts5_query("brachiopod"),
+        10,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
     assert!(
         new_term.iter().any(|(id, _)| id == "lexical"),
         "the replacement text was never indexed: {new_term:?}"
@@ -235,9 +260,15 @@ async fn the_index_can_be_rebuilt_from_the_ledger() {
     let harness = TestHarness::new();
     let db = fixture(&harness).await;
 
-    let expected = keyword_search(db.read_conn(), &escape_fts5_query("zygomorphic"), 10, None)
-        .await
-        .unwrap();
+    let expected = keyword_search(
+        db.read_conn(),
+        &escape_fts5_query("zygomorphic"),
+        10,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
     assert!(!expected.is_empty(), "fixture must match something to lose");
 
     // Damage the index behind the crate's back, the way integrity_tests damages
@@ -251,16 +282,28 @@ async fn the_index_can_be_rebuilt_from_the_ledger() {
         conn.execute("DELETE FROM concepts_fts", ()).await.unwrap();
     }
 
-    let damaged = keyword_search(db.read_conn(), &escape_fts5_query("zygomorphic"), 10, None)
-        .await
-        .unwrap();
+    let damaged = keyword_search(
+        db.read_conn(),
+        &escape_fts5_query("zygomorphic"),
+        10,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
     assert!(damaged.is_empty(), "the damage did not take: {damaged:?}");
 
     db.rebuild_fts().await.unwrap();
 
-    let restored = keyword_search(db.read_conn(), &escape_fts5_query("zygomorphic"), 10, None)
-        .await
-        .unwrap();
+    let restored = keyword_search(
+        db.read_conn(),
+        &escape_fts5_query("zygomorphic"),
+        10,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
     assert_eq!(
         restored
             .iter()
@@ -293,9 +336,15 @@ async fn a_retired_concept_leaves_the_results() {
     .await
     .unwrap();
 
-    let hits = keyword_search(db.read_conn(), &escape_fts5_query("zygomorphic"), 10, None)
-        .await
-        .unwrap();
+    let hits = keyword_search(
+        db.read_conn(),
+        &escape_fts5_query("zygomorphic"),
+        10,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
     assert!(
         !hits.iter().any(|(id, _)| id == "lexical"),
         "a retired concept came back from search: {hits:?}"
@@ -510,7 +559,7 @@ async fn each_search_arm_reads_at_the_instant_it_was_given() {
         .unwrap();
 
     async fn vector(db: &Database, at: Option<&str>) -> Vec<String> {
-        search_vector(db.read_conn(), &query_vec(), &model(), 3, at)
+        search_vector(db.read_conn(), &query_vec(), &model(), 3, at, None)
             .await
             .unwrap()
             .into_iter()
@@ -518,12 +567,18 @@ async fn each_search_arm_reads_at_the_instant_it_was_given() {
             .collect()
     }
     async fn keyword(db: &Database, at: Option<&str>) -> Vec<String> {
-        keyword_search(db.read_conn(), &escape_fts5_query("zygomorphic"), 10, at)
-            .await
-            .unwrap()
-            .into_iter()
-            .map(|(id, _)| id)
-            .collect()
+        keyword_search(
+            db.read_conn(),
+            &escape_fts5_query("zygomorphic"),
+            10,
+            at,
+            None,
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect()
     }
     async fn hybrid(db: &Database, at: Option<&str>) -> Vec<String> {
         let mut search = HybridSearch::new(model(), "zygomorphic", query_vec()).top_k(6);
@@ -586,6 +641,192 @@ async fn each_search_arm_reads_at_the_instant_it_was_given() {
         "keyword arm at WITHIN: {k:?}"
     );
     assert!(h.contains(&"both".to_string()), "fused at WITHIN: {h:?}");
+
+    db.close().await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Decay: the age of what was matched, priced into the ranking (W9.5)
+// ---------------------------------------------------------------------------
+
+/// One week, against ages of one day and 181 days.
+const HALF_LIFE: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 3600);
+/// The instant every decayed search below reads at, and measures age from.
+const NOW: &str = "2026-07-01T00:00:00.000000Z";
+const LONG_AGO: &str = "2026-01-01T00:00:00.000000Z";
+const YESTERDAY: &str = "2026-06-30T00:00:00.000000Z";
+
+/// Two documents that are **identical to both arms except for age**.
+///
+/// Same title, same content, so bm25 cannot separate them and the keyword arm
+/// falls to its `c.id ASC` tie-break; `a_stale` therefore leads the undecayed
+/// list in *both* arms, and it is also the nearer vector. The ids are chosen so
+/// that the decayed order is the exact reverse rather than merely different —
+/// a test that only checks "the order changed" passes for a decay applied with
+/// the wrong sign, since that reverses it too.
+async fn aged(harness: &TestHarness) -> Database {
+    let db = Database::open(&harness.db_path).await.unwrap();
+
+    let docs: [(&str, &str, usize); 2] = [
+        // id          valid_from   vector rank (0 is nearest)
+        ("a_stale", LONG_AGO, 0),
+        ("b_fresh", YESTERDAY, 8),
+    ];
+
+    db.write_concepts(
+        docs.iter()
+            .map(|(id, from, _)| {
+                ConceptUpsert::new(*id, "T")
+                    .content("zygomorphic paraphrase")
+                    .valid_from(*from)
+            })
+            .collect(),
+    )
+    .await
+    .unwrap();
+
+    db.register_model(&model(), 2).await.unwrap();
+    db.upsert_embeddings(
+        &model(),
+        docs.iter()
+            .map(|(id, _, rank)| (id.to_string(), v(*rank)))
+            .collect::<Vec<_>>(),
+    )
+    .await
+    .unwrap();
+    db
+}
+
+/// **A half-life reorders both arms, and it reorders them by age.**
+///
+/// The nearer vector is also the older document, and the two arms agree on the
+/// undecayed order because bm25 cannot tell the documents apart. So every list
+/// here starts `[a_stale, b_fresh]` and must end `[b_fresh, a_stale]` — an
+/// exact reversal, in all three surfaces, from one parameter.
+#[tokio::test]
+async fn a_half_life_ranks_by_age_in_every_arm() {
+    let harness = TestHarness::new();
+    let db = aged(&harness).await;
+
+    async fn vector(db: &Database, half_life: Option<std::time::Duration>) -> Vec<String> {
+        search_vector(
+            db.read_conn(),
+            &query_vec(),
+            &model(),
+            2,
+            Some(NOW),
+            half_life,
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|r| r.concept_id)
+        .collect()
+    }
+
+    async fn keyword(db: &Database, half_life: Option<std::time::Duration>) -> Vec<String> {
+        keyword_search(
+            db.read_conn(),
+            &escape_fts5_query("zygomorphic"),
+            2,
+            Some(NOW),
+            half_life,
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect()
+    }
+
+    async fn hybrid(db: &Database, half_life: Option<std::time::Duration>) -> Vec<String> {
+        let mut search = HybridSearch::new(model(), "zygomorphic", query_vec())
+            .top_k(2)
+            .as_of_valid(NOW);
+        if let Some(h) = half_life {
+            search = search.half_life(h);
+        }
+        ids(&search.execute(db.read_conn()).await.unwrap())
+    }
+
+    assert_eq!(
+        vector(&db, None).await,
+        vec!["a_stale", "b_fresh"],
+        "fixture: undecayed, the stale document is the nearer vector"
+    );
+    assert_eq!(
+        vector(&db, Some(HALF_LIFE)).await,
+        vec!["b_fresh", "a_stale"],
+        "a distance is not a similarity: decay must demote the older hit, not \
+         promote it"
+    );
+
+    assert_eq!(
+        keyword(&db, None).await,
+        vec!["a_stale", "b_fresh"],
+        "fixture: bm25 ties, so the undecayed order is the id tie-break"
+    );
+    assert_eq!(
+        keyword(&db, Some(HALF_LIFE)).await,
+        vec!["b_fresh", "a_stale"],
+        "the keyword arm must price age too. bm25 arrives negative, so here \
+         the plain multiply is the correct direction — the operation that \
+         would have been the bug on the vector surface"
+    );
+
+    assert_eq!(hybrid(&db, None).await, vec!["a_stale", "b_fresh"]);
+    assert_eq!(
+        hybrid(&db, Some(HALF_LIFE)).await,
+        vec!["b_fresh", "a_stale"],
+        "RRF adds ranks, so decay has to reach the arms rather than the fused \
+         score"
+    );
+
+    db.close().await.unwrap();
+}
+
+/// **A half-life with no instant is refused, not defaulted to now.**
+///
+/// Age is relative to something, and the crate does not read a wall clock on a
+/// read path — that is what makes these answers pinnable at all. Defaulting
+/// would make every decayed search quietly a search about the present, which is
+/// F-35's shape.
+#[tokio::test]
+async fn a_half_life_without_an_instant_is_refused() {
+    let harness = TestHarness::new();
+    let db = aged(&harness).await;
+
+    for err in [
+        search_vector(
+            db.read_conn(),
+            &query_vec(),
+            &model(),
+            2,
+            None,
+            Some(HALF_LIFE),
+        )
+        .await
+        .unwrap_err(),
+        keyword_search(db.read_conn(), "\"zygomorphic\"", 2, None, Some(HALF_LIFE))
+            .await
+            .unwrap_err(),
+        HybridSearch::new(model(), "zygomorphic", query_vec())
+            .half_life(HALF_LIFE)
+            .execute(db.read_conn())
+            .await
+            .unwrap_err(),
+    ] {
+        assert!(
+            matches!(err, DbError::HalfLifeWithoutInstant),
+            "expected a refusal naming the missing instant, got {err:?}"
+        );
+        // The remedy has to be in the sentence: an error that says only what is
+        // wrong makes the caller guess which of two knobs to change.
+        assert!(
+            err.to_string().contains("as_of_valid"),
+            "the message must name the fix: {err}"
+        );
+    }
 
     db.close().await.unwrap();
 }

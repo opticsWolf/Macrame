@@ -15,7 +15,10 @@
 //! could not run. The fusion function is unchanged in substance; what is new is
 //! everything that feeds it.
 
-use crate::error::Result;
+use std::time::Duration;
+
+use crate::error::{DbError, Result};
+use crate::vector::search::{decay_factor, rerank_depth};
 use crate::vector::{reciprocal_rank_fusion, search_vector, ModelName, VectorSearchResult};
 
 /// The `k` in `1/(k + rank)`, from the paper and from §5.9.
@@ -107,13 +110,31 @@ pub async fn keyword_search(
     query: &str,
     top_k: usize,
     as_of_valid: Option<&str>,
+    half_life: Option<Duration>,
 ) -> Result<Vec<(String, f64)>> {
     if top_k == 0 || query.trim().is_empty() {
         return Ok(Vec::new());
     }
+    let reference = match (half_life, as_of_valid) {
+        (Some(_), None) => return Err(DbError::HalfLifeWithoutInstant),
+        (Some(_), Some(t)) => Some(t),
+        (None, _) => None,
+    };
+
+    // Deeper than the answer when the answer is about to be reordered, for the
+    // reason `rerank_depth` states.
+    let want = match half_life {
+        Some(_) => rerank_depth(top_k),
+        None => top_k,
+    };
+    let age_column = if half_life.is_some() {
+        ", c.valid_from"
+    } else {
+        ""
+    };
 
     let sql = format!(
-        "SELECT c.id, bm25(concepts_fts) AS rank
+        "SELECT c.id, bm25(concepts_fts) AS rank{age_column}
            FROM concepts_fts
            JOIN concepts c ON c.rowid_pk = concepts_fts.rowid
           WHERE concepts_fts MATCH ?1
@@ -123,16 +144,62 @@ pub async fn keyword_search(
         visible = crate::vector::search::visible_concept(as_of_valid.map(|_| 3)),
     );
 
-    let mut params: Vec<libsql::Value> = vec![query.into(), (top_k as i64).into()];
+    let mut params: Vec<libsql::Value> = vec![query.into(), (want as i64).into()];
     if let Some(t) = as_of_valid {
         params.push(t.into());
     }
     let mut rows = conn.query(&sql, params).await?;
-    let mut out = Vec::new();
+    let mut out: Vec<(String, f64)> = Vec::new();
     while let Some(row) = rows.next().await? {
-        out.push((row.get(0)?, row.get::<f64>(1)?));
+        let id: String = row.get(0)?;
+        let rank: f64 = row.get(1)?;
+        let rank = match (reference, half_life) {
+            (Some(reference), Some(half_life)) => {
+                let valid_from: String = row.get(2)?;
+                decayed_rank(rank, decay_factor(reference, &valid_from, half_life)?)
+            }
+            _ => rank,
+        };
+        out.push((id, rank));
+    }
+
+    if half_life.is_some() {
+        out.sort_by(|a, b| {
+            a.1.partial_cmp(&b.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        out.truncate(top_k);
     }
     Ok(out)
+}
+
+/// A bm25 rank, decayed, still a bm25-shaped rank (0.13.20, W9.5, D-193).
+///
+/// **This is where the two surfaces stop being the same operation.**
+/// [`crate::vector::search::decayed_distance`] has to convert, because a
+/// distance multiplied by a factor in (0, 1] gets *smaller* and a smaller
+/// distance is a better hit. Here the plain multiply is already right, and for
+/// a reason worth stating rather than relying on: bm25 arrives **negative**,
+/// with magnitude growing in relevance, so it is a negated similarity already.
+/// Multiplying moves a hit toward zero, and toward zero is toward the far end
+/// of an ascending best-first list — exactly the demotion decay is for.
+///
+/// So the operation that would have been the bug on the vector surface is the
+/// correct one here, and writing them as one shared helper would have made one
+/// of the two wrong. `a_half_life_ranks_by_age_in_every_arm` asserts both
+/// orders, which is what stops that from being a comment nobody re-checks.
+///
+/// A non-negative rank is left alone rather than multiplied. FTS5 does not
+/// produce one on this path, and if it ever did, multiplying would move it
+/// toward zero from the *other* side — an improvement, which is the one thing
+/// decay must never be.
+fn decayed_rank(rank: f64, factor: f64) -> f64 {
+    if rank < 0.0 {
+        rank * factor
+    } else {
+        rank
+    }
 }
 
 /// A hybrid search over one model's vectors and the concept-text index (§5.9).
@@ -149,6 +216,7 @@ pub struct HybridSearch {
     rrf_k: usize,
     raw_match: bool,
     as_of_valid: Option<String>,
+    half_life: Option<Duration>,
 }
 
 impl HybridSearch {
@@ -166,6 +234,7 @@ impl HybridSearch {
             rrf_k: RRF_K,
             raw_match: false,
             as_of_valid: None,
+            half_life: None,
         }
     }
 
@@ -220,8 +289,26 @@ impl HybridSearch {
         self
     }
 
+    /// Weight each arm's ranking by the age of what it matched (0.13.20, W9.5).
+    ///
+    /// **Both arms, and before the fusion rather than after it.** RRF adds
+    /// *ranks*; a decay applied to the fused score afterwards would be
+    /// penalising a number that is already scale-free and would leave both
+    /// arms' orderings — the only thing RRF reads — untouched. So each arm
+    /// decays its own similarity and re-sorts, and the fusion sees two lists
+    /// that already price age.
+    ///
+    /// Requires [`Self::as_of_valid`]: age is measured from the instant the
+    /// search reads at, and there is no other instant here to fall back to. The
+    /// arms raise [`DbError::HalfLifeWithoutInstant`] rather than defaulting to
+    /// now.
+    pub fn half_life(mut self, half_life: Duration) -> Self {
+        self.half_life = Some(half_life);
+        self
+    }
+
     fn effective_depth(&self) -> usize {
-        self.depth.unwrap_or_else(|| (self.top_k * 5).max(50))
+        self.depth.unwrap_or_else(|| rerank_depth(self.top_k))
     }
 
     /// Run both arms and fuse them (§5.9).
@@ -235,15 +322,22 @@ impl HybridSearch {
         // is deliberately not softened into "no vector results": a caller who
         // named a model that does not exist asked a question this cannot answer.
         let at = self.as_of_valid.as_deref();
-        let vector: Vec<VectorSearchResult> =
-            search_vector(conn, &self.query_vector, &self.model, depth, at).await?;
+        let vector: Vec<VectorSearchResult> = search_vector(
+            conn,
+            &self.query_vector,
+            &self.model,
+            depth,
+            at,
+            self.half_life,
+        )
+        .await?;
 
         let match_expr = if self.raw_match {
             self.query_text.clone()
         } else {
             escape_fts5_query(&self.query_text)
         };
-        let keyword = keyword_search(conn, &match_expr, depth, at).await?;
+        let keyword = keyword_search(conn, &match_expr, depth, at, self.half_life).await?;
 
         let vector_ids: Vec<String> = vector.iter().map(|v| v.concept_id.clone()).collect();
         let keyword_ids: Vec<String> = keyword.iter().map(|(id, _)| id.clone()).collect();

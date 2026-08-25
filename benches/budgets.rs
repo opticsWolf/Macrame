@@ -976,7 +976,7 @@ fn search(c: &mut Criterion) {
 
     group.bench_function("vector_top10 (§9 ≤ 20 ms @ 100K)", |b| {
         b.to_async(&rt).iter(|| async {
-            search_vector(fx.db.read_conn(), &query, &model, 10, None)
+            search_vector(fx.db.read_conn(), &query, &model, 10, None, None)
                 .await
                 .unwrap()
         })
