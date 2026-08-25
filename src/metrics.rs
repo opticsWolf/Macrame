@@ -738,9 +738,36 @@ pub struct MetricsSnapshot {
     /// their job; a large *run* says one specific chunk, rebuild or archive sat
     /// behind that many interactive writes in a row.
     ///
-    /// **There is deliberately no forced-yield policy attached to this.**
-    /// Adding one now would be fixing a bound nobody has observed being hit,
-    /// and the counter exists precisely to find out whether it is. See D-153.
+    /// # There is deliberately no forced-yield policy, and the reason changed
+    /// (0.13.26, W10.4, [D-199])
+    ///
+    /// It used to be "adding one now would be fixing a bound nobody has
+    /// observed being hit". That premise died twice. [D-153] hit the bound
+    /// completely on a synthetic burst, and W10.4 then hit it on an ordinary
+    /// one: **four closed-loop writers** — each awaiting its own write before
+    /// issuing the next, which is what application code does — starve the low
+    /// tier for essentially all of their writes
+    /// (`examples/fairness_probe.rs`). The run is bounded by how long the
+    /// caller keeps offering interactive work, not by concurrency and not by
+    /// anything in this crate.
+    ///
+    /// **What replaced it is the floor's own price.** "After N starved turns,
+    /// take one low-priority command" cannot choose *which* command — the low
+    /// queue is an mpsc channel and its head is not inspectable — and at least
+    /// one low-priority kind is exempt from [`crate::CHUNK_BUDGET`] **by
+    /// contract**: an [`crate::Database::archive`] was measured at 3.3 s
+    /// unwindowed on an 8,000-key backlog. So the floor would add an unbounded
+    /// term to the interactive worst case in order to unblock work that is
+    /// declared not to be latency-sensitive, which is the tier split running
+    /// backwards.
+    ///
+    /// **The lever that does work belongs to the caller**: 1 ms of think time
+    /// between a writer's writes takes four writers from ~78 to ~2. Which makes
+    /// this field the instrument for a decision the caller owns rather than a
+    /// defect report about the actor.
+    ///
+    /// [D-153]: ../docs/architecture/s13-decision-register.md#d-153
+    /// [D-199]: ../docs/architecture/s13-decision-register.md#d-199
     pub low_starved_run_max: u64,
     pub kinds: Vec<KindSnapshot>,
 }

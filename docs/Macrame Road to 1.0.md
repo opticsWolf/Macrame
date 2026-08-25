@@ -275,7 +275,7 @@ branching lands.** This is the one item in this document I would cut first if
 | 3.5 | `run_writer_actor` cannot return `Err` | Low | W7.3 | 0.13.4 ✅ |
 | 3.6 | `write_annotations_atomic` bypasses `classify` | Med | W7.2 | 0.13.3 ✅ |
 | 3.7 | Snapshot rename atomic but not durable | Med | W8.3 | 0.13.13 ✅ |
-| 4.1 | No anti-starvation floor on low-priority work | Med | W4.4 (counter), W10.4 (the floor itself) | 0.13.0 / 0.14.0 |
+| 4.1 | No anti-starvation floor on low-priority work | Med | W4.4 (counter), W10.4 (the floor itself) | 0.13.0 / 0.14.0 ✅ |
 | 4.2 | No cancellation or progress on bulk paths | Med | W7.6 | 0.14.0 ✅ |
 | 4.3 | `metrics` off by default | High | W4.5 | 0.13.0 |
 | 4.4 | Metrics surface frozen by accident | High | W4.2, W4.3 | 0.13.0 |
@@ -2041,6 +2041,48 @@ that order:
 would ship the fix, so a before/after taken with it alone measures the fix
 against itself. That is why this is a 0.14.0 wave and not a 0.13.0 one.
 
+> **✅ Shipped 0.13.26 (recorded as
+> [D-199](../docs/architecture/s13-decision-register.md#d-199), which settles
+> [D-153](../docs/architecture/s13-decision-register.md#d-153) and §19).
+> Closed as **no floor**, and every stated reason for that answer is new.**
+>
+> **1. The realistic reading was taken, and it refuted the hypothesis behind
+> the item.** The candidate for what made D-153's fixture synthetic is that it
+> is open-loop. It is not: `examples/fairness_probe.rs` sweeps **closed-loop**
+> writers — each awaiting its own write, as application code does — against a
+> 900-edge chunked import, and gets `run_max` ≈ 78 at **four writers**, 157 at
+> 8, 318 at 16, 1277 at 64. The low tier is starved for essentially the whole
+> of the interactive work at a concurrency nobody can call a stress test. *The
+> run is bounded by how long the caller keeps offering interactive work.*
+>
+> **2. The floor was then costed, which is the measurement the item did not
+> ask for and needed.** "After N starved turns, take one low-priority command"
+> costs one branch per turn — and one *turn* of whatever is at the head of the
+> low queue, which the floor cannot choose: `lowpri_rx` is an mpsc channel with
+> no peek. **At least one low-priority kind is `CHUNK_BUDGET`-exempt by
+> contract**: `archive` (D-012's atomicity), measured at **3.3 s** unwindowed on
+> an 8,000-key backlog (D-080). So the floor adds an unbounded third term to the
+> interactive worst case in order to unblock work whose exemption was granted
+> *because* it is not on a latency path. That is the tier split running
+> backwards.
+>
+> **3. The lever that works belongs to the caller.** 1 ms of think time between
+> a writer's writes takes four writers from ~78 to ~2. `low_starved_run_max`'s
+> rustdoc now says so — it is the instrument for a decision the caller owns,
+> not a defect report about the actor. And the import is *delayed*, not stalled:
+> 93 ms undisturbed, 333 ms behind 64 writers, because a closed-loop caller's
+> offered load is finite by construction.
+>
+> **4. The reopening condition is a test, not a paragraph.**
+> `a_forced_low_turn_would_be_unbounded_by_contract` drives `archive()` through
+> the low tier and asserts its kind is budget-exempt. If every low-priority kind
+> ever states a bound, the floor becomes boundable and this decision expires.
+>
+> The sweep's numbers stay in the example rather than in a test, per
+> [D-147](../docs/architecture/s13-decision-register.md#d-147): they are
+> properties of the machine and the scheduler.
+
+
 **W10.5 — Split `CommandKind::Analyze`, then decide the budget exemption.**
 Added 0.12.25, after §8's acceptance measured `ANALYZE`'s hold and found
 [D-149](architecture/s13-decision-register.md#d-149) had overstated its bound
@@ -2568,6 +2610,16 @@ no evidence behind it.
 > first, precisely because the counter was added in the release that would carry
 > the fix, and a before/after taken with it alone measures the fix against
 > itself.
+>
+> **Closed 0.13.26 — the rejection stands and none of its stated reasons do
+> ([D-199](../docs/architecture/s13-decision-register.md#d-199)).** The
+> "measurement nobody has taken" has now been taken twice, the second time on
+> four closed-loop writers, which is not a synthetic burst by anyone's reading.
+> What replaces the argument is the floor's own price: "take one low-priority
+> command" cannot choose *which*, the low queue's head is not inspectable, and
+> at least one low-priority kind is exempt from `CHUNK_BUDGET` **by contract** —
+> so the floor adds an unbounded term to the interactive path in order to
+> unblock work declared not to be latency-sensitive.
 
 ### Added 0.13.1, after the 2026 bitemporal survey
 

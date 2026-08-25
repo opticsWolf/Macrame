@@ -473,6 +473,56 @@ async fn the_starvation_counter_distinguishes_a_backlog_from_a_quiet_actor() {
     Arc::into_inner(db).unwrap().close().await.unwrap();
 }
 
+/// **A forced low-priority turn would be unbounded by contract, and that is why
+/// there is no fairness floor** (0.13.26, W10.4, D-199).
+///
+/// W10.4 measured the starvation D-153 found and then measured the fix's price.
+/// The obvious floor — "after N starved turns, take one low-priority command"
+/// — cannot choose *which* command: the low queue is an mpsc channel and its
+/// head is not inspectable. So the floor's cost is whatever is at that head,
+/// and this test pins the fact that makes that unbounded: **a low-priority path
+/// exists whose kind is budget-exempt by contract**.
+///
+/// `archive` is that path. It is reached only through `Database::archive`, it is
+/// low-priority, and `CHUNK_BUDGET`'s table exempts it because copy-then-delete
+/// must be atomic (D-012) — measured at 3.3 s unwindowed on an 8,000-key
+/// backlog (D-080). Admitting one of those into an interactive write's wait
+/// trades the guarantee the tier split exists to provide for the starvation of
+/// work that is declared not latency-sensitive.
+///
+/// If this ever goes red — if every low-priority kind gains a bound — then a
+/// floor becomes boundable and W10.4's decision is due for review. That is the
+/// only thing that changes it, and it is why this is a test rather than a
+/// paragraph.
+#[tokio::test]
+async fn a_forced_low_turn_would_be_unbounded_by_contract() {
+    let harness = TestHarness::new();
+    let db = Database::open_with_cadence(&harness.db_path, None)
+        .await
+        .unwrap();
+
+    // Reached through the low tier, and counted, so this is not an assertion
+    // about a table but about a path the actor really takes.
+    db.archive("2027-01-01T00:00:00.000000Z").await.unwrap();
+    assert_eq!(
+        turns_for(&db.metrics(), CommandKind::Archive),
+        1,
+        "`archive()` no longer takes an `Archive` turn, so this test is no \
+         longer about the low tier"
+    );
+
+    assert!(
+        CommandKind::Archive.exempt_from_budget(),
+        "every low-priority kind now states a bound, which is the one thing \
+         that would make a fairness floor boundable. W10.4 declined the floor \
+         because a forced low turn admits an arbitrary low command and one of \
+         them has no latency bound by contract (D-199). Re-read that decision \
+         rather than deleting this assertion."
+    );
+
+    db.close().await.unwrap();
+}
+
 /// **`analyze()` and `optimize()` are attributed to different kinds, and the
 /// flag is not inverted** (0.13.24, W10.5, D-197).
 ///
