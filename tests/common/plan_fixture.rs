@@ -11,6 +11,13 @@
 //!   agree, so a uniform fixture would pass whether or not `ANALYZE` had ever
 //!   run and would prove nothing about either.
 //!
+//! **`transaction_log` is empty in both.** The rows go into `concepts` and
+//! `links` directly, which is right for the queries these fixtures were built
+//! for and wrong for any question about the ledger itself. A plan on an empty
+//! table is seekable in a way that proves nothing, so W10.6's questions use a
+//! database written through the public API instead — see
+//! `tests/bitemporal_plan_tests.rs`, which says so at its own top.
+//!
 //! **Why this is a module rather than a helper in one test file.** It was one,
 //! in `index_plan_tests`, until `operation_count_tests` needed the same
 //! database. A copied fixture is the defect D-088 names: two measurements

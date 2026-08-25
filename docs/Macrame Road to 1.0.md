@@ -294,7 +294,7 @@ branching lands.** This is the one item in this document I would cut first if
 | F-30 | Autocheckpoint perturbs the chunk controller | Med | W5.3 | 0.13.0 |
 | F-31 | `search_vector` returns retired concepts; `keyword_search` does not | High | W9.3 | 0.13.18 ✅ |
 | F-32 | No search surface filters concept valid time | Med | W9.4, W9.5 | 0.14.0 ✅ |
-| F-33 | The 2-D index question is unasked and the obvious answer does not fit | Med | W10.6 | 0.14.0 |
+| F-33 | The 2-D index question is unasked and the obvious answer does not fit | Med | W10.6 | 0.14.0 ✅ |
 | F-34 | No declarative surface; three qualifiers × four builders | Low | W13 | 0.15.0 |
 | F-35 | `load_subgraph_with` accepts an instant and reads the present | Med | W7.1 | 0.14.0 ✅ |
 
@@ -2082,6 +2082,44 @@ If it does not, the options in the order the evidence supports them:
 **Whatever the answer, it is a decision-register entry.** The one thing this
 wave must not produce is an index added because a paper said B-trees are
 insufficient for a query nobody has timed.
+
+> **✅ Shipped 0.13.23 (recorded as
+> [D-196](../docs/architecture/s13-decision-register.md#d-196)). Closed as "no
+> index needed", which the item names as a legitimate outcome.**
+>
+> **The transaction-time bound already seeks**, on `idx_txlog_time`, which is
+> option 1 for that domain already built.
+>
+> **Adding the valid-time instant changes the plan not at all — and that is
+> the finding, not the result.** The two axes never meet on a table.
+> `recorded_at` is a column of `transaction_log`; the valid-time bound applies
+> to the walk's join against `links_at_tx`, whose columns come out of
+> `json_extract`, one derivation past anything an index can be consulted for.
+> **F-33's question has no object rather than a difficult answer.**
+>
+> **Option 2 was built rather than argued about.** A composite over
+> `(recorded_at, json_extract(payload, '$.valid_from'))` *is* chosen, in
+> preference to `idx_txlog_time`, and the plan reads `(recorded_at<?)`: the
+> second column is never consulted. It is a wider `idx_txlog_time` that costs
+> an index write per log row, forever, and returns nothing. That is the price
+> of the thing the survey is usually cited to recommend, measured.
+>
+> **Option 3 needs no test to reject** and the plan already said why: `rtree`
+> is float32 and `rtree_i32` is int32, neither holds a microsecond epoch, and
+> the mandatory recheck would be against columns that do not exist on the table.
+>
+> **The plans' actual cost is not a temporal predicate at all.** `ROW_NUMBER()
+> OVER (PARTITION BY entity_id ORDER BY seq_id DESC)` sorts the whole bounded
+> slice; forcing the fold onto `idx_txlog_entity` trades the seek for a full
+> scan and still leaves `USE TEMP B-TREE FOR RIGHT PART OF ORDER BY`. Recorded
+> as where to look next, not fixed here — it is a different item from the one
+> F-33 asked.
+>
+> `tests/bitemporal_plan_tests.rs` pins all three claims, because a decision
+> that reads "we measured and there was nothing to build" is exactly the kind
+> re-litigated by someone who did not. `examples/bitemporal_index_probe.rs` is
+> the sweep, re-runnable.
+
 
 ---
 
