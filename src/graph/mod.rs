@@ -1,5 +1,6 @@
 pub mod algorithms;
 pub mod builder;
+pub(crate) mod dense;
 pub mod edge;
 pub mod subgraph;
 pub mod vector_filter;

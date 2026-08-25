@@ -1,31 +1,51 @@
-//! W10.3: is `Subgraph`'s string-keyed adjacency worth replacing with a dense
-//! index-based interior?
+//! W10.3: `Subgraph`'s interior, measured before it was replaced and after.
 //!
 //! §2.5 of the 0.12.0 review says the algorithms "could build a dense
 //! `Vec`-indexed view once (node id → `u32`, CSR adjacency), run on integers,
 //! and translate back at the boundary", and estimates *"on a 10K-node subgraph
-//! that is plausibly a 5–20× improvement in the analytics module"*. The finding
-//! closes with the only sentence that matters here: **"Order-of-magnitude only
-//! — this was read, not benchmarked."** So this benchmarks it, and the plan
-//! says to be prepared to close the item as "not worth it".
+//! that is plausibly a 5–20× improvement in the analytics module"*. It closes
+//! with the sentence that made this probe exist: **"Order-of-magnitude only —
+//! this was read, not benchmarked."**
 //!
 //! ```text
 //! cargo run --release --example subgraph_interior
 //! ```
 //!
-//! # The comparison charges the conversion, because the proposal includes it
+//! # What it measured, and what it measures now
+//!
+//! In **0.13.27** the `louvain`, `dijkstra`, `scc` and `k_core` columns were the
+//! string-keyed interior, and the dense arm was the proposal. The ratio came
+//! back inside §2.5's range with the conversion excluded — and **below 1 for
+//! `dijkstra` with the conversion charged**, which is what settled the design:
+//! built at the boundary, mapping an edge's far end to an index costs a string
+//! lookup *per edge endpoint*, and a single-pass algorithm never earns that
+//! back. See [D-200].
+//!
+//! In **0.13.28** those columns are the dense interior, built in-crate where
+//! the far end is already a `u32` ([D-201]). So the same table now reads as a
+//! standing comparison rather than a one-off: the dense arm is the **boundary**
+//! alternative that was rejected, and `x` below 1 is that rejection staying
+//! true. `ceil` — the arm with its build struck out — is the remaining headroom,
+//! and it is now small.
+//!
+//! [D-200]: ../docs/architecture/s13-decision-register.md#d-200
+//! [D-201]: ../docs/architecture/s13-decision-register.md#d-201
+//!
+//! # The comparison charges the conversion, because the proposal included it
 //!
 //! The dense arm is not "the same algorithm on integers". It is what a caller
-//! would actually get: **build the dense view, run, translate back to the
-//! `BTreeMap<String, _>` the public signature returns.** Timing only the middle
-//! third would measure a function this crate cannot expose. `build` and `back`
-//! are reported separately so the shape of the answer is visible rather than
-//! summarised into one ratio.
+//! outside the crate would actually get: **build the dense view, run, translate
+//! back to the `BTreeMap<String, _>` the public signature returns.** Timing
+//! only the middle third would measure a function this crate cannot expose.
+//! `build` and `back` are reported separately so the shape of the answer is
+//! visible rather than summarised into one ratio.
 //!
 //! `Flat` and the transcribed local-moving step are lifted from
 //! `examples/louvain_aggregation_probe.rs`, where a control already asserts
 //! they produce the crate's partition exactly. Both arms are checked against
-//! each other here too, per size, so a speedup can never be a divergence.
+//! each other here too, per size, so a speedup can never be a divergence — and
+//! that check is now also a cross-implementation test of the rewritten
+//! interior.
 //!
 //! # Two id styles, because the string cost is a function of the string
 //!
@@ -33,18 +53,18 @@
 //! each level, and comparison cost tracks the **shared prefix**. The crate's
 //! own ids in practice are ULIDs — 26 characters, the first ten of which are a
 //! timestamp that barely moves across one import. So the sweep runs short
-//! (`c0000000`) and ULID-shaped ids over the same topology. If string keying is
-//! the cost, the two must differ.
+//! (`c0000000`) and ULID-shaped ids over the same topology. Before the rewrite
+//! the two differed by a third on `louvain`; after it they are within noise,
+//! because the per-edge work no longer touches a string.
 //!
 //! # And a share, because a ratio on the interior is not a ratio on the caller
 //!
 //! A ratio on the interior only matters in proportion to what the interior is a
 //! share of. The last section loads a subgraph from a real database and times
 //! the load against the algorithms over it, so the answer is a fraction of the
-//! caller's wall clock rather than of a function.
-//!
-//! **It came back large** — a third to two thirds — which is what makes this
-//! item something other than a closable one.
+//! caller's wall clock rather than of a function. It came back at **34%–64%**
+//! before the rewrite, which is what made the item worth doing, and at
+//! **10%–25%** after it.
 //!
 //! That section deliberately does **not** use the clique chain. Reaching all of
 //! a 256-community chain takes 256 hops, and timing a walk that deep would
@@ -592,13 +612,14 @@ async fn main() {
     }
 
     println!(
-        "`x` is crate / dense as an outside caller would pay it: build + run + back.\n\
-         `ceil` is the same ratio with `build` struck out -- the upper bound on what an\n\
-         **in-crate** change could give, because `EdgeRef` already carries u32 pool\n\
-         indices and only `nodes` and the two adjacency maps are still keyed by String,\n\
-         so an interior rewrite would not pay this probe's per-endpoint string lookup.\n\
-         `back` cannot be struck out: the return type is BTreeMap<String, _>, and that\n\
-         is the public signature.\n"
+        "`x` is the crate / the same work built at the **boundary**: build + run + back.\n\
+         Since 0.13.28 the crate runs a dense interior of its own, so x below 1 is the\n\
+         boundary form staying rejected -- it pays one string lookup per edge endpoint\n\
+         where the in-crate build pays one per node. `ceil` strikes the boundary build\n\
+         out entirely: it was the upper bound on the rewrite, and what is left of it is\n\
+         the headroom still on the table. `back` is in both arms and cannot leave\n\
+         either: the return type is BTreeMap<String, _>, and that is the public\n\
+         signature.\n"
     );
 
     println!("===== what the interior is a share of =====");
@@ -632,9 +653,9 @@ async fn main() {
     let _ = std::fs::remove_dir_all(&dir);
 
     println!(
-        "\n`algos %` is the share of the caller's wall clock a faster interior could act on\n\
-         at all, and it is the number that decides this item. It is a third to two thirds\n\
-         here -- the load does not dominate the way a database-backed operation is usually\n\
-         assumed to. Almost all of it is `louvain`, exactly as section 2.5 said."
+        "\n`algos %` is the share of the caller's wall clock the interior can act on at all.\n\
+         It was 34%-64% against the string-keyed interior and is 10%-25% against the\n\
+         dense one, which is the same work measured from the other side of 0.13.28.\n\
+         Almost all of it is still `louvain`, exactly as section 2.5 said."
     );
 }

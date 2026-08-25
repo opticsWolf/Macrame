@@ -104,6 +104,7 @@ macrame/
 │   │   ├── edge.rs             # assert / retire / re-assert lifecycle
 │   │   ├── vector_filter.rs    # §5.3 — strategies, cost model
 │   │   ├── subgraph.rs         # DB → Subgraph loader, byte budget, chunked write-back
+│   │   ├── dense.rs            # §5.4 — crate-private CSR view the algorithms run on
 │   │   └── algorithms.rs       # dijkstra · astar · scc · k_core · louvain
 │   ├── temporal/
 │   │   ├── mod.rs

@@ -266,7 +266,7 @@ branching lands.** This is the one item in this document I would cut first if
 | 2.2 | `CONCEPTS_ARCHIVABLE` quadratic on `links.target_id` | High | W3.2 | 0.13.0 |
 | 2.3 | Per-transaction overhead ~0.8 ms; singular paths pay it per row | Med | W3.4 | 0.13.0 |
 | 2.4 | Snapshot work runs on a tokio worker | Med | W8.1 | 0.13.11 ✅ |
-| 2.5 | `Subgraph` string-keyed adjacency | Low | W10.3 (measured), W10.3b (built) | 0.14.0 |
+| 2.5 | `Subgraph` string-keyed adjacency | Low | W10.3 (measured), W10.3b (built) | 0.14.0 ✅ |
 | 2.6 | `reject_overlaps_within` O(n²) | Med | W7.5 | 0.13.6 ✅ |
 | 3.1 | `as_of` mixes valid time and transaction time | High | W5.6 / W7.1 | both |
 | 3.2 | `AtTime` degrades silently after archive | Med | W9.1 | 0.13.16 ✅ |
@@ -2230,6 +2230,50 @@ the six algorithms on it; hold the result to
 guarantees of §5.4. **Measure the in-crate build**, because D-200's upper bound
 is a structural argument and not yet a reading — if the rewrite does not
 approach it, the decision comes back.
+
+> **✅ Shipped 0.13.28 (recorded as
+> [D-201](../docs/architecture/s13-decision-register.md#d-201), which
+> implements [D-200](../docs/architecture/s13-decision-register.md#d-200) and
+> closes §2.5). Built as a crate-private CSR view rather than by re-keying the
+> maps, and **no public signature moved**.**
+>
+> **1. The numbers, at the 49,152-node / 544,767-edge budget ceiling with
+> ULID-shaped ids.** `louvain` **675 ms → 75 ms**, `scc` **310 → 34**,
+> `dijkstra` **125 → 28**, `k_core` **24 → 24**. End to end on the realistic
+> fixture — 10,000 concepts at out-degree 8, a three-hop neighbourhood — the
+> whole call goes from ~81 ms to ~33 ms, and the interior falls from 60% of it
+> to 25%.
+>
+> **2. `k_core` at parity is reported rather than buried.** It was already the
+> cheapest of the four: its own work is one degree count per node, so on a
+> graph where nothing peels it did almost no edge traversal. It now pays a
+> build proportional to the edges to avoid a cost proportional to the nodes.
+> Where peeling actually happens both forms are O(E) and it gains with the
+> rest.
+>
+> **3. The first build was wrong and the way it was wrong is the finding.**
+> `Vec<Vec<_>>` — the obvious shape — costs two heap allocations per node and
+> made `k_core` **1.8× slower than the string-keyed version it replaced**. Flat
+> CSR arrays fixed the allocations and did *not* fix `k_core`, which is how the
+> real cost surfaced: the build's dominant term is the `BTreeMap<String, u32>`
+> descents that map ids onto indices. Merge-walking `nodes` against the two
+> adjacency maps — legitimate because all three are `BTreeMap`s over the same
+> keys and closure makes adjacency a subset — cut those from `3V` descents to
+> `V`, which is what restored parity and took another ~20% off everything else.
+>
+> **4. Nothing in the test suite was edited to make it pass.** Dense indices
+> are `nodes`' key order, so `u < v` iff `ids[u] < ids[v]` and every tie the
+> determinism contract breaks by node id is broken identically by index —
+> heap order, `scc`'s sorted components *and* their sorted order, Louvain's
+> lowest-index rule, `renumber`'s first-appearance order.
+> `the_interior_may_change_but_these_answers_may_not`, written in 0.13.27
+> before any of this existed, held throughout.
+>
+> **5. The view is built per call and not cached.** A cache would roughly
+> double the retained footprint of the one structure in the crate with an
+> explicit byte budget, which is the memory `load_subgraph` refuses loads to
+> bound. A caller running several algorithms over one graph pays the build
+> several times instead — the side of that trade the budget exists to take.
 
 **W10.6 — The two-dimensional index question, measured before it is answered.**
 Closes F-33. W7.1 makes bitemporal predicates expressible; this asks what they

@@ -85,11 +85,12 @@ const NO_EDGES: &[EdgeRef] = &[];
 /// already interned everything an [`EdgeRef`] carries, and that asymmetry is why
 /// the change belongs here rather than in a caller.
 ///
-/// The rewrite lands in 0.13.28. It is held to everything above — the closure
-/// invariant, the node order, the adjacency order — and to
-/// `the_interior_may_change_but_these_answers_may_not`, which pins all six
-/// algorithms' exact output so a moved answer fails loudly rather than arriving
-/// as an improvement.
+/// **0.13.28 is that rewrite** ([D-201]), and the maps above are unchanged by
+/// it. `Subgraph::build_dense` — crate-private — produces a borrowed CSR view and
+/// [`super::algorithms`] runs on that; at the budget ceiling `louvain` goes
+/// 675 ms → 75 ms, `scc` 310 → 34, `dijkstra` 125 → 28, and `k_core` breaks
+/// even. The view is built per call and deliberately not cached — see
+/// `build_dense` and D-201 for why the byte budget decides that.
 ///
 /// [D-115]: ../../docs/architecture/s13-decision-register.md#d-115
 /// [D-200]: ../../docs/architecture/s13-decision-register.md#d-200
@@ -565,6 +566,91 @@ impl Subgraph {
                 valid_to: to,
             });
         2 * std::mem::size_of::<EdgeRef>() + pooled
+    }
+
+    /// Build the integer-indexed view [`super::algorithms`] runs on
+    /// (0.13.28, W10.3b, [D-201]).
+    ///
+    /// **The per-edge term has no strings in it**, and that is the whole reason
+    /// the method is here rather than in a caller. [`Interner`] already holds
+    /// every string an [`EdgeRef`] carries, so an edge's far end is a pool
+    /// index; mapping the pool onto dense indices costs one lookup **per node**,
+    /// after which every edge is a `Vec` index. [D-200] measured the same view
+    /// built through the public API, where the far end is only reachable as a
+    /// `&str` and the mapping costs a lookup per *edge endpoint*: 1.8x-2.1x on
+    /// `louvain` and a **loss** on `dijkstra`, which has one pass to earn the
+    /// build back.
+    ///
+    /// Dense indices are `nodes`' key order, so index order and id order are the
+    /// same relation and every tie broken by id is broken identically by index.
+    ///
+    /// # The two orders this relies on
+    ///
+    /// `nodes`, `out_adj` and `in_adj` are `BTreeMap`s over the same key type,
+    /// and by the closure invariant every adjacency key is a key of `nodes`.
+    /// So the three are **merge-walkable**: the flat arrays are filled in one
+    /// forward pass, with one string comparison per node rather than a
+    /// `BTreeMap` descent per node, and no per-node allocation at all. Only the
+    /// pool mapping needs real lookups, and it needs `V` of them.
+    ///
+    /// [D-200]: ../../docs/architecture/s13-decision-register.md#d-200
+    /// [D-201]: ../../docs/architecture/s13-decision-register.md#d-201
+    pub(crate) fn build_dense(&self) -> super::dense::Dense<'_> {
+        use super::dense::Dense;
+
+        debug_assert!(
+            self.is_closed(),
+            "`build_dense` on a graph that violates the closure invariant: \
+             adjacency references a node that is not in `nodes`"
+        );
+
+        let ids: Vec<&str> = self.nodes.keys().map(String::as_str).collect();
+        let n = ids.len();
+
+        // Pool index -> dense index. One string lookup per node; a pooled string
+        // that is not a node id (an edge type, a timestamp) keeps the sentinel.
+        let mut pool_to_dense = vec![Dense::not_a_node(); self.pool.strings.len()];
+        for (dense, id) in ids.iter().enumerate() {
+            if let Some(&pooled) = self.pool.index.get(*id) {
+                pool_to_dense[pooled as usize] =
+                    u32::try_from(dense).expect("a subgraph cannot hold 2^32 nodes");
+            }
+        }
+
+        // `ids` and an adjacency map are both in key order, and every
+        // adjacency key is a key of `nodes`, so this is a merge rather than a
+        // lookup per key: one string comparison per node instead of a
+        // `BTreeMap` descent. The `while` guard makes it a merge rather than a
+        // lockstep walk, so a key that is *not* a node — the closure invariant
+        // broken in a release build — is skipped instead of stalling the walk.
+        let flatten = |adj: &BTreeMap<String, Vec<EdgeRef>>| -> (Vec<(u32, f64)>, Vec<u32>) {
+            let total: usize = adj.values().map(Vec::len).sum();
+            let mut flat = Vec::with_capacity(total);
+            let mut at = Vec::with_capacity(n + 1);
+            let mut keys = adj.iter().peekable();
+
+            for id in &ids {
+                at.push(u32::try_from(flat.len()).expect("a subgraph cannot hold 2^32 edges"));
+                while keys.peek().is_some_and(|(k, _)| k.as_str() < *id) {
+                    keys.next();
+                }
+                if keys.peek().is_some_and(|(k, _)| k.as_str() == *id) {
+                    let (_, edges) = keys.next().expect("just peeked");
+                    flat.extend(
+                        edges
+                            .iter()
+                            .map(|e| (pool_to_dense[e.node as usize], e.weight)),
+                    );
+                }
+            }
+            at.push(u32::try_from(flat.len()).expect("a subgraph cannot hold 2^32 edges"));
+            (flat, at)
+        };
+
+        let (out, out_at) = flatten(&self.out_adj);
+        let (inn, inn_at) = flatten(&self.in_adj);
+
+        Dense::from_parts(ids, out, out_at, inn, inn_at)
     }
 
     /// Estimated payload bytes for one node, keyed by `id`.
