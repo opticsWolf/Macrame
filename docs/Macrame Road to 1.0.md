@@ -1868,6 +1868,39 @@ across all four search surfaces including `search_filtered` — whose safety is
 currently accidental (F-31) and which must therefore be pinned as a
 *requirement* rather than left to keep passing by composition.
 
+> **✅ Shipped 0.13.21 (recorded as
+> [D-194](../docs/architecture/s13-decision-register.md#d-194)).**
+>
+> **The gate is `tests/search_visibility_tests.rs`, and it asks five questions,
+> not four.** `search_filtered` is asked once per strategy: the predicate is
+> spliced into two statements that share no query, no access path and no
+> ordering mechanism, and a visibility rule that holds under one plan and not
+> the other is a wrong answer selected by a byte estimate.
+>
+> **The fixture ranks both hidden concepts first, on every surface, before it
+> hides them.** Content is `TERM` repeated `8 - rank` times and padded to a
+> constant eight tokens, so bm25 has term frequency as its only variable and
+> the keyword order is the same total order as the vector order — asserted,
+> not assumed, by the first of the test's three claims. Without it, "absent" is
+> satisfied by a corpus that was never within reach.
+>
+> **The two are hidden by different mechanisms**, a `retired` flag and a
+> `valid_to`, because they are separate terms of one clause and a surface can
+> splice one and forget the other. `top_k` is required to stay a count in the
+> same assertion: three asked for, three live concepts back.
+>
+> **The companion test is the absent knob.** With no instant stated the
+> retirement still applies and the ended validity does not — so a build that
+> valid-time-bounds every search whether or not one was asked for fails here,
+> which the gate above alone would not catch.
+>
+> Mutation-discriminated three ways, each red at the value: dropping the
+> valid-time terms from `visible_concept`, widening `VISIBLE_CONCEPT` to admit
+> a retirement, and — the one the per-surface tests could not reach —
+> dropping the instant from `run_pre_filter`'s splice alone, which fails at
+> `search_filtered/PreFilterCTE` and nowhere else.
+
+
 ---
 
 ## 12. W10 — The gates
