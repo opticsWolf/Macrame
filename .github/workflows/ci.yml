@@ -313,6 +313,44 @@ jobs:
           path: fuzz/artifacts/
           if-no-files-found: ignore
 
+  # The public API against its checked-in baseline (0.13.32, W11.2, D-205).
+  #
+  # Nightly, for the same reason `fuzz` is: `cargo-public-api` reads rustdoc's
+  # JSON output, which is unstable. That makes this the second job here that
+  # cannot run in the local stable loop, and the reason the baseline is a file
+  # in the repository rather than a number in someone's head.
+  #
+  # **Blocking on the result, immune to the noise, and the script is what tells
+  # them apart.** `check_public_api.py` exits 1 when the surface moved and 2
+  # when it could not be measured -- nightly missing, or a rustdoc JSON format
+  # change that `cargo-public-api` has not caught up with yet. Collapsing those
+  # two into "the job is red" is what `continue-on-error` would do, and a job
+  # that is allowed to be red is a job nobody reads; collapsing them into "the
+  # job is green" would be worse. So 2 is a warning that is explicitly not a
+  # pass, and 1 fails. This is `run_rust_suite.py`'s design applied to a
+  # different flavour of the same problem (D-147).
+  public-api:
+    name: public API baseline
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - name: install cargo-public-api
+        run: cargo install cargo-public-api --locked
+      - name: diff against the baseline
+        shell: bash
+        run: |
+          set +e
+          python scripts/check_public_api.py
+          code=$?
+          set -e
+          if [ "$code" = "2" ]; then
+            echo "::warning::the public API could not be measured; this is not a pass"
+            exit 0
+          fi
+          exit $code
+
   # A `cargo publish` failure after a tag is pushed is expensive: the tag is
   # already public and the version number is spent. This runs the same
   # packaging and verification step on every PR, so the release job's only new

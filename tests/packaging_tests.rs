@@ -125,8 +125,11 @@ fn the_only_workspace_member_is_the_python_binding() {
 ///
 /// `bindings/` is deliberately not in the list and does not need to be: Cargo
 /// skips a subdirectory carrying its own `Cargo.toml`. Confirmed with
-/// `cargo package --list`, which reports the same 105 files and the same
-/// top-level entries as before the workspace existed.
+/// `cargo package --list`, which reports the same top-level entries as
+/// before the workspace existed — 105 files then, 154 at 0.13.32, and none of
+/// them under `bindings/`. The count is prose and not asserted: it moves
+/// whenever a doc or a script is added, and a number that changes for reasons
+/// unrelated to the claim is not worth gating on.
 #[test]
 fn the_python_tree_is_excluded_from_the_crate_tarball() {
     let text = MANIFEST.replace(' ', "");

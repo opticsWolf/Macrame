@@ -1,0 +1,1701 @@
+# The public API of `macrame-db`, as `cargo-public-api` reports it.
+#
+# Generated. Do not hand-edit: `python scripts/check_public_api.py --bless`
+# rewrites it, and that script's docstring says why this file is checked in
+# (D-205). A change here is a change to what 1.x promises, so it belongs in
+# the same commit as the code that caused it, with the diff in the message.
+#
+#     cargo +nightly public-api --all-features --omit blanket-impls,auto-trait-impls,auto-derived-impls
+#
+pub mod macrame
+pub mod macrame::connection
+pub mod macrame::connection::chunk_rows
+pub const macrame::connection::chunk_rows::ANNOTATIONS: usize
+pub const macrame::connection::chunk_rows::CONCEPTS: usize
+pub const macrame::connection::chunk_rows::EDGES: usize
+pub const macrame::connection::chunk_rows::EMBEDDINGS: usize
+#[non_exhaustive] pub enum macrame::connection::CadencePolicy
+pub macrame::connection::CadencePolicy::Default
+pub macrame::connection::CadencePolicy::Disabled
+pub macrame::connection::CadencePolicy::Every(macrame::temporal::snapshot::SnapshotCadence)
+pub enum macrame::connection::HighPriCommand
+pub macrame::connection::HighPriCommand::AssertEdge
+pub macrame::connection::HighPriCommand::AssertEdge::edge: macrame::graph::edge::EdgeAssertion
+pub macrame::connection::HighPriCommand::AssertEdge::responder: tokio::sync::oneshot::Sender<macrame::error::Result<()>>
+pub macrame::connection::HighPriCommand::Checkpoint
+pub macrame::connection::HighPriCommand::Checkpoint::responder: tokio::sync::oneshot::Sender<macrame::error::Result<macrame::connection::CheckpointReport>>
+pub macrame::connection::HighPriCommand::RebuildCurrent
+pub macrame::connection::HighPriCommand::RebuildCurrent::responder: tokio::sync::oneshot::Sender<macrame::error::Result<macrame::integrity::rebuild::RebuildReport>>
+pub macrame::connection::HighPriCommand::RegisterModel
+pub macrame::connection::HighPriCommand::RegisterModel::dim: usize
+pub macrame::connection::HighPriCommand::RegisterModel::model: macrame::vector::model::ModelName
+pub macrame::connection::HighPriCommand::RegisterModel::responder: tokio::sync::oneshot::Sender<macrame::error::Result<()>>
+pub macrame::connection::HighPriCommand::RetireEdge
+pub macrame::connection::HighPriCommand::RetireEdge::edge_type: alloc::string::String
+pub macrame::connection::HighPriCommand::RetireEdge::responder: tokio::sync::oneshot::Sender<macrame::error::Result<()>>
+pub macrame::connection::HighPriCommand::RetireEdge::source: alloc::string::String
+pub macrame::connection::HighPriCommand::RetireEdge::target: alloc::string::String
+pub macrame::connection::HighPriCommand::RetireEdge::valid_from: alloc::string::String
+pub macrame::connection::HighPriCommand::RetireEdge::valid_to: alloc::string::String
+pub macrame::connection::HighPriCommand::Shutdown
+pub macrame::connection::HighPriCommand::Shutdown::responder: tokio::sync::oneshot::Sender<macrame::error::Result<()>>
+pub macrame::connection::HighPriCommand::UpsertConcept
+pub macrame::connection::HighPriCommand::UpsertConcept::concept: macrame::connection::ConceptUpsert
+pub macrame::connection::HighPriCommand::UpsertConcept::responder: tokio::sync::oneshot::Sender<macrame::error::Result<()>>
+pub macrame::connection::HighPriCommand::WriteBulkAtomic
+pub macrame::connection::HighPriCommand::WriteBulkAtomic::edges: alloc::vec::Vec<macrame::graph::edge::EdgeAssertion>
+pub macrame::connection::HighPriCommand::WriteBulkAtomic::responder: tokio::sync::oneshot::Sender<macrame::error::Result<usize>>
+pub enum macrame::connection::LowPriCommand
+pub macrame::connection::LowPriCommand::Analyze
+pub macrame::connection::LowPriCommand::Analyze::incremental: bool
+pub macrame::connection::LowPriCommand::Analyze::responder: tokio::sync::oneshot::Sender<macrame::error::Result<()>>
+pub macrame::connection::LowPriCommand::Archive
+pub macrame::connection::LowPriCommand::Archive::archive_path: std::path::PathBuf
+pub macrame::connection::LowPriCommand::Archive::cutoff: alloc::string::String
+pub macrame::connection::LowPriCommand::Archive::responder: tokio::sync::oneshot::Sender<macrame::error::Result<macrame::temporal::archive::ArchiveReport>>
+pub macrame::connection::LowPriCommand::BulkImportChunk
+pub macrame::connection::LowPriCommand::BulkImportChunk::chunk: alloc::vec::Vec<macrame::graph::edge::EdgeAssertion>
+pub macrame::connection::LowPriCommand::BulkImportChunk::responder: tokio::sync::oneshot::Sender<macrame::error::Result<macrame::connection::ChunkOutcome>>
+pub macrame::connection::LowPriCommand::RebuildFts
+pub macrame::connection::LowPriCommand::RebuildFts::responder: tokio::sync::oneshot::Sender<macrame::error::Result<()>>
+pub macrame::connection::LowPriCommand::Rehydrate
+pub macrame::connection::LowPriCommand::Rehydrate::archive_path: std::path::PathBuf
+pub macrame::connection::LowPriCommand::Rehydrate::ids: alloc::vec::Vec<alloc::string::String>
+pub macrame::connection::LowPriCommand::Rehydrate::responder: tokio::sync::oneshot::Sender<macrame::error::Result<macrame::temporal::archive::RehydrateReport>>
+pub macrame::connection::LowPriCommand::ShadowRebuild
+pub macrame::connection::LowPriCommand::ShadowRebuild::responder: tokio::sync::oneshot::Sender<macrame::error::Result<macrame::integrity::shadow::ShadowOutcome>>
+pub macrame::connection::LowPriCommand::ShadowRebuild::step: macrame::integrity::shadow::ShadowStep
+pub macrame::connection::LowPriCommand::UpsertEmbeddingChunk
+pub macrame::connection::LowPriCommand::UpsertEmbeddingChunk::chunk: alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<f32>)>
+pub macrame::connection::LowPriCommand::UpsertEmbeddingChunk::model: macrame::vector::model::ModelName
+pub macrame::connection::LowPriCommand::UpsertEmbeddingChunk::responder: tokio::sync::oneshot::Sender<macrame::error::Result<macrame::connection::ChunkOutcome>>
+pub macrame::connection::LowPriCommand::WriteAnalyticsChunk
+pub macrame::connection::LowPriCommand::WriteAnalyticsChunk::chunk: alloc::vec::Vec<macrame::connection::Annotation>
+pub macrame::connection::LowPriCommand::WriteAnalyticsChunk::responder: tokio::sync::oneshot::Sender<macrame::error::Result<macrame::connection::ChunkOutcome>>
+pub macrame::connection::LowPriCommand::WriteConceptsChunk
+pub macrame::connection::LowPriCommand::WriteConceptsChunk::chunk: alloc::vec::Vec<macrame::connection::ConceptUpsert>
+pub macrame::connection::LowPriCommand::WriteConceptsChunk::responder: tokio::sync::oneshot::Sender<macrame::error::Result<macrame::connection::ChunkOutcome>>
+#[non_exhaustive] pub enum macrame::connection::WalCheckpointPolicy
+pub macrame::connection::WalCheckpointPolicy::Default
+pub macrame::connection::WalCheckpointPolicy::Disabled
+pub macrame::connection::WalCheckpointPolicy::EveryPages(u32)
+pub struct macrame::connection::Annotation
+pub macrame::connection::Annotation::concept_id: alloc::string::String
+pub macrame::connection::Annotation::label: alloc::string::String
+pub macrame::connection::Annotation::value: alloc::string::String
+impl macrame::connection::Annotation
+pub fn macrame::connection::Annotation::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
+pub struct macrame::connection::BulkControl
+impl macrame::connection::BulkControl
+pub fn macrame::connection::BulkControl::cancel_with(self, macrame::connection::CancelToken) -> Self
+pub fn macrame::connection::BulkControl::new() -> Self
+pub fn macrame::connection::BulkControl::on_progress(self, impl core::ops::function::Fn(macrame::connection::BulkProgress) + core::marker::Send + core::marker::Sync + 'static) -> Self
+impl core::fmt::Debug for macrame::connection::BulkControl
+pub fn macrame::connection::BulkControl::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct macrame::connection::BulkProgress
+pub macrame::connection::BulkProgress::held: core::time::Duration
+pub macrame::connection::BulkProgress::rows: usize
+pub macrame::connection::BulkProgress::total: usize
+pub macrame::connection::BulkProgress::written: usize
+pub struct macrame::connection::CancelToken(_)
+impl macrame::connection::CancelToken
+pub fn macrame::connection::CancelToken::cancel(&self)
+pub fn macrame::connection::CancelToken::is_cancelled(&self) -> bool
+pub fn macrame::connection::CancelToken::new() -> Self
+pub struct macrame::connection::CheckpointReport
+pub macrame::connection::CheckpointReport::busy: bool
+pub macrame::connection::CheckpointReport::checkpointed_frames: u64
+pub macrame::connection::CheckpointReport::log_frames: u64
+impl macrame::connection::CheckpointReport
+pub fn macrame::connection::CheckpointReport::is_complete(&self) -> bool
+pub struct macrame::connection::ChunkOutcome
+pub macrame::connection::ChunkOutcome::held: core::time::Duration
+pub macrame::connection::ChunkOutcome::rows: usize
+pub struct macrame::connection::ConceptUpsert
+pub macrame::connection::ConceptUpsert::content: alloc::string::String
+pub macrame::connection::ConceptUpsert::embedding_model: core::option::Option<alloc::string::String>
+pub macrame::connection::ConceptUpsert::id: alloc::string::String
+pub macrame::connection::ConceptUpsert::retired: bool
+pub macrame::connection::ConceptUpsert::title: alloc::string::String
+pub macrame::connection::ConceptUpsert::valid_from: alloc::string::String
+pub macrame::connection::ConceptUpsert::valid_to: alloc::string::String
+impl macrame::connection::ConceptUpsert
+pub fn macrame::connection::ConceptUpsert::content(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn macrame::connection::ConceptUpsert::embedding_model(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn macrame::connection::ConceptUpsert::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn macrame::connection::ConceptUpsert::normalized(self) -> macrame::error::Result<Self>
+pub fn macrame::connection::ConceptUpsert::retired(self, bool) -> Self
+pub fn macrame::connection::ConceptUpsert::valid_from(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn macrame::connection::ConceptUpsert::valid_to(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub struct macrame::connection::Database
+impl macrame::connection::Database
+pub async fn macrame::connection::Database::analyze(&self) -> macrame::error::Result<()>
+pub async fn macrame::connection::Database::archive(&self, &str) -> macrame::error::Result<macrame::temporal::archive::ArchiveReport>
+pub fn macrame::connection::Database::archive_path(&self) -> &std::path::Path
+pub async fn macrame::connection::Database::archive_windowed(&self, &str, core::time::Duration) -> macrame::error::Result<alloc::vec::Vec<macrame::temporal::archive::ArchiveReport>>
+pub async fn macrame::connection::Database::assert_edge(&self, macrame::graph::edge::EdgeAssertion) -> macrame::error::Result<()>
+pub async fn macrame::connection::Database::bulk_import(&self, alloc::vec::Vec<macrame::graph::edge::EdgeAssertion>) -> macrame::error::BulkResult<usize>
+pub async fn macrame::connection::Database::bulk_import_with(&self, alloc::vec::Vec<macrame::graph::edge::EdgeAssertion>, macrame::connection::BulkControl) -> macrame::error::BulkResult<usize>
+pub async fn macrame::connection::Database::checkpoint(&self) -> macrame::error::Result<macrame::connection::CheckpointReport>
+pub fn macrame::connection::Database::clock(&self) -> &alloc::sync::Arc<dyn macrame::util::clock::Clock>
+pub async fn macrame::connection::Database::close(self) -> macrame::error::Result<()>
+pub async fn macrame::connection::Database::diagnostic_conn(&self) -> macrame::error::Result<libsql::connection::Connection>
+pub fn macrame::connection::Database::metrics(&self) -> macrame::metrics::MetricsSnapshot
+pub async fn macrame::connection::Database::open(impl core::convert::AsRef<std::path::Path>) -> macrame::error::Result<Self>
+pub async fn macrame::connection::Database::open_tuned(impl core::convert::AsRef<std::path::Path>, macrame::connection::Tuning) -> macrame::error::Result<Self>
+pub async fn macrame::connection::Database::open_with_cadence(impl core::convert::AsRef<std::path::Path>, core::option::Option<macrame::temporal::snapshot::SnapshotCadence>) -> macrame::error::Result<Self>
+pub async fn macrame::connection::Database::open_with_clock(impl core::convert::AsRef<std::path::Path>, core::option::Option<macrame::temporal::snapshot::SnapshotCadence>, alloc::sync::Arc<dyn macrame::util::clock::Clock>) -> macrame::error::Result<Self>
+pub async fn macrame::connection::Database::optimize(&self) -> macrame::error::Result<()>
+pub fn macrame::connection::Database::path(&self) -> &std::path::Path
+pub fn macrame::connection::Database::read_conn(&self) -> &libsql::connection::Connection
+pub async fn macrame::connection::Database::rebuild_current(&self) -> macrame::error::Result<macrame::integrity::rebuild::RebuildReport>
+pub async fn macrame::connection::Database::rebuild_current_chunked(&self) -> macrame::error::Result<macrame::integrity::rebuild::RebuildReport>
+pub async fn macrame::connection::Database::rebuild_fts(&self) -> macrame::error::Result<()>
+pub async fn macrame::connection::Database::reconstruct(&self, &str) -> macrame::error::Result<macrame::temporal::replay::MaterializedState>
+pub async fn macrame::connection::Database::register_model(&self, &macrame::vector::model::ModelName, usize) -> macrame::error::Result<()>
+pub async fn macrame::connection::Database::rehydrate(&self, &[&str]) -> macrame::error::Result<macrame::temporal::archive::RehydrateReport>
+pub async fn macrame::connection::Database::retire_edge(&self, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, &str, &str) -> macrame::error::Result<()>
+pub fn macrame::connection::Database::schema_version(&self) -> u32
+pub async fn macrame::connection::Database::shadow_step(&self, macrame::integrity::shadow::ShadowStep) -> macrame::error::Result<macrame::integrity::shadow::ShadowOutcome>
+pub fn macrame::connection::Database::snapshots_dir(&self) -> &std::path::Path
+pub async fn macrame::connection::Database::upsert_concept(&self, macrame::connection::ConceptUpsert) -> macrame::error::Result<()>
+pub async fn macrame::connection::Database::upsert_embeddings(&self, &macrame::vector::model::ModelName, alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<f32>)>) -> macrame::error::BulkResult<usize>
+pub async fn macrame::connection::Database::upsert_embeddings_with(&self, &macrame::vector::model::ModelName, alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<f32>)>, macrame::connection::BulkControl) -> macrame::error::BulkResult<usize>
+pub async fn macrame::connection::Database::verify_snapshot_chain(&self, &str) -> macrame::error::Result<macrame::temporal::replay::ChainCheck>
+pub async fn macrame::connection::Database::write_analytics_annotations(&self, alloc::vec::Vec<macrame::connection::Annotation>) -> macrame::error::BulkResult<usize>
+pub async fn macrame::connection::Database::write_analytics_annotations_with(&self, alloc::vec::Vec<macrame::connection::Annotation>, macrame::connection::BulkControl) -> macrame::error::BulkResult<usize>
+pub async fn macrame::connection::Database::write_bulk_atomic(&self, alloc::vec::Vec<macrame::graph::edge::EdgeAssertion>) -> macrame::error::Result<usize>
+pub async fn macrame::connection::Database::write_concepts(&self, alloc::vec::Vec<macrame::connection::ConceptUpsert>) -> macrame::error::BulkResult<usize>
+pub async fn macrame::connection::Database::write_concepts_with(&self, alloc::vec::Vec<macrame::connection::ConceptUpsert>, macrame::connection::BulkControl) -> macrame::error::BulkResult<usize>
+impl macrame::connection::Database
+pub async fn macrame::connection::Database::load_subgraph(&self, &str, u32, &str, usize) -> macrame::error::Result<macrame::graph::subgraph::Subgraph>
+pub async fn macrame::connection::Database::load_subgraph_with(&self, &macrame::graph::builder::TraversalBuilder, &str, usize) -> macrame::error::Result<macrame::graph::subgraph::Subgraph>
+impl core::ops::drop::Drop for macrame::connection::Database
+pub fn macrame::connection::Database::drop(&mut self)
+pub struct macrame::connection::Tuning
+pub macrame::connection::Tuning::cadence: macrame::connection::CadencePolicy
+pub macrame::connection::Tuning::clock: core::option::Option<alloc::sync::Arc<dyn macrame::util::clock::Clock>>
+pub macrame::connection::Tuning::future_stamps: macrame::util::clock::FutureStampPolicy
+pub macrame::connection::Tuning::reader_cache_size: core::option::Option<i32>
+pub macrame::connection::Tuning::wal_autocheckpoint: macrame::connection::WalCheckpointPolicy
+pub macrame::connection::Tuning::writer_cache_size: core::option::Option<i32>
+impl core::fmt::Debug for macrame::connection::Tuning
+pub fn macrame::connection::Tuning::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub const macrame::connection::BULK_ATOMIC_WARN_HOLD: core::time::Duration
+pub const macrame::connection::CHUNK_BUDGET: core::time::Duration
+pub const macrame::connection::MAX_ARCHIVE_SESSIONS: usize
+pub fn macrame::connection::estimated_bulk_hold(&[macrame::graph::edge::EdgeAssertion]) -> core::time::Duration
+pub mod macrame::error
+pub enum macrame::error::AbortKind
+pub macrame::error::AbortKind::DeleteOutsideArchive
+pub macrame::error::AbortKind::NotAGuard
+pub macrame::error::AbortKind::RecordedAtRegression
+pub macrame::error::AbortKind::SingleOpenInterval
+pub enum macrame::error::DbError
+pub macrame::error::DbError::ArchiveSessionLeaked
+pub macrame::error::DbError::ArchiveSessionLeaked::marker: alloc::string::String
+pub macrame::error::DbError::ArchiveViolation
+pub macrame::error::DbError::ArchiveViolation::table: alloc::string::String
+pub macrame::error::DbError::ArchiveWindow
+pub macrame::error::DbError::ArchiveWindow::reason: alloc::string::String
+pub macrame::error::DbError::ArchiveWindow::window: core::time::Duration
+pub macrame::error::DbError::AttributeModeUnstated
+pub macrame::error::DbError::AttributeModeUnstated::instants: macrame::error::StatedInstants
+pub macrame::error::DbError::BulkCancelled
+pub macrame::error::DbError::CurrentDrift
+pub macrame::error::DbError::CurrentDrift::n: usize
+pub macrame::error::DbError::DiagnosticConn
+pub macrame::error::DbError::DiagnosticConn::path: alloc::string::String
+pub macrame::error::DbError::DiagnosticConn::reason: alloc::string::String
+pub macrame::error::DbError::DimMismatch
+pub macrame::error::DbError::DimMismatch::expected: usize
+pub macrame::error::DbError::DimMismatch::got: usize
+pub macrame::error::DbError::DimMismatch::model: alloc::string::String
+pub macrame::error::DbError::Engine(libsql::errors::Error)
+pub macrame::error::DbError::FutureRecordedAt
+pub macrame::error::DbError::FutureRecordedAt::limit: alloc::string::String
+pub macrame::error::DbError::FutureRecordedAt::stamp: alloc::string::String
+pub macrame::error::DbError::HalfLifeWithoutInstant
+pub macrame::error::DbError::InvalidEdgeType(alloc::string::String)
+pub macrame::error::DbError::InvalidId
+pub macrame::error::DbError::InvalidId::id: alloc::string::String
+pub macrame::error::DbError::InvalidId::reason: alloc::string::String
+pub macrame::error::DbError::InvalidModelName(alloc::string::String)
+pub macrame::error::DbError::InvalidTimestamp
+pub macrame::error::DbError::InvalidTimestamp::reason: alloc::string::String
+pub macrame::error::DbError::InvalidTimestamp::value: alloc::string::String
+pub macrame::error::DbError::Migration
+pub macrame::error::DbError::Migration::reason: alloc::string::String
+pub macrame::error::DbError::Migration::to: u32
+pub macrame::error::DbError::ModelNotRegistered
+pub macrame::error::DbError::ModelNotRegistered::model: alloc::string::String
+pub macrame::error::DbError::ModelNotRegistered::table: alloc::string::String
+pub macrame::error::DbError::NegativeEdgeWeight
+pub macrame::error::DbError::NegativeEdgeWeight::source_id: alloc::string::String
+pub macrame::error::DbError::NegativeEdgeWeight::target_id: alloc::string::String
+pub macrame::error::DbError::NegativeEdgeWeight::weight: f64
+pub macrame::error::DbError::NotFound(alloc::string::String)
+pub macrame::error::DbError::OverlappingInterval
+pub macrame::error::DbError::OverlappingInterval::overlap: alloc::boxed::Box<macrame::error::Overlap>
+pub macrame::error::DbError::PayloadVersion
+pub macrame::error::DbError::PayloadVersion::got: u8
+pub macrame::error::DbError::PayloadVersion::max: u8
+pub macrame::error::DbError::RebuildFailed
+pub macrame::error::DbError::RebuildFailed::n: usize
+pub macrame::error::DbError::RebuildInterrupted
+pub macrame::error::DbError::RebuildInterrupted::reason: alloc::string::String
+pub macrame::error::DbError::RecordedAtRegression
+pub macrame::error::DbError::RecordedAtRegression::got: alloc::string::String
+pub macrame::error::DbError::RecordedAtRegression::had: alloc::string::String
+pub macrame::error::DbError::RecordedInstantUnreachable
+pub macrame::error::DbError::RecordedInstantUnreachable::ts: alloc::string::String
+pub macrame::error::DbError::ReplayCorrupt
+pub macrame::error::DbError::ReplayCorrupt::reason: alloc::string::String
+pub macrame::error::DbError::ReplayCorrupt::seq: i64
+pub macrame::error::DbError::SingleOpenViolation
+pub macrame::error::DbError::SingleOpenViolation::edge_type: alloc::string::String
+pub macrame::error::DbError::SingleOpenViolation::source_id: alloc::string::String
+pub macrame::error::DbError::SingleOpenViolation::target_id: alloc::string::String
+pub macrame::error::DbError::SnapshotCorrupt
+pub macrame::error::DbError::SnapshotCorrupt::path: alloc::string::String
+pub macrame::error::DbError::SnapshotCorrupt::reason: alloc::string::String
+pub macrame::error::DbError::SnapshotIncompatible
+pub macrame::error::DbError::SnapshotIncompatible::path: alloc::string::String
+pub macrame::error::DbError::SnapshotIncompatible::reason: alloc::string::String
+pub macrame::error::DbError::SubgraphTooLarge
+pub macrame::error::DbError::SubgraphTooLarge::budget: usize
+pub macrame::error::DbError::SubgraphTooLarge::n: usize
+pub macrame::error::DbError::WriterDroppedResponder
+pub macrame::error::DbError::WriterStopped(alloc::string::String)
+pub macrame::error::DbError::WriterUnavailable
+impl core::convert::From<macrame::error::BulkInterrupted> for macrame::error::DbError
+pub fn macrame::error::DbError::from(macrame::error::BulkInterrupted) -> Self
+pub enum macrame::error::StatedInstants
+pub macrame::error::StatedInstants::Both
+pub macrame::error::StatedInstants::Both::recorded: alloc::string::String
+pub macrame::error::StatedInstants::Both::valid: alloc::string::String
+pub macrame::error::StatedInstants::Recorded(alloc::string::String)
+pub macrame::error::StatedInstants::Valid(alloc::string::String)
+impl macrame::error::StatedInstants
+pub fn macrame::error::StatedInstants::new(core::option::Option<&str>, core::option::Option<&str>) -> core::option::Option<Self>
+pub fn macrame::error::StatedInstants::recorded(&self) -> core::option::Option<&str>
+pub fn macrame::error::StatedInstants::valid(&self) -> core::option::Option<&str>
+impl core::fmt::Display for macrame::error::StatedInstants
+pub fn macrame::error::StatedInstants::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub enum macrame::error::WriteOp<'a>
+pub macrame::error::WriteOp::Annotation
+pub macrame::error::WriteOp::Annotation::concept_id: &'a str
+pub macrame::error::WriteOp::Concept
+pub macrame::error::WriteOp::Concept::id: &'a str
+pub macrame::error::WriteOp::Concept::recorded_at: &'a str
+pub macrame::error::WriteOp::Delete
+pub macrame::error::WriteOp::Delete::table: &'a str
+pub macrame::error::WriteOp::Edge
+pub macrame::error::WriteOp::Edge::edge_type: &'a str
+pub macrame::error::WriteOp::Edge::source_id: &'a str
+pub macrame::error::WriteOp::Edge::target_id: &'a str
+pub struct macrame::error::BulkInterrupted
+pub macrame::error::BulkInterrupted::cause: macrame::error::DbError
+pub macrame::error::BulkInterrupted::written: usize
+impl macrame::error::BulkInterrupted
+pub fn macrame::error::BulkInterrupted::was_cancelled(&self) -> bool
+impl core::convert::From<macrame::error::BulkInterrupted> for macrame::error::DbError
+pub fn macrame::error::DbError::from(macrame::error::BulkInterrupted) -> Self
+impl core::error::Error for macrame::error::BulkInterrupted
+pub fn macrame::error::BulkInterrupted::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
+impl core::fmt::Display for macrame::error::BulkInterrupted
+pub fn macrame::error::BulkInterrupted::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct macrame::error::Overlap
+pub macrame::error::Overlap::edge_type: alloc::string::String
+pub macrame::error::Overlap::existing_from: alloc::string::String
+pub macrame::error::Overlap::existing_to: alloc::string::String
+pub macrame::error::Overlap::source_id: alloc::string::String
+pub macrame::error::Overlap::target_id: alloc::string::String
+pub macrame::error::Overlap::valid_from: alloc::string::String
+pub macrame::error::Overlap::valid_to: alloc::string::String
+pub macrame::error::Overlap::within_batch: bool
+impl macrame::error::Overlap
+pub fn macrame::error::Overlap::provenance(&self) -> &'static str
+pub fn macrame::error::abort_kind(&libsql::errors::Error) -> macrame::error::AbortKind
+pub async fn macrame::error::classify(&libsql::connection::Connection, libsql::errors::Error, macrame::error::WriteOp<'_>) -> macrame::error::DbError
+pub type macrame::error::BulkResult<T> = core::result::Result<T, macrame::error::BulkInterrupted>
+pub type macrame::error::Result<T> = core::result::Result<T, macrame::error::DbError>
+pub mod macrame::graph
+pub mod macrame::graph::algorithms
+pub fn macrame::graph::algorithms::astar<F>(&macrame::graph::subgraph::Subgraph, &str, &str, F) -> core::option::Option<(f64, alloc::vec::Vec<alloc::string::String>)> where F: core::ops::function::Fn(&str, &str) -> f64
+pub fn macrame::graph::algorithms::dijkstra(&macrame::graph::subgraph::Subgraph, &str) -> alloc::collections::btree::map::BTreeMap<alloc::string::String, f64>
+pub fn macrame::graph::algorithms::k_core(&macrame::graph::subgraph::Subgraph, usize) -> alloc::collections::btree::set::BTreeSet<alloc::string::String>
+pub fn macrame::graph::algorithms::louvain(&macrame::graph::subgraph::Subgraph) -> alloc::collections::btree::map::BTreeMap<alloc::string::String, usize>
+pub fn macrame::graph::algorithms::modularity(&macrame::graph::subgraph::Subgraph, &alloc::collections::btree::map::BTreeMap<alloc::string::String, usize>) -> f64
+pub fn macrame::graph::algorithms::scc(&macrame::graph::subgraph::Subgraph) -> alloc::vec::Vec<alloc::vec::Vec<alloc::string::String>>
+pub mod macrame::graph::builder
+pub enum macrame::graph::builder::AttributeMode
+pub macrame::graph::builder::AttributeMode::AtTime
+pub macrame::graph::builder::AttributeMode::Current
+pub macrame::graph::builder::AttributeMode::Omit
+pub struct macrame::graph::builder::TraversalBuilder
+pub macrame::graph::builder::TraversalBuilder::as_of_recorded: core::option::Option<alloc::string::String>
+pub macrame::graph::builder::TraversalBuilder::as_of_valid: core::option::Option<alloc::string::String>
+pub macrame::graph::builder::TraversalBuilder::attribute_mode: core::option::Option<macrame::graph::builder::AttributeMode>
+pub macrame::graph::builder::TraversalBuilder::content: bool
+pub macrame::graph::builder::TraversalBuilder::edge_types: alloc::vec::Vec<alloc::string::String>
+pub macrame::graph::builder::TraversalBuilder::max_depth: usize
+pub macrame::graph::builder::TraversalBuilder::min_weight: f64
+pub macrame::graph::builder::TraversalBuilder::start_node: alloc::string::String
+impl macrame::graph::builder::TraversalBuilder
+pub fn macrame::graph::builder::TraversalBuilder::as_of_recorded(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn macrame::graph::builder::TraversalBuilder::as_of_valid(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn macrame::graph::builder::TraversalBuilder::attribute_mode(self, macrame::graph::builder::AttributeMode) -> Self
+pub fn macrame::graph::builder::TraversalBuilder::build_sql(&self) -> alloc::string::String
+pub fn macrame::graph::builder::TraversalBuilder::content(self, bool) -> Self
+pub fn macrame::graph::builder::TraversalBuilder::edge_types(self, alloc::vec::Vec<alloc::string::String>) -> Self
+pub async fn macrame::graph::builder::TraversalBuilder::execute(&self, &libsql::connection::Connection, &str) -> macrame::error::Result<alloc::vec::Vec<macrame::temporal::as_of::NodeAttributes>>
+pub async fn macrame::graph::builder::TraversalBuilder::execute_ids(&self, &libsql::connection::Connection, &str) -> macrame::error::Result<alloc::vec::Vec<alloc::string::String>>
+pub fn macrame::graph::builder::TraversalBuilder::max_depth(self, usize) -> Self
+pub fn macrame::graph::builder::TraversalBuilder::min_weight(self, f64) -> Self
+pub fn macrame::graph::builder::TraversalBuilder::new(impl core::convert::Into<alloc::string::String>) -> Self
+pub mod macrame::graph::edge
+pub struct macrame::graph::edge::EdgeAssertion
+pub macrame::graph::edge::EdgeAssertion::edge_type: alloc::string::String
+pub macrame::graph::edge::EdgeAssertion::properties: alloc::string::String
+pub macrame::graph::edge::EdgeAssertion::source: alloc::string::String
+pub macrame::graph::edge::EdgeAssertion::target: alloc::string::String
+pub macrame::graph::edge::EdgeAssertion::valid_from: alloc::string::String
+pub macrame::graph::edge::EdgeAssertion::valid_to: alloc::string::String
+pub macrame::graph::edge::EdgeAssertion::weight: f64
+impl macrame::graph::edge::EdgeAssertion
+pub fn macrame::graph::edge::EdgeAssertion::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn macrame::graph::edge::EdgeAssertion::normalized(self) -> macrame::error::Result<Self>
+pub fn macrame::graph::edge::EdgeAssertion::properties(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn macrame::graph::edge::EdgeAssertion::valid_from(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn macrame::graph::edge::EdgeAssertion::valid_to(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn macrame::graph::edge::EdgeAssertion::weight(self, f64) -> Self
+pub fn macrame::graph::edge::validate_edge_type(&str) -> macrame::error::Result<()>
+pub mod macrame::graph::subgraph
+pub struct macrame::graph::subgraph::EdgeRef
+impl macrame::graph::subgraph::EdgeRef
+pub fn macrame::graph::subgraph::EdgeRef::edge_type<'a>(&self, &'a macrame::graph::subgraph::Subgraph) -> &'a str
+pub fn macrame::graph::subgraph::EdgeRef::node<'a>(&self, &'a macrame::graph::subgraph::Subgraph) -> &'a str
+pub fn macrame::graph::subgraph::EdgeRef::valid_from<'a>(&self, &'a macrame::graph::subgraph::Subgraph) -> &'a str
+pub fn macrame::graph::subgraph::EdgeRef::valid_to<'a>(&self, &'a macrame::graph::subgraph::Subgraph) -> &'a str
+pub fn macrame::graph::subgraph::EdgeRef::weight(&self) -> f64
+impl core::fmt::Debug for macrame::graph::subgraph::EdgeRef
+pub fn macrame::graph::subgraph::EdgeRef::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct macrame::graph::subgraph::NodeData
+impl macrame::graph::subgraph::NodeData
+pub fn macrame::graph::subgraph::NodeData::content(&self) -> core::option::Option<&str>
+pub fn macrame::graph::subgraph::NodeData::embedding_model(&self) -> core::option::Option<&str>
+pub fn macrame::graph::subgraph::NodeData::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn macrame::graph::subgraph::NodeData::title(&self) -> &str
+pub fn macrame::graph::subgraph::NodeData::valid_from(&self) -> &str
+pub fn macrame::graph::subgraph::NodeData::valid_to(&self) -> &str
+pub fn macrame::graph::subgraph::NodeData::with_content(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn macrame::graph::subgraph::NodeData::with_embedding_model(self, core::option::Option<alloc::string::String>) -> Self
+pub struct macrame::graph::subgraph::Subgraph
+impl macrame::graph::subgraph::Subgraph
+pub fn macrame::graph::subgraph::Subgraph::add_edge(&mut self, &str, &str, &str, f64, &str, &str) -> usize
+pub fn macrame::graph::subgraph::Subgraph::contains_node(&self, &str) -> bool
+pub fn macrame::graph::subgraph::Subgraph::degree(&self, &str) -> usize
+pub fn macrame::graph::subgraph::Subgraph::edge_count(&self) -> usize
+pub fn macrame::graph::subgraph::Subgraph::estimated_bytes(&self) -> usize
+pub fn macrame::graph::subgraph::Subgraph::in_adjacency(&self) -> impl core::iter::traits::iterator::Iterator<Item = (&str, &[macrame::graph::subgraph::EdgeRef])> + '_
+pub fn macrame::graph::subgraph::Subgraph::in_edges(&self, &str) -> &[macrame::graph::subgraph::EdgeRef]
+pub fn macrame::graph::subgraph::Subgraph::insert_node(&mut self, impl core::convert::Into<alloc::string::String>, macrame::graph::subgraph::NodeData) -> core::option::Option<macrame::graph::subgraph::NodeData>
+pub fn macrame::graph::subgraph::Subgraph::is_closed(&self) -> bool
+pub fn macrame::graph::subgraph::Subgraph::node(&self, &str) -> core::option::Option<&macrame::graph::subgraph::NodeData>
+pub fn macrame::graph::subgraph::Subgraph::node_count(&self) -> usize
+pub fn macrame::graph::subgraph::Subgraph::node_ids(&self) -> impl core::iter::traits::exact_size::ExactSizeIterator<Item = &str> + '_
+pub fn macrame::graph::subgraph::Subgraph::nodes(&self) -> impl core::iter::traits::exact_size::ExactSizeIterator<Item = (&str, &macrame::graph::subgraph::NodeData)> + '_
+pub fn macrame::graph::subgraph::Subgraph::out_adjacency(&self) -> impl core::iter::traits::iterator::Iterator<Item = (&str, &[macrame::graph::subgraph::EdgeRef])> + '_
+pub fn macrame::graph::subgraph::Subgraph::out_edges(&self, &str) -> &[macrame::graph::subgraph::EdgeRef]
+pub fn macrame::graph::subgraph::Subgraph::total_weight(&self) -> f64
+pub fn macrame::graph::subgraph::Subgraph::weighted_degree(&self, &str) -> f64
+pub async fn macrame::graph::subgraph::Subgraph::write_back_annotations(&self, &macrame::connection::Database, &str, &alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::string::String>) -> macrame::error::BulkResult<usize>
+pub mod macrame::graph::vector_filter
+pub enum macrame::graph::vector_filter::CandidateCount
+pub macrame::graph::vector_filter::CandidateCount::AtLeast(usize)
+pub macrame::graph::vector_filter::CandidateCount::Exact(usize)
+impl macrame::graph::vector_filter::CandidateCount
+pub fn macrame::graph::vector_filter::CandidateCount::is_capped(self) -> bool
+pub fn macrame::graph::vector_filter::CandidateCount::lower_bound(self) -> usize
+pub enum macrame::graph::vector_filter::VectorFilterStrategy
+pub macrame::graph::vector_filter::VectorFilterStrategy::PostFilter
+pub macrame::graph::vector_filter::VectorFilterStrategy::PreFilterCTE
+pub struct macrame::graph::vector_filter::CostEstimate
+pub macrame::graph::vector_filter::CostEstimate::candidates: macrame::graph::vector_filter::CandidateCount
+pub macrame::graph::vector_filter::CostEstimate::k_prime: usize
+pub macrame::graph::vector_filter::CostEstimate::post_filter_bytes: usize
+pub macrame::graph::vector_filter::CostEstimate::pre_filter_bytes: usize
+pub macrame::graph::vector_filter::CostEstimate::strategy: macrame::graph::vector_filter::VectorFilterStrategy
+pub struct macrame::graph::vector_filter::CostEstimator
+pub macrame::graph::vector_filter::CostEstimator::byte_budget: usize
+pub macrame::graph::vector_filter::CostEstimator::corpus: usize
+pub macrame::graph::vector_filter::CostEstimator::vector_bytes: usize
+impl macrame::graph::vector_filter::CostEstimator
+pub fn macrame::graph::vector_filter::CostEstimator::estimate(&self, usize, macrame::graph::vector_filter::CandidateCount) -> macrame::error::Result<macrame::graph::vector_filter::CostEstimate>
+pub fn macrame::graph::vector_filter::CostEstimator::k_prime(&self, usize, usize) -> usize
+pub fn macrame::graph::vector_filter::CostEstimator::new(usize, usize, usize) -> Self
+pub struct macrame::graph::vector_filter::FilteredVectorSearch
+impl macrame::graph::vector_filter::FilteredVectorSearch
+pub fn macrame::graph::vector_filter::FilteredVectorSearch::byte_budget(self, usize) -> Self
+pub async fn macrame::graph::vector_filter::FilteredVectorSearch::execute(&self, &libsql::connection::Connection, &str) -> macrame::error::Result<alloc::vec::Vec<macrame::vector::search::VectorSearchResult>>
+pub async fn macrame::graph::vector_filter::FilteredVectorSearch::execute_explained(&self, &libsql::connection::Connection, &str) -> macrame::error::Result<(alloc::vec::Vec<macrame::vector::search::VectorSearchResult>, macrame::graph::vector_filter::CostEstimate)>
+pub fn macrame::graph::vector_filter::FilteredVectorSearch::new(macrame::vector::model::ModelName, alloc::vec::Vec<f32>, macrame::graph::builder::TraversalBuilder) -> Self
+pub fn macrame::graph::vector_filter::FilteredVectorSearch::probe_cap(self, usize) -> Self
+pub fn macrame::graph::vector_filter::FilteredVectorSearch::strategy(self, macrame::graph::vector_filter::VectorFilterStrategy) -> Self
+pub fn macrame::graph::vector_filter::FilteredVectorSearch::top_k(self, usize) -> Self
+pub const macrame::graph::vector_filter::DEFAULT_BYTE_BUDGET: usize
+pub const macrame::graph::vector_filter::DEFAULT_PROBE_CAP: usize
+pub enum macrame::graph::AttributeMode
+pub macrame::graph::AttributeMode::AtTime
+pub macrame::graph::AttributeMode::Current
+pub macrame::graph::AttributeMode::Omit
+pub enum macrame::graph::CandidateCount
+pub macrame::graph::CandidateCount::AtLeast(usize)
+pub macrame::graph::CandidateCount::Exact(usize)
+impl macrame::graph::vector_filter::CandidateCount
+pub fn macrame::graph::vector_filter::CandidateCount::is_capped(self) -> bool
+pub fn macrame::graph::vector_filter::CandidateCount::lower_bound(self) -> usize
+pub enum macrame::graph::VectorFilterStrategy
+pub macrame::graph::VectorFilterStrategy::PostFilter
+pub macrame::graph::VectorFilterStrategy::PreFilterCTE
+pub struct macrame::graph::CostEstimate
+pub macrame::graph::CostEstimate::candidates: macrame::graph::vector_filter::CandidateCount
+pub macrame::graph::CostEstimate::k_prime: usize
+pub macrame::graph::CostEstimate::post_filter_bytes: usize
+pub macrame::graph::CostEstimate::pre_filter_bytes: usize
+pub macrame::graph::CostEstimate::strategy: macrame::graph::vector_filter::VectorFilterStrategy
+pub struct macrame::graph::CostEstimator
+pub macrame::graph::CostEstimator::byte_budget: usize
+pub macrame::graph::CostEstimator::corpus: usize
+pub macrame::graph::CostEstimator::vector_bytes: usize
+impl macrame::graph::vector_filter::CostEstimator
+pub fn macrame::graph::vector_filter::CostEstimator::estimate(&self, usize, macrame::graph::vector_filter::CandidateCount) -> macrame::error::Result<macrame::graph::vector_filter::CostEstimate>
+pub fn macrame::graph::vector_filter::CostEstimator::k_prime(&self, usize, usize) -> usize
+pub fn macrame::graph::vector_filter::CostEstimator::new(usize, usize, usize) -> Self
+pub struct macrame::graph::EdgeAssertion
+pub macrame::graph::EdgeAssertion::edge_type: alloc::string::String
+pub macrame::graph::EdgeAssertion::properties: alloc::string::String
+pub macrame::graph::EdgeAssertion::source: alloc::string::String
+pub macrame::graph::EdgeAssertion::target: alloc::string::String
+pub macrame::graph::EdgeAssertion::valid_from: alloc::string::String
+pub macrame::graph::EdgeAssertion::valid_to: alloc::string::String
+pub macrame::graph::EdgeAssertion::weight: f64
+impl macrame::graph::edge::EdgeAssertion
+pub fn macrame::graph::edge::EdgeAssertion::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn macrame::graph::edge::EdgeAssertion::normalized(self) -> macrame::error::Result<Self>
+pub fn macrame::graph::edge::EdgeAssertion::properties(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn macrame::graph::edge::EdgeAssertion::valid_from(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn macrame::graph::edge::EdgeAssertion::valid_to(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn macrame::graph::edge::EdgeAssertion::weight(self, f64) -> Self
+pub struct macrame::graph::EdgeRef
+impl macrame::graph::subgraph::EdgeRef
+pub fn macrame::graph::subgraph::EdgeRef::edge_type<'a>(&self, &'a macrame::graph::subgraph::Subgraph) -> &'a str
+pub fn macrame::graph::subgraph::EdgeRef::node<'a>(&self, &'a macrame::graph::subgraph::Subgraph) -> &'a str
+pub fn macrame::graph::subgraph::EdgeRef::valid_from<'a>(&self, &'a macrame::graph::subgraph::Subgraph) -> &'a str
+pub fn macrame::graph::subgraph::EdgeRef::valid_to<'a>(&self, &'a macrame::graph::subgraph::Subgraph) -> &'a str
+pub fn macrame::graph::subgraph::EdgeRef::weight(&self) -> f64
+impl core::fmt::Debug for macrame::graph::subgraph::EdgeRef
+pub fn macrame::graph::subgraph::EdgeRef::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct macrame::graph::FilteredVectorSearch
+impl macrame::graph::vector_filter::FilteredVectorSearch
+pub fn macrame::graph::vector_filter::FilteredVectorSearch::byte_budget(self, usize) -> Self
+pub async fn macrame::graph::vector_filter::FilteredVectorSearch::execute(&self, &libsql::connection::Connection, &str) -> macrame::error::Result<alloc::vec::Vec<macrame::vector::search::VectorSearchResult>>
+pub async fn macrame::graph::vector_filter::FilteredVectorSearch::execute_explained(&self, &libsql::connection::Connection, &str) -> macrame::error::Result<(alloc::vec::Vec<macrame::vector::search::VectorSearchResult>, macrame::graph::vector_filter::CostEstimate)>
+pub fn macrame::graph::vector_filter::FilteredVectorSearch::new(macrame::vector::model::ModelName, alloc::vec::Vec<f32>, macrame::graph::builder::TraversalBuilder) -> Self
+pub fn macrame::graph::vector_filter::FilteredVectorSearch::probe_cap(self, usize) -> Self
+pub fn macrame::graph::vector_filter::FilteredVectorSearch::strategy(self, macrame::graph::vector_filter::VectorFilterStrategy) -> Self
+pub fn macrame::graph::vector_filter::FilteredVectorSearch::top_k(self, usize) -> Self
+pub struct macrame::graph::NodeData
+impl macrame::graph::subgraph::NodeData
+pub fn macrame::graph::subgraph::NodeData::content(&self) -> core::option::Option<&str>
+pub fn macrame::graph::subgraph::NodeData::embedding_model(&self) -> core::option::Option<&str>
+pub fn macrame::graph::subgraph::NodeData::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn macrame::graph::subgraph::NodeData::title(&self) -> &str
+pub fn macrame::graph::subgraph::NodeData::valid_from(&self) -> &str
+pub fn macrame::graph::subgraph::NodeData::valid_to(&self) -> &str
+pub fn macrame::graph::subgraph::NodeData::with_content(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn macrame::graph::subgraph::NodeData::with_embedding_model(self, core::option::Option<alloc::string::String>) -> Self
+pub struct macrame::graph::Subgraph
+impl macrame::graph::subgraph::Subgraph
+pub fn macrame::graph::subgraph::Subgraph::add_edge(&mut self, &str, &str, &str, f64, &str, &str) -> usize
+pub fn macrame::graph::subgraph::Subgraph::contains_node(&self, &str) -> bool
+pub fn macrame::graph::subgraph::Subgraph::degree(&self, &str) -> usize
+pub fn macrame::graph::subgraph::Subgraph::edge_count(&self) -> usize
+pub fn macrame::graph::subgraph::Subgraph::estimated_bytes(&self) -> usize
+pub fn macrame::graph::subgraph::Subgraph::in_adjacency(&self) -> impl core::iter::traits::iterator::Iterator<Item = (&str, &[macrame::graph::subgraph::EdgeRef])> + '_
+pub fn macrame::graph::subgraph::Subgraph::in_edges(&self, &str) -> &[macrame::graph::subgraph::EdgeRef]
+pub fn macrame::graph::subgraph::Subgraph::insert_node(&mut self, impl core::convert::Into<alloc::string::String>, macrame::graph::subgraph::NodeData) -> core::option::Option<macrame::graph::subgraph::NodeData>
+pub fn macrame::graph::subgraph::Subgraph::is_closed(&self) -> bool
+pub fn macrame::graph::subgraph::Subgraph::node(&self, &str) -> core::option::Option<&macrame::graph::subgraph::NodeData>
+pub fn macrame::graph::subgraph::Subgraph::node_count(&self) -> usize
+pub fn macrame::graph::subgraph::Subgraph::node_ids(&self) -> impl core::iter::traits::exact_size::ExactSizeIterator<Item = &str> + '_
+pub fn macrame::graph::subgraph::Subgraph::nodes(&self) -> impl core::iter::traits::exact_size::ExactSizeIterator<Item = (&str, &macrame::graph::subgraph::NodeData)> + '_
+pub fn macrame::graph::subgraph::Subgraph::out_adjacency(&self) -> impl core::iter::traits::iterator::Iterator<Item = (&str, &[macrame::graph::subgraph::EdgeRef])> + '_
+pub fn macrame::graph::subgraph::Subgraph::out_edges(&self, &str) -> &[macrame::graph::subgraph::EdgeRef]
+pub fn macrame::graph::subgraph::Subgraph::total_weight(&self) -> f64
+pub fn macrame::graph::subgraph::Subgraph::weighted_degree(&self, &str) -> f64
+pub async fn macrame::graph::subgraph::Subgraph::write_back_annotations(&self, &macrame::connection::Database, &str, &alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::string::String>) -> macrame::error::BulkResult<usize>
+pub struct macrame::graph::TraversalBuilder
+pub macrame::graph::TraversalBuilder::as_of_recorded: core::option::Option<alloc::string::String>
+pub macrame::graph::TraversalBuilder::as_of_valid: core::option::Option<alloc::string::String>
+pub macrame::graph::TraversalBuilder::attribute_mode: core::option::Option<macrame::graph::builder::AttributeMode>
+pub macrame::graph::TraversalBuilder::content: bool
+pub macrame::graph::TraversalBuilder::edge_types: alloc::vec::Vec<alloc::string::String>
+pub macrame::graph::TraversalBuilder::max_depth: usize
+pub macrame::graph::TraversalBuilder::min_weight: f64
+pub macrame::graph::TraversalBuilder::start_node: alloc::string::String
+impl macrame::graph::builder::TraversalBuilder
+pub fn macrame::graph::builder::TraversalBuilder::as_of_recorded(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn macrame::graph::builder::TraversalBuilder::as_of_valid(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn macrame::graph::builder::TraversalBuilder::attribute_mode(self, macrame::graph::builder::AttributeMode) -> Self
+pub fn macrame::graph::builder::TraversalBuilder::build_sql(&self) -> alloc::string::String
+pub fn macrame::graph::builder::TraversalBuilder::content(self, bool) -> Self
+pub fn macrame::graph::builder::TraversalBuilder::edge_types(self, alloc::vec::Vec<alloc::string::String>) -> Self
+pub async fn macrame::graph::builder::TraversalBuilder::execute(&self, &libsql::connection::Connection, &str) -> macrame::error::Result<alloc::vec::Vec<macrame::temporal::as_of::NodeAttributes>>
+pub async fn macrame::graph::builder::TraversalBuilder::execute_ids(&self, &libsql::connection::Connection, &str) -> macrame::error::Result<alloc::vec::Vec<alloc::string::String>>
+pub fn macrame::graph::builder::TraversalBuilder::max_depth(self, usize) -> Self
+pub fn macrame::graph::builder::TraversalBuilder::min_weight(self, f64) -> Self
+pub fn macrame::graph::builder::TraversalBuilder::new(impl core::convert::Into<alloc::string::String>) -> Self
+pub fn macrame::graph::astar<F>(&macrame::graph::subgraph::Subgraph, &str, &str, F) -> core::option::Option<(f64, alloc::vec::Vec<alloc::string::String>)> where F: core::ops::function::Fn(&str, &str) -> f64
+pub fn macrame::graph::dijkstra(&macrame::graph::subgraph::Subgraph, &str) -> alloc::collections::btree::map::BTreeMap<alloc::string::String, f64>
+pub fn macrame::graph::k_core(&macrame::graph::subgraph::Subgraph, usize) -> alloc::collections::btree::set::BTreeSet<alloc::string::String>
+pub fn macrame::graph::louvain(&macrame::graph::subgraph::Subgraph) -> alloc::collections::btree::map::BTreeMap<alloc::string::String, usize>
+pub fn macrame::graph::modularity(&macrame::graph::subgraph::Subgraph, &alloc::collections::btree::map::BTreeMap<alloc::string::String, usize>) -> f64
+pub fn macrame::graph::scc(&macrame::graph::subgraph::Subgraph) -> alloc::vec::Vec<alloc::vec::Vec<alloc::string::String>>
+pub mod macrame::integrity
+pub mod macrame::integrity::audit
+pub async fn macrame::integrity::audit::audit_current(&libsql::connection::Connection) -> macrame::error::Result<usize>
+pub mod macrame::integrity::rebuild
+pub struct macrame::integrity::rebuild::RebuildReport
+pub macrame::integrity::rebuild::RebuildReport::drift_after: usize
+pub macrame::integrity::rebuild::RebuildReport::rows_rebuilt: usize
+pub async fn macrame::integrity::rebuild::rebuild_current(&libsql::connection::Connection) -> macrame::error::Result<macrame::integrity::rebuild::RebuildReport>
+pub mod macrame::integrity::shadow
+pub enum macrame::integrity::shadow::ShadowOutcome
+pub macrame::integrity::shadow::ShadowOutcome::Filled
+pub macrame::integrity::shadow::ShadowOutcome::Filled::last: core::option::Option<alloc::string::String>
+pub macrame::integrity::shadow::ShadowOutcome::Started
+pub macrame::integrity::shadow::ShadowOutcome::Started::build_start: alloc::string::String
+pub macrame::integrity::shadow::ShadowOutcome::Started::epoch: u64
+pub macrame::integrity::shadow::ShadowOutcome::Swapped
+pub macrame::integrity::shadow::ShadowOutcome::Swapped::rows: usize
+pub enum macrame::integrity::shadow::ShadowStep
+pub macrame::integrity::shadow::ShadowStep::Begin
+pub macrame::integrity::shadow::ShadowStep::Fill
+pub macrame::integrity::shadow::ShadowStep::Fill::after: core::option::Option<alloc::string::String>
+pub macrame::integrity::shadow::ShadowStep::Swap
+pub macrame::integrity::shadow::ShadowStep::Swap::build_start: alloc::string::String
+pub macrame::integrity::shadow::ShadowStep::Swap::epoch: u64
+pub enum macrame::integrity::ShadowOutcome
+pub macrame::integrity::ShadowOutcome::Filled
+pub macrame::integrity::ShadowOutcome::Filled::last: core::option::Option<alloc::string::String>
+pub macrame::integrity::ShadowOutcome::Started
+pub macrame::integrity::ShadowOutcome::Started::build_start: alloc::string::String
+pub macrame::integrity::ShadowOutcome::Started::epoch: u64
+pub macrame::integrity::ShadowOutcome::Swapped
+pub macrame::integrity::ShadowOutcome::Swapped::rows: usize
+pub enum macrame::integrity::ShadowStep
+pub macrame::integrity::ShadowStep::Begin
+pub macrame::integrity::ShadowStep::Fill
+pub macrame::integrity::ShadowStep::Fill::after: core::option::Option<alloc::string::String>
+pub macrame::integrity::ShadowStep::Swap
+pub macrame::integrity::ShadowStep::Swap::build_start: alloc::string::String
+pub macrame::integrity::ShadowStep::Swap::epoch: u64
+pub struct macrame::integrity::RebuildReport
+pub macrame::integrity::RebuildReport::drift_after: usize
+pub macrame::integrity::RebuildReport::rows_rebuilt: usize
+pub async fn macrame::integrity::audit_current(&libsql::connection::Connection) -> macrame::error::Result<usize>
+pub async fn macrame::integrity::rebuild_current(&libsql::connection::Connection) -> macrame::error::Result<macrame::integrity::rebuild::RebuildReport>
+pub mod macrame::metrics
+#[non_exhaustive] #[repr(u8)] pub enum macrame::metrics::CommandKind
+pub macrame::metrics::CommandKind::Analyze
+pub macrame::metrics::CommandKind::Archive
+pub macrame::metrics::CommandKind::AssertEdge
+pub macrame::metrics::CommandKind::BulkImportChunk
+pub macrame::metrics::CommandKind::Checkpoint
+pub macrame::metrics::CommandKind::Optimize
+pub macrame::metrics::CommandKind::RebuildCurrent
+pub macrame::metrics::CommandKind::RebuildFts
+pub macrame::metrics::CommandKind::RegisterModel
+pub macrame::metrics::CommandKind::Rehydrate
+pub macrame::metrics::CommandKind::RetireEdge
+pub macrame::metrics::CommandKind::ShadowRebuild
+pub macrame::metrics::CommandKind::Shutdown
+pub macrame::metrics::CommandKind::UpsertConcept
+pub macrame::metrics::CommandKind::UpsertEmbeddingChunk
+pub macrame::metrics::CommandKind::WriteAnalyticsChunk
+pub macrame::metrics::CommandKind::WriteBulkAtomic
+pub macrame::metrics::CommandKind::WriteConceptsChunk
+impl macrame::metrics::CommandKind
+pub const macrame::metrics::CommandKind::ALL: &'static [macrame::metrics::CommandKind]
+pub const macrame::metrics::CommandKind::COUNT: usize
+pub const fn macrame::metrics::CommandKind::as_str(self) -> &'static str
+pub const fn macrame::metrics::CommandKind::exempt_from_budget(self) -> bool
+pub const fn macrame::metrics::CommandKind::index(self) -> usize
+impl core::fmt::Display for macrame::metrics::CommandKind
+pub fn macrame::metrics::CommandKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct macrame::metrics::ActorMetrics
+impl macrame::metrics::ActorMetrics
+pub fn macrame::metrics::ActorMetrics::new() -> Self
+pub fn macrame::metrics::ActorMetrics::record_hold(&self, macrame::metrics::CommandKind, core::time::Duration)
+pub fn macrame::metrics::ActorMetrics::record_priority_choice(&self, bool, usize)
+pub fn macrame::metrics::ActorMetrics::record_turn(&self, usize, usize)
+pub fn macrame::metrics::ActorMetrics::snapshot(&self) -> macrame::metrics::MetricsSnapshot
+pub struct macrame::metrics::HoldTimer
+impl macrame::metrics::HoldTimer
+pub fn macrame::metrics::HoldTimer::elapsed(&self) -> core::time::Duration
+pub fn macrame::metrics::HoldTimer::start() -> Self
+#[non_exhaustive] pub struct macrame::metrics::KindSnapshot
+pub macrame::metrics::KindSnapshot::kind: macrame::metrics::CommandKind
+pub macrame::metrics::KindSnapshot::longest: core::time::Duration
+pub macrame::metrics::KindSnapshot::mean: core::time::Duration
+pub macrame::metrics::KindSnapshot::over_budget: u64
+pub macrame::metrics::KindSnapshot::turns: u64
+impl macrame::metrics::KindSnapshot
+pub fn macrame::metrics::KindSnapshot::buckets(&self) -> &[u64]
+#[non_exhaustive] pub struct macrame::metrics::MetricsSnapshot
+pub macrame::metrics::MetricsSnapshot::depth_samples: u64
+pub macrame::metrics::MetricsSnapshot::high_depth_max: u64
+pub macrame::metrics::MetricsSnapshot::high_depth_mean: f64
+pub macrame::metrics::MetricsSnapshot::kinds: alloc::vec::Vec<macrame::metrics::KindSnapshot>
+pub macrame::metrics::MetricsSnapshot::longest: core::option::Option<(macrame::metrics::CommandKind, core::time::Duration)>
+pub macrame::metrics::MetricsSnapshot::low_depth_max: u64
+pub macrame::metrics::MetricsSnapshot::low_depth_mean: f64
+pub macrame::metrics::MetricsSnapshot::low_starved_run_max: u64
+pub macrame::metrics::MetricsSnapshot::low_starved_turns: u64
+pub macrame::metrics::MetricsSnapshot::turns: u64
+impl macrame::metrics::MetricsSnapshot
+pub fn macrame::metrics::MetricsSnapshot::budget_violations(&self) -> alloc::vec::Vec<&macrame::metrics::KindSnapshot>
+pub const macrame::metrics::BUCKET_BOUNDS_MICROS: &[u64]
+pub const macrame::metrics::BUCKET_COUNT: usize
+pub mod macrame::prelude
+pub mod macrame::prelude::archive
+pub struct macrame::prelude::archive::ArchiveReport
+pub macrame::prelude::archive::ArchiveReport::concepts_archived: usize
+pub macrame::prelude::archive::ArchiveReport::horizon: core::option::Option<i64>
+pub macrame::prelude::archive::ArchiveReport::links_archived: usize
+pub macrame::prelude::archive::ArchiveReport::log_entries_archived: usize
+pub struct macrame::prelude::archive::RehydrateReport
+pub macrame::prelude::archive::RehydrateReport::concepts_rehydrated: usize
+pub macrame::prelude::archive::RehydrateReport::rowids_reassigned: usize
+pub async fn macrame::prelude::archive::archivable_concepts(&libsql::connection::Connection, &str) -> macrame::error::Result<alloc::vec::Vec<alloc::string::String>>
+pub async fn macrame::prelude::archive::archive(&libsql::connection::Connection, &str, &str, &std::path::Path) -> macrame::error::Result<macrame::temporal::archive::ArchiveReport>
+pub async fn macrame::prelude::archive::rehydrate(&libsql::connection::Connection, &[&str], &std::path::Path) -> macrame::error::Result<macrame::temporal::archive::RehydrateReport>
+pub mod macrame::prelude::chunk_rows
+pub const macrame::prelude::chunk_rows::ANNOTATIONS: usize
+pub const macrame::prelude::chunk_rows::CONCEPTS: usize
+pub const macrame::prelude::chunk_rows::EDGES: usize
+pub const macrame::prelude::chunk_rows::EMBEDDINGS: usize
+pub enum macrame::prelude::AttributeMode
+pub macrame::prelude::AttributeMode::AtTime
+pub macrame::prelude::AttributeMode::Current
+pub macrame::prelude::AttributeMode::Omit
+#[non_exhaustive] pub enum macrame::prelude::CadencePolicy
+pub macrame::prelude::CadencePolicy::Default
+pub macrame::prelude::CadencePolicy::Disabled
+pub macrame::prelude::CadencePolicy::Every(macrame::temporal::snapshot::SnapshotCadence)
+pub enum macrame::prelude::CandidateCount
+pub macrame::prelude::CandidateCount::AtLeast(usize)
+pub macrame::prelude::CandidateCount::Exact(usize)
+impl macrame::graph::vector_filter::CandidateCount
+pub fn macrame::graph::vector_filter::CandidateCount::is_capped(self) -> bool
+pub fn macrame::graph::vector_filter::CandidateCount::lower_bound(self) -> usize
+#[non_exhaustive] #[repr(u8)] pub enum macrame::prelude::CommandKind
+pub macrame::prelude::CommandKind::Analyze
+pub macrame::prelude::CommandKind::Archive
+pub macrame::prelude::CommandKind::AssertEdge
+pub macrame::prelude::CommandKind::BulkImportChunk
+pub macrame::prelude::CommandKind::Checkpoint
+pub macrame::prelude::CommandKind::Optimize
+pub macrame::prelude::CommandKind::RebuildCurrent
+pub macrame::prelude::CommandKind::RebuildFts
+pub macrame::prelude::CommandKind::RegisterModel
+pub macrame::prelude::CommandKind::Rehydrate
+pub macrame::prelude::CommandKind::RetireEdge
+pub macrame::prelude::CommandKind::ShadowRebuild
+pub macrame::prelude::CommandKind::Shutdown
+pub macrame::prelude::CommandKind::UpsertConcept
+pub macrame::prelude::CommandKind::UpsertEmbeddingChunk
+pub macrame::prelude::CommandKind::WriteAnalyticsChunk
+pub macrame::prelude::CommandKind::WriteBulkAtomic
+pub macrame::prelude::CommandKind::WriteConceptsChunk
+impl macrame::metrics::CommandKind
+pub const macrame::metrics::CommandKind::ALL: &'static [macrame::metrics::CommandKind]
+pub const macrame::metrics::CommandKind::COUNT: usize
+pub const fn macrame::metrics::CommandKind::as_str(self) -> &'static str
+pub const fn macrame::metrics::CommandKind::exempt_from_budget(self) -> bool
+pub const fn macrame::metrics::CommandKind::index(self) -> usize
+impl core::fmt::Display for macrame::metrics::CommandKind
+pub fn macrame::metrics::CommandKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub enum macrame::prelude::DbError
+pub macrame::prelude::DbError::ArchiveSessionLeaked
+pub macrame::prelude::DbError::ArchiveSessionLeaked::marker: alloc::string::String
+pub macrame::prelude::DbError::ArchiveViolation
+pub macrame::prelude::DbError::ArchiveViolation::table: alloc::string::String
+pub macrame::prelude::DbError::ArchiveWindow
+pub macrame::prelude::DbError::ArchiveWindow::reason: alloc::string::String
+pub macrame::prelude::DbError::ArchiveWindow::window: core::time::Duration
+pub macrame::prelude::DbError::AttributeModeUnstated
+pub macrame::prelude::DbError::AttributeModeUnstated::instants: macrame::error::StatedInstants
+pub macrame::prelude::DbError::BulkCancelled
+pub macrame::prelude::DbError::CurrentDrift
+pub macrame::prelude::DbError::CurrentDrift::n: usize
+pub macrame::prelude::DbError::DiagnosticConn
+pub macrame::prelude::DbError::DiagnosticConn::path: alloc::string::String
+pub macrame::prelude::DbError::DiagnosticConn::reason: alloc::string::String
+pub macrame::prelude::DbError::DimMismatch
+pub macrame::prelude::DbError::DimMismatch::expected: usize
+pub macrame::prelude::DbError::DimMismatch::got: usize
+pub macrame::prelude::DbError::DimMismatch::model: alloc::string::String
+pub macrame::prelude::DbError::Engine(libsql::errors::Error)
+pub macrame::prelude::DbError::FutureRecordedAt
+pub macrame::prelude::DbError::FutureRecordedAt::limit: alloc::string::String
+pub macrame::prelude::DbError::FutureRecordedAt::stamp: alloc::string::String
+pub macrame::prelude::DbError::HalfLifeWithoutInstant
+pub macrame::prelude::DbError::InvalidEdgeType(alloc::string::String)
+pub macrame::prelude::DbError::InvalidId
+pub macrame::prelude::DbError::InvalidId::id: alloc::string::String
+pub macrame::prelude::DbError::InvalidId::reason: alloc::string::String
+pub macrame::prelude::DbError::InvalidModelName(alloc::string::String)
+pub macrame::prelude::DbError::InvalidTimestamp
+pub macrame::prelude::DbError::InvalidTimestamp::reason: alloc::string::String
+pub macrame::prelude::DbError::InvalidTimestamp::value: alloc::string::String
+pub macrame::prelude::DbError::Migration
+pub macrame::prelude::DbError::Migration::reason: alloc::string::String
+pub macrame::prelude::DbError::Migration::to: u32
+pub macrame::prelude::DbError::ModelNotRegistered
+pub macrame::prelude::DbError::ModelNotRegistered::model: alloc::string::String
+pub macrame::prelude::DbError::ModelNotRegistered::table: alloc::string::String
+pub macrame::prelude::DbError::NegativeEdgeWeight
+pub macrame::prelude::DbError::NegativeEdgeWeight::source_id: alloc::string::String
+pub macrame::prelude::DbError::NegativeEdgeWeight::target_id: alloc::string::String
+pub macrame::prelude::DbError::NegativeEdgeWeight::weight: f64
+pub macrame::prelude::DbError::NotFound(alloc::string::String)
+pub macrame::prelude::DbError::OverlappingInterval
+pub macrame::prelude::DbError::OverlappingInterval::overlap: alloc::boxed::Box<macrame::error::Overlap>
+pub macrame::prelude::DbError::PayloadVersion
+pub macrame::prelude::DbError::PayloadVersion::got: u8
+pub macrame::prelude::DbError::PayloadVersion::max: u8
+pub macrame::prelude::DbError::RebuildFailed
+pub macrame::prelude::DbError::RebuildFailed::n: usize
+pub macrame::prelude::DbError::RebuildInterrupted
+pub macrame::prelude::DbError::RebuildInterrupted::reason: alloc::string::String
+pub macrame::prelude::DbError::RecordedAtRegression
+pub macrame::prelude::DbError::RecordedAtRegression::got: alloc::string::String
+pub macrame::prelude::DbError::RecordedAtRegression::had: alloc::string::String
+pub macrame::prelude::DbError::RecordedInstantUnreachable
+pub macrame::prelude::DbError::RecordedInstantUnreachable::ts: alloc::string::String
+pub macrame::prelude::DbError::ReplayCorrupt
+pub macrame::prelude::DbError::ReplayCorrupt::reason: alloc::string::String
+pub macrame::prelude::DbError::ReplayCorrupt::seq: i64
+pub macrame::prelude::DbError::SingleOpenViolation
+pub macrame::prelude::DbError::SingleOpenViolation::edge_type: alloc::string::String
+pub macrame::prelude::DbError::SingleOpenViolation::source_id: alloc::string::String
+pub macrame::prelude::DbError::SingleOpenViolation::target_id: alloc::string::String
+pub macrame::prelude::DbError::SnapshotCorrupt
+pub macrame::prelude::DbError::SnapshotCorrupt::path: alloc::string::String
+pub macrame::prelude::DbError::SnapshotCorrupt::reason: alloc::string::String
+pub macrame::prelude::DbError::SnapshotIncompatible
+pub macrame::prelude::DbError::SnapshotIncompatible::path: alloc::string::String
+pub macrame::prelude::DbError::SnapshotIncompatible::reason: alloc::string::String
+pub macrame::prelude::DbError::SubgraphTooLarge
+pub macrame::prelude::DbError::SubgraphTooLarge::budget: usize
+pub macrame::prelude::DbError::SubgraphTooLarge::n: usize
+pub macrame::prelude::DbError::WriterDroppedResponder
+pub macrame::prelude::DbError::WriterStopped(alloc::string::String)
+pub macrame::prelude::DbError::WriterUnavailable
+impl core::convert::From<macrame::error::BulkInterrupted> for macrame::error::DbError
+pub fn macrame::error::DbError::from(macrame::error::BulkInterrupted) -> Self
+pub enum macrame::prelude::FutureStampPolicy
+pub macrame::prelude::FutureStampPolicy::Allow
+pub macrame::prelude::FutureStampPolicy::Default
+pub macrame::prelude::FutureStampPolicy::Tolerance(core::time::Duration)
+pub enum macrame::prelude::StatedInstants
+pub macrame::prelude::StatedInstants::Both
+pub macrame::prelude::StatedInstants::Both::recorded: alloc::string::String
+pub macrame::prelude::StatedInstants::Both::valid: alloc::string::String
+pub macrame::prelude::StatedInstants::Recorded(alloc::string::String)
+pub macrame::prelude::StatedInstants::Valid(alloc::string::String)
+impl macrame::error::StatedInstants
+pub fn macrame::error::StatedInstants::new(core::option::Option<&str>, core::option::Option<&str>) -> core::option::Option<Self>
+pub fn macrame::error::StatedInstants::recorded(&self) -> core::option::Option<&str>
+pub fn macrame::error::StatedInstants::valid(&self) -> core::option::Option<&str>
+impl core::fmt::Display for macrame::error::StatedInstants
+pub fn macrame::error::StatedInstants::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub enum macrame::prelude::VectorFilterStrategy
+pub macrame::prelude::VectorFilterStrategy::PostFilter
+pub macrame::prelude::VectorFilterStrategy::PreFilterCTE
+#[non_exhaustive] pub enum macrame::prelude::WalCheckpointPolicy
+pub macrame::prelude::WalCheckpointPolicy::Default
+pub macrame::prelude::WalCheckpointPolicy::Disabled
+pub macrame::prelude::WalCheckpointPolicy::EveryPages(u32)
+pub struct macrame::prelude::Annotation
+pub macrame::prelude::Annotation::concept_id: alloc::string::String
+pub macrame::prelude::Annotation::label: alloc::string::String
+pub macrame::prelude::Annotation::value: alloc::string::String
+impl macrame::connection::Annotation
+pub fn macrame::connection::Annotation::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
+pub struct macrame::prelude::ArchiveReport
+pub macrame::prelude::ArchiveReport::concepts_archived: usize
+pub macrame::prelude::ArchiveReport::horizon: core::option::Option<i64>
+pub macrame::prelude::ArchiveReport::links_archived: usize
+pub macrame::prelude::ArchiveReport::log_entries_archived: usize
+pub struct macrame::prelude::BulkControl
+impl macrame::connection::BulkControl
+pub fn macrame::connection::BulkControl::cancel_with(self, macrame::connection::CancelToken) -> Self
+pub fn macrame::connection::BulkControl::new() -> Self
+pub fn macrame::connection::BulkControl::on_progress(self, impl core::ops::function::Fn(macrame::connection::BulkProgress) + core::marker::Send + core::marker::Sync + 'static) -> Self
+impl core::fmt::Debug for macrame::connection::BulkControl
+pub fn macrame::connection::BulkControl::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct macrame::prelude::BulkInterrupted
+pub macrame::prelude::BulkInterrupted::cause: macrame::error::DbError
+pub macrame::prelude::BulkInterrupted::written: usize
+impl macrame::error::BulkInterrupted
+pub fn macrame::error::BulkInterrupted::was_cancelled(&self) -> bool
+impl core::convert::From<macrame::error::BulkInterrupted> for macrame::error::DbError
+pub fn macrame::error::DbError::from(macrame::error::BulkInterrupted) -> Self
+impl core::error::Error for macrame::error::BulkInterrupted
+pub fn macrame::error::BulkInterrupted::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
+impl core::fmt::Display for macrame::error::BulkInterrupted
+pub fn macrame::error::BulkInterrupted::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct macrame::prelude::BulkProgress
+pub macrame::prelude::BulkProgress::held: core::time::Duration
+pub macrame::prelude::BulkProgress::rows: usize
+pub macrame::prelude::BulkProgress::total: usize
+pub macrame::prelude::BulkProgress::written: usize
+pub struct macrame::prelude::CancelToken(_)
+impl macrame::connection::CancelToken
+pub fn macrame::connection::CancelToken::cancel(&self)
+pub fn macrame::connection::CancelToken::is_cancelled(&self) -> bool
+pub fn macrame::connection::CancelToken::new() -> Self
+pub struct macrame::prelude::CheckpointReport
+pub macrame::prelude::CheckpointReport::busy: bool
+pub macrame::prelude::CheckpointReport::checkpointed_frames: u64
+pub macrame::prelude::CheckpointReport::log_frames: u64
+impl macrame::connection::CheckpointReport
+pub fn macrame::connection::CheckpointReport::is_complete(&self) -> bool
+pub struct macrame::prelude::ConceptUpsert
+pub macrame::prelude::ConceptUpsert::content: alloc::string::String
+pub macrame::prelude::ConceptUpsert::embedding_model: core::option::Option<alloc::string::String>
+pub macrame::prelude::ConceptUpsert::id: alloc::string::String
+pub macrame::prelude::ConceptUpsert::retired: bool
+pub macrame::prelude::ConceptUpsert::title: alloc::string::String
+pub macrame::prelude::ConceptUpsert::valid_from: alloc::string::String
+pub macrame::prelude::ConceptUpsert::valid_to: alloc::string::String
+impl macrame::connection::ConceptUpsert
+pub fn macrame::connection::ConceptUpsert::content(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn macrame::connection::ConceptUpsert::embedding_model(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn macrame::connection::ConceptUpsert::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn macrame::connection::ConceptUpsert::normalized(self) -> macrame::error::Result<Self>
+pub fn macrame::connection::ConceptUpsert::retired(self, bool) -> Self
+pub fn macrame::connection::ConceptUpsert::valid_from(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn macrame::connection::ConceptUpsert::valid_to(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub struct macrame::prelude::CostEstimate
+pub macrame::prelude::CostEstimate::candidates: macrame::graph::vector_filter::CandidateCount
+pub macrame::prelude::CostEstimate::k_prime: usize
+pub macrame::prelude::CostEstimate::post_filter_bytes: usize
+pub macrame::prelude::CostEstimate::pre_filter_bytes: usize
+pub macrame::prelude::CostEstimate::strategy: macrame::graph::vector_filter::VectorFilterStrategy
+pub struct macrame::prelude::CostEstimator
+pub macrame::prelude::CostEstimator::byte_budget: usize
+pub macrame::prelude::CostEstimator::corpus: usize
+pub macrame::prelude::CostEstimator::vector_bytes: usize
+impl macrame::graph::vector_filter::CostEstimator
+pub fn macrame::graph::vector_filter::CostEstimator::estimate(&self, usize, macrame::graph::vector_filter::CandidateCount) -> macrame::error::Result<macrame::graph::vector_filter::CostEstimate>
+pub fn macrame::graph::vector_filter::CostEstimator::k_prime(&self, usize, usize) -> usize
+pub fn macrame::graph::vector_filter::CostEstimator::new(usize, usize, usize) -> Self
+pub struct macrame::prelude::Database
+impl macrame::connection::Database
+pub async fn macrame::connection::Database::analyze(&self) -> macrame::error::Result<()>
+pub async fn macrame::connection::Database::archive(&self, &str) -> macrame::error::Result<macrame::temporal::archive::ArchiveReport>
+pub fn macrame::connection::Database::archive_path(&self) -> &std::path::Path
+pub async fn macrame::connection::Database::archive_windowed(&self, &str, core::time::Duration) -> macrame::error::Result<alloc::vec::Vec<macrame::temporal::archive::ArchiveReport>>
+pub async fn macrame::connection::Database::assert_edge(&self, macrame::graph::edge::EdgeAssertion) -> macrame::error::Result<()>
+pub async fn macrame::connection::Database::bulk_import(&self, alloc::vec::Vec<macrame::graph::edge::EdgeAssertion>) -> macrame::error::BulkResult<usize>
+pub async fn macrame::connection::Database::bulk_import_with(&self, alloc::vec::Vec<macrame::graph::edge::EdgeAssertion>, macrame::connection::BulkControl) -> macrame::error::BulkResult<usize>
+pub async fn macrame::connection::Database::checkpoint(&self) -> macrame::error::Result<macrame::connection::CheckpointReport>
+pub fn macrame::connection::Database::clock(&self) -> &alloc::sync::Arc<dyn macrame::util::clock::Clock>
+pub async fn macrame::connection::Database::close(self) -> macrame::error::Result<()>
+pub async fn macrame::connection::Database::diagnostic_conn(&self) -> macrame::error::Result<libsql::connection::Connection>
+pub fn macrame::connection::Database::metrics(&self) -> macrame::metrics::MetricsSnapshot
+pub async fn macrame::connection::Database::open(impl core::convert::AsRef<std::path::Path>) -> macrame::error::Result<Self>
+pub async fn macrame::connection::Database::open_tuned(impl core::convert::AsRef<std::path::Path>, macrame::connection::Tuning) -> macrame::error::Result<Self>
+pub async fn macrame::connection::Database::open_with_cadence(impl core::convert::AsRef<std::path::Path>, core::option::Option<macrame::temporal::snapshot::SnapshotCadence>) -> macrame::error::Result<Self>
+pub async fn macrame::connection::Database::open_with_clock(impl core::convert::AsRef<std::path::Path>, core::option::Option<macrame::temporal::snapshot::SnapshotCadence>, alloc::sync::Arc<dyn macrame::util::clock::Clock>) -> macrame::error::Result<Self>
+pub async fn macrame::connection::Database::optimize(&self) -> macrame::error::Result<()>
+pub fn macrame::connection::Database::path(&self) -> &std::path::Path
+pub fn macrame::connection::Database::read_conn(&self) -> &libsql::connection::Connection
+pub async fn macrame::connection::Database::rebuild_current(&self) -> macrame::error::Result<macrame::integrity::rebuild::RebuildReport>
+pub async fn macrame::connection::Database::rebuild_current_chunked(&self) -> macrame::error::Result<macrame::integrity::rebuild::RebuildReport>
+pub async fn macrame::connection::Database::rebuild_fts(&self) -> macrame::error::Result<()>
+pub async fn macrame::connection::Database::reconstruct(&self, &str) -> macrame::error::Result<macrame::temporal::replay::MaterializedState>
+pub async fn macrame::connection::Database::register_model(&self, &macrame::vector::model::ModelName, usize) -> macrame::error::Result<()>
+pub async fn macrame::connection::Database::rehydrate(&self, &[&str]) -> macrame::error::Result<macrame::temporal::archive::RehydrateReport>
+pub async fn macrame::connection::Database::retire_edge(&self, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, &str, &str) -> macrame::error::Result<()>
+pub fn macrame::connection::Database::schema_version(&self) -> u32
+pub async fn macrame::connection::Database::shadow_step(&self, macrame::integrity::shadow::ShadowStep) -> macrame::error::Result<macrame::integrity::shadow::ShadowOutcome>
+pub fn macrame::connection::Database::snapshots_dir(&self) -> &std::path::Path
+pub async fn macrame::connection::Database::upsert_concept(&self, macrame::connection::ConceptUpsert) -> macrame::error::Result<()>
+pub async fn macrame::connection::Database::upsert_embeddings(&self, &macrame::vector::model::ModelName, alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<f32>)>) -> macrame::error::BulkResult<usize>
+pub async fn macrame::connection::Database::upsert_embeddings_with(&self, &macrame::vector::model::ModelName, alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<f32>)>, macrame::connection::BulkControl) -> macrame::error::BulkResult<usize>
+pub async fn macrame::connection::Database::verify_snapshot_chain(&self, &str) -> macrame::error::Result<macrame::temporal::replay::ChainCheck>
+pub async fn macrame::connection::Database::write_analytics_annotations(&self, alloc::vec::Vec<macrame::connection::Annotation>) -> macrame::error::BulkResult<usize>
+pub async fn macrame::connection::Database::write_analytics_annotations_with(&self, alloc::vec::Vec<macrame::connection::Annotation>, macrame::connection::BulkControl) -> macrame::error::BulkResult<usize>
+pub async fn macrame::connection::Database::write_bulk_atomic(&self, alloc::vec::Vec<macrame::graph::edge::EdgeAssertion>) -> macrame::error::Result<usize>
+pub async fn macrame::connection::Database::write_concepts(&self, alloc::vec::Vec<macrame::connection::ConceptUpsert>) -> macrame::error::BulkResult<usize>
+pub async fn macrame::connection::Database::write_concepts_with(&self, alloc::vec::Vec<macrame::connection::ConceptUpsert>, macrame::connection::BulkControl) -> macrame::error::BulkResult<usize>
+impl macrame::connection::Database
+pub async fn macrame::connection::Database::load_subgraph(&self, &str, u32, &str, usize) -> macrame::error::Result<macrame::graph::subgraph::Subgraph>
+pub async fn macrame::connection::Database::load_subgraph_with(&self, &macrame::graph::builder::TraversalBuilder, &str, usize) -> macrame::error::Result<macrame::graph::subgraph::Subgraph>
+impl core::ops::drop::Drop for macrame::connection::Database
+pub fn macrame::connection::Database::drop(&mut self)
+pub struct macrame::prelude::EdgeAssertion
+pub macrame::prelude::EdgeAssertion::edge_type: alloc::string::String
+pub macrame::prelude::EdgeAssertion::properties: alloc::string::String
+pub macrame::prelude::EdgeAssertion::source: alloc::string::String
+pub macrame::prelude::EdgeAssertion::target: alloc::string::String
+pub macrame::prelude::EdgeAssertion::valid_from: alloc::string::String
+pub macrame::prelude::EdgeAssertion::valid_to: alloc::string::String
+pub macrame::prelude::EdgeAssertion::weight: f64
+impl macrame::graph::edge::EdgeAssertion
+pub fn macrame::graph::edge::EdgeAssertion::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn macrame::graph::edge::EdgeAssertion::normalized(self) -> macrame::error::Result<Self>
+pub fn macrame::graph::edge::EdgeAssertion::properties(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn macrame::graph::edge::EdgeAssertion::valid_from(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn macrame::graph::edge::EdgeAssertion::valid_to(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn macrame::graph::edge::EdgeAssertion::weight(self, f64) -> Self
+pub struct macrame::prelude::EmbeddingCodec
+impl macrame::vector::embedding::EmbeddingCodec
+pub fn macrame::vector::embedding::EmbeddingCodec::decode(&[u8]) -> macrame::error::Result<alloc::vec::Vec<f32>>
+pub fn macrame::vector::embedding::EmbeddingCodec::encode(&[f32], usize, &str) -> macrame::error::Result<alloc::vec::Vec<u8>>
+pub struct macrame::prelude::FakeClock
+impl macrame::util::clock::FakeClock
+pub fn macrame::util::clock::FakeClock::advance(&self, core::time::Duration)
+pub fn macrame::util::clock::FakeClock::new(std::time::SystemTime) -> Self
+pub fn macrame::util::clock::FakeClock::peek(&self) -> alloc::string::String
+impl macrame::util::clock::Clock for macrame::util::clock::FakeClock
+pub fn macrame::util::clock::FakeClock::now(&self) -> alloc::string::String
+pub fn macrame::util::clock::FakeClock::raise_floor(&self, std::time::SystemTime)
+pub struct macrame::prelude::FilteredVectorSearch
+impl macrame::graph::vector_filter::FilteredVectorSearch
+pub fn macrame::graph::vector_filter::FilteredVectorSearch::byte_budget(self, usize) -> Self
+pub async fn macrame::graph::vector_filter::FilteredVectorSearch::execute(&self, &libsql::connection::Connection, &str) -> macrame::error::Result<alloc::vec::Vec<macrame::vector::search::VectorSearchResult>>
+pub async fn macrame::graph::vector_filter::FilteredVectorSearch::execute_explained(&self, &libsql::connection::Connection, &str) -> macrame::error::Result<(alloc::vec::Vec<macrame::vector::search::VectorSearchResult>, macrame::graph::vector_filter::CostEstimate)>
+pub fn macrame::graph::vector_filter::FilteredVectorSearch::new(macrame::vector::model::ModelName, alloc::vec::Vec<f32>, macrame::graph::builder::TraversalBuilder) -> Self
+pub fn macrame::graph::vector_filter::FilteredVectorSearch::probe_cap(self, usize) -> Self
+pub fn macrame::graph::vector_filter::FilteredVectorSearch::strategy(self, macrame::graph::vector_filter::VectorFilterStrategy) -> Self
+pub fn macrame::graph::vector_filter::FilteredVectorSearch::top_k(self, usize) -> Self
+pub struct macrame::prelude::HybridHit
+pub macrame::prelude::HybridHit::concept_id: alloc::string::String
+pub macrame::prelude::HybridHit::keyword_rank: core::option::Option<usize>
+pub macrame::prelude::HybridHit::score: f64
+pub macrame::prelude::HybridHit::vector_rank: core::option::Option<usize>
+pub struct macrame::prelude::HybridSearch
+impl macrame::vector::hybrid::HybridSearch
+pub fn macrame::vector::hybrid::HybridSearch::as_of_valid(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn macrame::vector::hybrid::HybridSearch::depth(self, usize) -> Self
+pub async fn macrame::vector::hybrid::HybridSearch::execute(&self, &libsql::connection::Connection) -> macrame::error::Result<alloc::vec::Vec<macrame::vector::hybrid::HybridHit>>
+pub fn macrame::vector::hybrid::HybridSearch::half_life(self, core::time::Duration) -> Self
+pub fn macrame::vector::hybrid::HybridSearch::new(macrame::vector::model::ModelName, impl core::convert::Into<alloc::string::String>, alloc::vec::Vec<f32>) -> Self
+pub fn macrame::vector::hybrid::HybridSearch::raw_match(self, bool) -> Self
+pub fn macrame::vector::hybrid::HybridSearch::rrf_k(self, usize) -> Self
+pub fn macrame::vector::hybrid::HybridSearch::top_k(self, usize) -> Self
+pub struct macrame::prelude::Interval
+pub macrame::prelude::Interval::valid_from: alloc::string::String
+pub macrame::prelude::Interval::valid_to: alloc::string::String
+impl macrame::temporal::interval::Interval
+pub fn macrame::temporal::interval::Interval::contains(&self, &str) -> bool
+pub fn macrame::temporal::interval::Interval::is_open(&self) -> bool
+pub fn macrame::temporal::interval::Interval::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn macrame::temporal::interval::Interval::overlaps(&self, &macrame::temporal::interval::Interval) -> bool
+#[non_exhaustive] pub struct macrame::prelude::KindSnapshot
+pub macrame::prelude::KindSnapshot::kind: macrame::metrics::CommandKind
+pub macrame::prelude::KindSnapshot::longest: core::time::Duration
+pub macrame::prelude::KindSnapshot::mean: core::time::Duration
+pub macrame::prelude::KindSnapshot::over_budget: u64
+pub macrame::prelude::KindSnapshot::turns: u64
+impl macrame::metrics::KindSnapshot
+pub fn macrame::metrics::KindSnapshot::buckets(&self) -> &[u64]
+pub struct macrame::prelude::MaterializedState
+pub macrame::prelude::MaterializedState::concepts: std::collections::hash::map::HashMap<alloc::string::String, macrame::temporal::as_of::NodeAttributes>
+pub macrame::prelude::MaterializedState::edges: alloc::vec::Vec<(alloc::string::String, alloc::string::String, alloc::string::String, alloc::string::String, alloc::string::String)>
+pub macrame::prelude::MaterializedState::predates_recorded_history: bool
+pub macrame::prelude::MaterializedState::seq_anchor: i64
+pub macrame::prelude::MaterializedState::timestamp: alloc::string::String
+#[non_exhaustive] pub struct macrame::prelude::MetricsSnapshot
+pub macrame::prelude::MetricsSnapshot::depth_samples: u64
+pub macrame::prelude::MetricsSnapshot::high_depth_max: u64
+pub macrame::prelude::MetricsSnapshot::high_depth_mean: f64
+pub macrame::prelude::MetricsSnapshot::kinds: alloc::vec::Vec<macrame::metrics::KindSnapshot>
+pub macrame::prelude::MetricsSnapshot::longest: core::option::Option<(macrame::metrics::CommandKind, core::time::Duration)>
+pub macrame::prelude::MetricsSnapshot::low_depth_max: u64
+pub macrame::prelude::MetricsSnapshot::low_depth_mean: f64
+pub macrame::prelude::MetricsSnapshot::low_starved_run_max: u64
+pub macrame::prelude::MetricsSnapshot::low_starved_turns: u64
+pub macrame::prelude::MetricsSnapshot::turns: u64
+impl macrame::metrics::MetricsSnapshot
+pub fn macrame::metrics::MetricsSnapshot::budget_violations(&self) -> alloc::vec::Vec<&macrame::metrics::KindSnapshot>
+pub struct macrame::prelude::ModelName(_)
+impl macrame::vector::model::ModelName
+pub fn macrame::vector::model::ModelName::as_str(&self) -> &str
+pub fn macrame::vector::model::ModelName::index(&self) -> alloc::string::String
+pub fn macrame::vector::model::ModelName::new(impl core::convert::AsRef<str>) -> macrame::error::Result<Self>
+pub fn macrame::vector::model::ModelName::table(&self) -> alloc::string::String
+impl core::fmt::Display for macrame::vector::model::ModelName
+pub fn macrame::vector::model::ModelName::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct macrame::prelude::Overlap
+pub macrame::prelude::Overlap::edge_type: alloc::string::String
+pub macrame::prelude::Overlap::existing_from: alloc::string::String
+pub macrame::prelude::Overlap::existing_to: alloc::string::String
+pub macrame::prelude::Overlap::source_id: alloc::string::String
+pub macrame::prelude::Overlap::target_id: alloc::string::String
+pub macrame::prelude::Overlap::valid_from: alloc::string::String
+pub macrame::prelude::Overlap::valid_to: alloc::string::String
+pub macrame::prelude::Overlap::within_batch: bool
+impl macrame::error::Overlap
+pub fn macrame::error::Overlap::provenance(&self) -> &'static str
+pub struct macrame::prelude::RebuildReport
+pub macrame::prelude::RebuildReport::drift_after: usize
+pub macrame::prelude::RebuildReport::rows_rebuilt: usize
+pub struct macrame::prelude::SnapshotCadence
+pub macrame::prelude::SnapshotCadence::every_entries: i64
+pub macrame::prelude::SnapshotCadence::poll_interval: core::time::Duration
+impl core::default::Default for macrame::temporal::snapshot::SnapshotCadence
+pub fn macrame::temporal::snapshot::SnapshotCadence::default() -> Self
+pub struct macrame::prelude::SystemClock
+impl macrame::util::clock::SystemClock
+pub async fn macrame::util::clock::SystemClock::new(&libsql::connection::Connection, macrame::util::clock::FutureStampPolicy) -> macrame::error::Result<Self>
+impl macrame::util::clock::Clock for macrame::util::clock::SystemClock
+pub fn macrame::util::clock::SystemClock::now(&self) -> alloc::string::String
+pub fn macrame::util::clock::SystemClock::raise_floor(&self, std::time::SystemTime)
+pub struct macrame::prelude::TraversalBuilder
+pub macrame::prelude::TraversalBuilder::as_of_recorded: core::option::Option<alloc::string::String>
+pub macrame::prelude::TraversalBuilder::as_of_valid: core::option::Option<alloc::string::String>
+pub macrame::prelude::TraversalBuilder::attribute_mode: core::option::Option<macrame::graph::builder::AttributeMode>
+pub macrame::prelude::TraversalBuilder::content: bool
+pub macrame::prelude::TraversalBuilder::edge_types: alloc::vec::Vec<alloc::string::String>
+pub macrame::prelude::TraversalBuilder::max_depth: usize
+pub macrame::prelude::TraversalBuilder::min_weight: f64
+pub macrame::prelude::TraversalBuilder::start_node: alloc::string::String
+impl macrame::graph::builder::TraversalBuilder
+pub fn macrame::graph::builder::TraversalBuilder::as_of_recorded(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn macrame::graph::builder::TraversalBuilder::as_of_valid(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn macrame::graph::builder::TraversalBuilder::attribute_mode(self, macrame::graph::builder::AttributeMode) -> Self
+pub fn macrame::graph::builder::TraversalBuilder::build_sql(&self) -> alloc::string::String
+pub fn macrame::graph::builder::TraversalBuilder::content(self, bool) -> Self
+pub fn macrame::graph::builder::TraversalBuilder::edge_types(self, alloc::vec::Vec<alloc::string::String>) -> Self
+pub async fn macrame::graph::builder::TraversalBuilder::execute(&self, &libsql::connection::Connection, &str) -> macrame::error::Result<alloc::vec::Vec<macrame::temporal::as_of::NodeAttributes>>
+pub async fn macrame::graph::builder::TraversalBuilder::execute_ids(&self, &libsql::connection::Connection, &str) -> macrame::error::Result<alloc::vec::Vec<alloc::string::String>>
+pub fn macrame::graph::builder::TraversalBuilder::max_depth(self, usize) -> Self
+pub fn macrame::graph::builder::TraversalBuilder::min_weight(self, f64) -> Self
+pub fn macrame::graph::builder::TraversalBuilder::new(impl core::convert::Into<alloc::string::String>) -> Self
+pub struct macrame::prelude::Tuning
+pub macrame::prelude::Tuning::cadence: macrame::connection::CadencePolicy
+pub macrame::prelude::Tuning::clock: core::option::Option<alloc::sync::Arc<dyn macrame::util::clock::Clock>>
+pub macrame::prelude::Tuning::future_stamps: macrame::util::clock::FutureStampPolicy
+pub macrame::prelude::Tuning::reader_cache_size: core::option::Option<i32>
+pub macrame::prelude::Tuning::wal_autocheckpoint: macrame::connection::WalCheckpointPolicy
+pub macrame::prelude::Tuning::writer_cache_size: core::option::Option<i32>
+impl core::fmt::Debug for macrame::connection::Tuning
+pub fn macrame::connection::Tuning::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct macrame::prelude::VectorSearchResult
+pub macrame::prelude::VectorSearchResult::concept_id: alloc::string::String
+pub macrame::prelude::VectorSearchResult::score: f32
+pub const macrame::prelude::BULK_ATOMIC_WARN_HOLD: core::time::Duration
+pub const macrame::prelude::CHUNK_BUDGET: core::time::Duration
+pub const macrame::prelude::DEFAULT_FUTURE_STAMP_TOLERANCE: core::time::Duration
+pub const macrame::prelude::MAX_ARCHIVE_SESSIONS: usize
+pub const macrame::prelude::RRF_K: usize
+pub trait macrame::prelude::Clock: core::marker::Send + core::marker::Sync
+pub fn macrame::prelude::Clock::now(&self) -> alloc::string::String
+pub fn macrame::prelude::Clock::raise_floor(&self, std::time::SystemTime)
+impl macrame::util::clock::Clock for macrame::util::clock::FakeClock
+pub fn macrame::util::clock::FakeClock::now(&self) -> alloc::string::String
+pub fn macrame::util::clock::FakeClock::raise_floor(&self, std::time::SystemTime)
+impl macrame::util::clock::Clock for macrame::util::clock::SystemClock
+pub fn macrame::util::clock::SystemClock::now(&self) -> alloc::string::String
+pub fn macrame::util::clock::SystemClock::raise_floor(&self, std::time::SystemTime)
+pub async fn macrame::prelude::archive(&libsql::connection::Connection, &str, &str, &std::path::Path) -> macrame::error::Result<macrame::temporal::archive::ArchiveReport>
+pub async fn macrame::prelude::audit_current(&libsql::connection::Connection) -> macrame::error::Result<usize>
+pub async fn macrame::prelude::declared_dimension(&libsql::connection::Connection, &macrame::vector::model::ModelName) -> macrame::error::Result<usize>
+pub fn macrame::prelude::escape_fts5_query(&str) -> alloc::string::String
+pub fn macrame::prelude::estimated_bulk_hold(&[macrame::graph::edge::EdgeAssertion]) -> core::time::Duration
+pub async fn macrame::prelude::keyword_search(&libsql::connection::Connection, &str, usize, core::option::Option<&str>, core::option::Option<core::time::Duration>) -> macrame::error::Result<alloc::vec::Vec<(alloc::string::String, f64)>>
+pub async fn macrame::prelude::query_as_of_edges(&libsql::connection::Connection, &str) -> macrame::error::Result<alloc::vec::Vec<(alloc::string::String, alloc::string::String, alloc::string::String, alloc::string::String, alloc::string::String)>>
+pub async fn macrame::prelude::rebuild_current(&libsql::connection::Connection) -> macrame::error::Result<macrame::integrity::rebuild::RebuildReport>
+pub fn macrame::prelude::reciprocal_rank_fusion(&[alloc::string::String], &[alloc::string::String], usize) -> alloc::vec::Vec<(alloc::string::String, f64)>
+pub async fn macrame::prelude::reconstruct(&libsql::connection::Connection, &str, core::option::Option<&std::path::Path>, core::option::Option<&std::path::Path>) -> macrame::error::Result<macrame::temporal::replay::MaterializedState>
+pub async fn macrame::prelude::registered_models(&libsql::connection::Connection) -> macrame::error::Result<alloc::vec::Vec<macrame::vector::model::ModelName>>
+pub async fn macrame::prelude::search_vector(&libsql::connection::Connection, &[f32], &macrame::vector::model::ModelName, usize, core::option::Option<&str>, core::option::Option<core::time::Duration>) -> macrame::error::Result<alloc::vec::Vec<macrame::vector::search::VectorSearchResult>>
+pub type macrame::prelude::BulkResult<T> = core::result::Result<T, macrame::error::BulkInterrupted>
+pub type macrame::prelude::Result<T> = core::result::Result<T, macrame::error::DbError>
+pub mod macrame::schema
+pub mod macrame::schema::ddl
+pub const macrame::schema::ddl::ABORT_DELETE_GUARD: &str
+pub const macrame::schema::ddl::ABORT_MONOTONIC_RA: &str
+pub const macrame::schema::ddl::ABORT_SINGLE_OPEN: &str
+pub const macrame::schema::ddl::ANALYSIS_LIMIT: &str
+pub const macrame::schema::ddl::ANALYZE: &str
+pub const macrame::schema::ddl::ARCHIVE_SESSION_MARKER: &str
+pub const macrame::schema::ddl::CREATE_ANALYTICS_ANNOTATIONS_TABLE: &str
+pub const macrame::schema::ddl::CREATE_CONCEPTS_FTS: &str
+pub const macrame::schema::ddl::CREATE_CONCEPTS_GUARD_DELETE: &str
+pub const macrame::schema::ddl::CREATE_CONCEPTS_LOG_INSERT: &str
+pub const macrame::schema::ddl::CREATE_CONCEPTS_TABLE: &str
+pub const macrame::schema::ddl::CREATE_INDICES: &[&str]
+pub const macrame::schema::ddl::CREATE_LINKS_CURRENT_TABLE: &str
+pub const macrame::schema::ddl::CREATE_LINKS_TABLE: &str
+pub const macrame::schema::ddl::CREATE_TRANSACTION_LOG_TABLE: &str
+pub const macrame::schema::ddl::CREATE_TRIGGERS: &[&str]
+pub const macrame::schema::ddl::OPTIMIZE: &str
+pub const macrame::schema::ddl::REBUILD_CONCEPTS_FTS: &str
+pub const macrame::schema::ddl::VERIFY_CONCEPTS_FTS: &str
+pub const macrame::schema::ddl::WEIGHT_CHECK: &str
+pub fn macrame::schema::ddl::create_embeddings_index(&macrame::vector::model::ModelName) -> alloc::string::String
+pub fn macrame::schema::ddl::create_embeddings_table(&macrame::vector::model::ModelName, usize) -> alloc::string::String
+pub mod macrame::schema::migrations
+pub struct macrame::schema::migrations::MigrationOutcome
+pub macrame::schema::migrations::MigrationOutcome::from: u32
+pub macrame::schema::migrations::MigrationOutcome::to: u32
+impl macrame::schema::migrations::MigrationOutcome
+pub fn macrame::schema::migrations::MigrationOutcome::upgraded(&self) -> bool
+pub const macrame::schema::migrations::SCHEMA_VERSION: u32
+pub fn macrame::schema::migrations::current_version() -> u32
+pub async fn macrame::schema::migrations::run(&libsql::connection::Connection) -> macrame::error::Result<macrame::schema::migrations::MigrationOutcome>
+pub mod macrame::schema::seed
+pub async fn macrame::schema::seed::seed_bootstrap(&libsql::connection::Connection) -> macrame::error::Result<()>
+pub const macrame::schema::SCHEMA_VERSION: u32
+pub fn macrame::schema::current_version() -> u32
+pub async fn macrame::schema::run_migrations(&libsql::connection::Connection) -> macrame::error::Result<macrame::schema::migrations::MigrationOutcome>
+pub mod macrame::temporal
+pub mod macrame::temporal::archive
+pub struct macrame::temporal::archive::ArchiveReport
+pub macrame::temporal::archive::ArchiveReport::concepts_archived: usize
+pub macrame::temporal::archive::ArchiveReport::horizon: core::option::Option<i64>
+pub macrame::temporal::archive::ArchiveReport::links_archived: usize
+pub macrame::temporal::archive::ArchiveReport::log_entries_archived: usize
+pub struct macrame::temporal::archive::RehydrateReport
+pub macrame::temporal::archive::RehydrateReport::concepts_rehydrated: usize
+pub macrame::temporal::archive::RehydrateReport::rowids_reassigned: usize
+pub async fn macrame::temporal::archive::archivable_concepts(&libsql::connection::Connection, &str) -> macrame::error::Result<alloc::vec::Vec<alloc::string::String>>
+pub async fn macrame::temporal::archive::archive(&libsql::connection::Connection, &str, &str, &std::path::Path) -> macrame::error::Result<macrame::temporal::archive::ArchiveReport>
+pub async fn macrame::temporal::archive::rehydrate(&libsql::connection::Connection, &[&str], &std::path::Path) -> macrame::error::Result<macrame::temporal::archive::RehydrateReport>
+pub mod macrame::temporal::as_of
+pub struct macrame::temporal::as_of::AsOf
+pub macrame::temporal::as_of::AsOf::recorded: core::option::Option<alloc::string::String>
+pub macrame::temporal::as_of::AsOf::valid: core::option::Option<alloc::string::String>
+impl macrame::temporal::as_of::AsOf
+pub fn macrame::temporal::as_of::AsOf::bitemporal(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn macrame::temporal::as_of::AsOf::now() -> Self
+pub fn macrame::temporal::as_of::AsOf::recorded_at(impl core::convert::Into<alloc::string::String>) -> Self
+pub fn macrame::temporal::as_of::AsOf::valid_at(impl core::convert::Into<alloc::string::String>) -> Self
+pub struct macrame::temporal::as_of::NodeAttributes
+pub macrame::temporal::as_of::NodeAttributes::content: alloc::string::String
+pub macrame::temporal::as_of::NodeAttributes::embedding_model: core::option::Option<alloc::string::String>
+pub macrame::temporal::as_of::NodeAttributes::id: alloc::string::String
+pub macrame::temporal::as_of::NodeAttributes::title: alloc::string::String
+pub async fn macrame::temporal::as_of::hydrate_attributes(&libsql::connection::Connection, &[alloc::string::String], &macrame::temporal::as_of::AsOf, macrame::graph::builder::AttributeMode) -> macrame::error::Result<alloc::vec::Vec<macrame::temporal::as_of::NodeAttributes>>
+pub async fn macrame::temporal::as_of::query_as_of_edges(&libsql::connection::Connection, &str) -> macrame::error::Result<alloc::vec::Vec<(alloc::string::String, alloc::string::String, alloc::string::String, alloc::string::String, alloc::string::String)>>
+pub mod macrame::temporal::interval
+pub struct macrame::temporal::interval::Interval
+pub macrame::temporal::interval::Interval::valid_from: alloc::string::String
+pub macrame::temporal::interval::Interval::valid_to: alloc::string::String
+impl macrame::temporal::interval::Interval
+pub fn macrame::temporal::interval::Interval::contains(&self, &str) -> bool
+pub fn macrame::temporal::interval::Interval::is_open(&self) -> bool
+pub fn macrame::temporal::interval::Interval::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn macrame::temporal::interval::Interval::overlaps(&self, &macrame::temporal::interval::Interval) -> bool
+pub mod macrame::temporal::replay
+pub struct macrame::temporal::replay::ChainCheck
+pub macrame::temporal::replay::ChainCheck::composed_anchor: i64
+pub macrame::temporal::replay::ChainCheck::composed_concepts: usize
+pub macrame::temporal::replay::ChainCheck::composed_edges: usize
+pub macrame::temporal::replay::ChainCheck::concept_disagreements: alloc::vec::Vec<alloc::string::String>
+pub macrame::temporal::replay::ChainCheck::edge_disagreements: alloc::vec::Vec<alloc::string::String>
+pub macrame::temporal::replay::ChainCheck::folded_anchor: i64
+pub macrame::temporal::replay::ChainCheck::folded_concepts: usize
+pub macrame::temporal::replay::ChainCheck::folded_edges: usize
+pub macrame::temporal::replay::ChainCheck::timestamp: alloc::string::String
+pub macrame::temporal::replay::ChainCheck::truncated: bool
+impl macrame::temporal::replay::ChainCheck
+pub const macrame::temporal::replay::ChainCheck::SAMPLE_LIMIT: usize
+pub fn macrame::temporal::replay::ChainCheck::diverged(&self) -> bool
+impl core::fmt::Display for macrame::temporal::replay::ChainCheck
+pub fn macrame::temporal::replay::ChainCheck::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct macrame::temporal::replay::MaterializedState
+pub macrame::temporal::replay::MaterializedState::concepts: std::collections::hash::map::HashMap<alloc::string::String, macrame::temporal::as_of::NodeAttributes>
+pub macrame::temporal::replay::MaterializedState::edges: alloc::vec::Vec<(alloc::string::String, alloc::string::String, alloc::string::String, alloc::string::String, alloc::string::String)>
+pub macrame::temporal::replay::MaterializedState::predates_recorded_history: bool
+pub macrame::temporal::replay::MaterializedState::seq_anchor: i64
+pub macrame::temporal::replay::MaterializedState::timestamp: alloc::string::String
+pub async fn macrame::temporal::replay::reconstruct(&libsql::connection::Connection, &str, core::option::Option<&std::path::Path>, core::option::Option<&std::path::Path>) -> macrame::error::Result<macrame::temporal::replay::MaterializedState>
+pub async fn macrame::temporal::replay::verify_snapshot_chain(&libsql::connection::Connection, &str, core::option::Option<&std::path::Path>, &std::path::Path) -> macrame::error::Result<macrame::temporal::replay::ChainCheck>
+pub mod macrame::temporal::snapshot
+pub struct macrame::temporal::snapshot::SnapshotCadence
+pub macrame::temporal::snapshot::SnapshotCadence::every_entries: i64
+pub macrame::temporal::snapshot::SnapshotCadence::poll_interval: core::time::Duration
+impl core::default::Default for macrame::temporal::snapshot::SnapshotCadence
+pub fn macrame::temporal::snapshot::SnapshotCadence::default() -> Self
+pub fn macrame::temporal::snapshot::cleanup_expired_snapshots(&std::path::Path) -> macrame::error::Result<usize>
+pub fn macrame::temporal::snapshot::load_snapshot(&std::path::Path) -> macrame::error::Result<macrame::temporal::replay::MaterializedState>
+pub fn macrame::temporal::snapshot::save_snapshot(&std::path::Path, &macrame::temporal::replay::MaterializedState) -> macrame::error::Result<std::path::PathBuf>
+pub async fn macrame::temporal::snapshot::write_final(&libsql::connection::Connection, &std::path::Path, &str, core::option::Option<&std::path::Path>) -> macrame::error::Result<std::path::PathBuf>
+pub struct macrame::temporal::ArchiveReport
+pub macrame::temporal::ArchiveReport::concepts_archived: usize
+pub macrame::temporal::ArchiveReport::horizon: core::option::Option<i64>
+pub macrame::temporal::ArchiveReport::links_archived: usize
+pub macrame::temporal::ArchiveReport::log_entries_archived: usize
+pub struct macrame::temporal::AsOf
+pub macrame::temporal::AsOf::recorded: core::option::Option<alloc::string::String>
+pub macrame::temporal::AsOf::valid: core::option::Option<alloc::string::String>
+impl macrame::temporal::as_of::AsOf
+pub fn macrame::temporal::as_of::AsOf::bitemporal(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn macrame::temporal::as_of::AsOf::now() -> Self
+pub fn macrame::temporal::as_of::AsOf::recorded_at(impl core::convert::Into<alloc::string::String>) -> Self
+pub fn macrame::temporal::as_of::AsOf::valid_at(impl core::convert::Into<alloc::string::String>) -> Self
+pub struct macrame::temporal::ChainCheck
+pub macrame::temporal::ChainCheck::composed_anchor: i64
+pub macrame::temporal::ChainCheck::composed_concepts: usize
+pub macrame::temporal::ChainCheck::composed_edges: usize
+pub macrame::temporal::ChainCheck::concept_disagreements: alloc::vec::Vec<alloc::string::String>
+pub macrame::temporal::ChainCheck::edge_disagreements: alloc::vec::Vec<alloc::string::String>
+pub macrame::temporal::ChainCheck::folded_anchor: i64
+pub macrame::temporal::ChainCheck::folded_concepts: usize
+pub macrame::temporal::ChainCheck::folded_edges: usize
+pub macrame::temporal::ChainCheck::timestamp: alloc::string::String
+pub macrame::temporal::ChainCheck::truncated: bool
+impl macrame::temporal::replay::ChainCheck
+pub const macrame::temporal::replay::ChainCheck::SAMPLE_LIMIT: usize
+pub fn macrame::temporal::replay::ChainCheck::diverged(&self) -> bool
+impl core::fmt::Display for macrame::temporal::replay::ChainCheck
+pub fn macrame::temporal::replay::ChainCheck::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct macrame::temporal::Interval
+pub macrame::temporal::Interval::valid_from: alloc::string::String
+pub macrame::temporal::Interval::valid_to: alloc::string::String
+impl macrame::temporal::interval::Interval
+pub fn macrame::temporal::interval::Interval::contains(&self, &str) -> bool
+pub fn macrame::temporal::interval::Interval::is_open(&self) -> bool
+pub fn macrame::temporal::interval::Interval::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn macrame::temporal::interval::Interval::overlaps(&self, &macrame::temporal::interval::Interval) -> bool
+pub struct macrame::temporal::MaterializedState
+pub macrame::temporal::MaterializedState::concepts: std::collections::hash::map::HashMap<alloc::string::String, macrame::temporal::as_of::NodeAttributes>
+pub macrame::temporal::MaterializedState::edges: alloc::vec::Vec<(alloc::string::String, alloc::string::String, alloc::string::String, alloc::string::String, alloc::string::String)>
+pub macrame::temporal::MaterializedState::predates_recorded_history: bool
+pub macrame::temporal::MaterializedState::seq_anchor: i64
+pub macrame::temporal::MaterializedState::timestamp: alloc::string::String
+pub struct macrame::temporal::NodeAttributes
+pub macrame::temporal::NodeAttributes::content: alloc::string::String
+pub macrame::temporal::NodeAttributes::embedding_model: core::option::Option<alloc::string::String>
+pub macrame::temporal::NodeAttributes::id: alloc::string::String
+pub macrame::temporal::NodeAttributes::title: alloc::string::String
+pub struct macrame::temporal::RehydrateReport
+pub macrame::temporal::RehydrateReport::concepts_rehydrated: usize
+pub macrame::temporal::RehydrateReport::rowids_reassigned: usize
+pub struct macrame::temporal::SnapshotCadence
+pub macrame::temporal::SnapshotCadence::every_entries: i64
+pub macrame::temporal::SnapshotCadence::poll_interval: core::time::Duration
+impl core::default::Default for macrame::temporal::snapshot::SnapshotCadence
+pub fn macrame::temporal::snapshot::SnapshotCadence::default() -> Self
+pub async fn macrame::temporal::archivable_concepts(&libsql::connection::Connection, &str) -> macrame::error::Result<alloc::vec::Vec<alloc::string::String>>
+pub async fn macrame::temporal::archive(&libsql::connection::Connection, &str, &str, &std::path::Path) -> macrame::error::Result<macrame::temporal::archive::ArchiveReport>
+pub fn macrame::temporal::cleanup_expired_snapshots(&std::path::Path) -> macrame::error::Result<usize>
+pub async fn macrame::temporal::hydrate_attributes(&libsql::connection::Connection, &[alloc::string::String], &macrame::temporal::as_of::AsOf, macrame::graph::builder::AttributeMode) -> macrame::error::Result<alloc::vec::Vec<macrame::temporal::as_of::NodeAttributes>>
+pub fn macrame::temporal::load_snapshot(&std::path::Path) -> macrame::error::Result<macrame::temporal::replay::MaterializedState>
+pub async fn macrame::temporal::query_as_of_edges(&libsql::connection::Connection, &str) -> macrame::error::Result<alloc::vec::Vec<(alloc::string::String, alloc::string::String, alloc::string::String, alloc::string::String, alloc::string::String)>>
+pub async fn macrame::temporal::reconstruct(&libsql::connection::Connection, &str, core::option::Option<&std::path::Path>, core::option::Option<&std::path::Path>) -> macrame::error::Result<macrame::temporal::replay::MaterializedState>
+pub async fn macrame::temporal::rehydrate(&libsql::connection::Connection, &[&str], &std::path::Path) -> macrame::error::Result<macrame::temporal::archive::RehydrateReport>
+pub fn macrame::temporal::save_snapshot(&std::path::Path, &macrame::temporal::replay::MaterializedState) -> macrame::error::Result<std::path::PathBuf>
+pub async fn macrame::temporal::verify_snapshot_chain(&libsql::connection::Connection, &str, core::option::Option<&std::path::Path>, &std::path::Path) -> macrame::error::Result<macrame::temporal::replay::ChainCheck>
+pub async fn macrame::temporal::write_final(&libsql::connection::Connection, &std::path::Path, &str, core::option::Option<&std::path::Path>) -> macrame::error::Result<std::path::PathBuf>
+pub mod macrame::util
+pub mod macrame::util::clock
+pub enum macrame::util::clock::FutureStampPolicy
+pub macrame::util::clock::FutureStampPolicy::Allow
+pub macrame::util::clock::FutureStampPolicy::Default
+pub macrame::util::clock::FutureStampPolicy::Tolerance(core::time::Duration)
+pub struct macrame::util::clock::FakeClock
+impl macrame::util::clock::FakeClock
+pub fn macrame::util::clock::FakeClock::advance(&self, core::time::Duration)
+pub fn macrame::util::clock::FakeClock::new(std::time::SystemTime) -> Self
+pub fn macrame::util::clock::FakeClock::peek(&self) -> alloc::string::String
+impl macrame::util::clock::Clock for macrame::util::clock::FakeClock
+pub fn macrame::util::clock::FakeClock::now(&self) -> alloc::string::String
+pub fn macrame::util::clock::FakeClock::raise_floor(&self, std::time::SystemTime)
+pub struct macrame::util::clock::SystemClock
+impl macrame::util::clock::SystemClock
+pub async fn macrame::util::clock::SystemClock::new(&libsql::connection::Connection, macrame::util::clock::FutureStampPolicy) -> macrame::error::Result<Self>
+impl macrame::util::clock::Clock for macrame::util::clock::SystemClock
+pub fn macrame::util::clock::SystemClock::now(&self) -> alloc::string::String
+pub fn macrame::util::clock::SystemClock::raise_floor(&self, std::time::SystemTime)
+pub const macrame::util::clock::DEFAULT_FUTURE_STAMP_TOLERANCE: core::time::Duration
+pub trait macrame::util::clock::Clock: core::marker::Send + core::marker::Sync
+pub fn macrame::util::clock::Clock::now(&self) -> alloc::string::String
+pub fn macrame::util::clock::Clock::raise_floor(&self, std::time::SystemTime)
+impl macrame::util::clock::Clock for macrame::util::clock::FakeClock
+pub fn macrame::util::clock::FakeClock::now(&self) -> alloc::string::String
+pub fn macrame::util::clock::FakeClock::raise_floor(&self, std::time::SystemTime)
+impl macrame::util::clock::Clock for macrame::util::clock::SystemClock
+pub fn macrame::util::clock::SystemClock::now(&self) -> alloc::string::String
+pub fn macrame::util::clock::SystemClock::raise_floor(&self, std::time::SystemTime)
+pub fn macrame::util::clock::format_iso8601_utc(std::time::SystemTime) -> alloc::string::String
+pub fn macrame::util::clock::parse_iso8601_utc(&str) -> macrame::error::Result<std::time::SystemTime>
+pub mod macrame::util::ids
+pub const macrame::util::ids::RESERVED_ID_CHARS: [char; 1]
+pub fn macrame::util::ids::generate_id() -> alloc::string::String
+pub fn macrame::util::ids::is_ulid(&str) -> bool
+pub fn macrame::util::ids::validate_id(&str) -> macrame::error::Result<()>
+pub mod macrame::util::limits
+pub const macrame::util::limits::HYDRATE_CHUNK: usize
+pub const macrame::util::limits::SQLITE_MAX_VARIABLE_NUMBER: usize
+pub mod macrame::util::timestamp
+pub const macrame::util::timestamp::CANONICAL_TS_GLOB: &str
+pub const macrame::util::timestamp::OPEN_SENTINEL: &str
+pub const macrame::util::timestamp::TIMESTAMP_LEN: usize
+pub fn macrame::util::timestamp::format(std::time::SystemTime) -> alloc::string::String
+pub fn macrame::util::timestamp::is_canonical(&str) -> bool
+pub fn macrame::util::timestamp::normalize(&str) -> macrame::error::Result<alloc::string::String>
+pub fn macrame::util::timestamp::parse(&str) -> macrame::error::Result<std::time::SystemTime>
+pub enum macrame::util::FutureStampPolicy
+pub macrame::util::FutureStampPolicy::Allow
+pub macrame::util::FutureStampPolicy::Default
+pub macrame::util::FutureStampPolicy::Tolerance(core::time::Duration)
+pub struct macrame::util::FakeClock
+impl macrame::util::clock::FakeClock
+pub fn macrame::util::clock::FakeClock::advance(&self, core::time::Duration)
+pub fn macrame::util::clock::FakeClock::new(std::time::SystemTime) -> Self
+pub fn macrame::util::clock::FakeClock::peek(&self) -> alloc::string::String
+impl macrame::util::clock::Clock for macrame::util::clock::FakeClock
+pub fn macrame::util::clock::FakeClock::now(&self) -> alloc::string::String
+pub fn macrame::util::clock::FakeClock::raise_floor(&self, std::time::SystemTime)
+pub struct macrame::util::SystemClock
+impl macrame::util::clock::SystemClock
+pub async fn macrame::util::clock::SystemClock::new(&libsql::connection::Connection, macrame::util::clock::FutureStampPolicy) -> macrame::error::Result<Self>
+impl macrame::util::clock::Clock for macrame::util::clock::SystemClock
+pub fn macrame::util::clock::SystemClock::now(&self) -> alloc::string::String
+pub fn macrame::util::clock::SystemClock::raise_floor(&self, std::time::SystemTime)
+pub const macrame::util::DEFAULT_FUTURE_STAMP_TOLERANCE: core::time::Duration
+pub const macrame::util::HYDRATE_CHUNK: usize
+pub const macrame::util::OPEN_SENTINEL: &str
+pub const macrame::util::TIMESTAMP_LEN: usize
+pub trait macrame::util::Clock: core::marker::Send + core::marker::Sync
+pub fn macrame::util::Clock::now(&self) -> alloc::string::String
+pub fn macrame::util::Clock::raise_floor(&self, std::time::SystemTime)
+impl macrame::util::clock::Clock for macrame::util::clock::FakeClock
+pub fn macrame::util::clock::FakeClock::now(&self) -> alloc::string::String
+pub fn macrame::util::clock::FakeClock::raise_floor(&self, std::time::SystemTime)
+impl macrame::util::clock::Clock for macrame::util::clock::SystemClock
+pub fn macrame::util::clock::SystemClock::now(&self) -> alloc::string::String
+pub fn macrame::util::clock::SystemClock::raise_floor(&self, std::time::SystemTime)
+pub fn macrame::util::generate_id() -> alloc::string::String
+pub fn macrame::util::is_canonical(&str) -> bool
+pub fn macrame::util::normalize(&str) -> macrame::error::Result<alloc::string::String>
+pub fn macrame::util::validate_id(&str) -> macrame::error::Result<()>
+pub mod macrame::vector
+pub mod macrame::vector::embedding
+pub struct macrame::vector::embedding::EmbeddingCodec
+impl macrame::vector::embedding::EmbeddingCodec
+pub fn macrame::vector::embedding::EmbeddingCodec::decode(&[u8]) -> macrame::error::Result<alloc::vec::Vec<f32>>
+pub fn macrame::vector::embedding::EmbeddingCodec::encode(&[f32], usize, &str) -> macrame::error::Result<alloc::vec::Vec<u8>>
+pub mod macrame::vector::hybrid
+pub struct macrame::vector::hybrid::HybridHit
+pub macrame::vector::hybrid::HybridHit::concept_id: alloc::string::String
+pub macrame::vector::hybrid::HybridHit::keyword_rank: core::option::Option<usize>
+pub macrame::vector::hybrid::HybridHit::score: f64
+pub macrame::vector::hybrid::HybridHit::vector_rank: core::option::Option<usize>
+pub struct macrame::vector::hybrid::HybridSearch
+impl macrame::vector::hybrid::HybridSearch
+pub fn macrame::vector::hybrid::HybridSearch::as_of_valid(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn macrame::vector::hybrid::HybridSearch::depth(self, usize) -> Self
+pub async fn macrame::vector::hybrid::HybridSearch::execute(&self, &libsql::connection::Connection) -> macrame::error::Result<alloc::vec::Vec<macrame::vector::hybrid::HybridHit>>
+pub fn macrame::vector::hybrid::HybridSearch::half_life(self, core::time::Duration) -> Self
+pub fn macrame::vector::hybrid::HybridSearch::new(macrame::vector::model::ModelName, impl core::convert::Into<alloc::string::String>, alloc::vec::Vec<f32>) -> Self
+pub fn macrame::vector::hybrid::HybridSearch::raw_match(self, bool) -> Self
+pub fn macrame::vector::hybrid::HybridSearch::rrf_k(self, usize) -> Self
+pub fn macrame::vector::hybrid::HybridSearch::top_k(self, usize) -> Self
+pub const macrame::vector::hybrid::RRF_K: usize
+pub fn macrame::vector::hybrid::escape_fts5_query(&str) -> alloc::string::String
+pub async fn macrame::vector::hybrid::keyword_search(&libsql::connection::Connection, &str, usize, core::option::Option<&str>, core::option::Option<core::time::Duration>) -> macrame::error::Result<alloc::vec::Vec<(alloc::string::String, f64)>>
+pub mod macrame::vector::model
+pub struct macrame::vector::model::ModelName(_)
+impl macrame::vector::model::ModelName
+pub fn macrame::vector::model::ModelName::as_str(&self) -> &str
+pub fn macrame::vector::model::ModelName::index(&self) -> alloc::string::String
+pub fn macrame::vector::model::ModelName::new(impl core::convert::AsRef<str>) -> macrame::error::Result<Self>
+pub fn macrame::vector::model::ModelName::table(&self) -> alloc::string::String
+impl core::fmt::Display for macrame::vector::model::ModelName
+pub fn macrame::vector::model::ModelName::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub mod macrame::vector::registry
+pub async fn macrame::vector::registry::declared_dimension(&libsql::connection::Connection, &macrame::vector::model::ModelName) -> macrame::error::Result<usize>
+pub async fn macrame::vector::registry::registered_models(&libsql::connection::Connection) -> macrame::error::Result<alloc::vec::Vec<macrame::vector::model::ModelName>>
+pub mod macrame::vector::search
+pub struct macrame::vector::search::VectorSearchResult
+pub macrame::vector::search::VectorSearchResult::concept_id: alloc::string::String
+pub macrame::vector::search::VectorSearchResult::score: f32
+pub fn macrame::vector::search::reciprocal_rank_fusion(&[alloc::string::String], &[alloc::string::String], usize) -> alloc::vec::Vec<(alloc::string::String, f64)>
+pub async fn macrame::vector::search::search_vector(&libsql::connection::Connection, &[f32], &macrame::vector::model::ModelName, usize, core::option::Option<&str>, core::option::Option<core::time::Duration>) -> macrame::error::Result<alloc::vec::Vec<macrame::vector::search::VectorSearchResult>>
+pub struct macrame::vector::EmbeddingCodec
+impl macrame::vector::embedding::EmbeddingCodec
+pub fn macrame::vector::embedding::EmbeddingCodec::decode(&[u8]) -> macrame::error::Result<alloc::vec::Vec<f32>>
+pub fn macrame::vector::embedding::EmbeddingCodec::encode(&[f32], usize, &str) -> macrame::error::Result<alloc::vec::Vec<u8>>
+pub struct macrame::vector::HybridHit
+pub macrame::vector::HybridHit::concept_id: alloc::string::String
+pub macrame::vector::HybridHit::keyword_rank: core::option::Option<usize>
+pub macrame::vector::HybridHit::score: f64
+pub macrame::vector::HybridHit::vector_rank: core::option::Option<usize>
+pub struct macrame::vector::HybridSearch
+impl macrame::vector::hybrid::HybridSearch
+pub fn macrame::vector::hybrid::HybridSearch::as_of_valid(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn macrame::vector::hybrid::HybridSearch::depth(self, usize) -> Self
+pub async fn macrame::vector::hybrid::HybridSearch::execute(&self, &libsql::connection::Connection) -> macrame::error::Result<alloc::vec::Vec<macrame::vector::hybrid::HybridHit>>
+pub fn macrame::vector::hybrid::HybridSearch::half_life(self, core::time::Duration) -> Self
+pub fn macrame::vector::hybrid::HybridSearch::new(macrame::vector::model::ModelName, impl core::convert::Into<alloc::string::String>, alloc::vec::Vec<f32>) -> Self
+pub fn macrame::vector::hybrid::HybridSearch::raw_match(self, bool) -> Self
+pub fn macrame::vector::hybrid::HybridSearch::rrf_k(self, usize) -> Self
+pub fn macrame::vector::hybrid::HybridSearch::top_k(self, usize) -> Self
+pub struct macrame::vector::ModelName(_)
+impl macrame::vector::model::ModelName
+pub fn macrame::vector::model::ModelName::as_str(&self) -> &str
+pub fn macrame::vector::model::ModelName::index(&self) -> alloc::string::String
+pub fn macrame::vector::model::ModelName::new(impl core::convert::AsRef<str>) -> macrame::error::Result<Self>
+pub fn macrame::vector::model::ModelName::table(&self) -> alloc::string::String
+impl core::fmt::Display for macrame::vector::model::ModelName
+pub fn macrame::vector::model::ModelName::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct macrame::vector::VectorSearchResult
+pub macrame::vector::VectorSearchResult::concept_id: alloc::string::String
+pub macrame::vector::VectorSearchResult::score: f32
+pub const macrame::vector::RRF_K: usize
+pub async fn macrame::vector::declared_dimension(&libsql::connection::Connection, &macrame::vector::model::ModelName) -> macrame::error::Result<usize>
+pub fn macrame::vector::escape_fts5_query(&str) -> alloc::string::String
+pub async fn macrame::vector::keyword_search(&libsql::connection::Connection, &str, usize, core::option::Option<&str>, core::option::Option<core::time::Duration>) -> macrame::error::Result<alloc::vec::Vec<(alloc::string::String, f64)>>
+pub fn macrame::vector::reciprocal_rank_fusion(&[alloc::string::String], &[alloc::string::String], usize) -> alloc::vec::Vec<(alloc::string::String, f64)>
+pub async fn macrame::vector::registered_models(&libsql::connection::Connection) -> macrame::error::Result<alloc::vec::Vec<macrame::vector::model::ModelName>>
+pub async fn macrame::vector::search_vector(&libsql::connection::Connection, &[f32], &macrame::vector::model::ModelName, usize, core::option::Option<&str>, core::option::Option<core::time::Duration>) -> macrame::error::Result<alloc::vec::Vec<macrame::vector::search::VectorSearchResult>>
+#[non_exhaustive] pub enum macrame::CadencePolicy
+pub macrame::CadencePolicy::Default
+pub macrame::CadencePolicy::Disabled
+pub macrame::CadencePolicy::Every(macrame::temporal::snapshot::SnapshotCadence)
+pub enum macrame::DbError
+pub macrame::DbError::ArchiveSessionLeaked
+pub macrame::DbError::ArchiveSessionLeaked::marker: alloc::string::String
+pub macrame::DbError::ArchiveViolation
+pub macrame::DbError::ArchiveViolation::table: alloc::string::String
+pub macrame::DbError::ArchiveWindow
+pub macrame::DbError::ArchiveWindow::reason: alloc::string::String
+pub macrame::DbError::ArchiveWindow::window: core::time::Duration
+pub macrame::DbError::AttributeModeUnstated
+pub macrame::DbError::AttributeModeUnstated::instants: macrame::error::StatedInstants
+pub macrame::DbError::BulkCancelled
+pub macrame::DbError::CurrentDrift
+pub macrame::DbError::CurrentDrift::n: usize
+pub macrame::DbError::DiagnosticConn
+pub macrame::DbError::DiagnosticConn::path: alloc::string::String
+pub macrame::DbError::DiagnosticConn::reason: alloc::string::String
+pub macrame::DbError::DimMismatch
+pub macrame::DbError::DimMismatch::expected: usize
+pub macrame::DbError::DimMismatch::got: usize
+pub macrame::DbError::DimMismatch::model: alloc::string::String
+pub macrame::DbError::Engine(libsql::errors::Error)
+pub macrame::DbError::FutureRecordedAt
+pub macrame::DbError::FutureRecordedAt::limit: alloc::string::String
+pub macrame::DbError::FutureRecordedAt::stamp: alloc::string::String
+pub macrame::DbError::HalfLifeWithoutInstant
+pub macrame::DbError::InvalidEdgeType(alloc::string::String)
+pub macrame::DbError::InvalidId
+pub macrame::DbError::InvalidId::id: alloc::string::String
+pub macrame::DbError::InvalidId::reason: alloc::string::String
+pub macrame::DbError::InvalidModelName(alloc::string::String)
+pub macrame::DbError::InvalidTimestamp
+pub macrame::DbError::InvalidTimestamp::reason: alloc::string::String
+pub macrame::DbError::InvalidTimestamp::value: alloc::string::String
+pub macrame::DbError::Migration
+pub macrame::DbError::Migration::reason: alloc::string::String
+pub macrame::DbError::Migration::to: u32
+pub macrame::DbError::ModelNotRegistered
+pub macrame::DbError::ModelNotRegistered::model: alloc::string::String
+pub macrame::DbError::ModelNotRegistered::table: alloc::string::String
+pub macrame::DbError::NegativeEdgeWeight
+pub macrame::DbError::NegativeEdgeWeight::source_id: alloc::string::String
+pub macrame::DbError::NegativeEdgeWeight::target_id: alloc::string::String
+pub macrame::DbError::NegativeEdgeWeight::weight: f64
+pub macrame::DbError::NotFound(alloc::string::String)
+pub macrame::DbError::OverlappingInterval
+pub macrame::DbError::OverlappingInterval::overlap: alloc::boxed::Box<macrame::error::Overlap>
+pub macrame::DbError::PayloadVersion
+pub macrame::DbError::PayloadVersion::got: u8
+pub macrame::DbError::PayloadVersion::max: u8
+pub macrame::DbError::RebuildFailed
+pub macrame::DbError::RebuildFailed::n: usize
+pub macrame::DbError::RebuildInterrupted
+pub macrame::DbError::RebuildInterrupted::reason: alloc::string::String
+pub macrame::DbError::RecordedAtRegression
+pub macrame::DbError::RecordedAtRegression::got: alloc::string::String
+pub macrame::DbError::RecordedAtRegression::had: alloc::string::String
+pub macrame::DbError::RecordedInstantUnreachable
+pub macrame::DbError::RecordedInstantUnreachable::ts: alloc::string::String
+pub macrame::DbError::ReplayCorrupt
+pub macrame::DbError::ReplayCorrupt::reason: alloc::string::String
+pub macrame::DbError::ReplayCorrupt::seq: i64
+pub macrame::DbError::SingleOpenViolation
+pub macrame::DbError::SingleOpenViolation::edge_type: alloc::string::String
+pub macrame::DbError::SingleOpenViolation::source_id: alloc::string::String
+pub macrame::DbError::SingleOpenViolation::target_id: alloc::string::String
+pub macrame::DbError::SnapshotCorrupt
+pub macrame::DbError::SnapshotCorrupt::path: alloc::string::String
+pub macrame::DbError::SnapshotCorrupt::reason: alloc::string::String
+pub macrame::DbError::SnapshotIncompatible
+pub macrame::DbError::SnapshotIncompatible::path: alloc::string::String
+pub macrame::DbError::SnapshotIncompatible::reason: alloc::string::String
+pub macrame::DbError::SubgraphTooLarge
+pub macrame::DbError::SubgraphTooLarge::budget: usize
+pub macrame::DbError::SubgraphTooLarge::n: usize
+pub macrame::DbError::WriterDroppedResponder
+pub macrame::DbError::WriterStopped(alloc::string::String)
+pub macrame::DbError::WriterUnavailable
+impl core::convert::From<macrame::error::BulkInterrupted> for macrame::error::DbError
+pub fn macrame::error::DbError::from(macrame::error::BulkInterrupted) -> Self
+pub enum macrame::FutureStampPolicy
+pub macrame::FutureStampPolicy::Allow
+pub macrame::FutureStampPolicy::Default
+pub macrame::FutureStampPolicy::Tolerance(core::time::Duration)
+pub enum macrame::StatedInstants
+pub macrame::StatedInstants::Both
+pub macrame::StatedInstants::Both::recorded: alloc::string::String
+pub macrame::StatedInstants::Both::valid: alloc::string::String
+pub macrame::StatedInstants::Recorded(alloc::string::String)
+pub macrame::StatedInstants::Valid(alloc::string::String)
+impl macrame::error::StatedInstants
+pub fn macrame::error::StatedInstants::new(core::option::Option<&str>, core::option::Option<&str>) -> core::option::Option<Self>
+pub fn macrame::error::StatedInstants::recorded(&self) -> core::option::Option<&str>
+pub fn macrame::error::StatedInstants::valid(&self) -> core::option::Option<&str>
+impl core::fmt::Display for macrame::error::StatedInstants
+pub fn macrame::error::StatedInstants::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+#[non_exhaustive] pub enum macrame::WalCheckpointPolicy
+pub macrame::WalCheckpointPolicy::Default
+pub macrame::WalCheckpointPolicy::Disabled
+pub macrame::WalCheckpointPolicy::EveryPages(u32)
+pub struct macrame::Annotation
+pub macrame::Annotation::concept_id: alloc::string::String
+pub macrame::Annotation::label: alloc::string::String
+pub macrame::Annotation::value: alloc::string::String
+impl macrame::connection::Annotation
+pub fn macrame::connection::Annotation::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
+pub struct macrame::BulkControl
+impl macrame::connection::BulkControl
+pub fn macrame::connection::BulkControl::cancel_with(self, macrame::connection::CancelToken) -> Self
+pub fn macrame::connection::BulkControl::new() -> Self
+pub fn macrame::connection::BulkControl::on_progress(self, impl core::ops::function::Fn(macrame::connection::BulkProgress) + core::marker::Send + core::marker::Sync + 'static) -> Self
+impl core::fmt::Debug for macrame::connection::BulkControl
+pub fn macrame::connection::BulkControl::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct macrame::BulkInterrupted
+pub macrame::BulkInterrupted::cause: macrame::error::DbError
+pub macrame::BulkInterrupted::written: usize
+impl macrame::error::BulkInterrupted
+pub fn macrame::error::BulkInterrupted::was_cancelled(&self) -> bool
+impl core::convert::From<macrame::error::BulkInterrupted> for macrame::error::DbError
+pub fn macrame::error::DbError::from(macrame::error::BulkInterrupted) -> Self
+impl core::error::Error for macrame::error::BulkInterrupted
+pub fn macrame::error::BulkInterrupted::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
+impl core::fmt::Display for macrame::error::BulkInterrupted
+pub fn macrame::error::BulkInterrupted::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct macrame::BulkProgress
+pub macrame::BulkProgress::held: core::time::Duration
+pub macrame::BulkProgress::rows: usize
+pub macrame::BulkProgress::total: usize
+pub macrame::BulkProgress::written: usize
+pub struct macrame::CancelToken(_)
+impl macrame::connection::CancelToken
+pub fn macrame::connection::CancelToken::cancel(&self)
+pub fn macrame::connection::CancelToken::is_cancelled(&self) -> bool
+pub fn macrame::connection::CancelToken::new() -> Self
+pub struct macrame::CheckpointReport
+pub macrame::CheckpointReport::busy: bool
+pub macrame::CheckpointReport::checkpointed_frames: u64
+pub macrame::CheckpointReport::log_frames: u64
+impl macrame::connection::CheckpointReport
+pub fn macrame::connection::CheckpointReport::is_complete(&self) -> bool
+pub struct macrame::ConceptUpsert
+pub macrame::ConceptUpsert::content: alloc::string::String
+pub macrame::ConceptUpsert::embedding_model: core::option::Option<alloc::string::String>
+pub macrame::ConceptUpsert::id: alloc::string::String
+pub macrame::ConceptUpsert::retired: bool
+pub macrame::ConceptUpsert::title: alloc::string::String
+pub macrame::ConceptUpsert::valid_from: alloc::string::String
+pub macrame::ConceptUpsert::valid_to: alloc::string::String
+impl macrame::connection::ConceptUpsert
+pub fn macrame::connection::ConceptUpsert::content(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn macrame::connection::ConceptUpsert::embedding_model(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn macrame::connection::ConceptUpsert::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn macrame::connection::ConceptUpsert::normalized(self) -> macrame::error::Result<Self>
+pub fn macrame::connection::ConceptUpsert::retired(self, bool) -> Self
+pub fn macrame::connection::ConceptUpsert::valid_from(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn macrame::connection::ConceptUpsert::valid_to(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub struct macrame::Database
+impl macrame::connection::Database
+pub async fn macrame::connection::Database::analyze(&self) -> macrame::error::Result<()>
+pub async fn macrame::connection::Database::archive(&self, &str) -> macrame::error::Result<macrame::temporal::archive::ArchiveReport>
+pub fn macrame::connection::Database::archive_path(&self) -> &std::path::Path
+pub async fn macrame::connection::Database::archive_windowed(&self, &str, core::time::Duration) -> macrame::error::Result<alloc::vec::Vec<macrame::temporal::archive::ArchiveReport>>
+pub async fn macrame::connection::Database::assert_edge(&self, macrame::graph::edge::EdgeAssertion) -> macrame::error::Result<()>
+pub async fn macrame::connection::Database::bulk_import(&self, alloc::vec::Vec<macrame::graph::edge::EdgeAssertion>) -> macrame::error::BulkResult<usize>
+pub async fn macrame::connection::Database::bulk_import_with(&self, alloc::vec::Vec<macrame::graph::edge::EdgeAssertion>, macrame::connection::BulkControl) -> macrame::error::BulkResult<usize>
+pub async fn macrame::connection::Database::checkpoint(&self) -> macrame::error::Result<macrame::connection::CheckpointReport>
+pub fn macrame::connection::Database::clock(&self) -> &alloc::sync::Arc<dyn macrame::util::clock::Clock>
+pub async fn macrame::connection::Database::close(self) -> macrame::error::Result<()>
+pub async fn macrame::connection::Database::diagnostic_conn(&self) -> macrame::error::Result<libsql::connection::Connection>
+pub fn macrame::connection::Database::metrics(&self) -> macrame::metrics::MetricsSnapshot
+pub async fn macrame::connection::Database::open(impl core::convert::AsRef<std::path::Path>) -> macrame::error::Result<Self>
+pub async fn macrame::connection::Database::open_tuned(impl core::convert::AsRef<std::path::Path>, macrame::connection::Tuning) -> macrame::error::Result<Self>
+pub async fn macrame::connection::Database::open_with_cadence(impl core::convert::AsRef<std::path::Path>, core::option::Option<macrame::temporal::snapshot::SnapshotCadence>) -> macrame::error::Result<Self>
+pub async fn macrame::connection::Database::open_with_clock(impl core::convert::AsRef<std::path::Path>, core::option::Option<macrame::temporal::snapshot::SnapshotCadence>, alloc::sync::Arc<dyn macrame::util::clock::Clock>) -> macrame::error::Result<Self>
+pub async fn macrame::connection::Database::optimize(&self) -> macrame::error::Result<()>
+pub fn macrame::connection::Database::path(&self) -> &std::path::Path
+pub fn macrame::connection::Database::read_conn(&self) -> &libsql::connection::Connection
+pub async fn macrame::connection::Database::rebuild_current(&self) -> macrame::error::Result<macrame::integrity::rebuild::RebuildReport>
+pub async fn macrame::connection::Database::rebuild_current_chunked(&self) -> macrame::error::Result<macrame::integrity::rebuild::RebuildReport>
+pub async fn macrame::connection::Database::rebuild_fts(&self) -> macrame::error::Result<()>
+pub async fn macrame::connection::Database::reconstruct(&self, &str) -> macrame::error::Result<macrame::temporal::replay::MaterializedState>
+pub async fn macrame::connection::Database::register_model(&self, &macrame::vector::model::ModelName, usize) -> macrame::error::Result<()>
+pub async fn macrame::connection::Database::rehydrate(&self, &[&str]) -> macrame::error::Result<macrame::temporal::archive::RehydrateReport>
+pub async fn macrame::connection::Database::retire_edge(&self, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, &str, &str) -> macrame::error::Result<()>
+pub fn macrame::connection::Database::schema_version(&self) -> u32
+pub async fn macrame::connection::Database::shadow_step(&self, macrame::integrity::shadow::ShadowStep) -> macrame::error::Result<macrame::integrity::shadow::ShadowOutcome>
+pub fn macrame::connection::Database::snapshots_dir(&self) -> &std::path::Path
+pub async fn macrame::connection::Database::upsert_concept(&self, macrame::connection::ConceptUpsert) -> macrame::error::Result<()>
+pub async fn macrame::connection::Database::upsert_embeddings(&self, &macrame::vector::model::ModelName, alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<f32>)>) -> macrame::error::BulkResult<usize>
+pub async fn macrame::connection::Database::upsert_embeddings_with(&self, &macrame::vector::model::ModelName, alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<f32>)>, macrame::connection::BulkControl) -> macrame::error::BulkResult<usize>
+pub async fn macrame::connection::Database::verify_snapshot_chain(&self, &str) -> macrame::error::Result<macrame::temporal::replay::ChainCheck>
+pub async fn macrame::connection::Database::write_analytics_annotations(&self, alloc::vec::Vec<macrame::connection::Annotation>) -> macrame::error::BulkResult<usize>
+pub async fn macrame::connection::Database::write_analytics_annotations_with(&self, alloc::vec::Vec<macrame::connection::Annotation>, macrame::connection::BulkControl) -> macrame::error::BulkResult<usize>
+pub async fn macrame::connection::Database::write_bulk_atomic(&self, alloc::vec::Vec<macrame::graph::edge::EdgeAssertion>) -> macrame::error::Result<usize>
+pub async fn macrame::connection::Database::write_concepts(&self, alloc::vec::Vec<macrame::connection::ConceptUpsert>) -> macrame::error::BulkResult<usize>
+pub async fn macrame::connection::Database::write_concepts_with(&self, alloc::vec::Vec<macrame::connection::ConceptUpsert>, macrame::connection::BulkControl) -> macrame::error::BulkResult<usize>
+impl macrame::connection::Database
+pub async fn macrame::connection::Database::load_subgraph(&self, &str, u32, &str, usize) -> macrame::error::Result<macrame::graph::subgraph::Subgraph>
+pub async fn macrame::connection::Database::load_subgraph_with(&self, &macrame::graph::builder::TraversalBuilder, &str, usize) -> macrame::error::Result<macrame::graph::subgraph::Subgraph>
+impl core::ops::drop::Drop for macrame::connection::Database
+pub fn macrame::connection::Database::drop(&mut self)
+pub struct macrame::Overlap
+pub macrame::Overlap::edge_type: alloc::string::String
+pub macrame::Overlap::existing_from: alloc::string::String
+pub macrame::Overlap::existing_to: alloc::string::String
+pub macrame::Overlap::source_id: alloc::string::String
+pub macrame::Overlap::target_id: alloc::string::String
+pub macrame::Overlap::valid_from: alloc::string::String
+pub macrame::Overlap::valid_to: alloc::string::String
+pub macrame::Overlap::within_batch: bool
+impl macrame::error::Overlap
+pub fn macrame::error::Overlap::provenance(&self) -> &'static str
+pub struct macrame::Tuning
+pub macrame::Tuning::cadence: macrame::connection::CadencePolicy
+pub macrame::Tuning::clock: core::option::Option<alloc::sync::Arc<dyn macrame::util::clock::Clock>>
+pub macrame::Tuning::future_stamps: macrame::util::clock::FutureStampPolicy
+pub macrame::Tuning::reader_cache_size: core::option::Option<i32>
+pub macrame::Tuning::wal_autocheckpoint: macrame::connection::WalCheckpointPolicy
+pub macrame::Tuning::writer_cache_size: core::option::Option<i32>
+impl core::fmt::Debug for macrame::connection::Tuning
+pub fn macrame::connection::Tuning::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub const macrame::CHUNK_BUDGET: core::time::Duration
+pub const macrame::DEFAULT_FUTURE_STAMP_TOLERANCE: core::time::Duration
+pub type macrame::BulkResult<T> = core::result::Result<T, macrame::error::BulkInterrupted>
+pub type macrame::Result<T> = core::result::Result<T, macrame::error::DbError>

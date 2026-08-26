@@ -2482,6 +2482,55 @@ for the life of 1.x. Everything that is not either becomes `#[doc(hidden)]`,
 gets `#[non_exhaustive]`, or is removed now. This is the last time the answer is
 free.
 
+**Split into four on measurement.** The listing came back at **1,692 items —
+409 functions, 105 structs, 69 constants, 39 modules, 33 enums** — and three of
+the commitments in it were ones nobody had decided to make. Each gets its own
+release so that each ships its own diff:
+
+| | |
+| --- | --- |
+| **W11.2a** | 0.13.32. The baseline and the gate. |
+| **W11.2b** | 0.13.33. `HighPriCommand`, `LowPriCommand`, `ChunkOutcome` → `pub(crate)`. |
+| **W11.2c** | 0.13.34. The `DbError` ↔ binding parity gate, *then* `#[non_exhaustive]`. |
+| **W11.2d** | 0.13.35. The module collapse; `schema` stays public and flattened. |
+
+> **✅ W11.2a shipped 0.13.32 (recorded as
+> [D-205](../docs/architecture/s13-decision-register.md#d-205)).**
+>
+> **1. The baseline is checked in, and it lands *before* the three releases
+> that change the surface.** The obvious order records what is left after the
+> churn; this one audits the churn. From 0.13.33 each release ships
+> `scripts/check_public_api.py`'s diff in its commit message, so *did we remove
+> more than we meant to* is answered from the record at review time.
+>
+> **2. Three findings, none visible in a diff of the source.** `HighPriCommand`
+> and `LowPriCommand` are `pub`, putting **17 `tokio::sync::oneshot::Sender`
+> signatures** into the API on enums nothing outside can construct — with
+> `ChunkOutcome` public only as collateral, which its own rustdoc already said.
+> `DbError`'s **44 variants** are exhaustive, as are eight domain enums, so
+> adding an error variant post-1.0 would break every downstream `match`. And
+> **39 public modules** give most types two to four supported paths, freezing
+> the internal file layout as public API.
+>
+> **3. The script exits three ways, which is [D-147]'s lesson applied to a new
+> noise source.** 0 unchanged, 1 moved, **2 could not be measured** — nightly
+> absent, or a rustdoc JSON change the tool has not caught up with. CI fails on
+> 1 and warns-without-passing on 2. Collapsing the two into a red job makes it
+> a job people are told to ignore; into a green one is worse.
+>
+> **4. Nightly is precedent, not a new dependency.** `cargo-public-api` reads
+> rustdoc's unstable JSON. The `fuzz` job has run on nightly since 0.13.14 for
+> the same class of reason, and the new job is documented the same way.
+>
+> **5. The gate was verified, and was wrong on its first run.** The differ
+> treated every line starting `#` as a header comment, silently dropping the
+> twelve items that start `#[non_exhaustive]` — so it reported a twelve-line
+> diff against a file it had just written. Fixed by excluding `#[`; confirmed
+> by appending a `pub fn` to `lib.rs` and watching it report exactly `+1 -0`
+> with the line named.
+
+[D-147]: ../docs/architecture/s13-decision-register.md#d-147
+
 **W11.3 — Documentation sweep.** Closes §6.1: the release history table in
 `docs/architecture/README.md` stops at 0.9.0, three releases behind. D-144
 already named doc drift as a category; this is the sweep that clears it.
