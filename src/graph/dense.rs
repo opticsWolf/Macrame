@@ -49,10 +49,21 @@
 //! `the_interior_may_change_but_these_answers_may_not` is the test that holds
 //! it anyway.
 //!
+//! # Who does not use this
+//!
+//! `astar`, and only `astar` ([D-202]). Everything above is amortised by
+//! settling every node, and `astar` exists precisely to avoid doing that: on a
+//! one-hop goal it settles six nodes and would pay a build over 49,152. A view
+//! whose cost is proportional to the graph cannot be free for a query that is
+//! deliberately not. Adding a seventh algorithm that stops early means asking
+//! the same question again, and `subgraph_interior`'s astar section is the
+//! shape the answer takes.
+//!
 //! [D-063]: ../../docs/architecture/s13-decision-register.md#d-063
 //! [D-115]: ../../docs/architecture/s13-decision-register.md#d-115
 //! [D-200]: ../../docs/architecture/s13-decision-register.md#d-200
 //! [D-201]: ../../docs/architecture/s13-decision-register.md#d-201
+//! [D-202]: ../../docs/architecture/s13-decision-register.md#d-202
 
 use std::collections::BTreeMap;
 

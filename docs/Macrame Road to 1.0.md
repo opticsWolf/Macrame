@@ -266,7 +266,7 @@ branching lands.** This is the one item in this document I would cut first if
 | 2.2 | `CONCEPTS_ARCHIVABLE` quadratic on `links.target_id` | High | W3.2 | 0.13.0 |
 | 2.3 | Per-transaction overhead ~0.8 ms; singular paths pay it per row | Med | W3.4 | 0.13.0 |
 | 2.4 | Snapshot work runs on a tokio worker | Med | W8.1 | 0.13.11 ✅ |
-| 2.5 | `Subgraph` string-keyed adjacency | Low | W10.3 (measured), W10.3b (built) | 0.14.0 ✅ |
+| 2.5 | `Subgraph` string-keyed adjacency | Low | W10.3 (measured), W10.3b (built), W10.3c (`astar` excepted) | 0.14.0 ✅ |
 | 2.6 | `reject_overlaps_within` O(n²) | Med | W7.5 | 0.13.6 ✅ |
 | 3.1 | `as_of` mixes valid time and transaction time | High | W5.6 / W7.1 | both |
 | 3.2 | `AtTime` degrades silently after archive | Med | W9.1 | 0.13.16 ✅ |
@@ -2274,6 +2274,65 @@ approach it, the decision comes back.
 > explicit byte budget, which is the memory `load_subgraph` refuses loads to
 > bound. A caller running several algorithms over one graph pays the build
 > several times instead — the side of that trade the budget exists to take.
+
+**W10.3c — the arm D-201 rewrote without measuring.** 0.13.29. W10.3 timed
+`louvain`, `dijkstra`, `scc` and `k_core`; W10.3b moved all six. `astar` is the
+one that can return before it has seen the graph, so price it at three goal
+distances against the body it replaced, and put it back if the build is not
+amortised.
+
+> **✅ Shipped 0.13.29 (recorded as
+> [D-202](../docs/architecture/s13-decision-register.md#d-202), which amends
+> [D-201](../docs/architecture/s13-decision-register.md#d-201)). `astar` is
+> back on the `String`-keyed maps; the other five stay on the dense view.**
+>
+> **1. The build is not a constant factor on this one, it is the early exit.**
+> At the 49,152-node ceiling the dense `astar` cost **16.3 ms** for a one-hop
+> goal, **16.6** for one 2,048 hops out and **17.2** for the far end of the
+> chain — flat in the distance, because what it is timing is the build. The
+> string-keyed version cost **0.019 ms**, **45.1** and **96.5**. On the case the
+> function exists for, the dense view was **860× slower** and settled the same
+> six nodes.
+>
+> **2. What it costs, stated rather than omitted.** Distant goals are now
+> 3×–10× slower than 0.13.28 shipped them. That is accepted: a goal the whole
+> graph away is a `dijkstra` call written as an `astar`, and `dijkstra` settles
+> the same nodes in 28 ms and returns distances to all of them. The crossover
+> is around **17% of the graph settled** — every point-to-point query is below
+> it.
+>
+> **3. The guard has teeth, and that was checked rather than assumed.**
+> `a_near_goal_does_not_pay_for_the_whole_graph` asserts no wall-clock number.
+> It times `dijkstra` on the same graph in the same test — necessarily a
+> whole-graph pass, so it prices the machine it is running on — and requires a
+> one-hop `astar` to come in 20× under. Confirmed by restoring the dense
+> version and watching it fail — at **0.77× in release and 8.3× in debug**,
+> against three orders of magnitude in hand when `astar` is correct.
+>
+> It also had to be taught to ignore a precondition. Every algorithm opens
+> with `debug_assert!(graph.is_closed())`, which walks every edge and is
+> compiled out in release; in debug it is **larger than either search** (175 ms
+> on the fixture), so the first version compared two closure checks and failed
+> against correct code at 2.2×. It now measures `is_closed` and subtracts it
+> from both sides in debug builds — the minimum of three runs, because
+> overestimating that baseline is the direction that lets a regression
+> through.
+>
+> **4. The first version of that test was wrong in an instructive way.** It
+> used a star whose weights ascend, where the goal is one hop away and still
+> popped *last* — so `astar` settled everything and the early exit never
+> happened. It failed against correct code. "Near" is a property of cost order,
+> not hop count, and D-202 records that rather than quietly swapping the
+> fixture.
+>
+> **5. A lazy pool-index search was designed and discarded.** `EdgeRef` already
+> carries pool indices and `pool.resolve` is an array index, so adjacency could
+> cost one map descent per *settled* node rather than per node — better than
+> either arm. But pool order is **insertion** order, not id order, so ties would
+> break differently and answers would move. The dense view is safe only because
+> its indices are `nodes`' key order. That is the tie-break drift a
+> representation change has to be checked against every time, and here it is
+> what stopped one.
 
 **W10.6 — The two-dimensional index question, measured before it is answered.**
 Closes F-33. W7.1 makes bitemporal predicates expressible; this asks what they

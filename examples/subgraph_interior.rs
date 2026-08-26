@@ -57,6 +57,18 @@
 //! the two differed by a third on `louvain`; after it they are within noise,
 //! because the per-edge work no longer touches a string.
 //!
+//! # And `astar`, which is the one that must not be on it
+//!
+//! D-201 measured five algorithms and rewrote six. `astar` is the only one that
+//! returns before it has seen the graph, so a build proportional to the graph
+//! is not amortised by it — it is the early exit, spent. The astar section
+//! prices that directly, at three goal distances, against the string-keyed body
+//! the rewrite replaced. It found a near goal costing **16.3 ms instead of
+//! 0.03**, and [D-202] moved `astar` back off the dense view. What the section
+//! prints now is a guard: `x` at 1.00 means it is still off.
+//!
+//! [D-202]: ../docs/architecture/s13-decision-register.md#d-202
+//!
 //! # And a share, because a ratio on the interior is not a ratio on the caller
 //!
 //! A ratio on the interior only matters in proportion to what the interior is a
@@ -77,7 +89,7 @@ use std::cmp::{Ordering, Reverse};
 use std::collections::{BTreeMap, BinaryHeap};
 use std::time::{Duration, Instant};
 
-use macrame::graph::{dijkstra, k_core, louvain, scc, NodeData, Subgraph};
+use macrame::graph::{astar, dijkstra, k_core, louvain, scc, NodeData, Subgraph};
 use macrame::prelude::*;
 
 /// Matches `tests/common/fixtures.rs` and the aggregation probe.
@@ -308,6 +320,85 @@ fn flat_dijkstra(f: &Flat, start: usize) -> Vec<f64> {
     dist
 }
 
+// ------------------------------------------------------- the arm that stops early
+
+/// `algorithms::astar` exactly as it stood at 0.13.27, transcribed.
+///
+/// This is not a strawman written to lose. It is `git show 82ed6c7` — the
+/// string-keyed body the dense rewrite replaced — with the counter added, so
+/// the comparison is against the code that actually shipped rather than
+/// against a reconstruction of it.
+///
+/// Returned alongside the answer is the number of nodes **settled**. Both arms
+/// explore the same set in the same order, so one instrumented arm reports for
+/// both.
+fn str_astar<F>(
+    graph: &Subgraph,
+    start: &str,
+    goal: &str,
+    heuristic: F,
+) -> (Option<(f64, Vec<String>)>, usize)
+where
+    F: Fn(&str, &str) -> f64,
+{
+    if !graph.contains_node(start) || !graph.contains_node(goal) {
+        return (None, 0);
+    }
+
+    let mut g_score: BTreeMap<String, f64> = BTreeMap::new();
+    let mut came_from: BTreeMap<String, String> = BTreeMap::new();
+    let mut heap = BinaryHeap::new();
+    let mut settled = 0usize;
+
+    g_score.insert(start.to_string(), 0.0);
+    heap.push(Reverse((OrdF64(heuristic(start, goal)), start.to_string())));
+
+    while let Some(Reverse((OrdF64(f_score), current))) = heap.pop() {
+        let current_g = g_score[&current];
+        settled += 1;
+
+        if current == goal {
+            let path = str_reconstruct(&came_from, goal, graph.node_count());
+            return (Some((current_g, path)), settled);
+        }
+
+        if f_score > current_g + heuristic(&current, goal) {
+            continue;
+        }
+
+        for edge in graph.out_edges(&current) {
+            let neighbor = edge.node(graph);
+            let tentative_g = current_g + edge.weight();
+
+            if tentative_g < *g_score.get(neighbor).unwrap_or(&f64::INFINITY) {
+                if neighbor != start {
+                    came_from.insert(neighbor.to_string(), current.clone());
+                }
+                g_score.insert(neighbor.to_string(), tentative_g);
+                let f = tentative_g + heuristic(neighbor, goal);
+                heap.push(Reverse((OrdF64(f), neighbor.to_string())));
+            }
+        }
+    }
+
+    (None, settled)
+}
+
+/// `algorithms::reconstruct` as it stood at 0.13.27.
+fn str_reconstruct(came_from: &BTreeMap<String, String>, goal: &str, limit: usize) -> Vec<String> {
+    let mut path = vec![goal.to_string()];
+    let mut curr = goal.to_string();
+    while let Some(prev) = came_from.get(&curr) {
+        if path.len() > limit {
+            break;
+        }
+        path.push(prev.clone());
+        curr = prev.clone();
+    }
+    path.reverse();
+    path
+}
+
 /// `algorithms::OrdF64`, which is private there.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct OrdF64(f64);
@@ -439,6 +530,94 @@ fn measure(communities: usize, ids: Ids) -> Row {
         dense_dijkstra_back,
         crate_scc,
         crate_k_core,
+    }
+}
+
+// ------------------------------------------------------ the arm that stops early
+
+/// One goal at one distance: what the search had to touch, and what each
+/// representation charged for touching it.
+struct Reach {
+    label: &'static str,
+    hops: usize,
+    settled: usize,
+    shipped: Duration,
+    transcribed: Duration,
+}
+
+struct AstarRow {
+    nodes: usize,
+    edges: usize,
+    reaches: Vec<Reach>,
+}
+
+/// `astar` is the only algorithm in the module that can return before it has
+/// seen the graph, and it is the one D-201 never timed.
+///
+/// The other five settle every node, so a build proportional to the edges is
+/// charged against work that is also proportional to the edges. `astar` stops
+/// at the goal — and on the dense view it stopped early and paid for the whole
+/// graph anyway. Measured at the ceiling, 0.13.28's `astar` cost 16.3 ms for a
+/// near goal, 16.6 for a middling one and 17.2 for the furthest: **flat in the
+/// distance it was supposed to exploit.** The string-keyed version it replaced
+/// cost 0.03 ms, 45 ms and 96 ms. [D-202] moved `astar` back.
+///
+/// So this section no longer compares two candidates. `str_astar` *is* the
+/// shipped algorithm now, transcribed, and the column that matters is `x`
+/// sitting at 1.00: if it ever leaves, `astar` has been put back on a
+/// whole-graph precompute. `a_near_goal_does_not_pay_for_the_whole_graph` is
+/// the same guard in the test suite, where it runs without anyone asking.
+fn measure_astar(communities: usize, ids: Ids) -> AstarRow {
+    let g = clustered(communities, ids);
+    let reps = if g.node_count() > 4_000 { 1 } else { 3 };
+    let start = ids.node(0);
+
+    // Zero is admissible on any graph, and it is the right heuristic *here*: a
+    // real one would add identical work to both arms and dilute the difference
+    // being measured. What is left is best-first search, which is what the
+    // representation question is about.
+    let h = |_: &str, _: &str| 0.0;
+
+    let last = communities * CLUSTER_SIZE - 1;
+    let targets = [
+        // Inside the start's own clique: one hop, and the search stops after
+        // the clique.
+        ("near", ids.node(5)),
+        // The head of the middle clique, reached only along the bridges.
+        ("mid", ids.node((communities / 2) * CLUSTER_SIZE)),
+        // The last node of the last clique: the search settles everything.
+        ("far", ids.node(last)),
+    ];
+
+    let mut reaches = Vec::new();
+    for (label, goal) in targets {
+        let (shipped_answer, shipped) = best(reps, || astar(&g, &start, &goal, h));
+        let ((transcribed_answer, settled), transcribed) =
+            best(reps, || str_astar(&g, &start, &goal, h));
+
+        assert!(
+            shipped_answer == transcribed_answer,
+            "`astar` and its 0.13.27 transcription disagree at {communities} \
+             communities, target {label} -- the timings below would be \
+             comparing two algorithms"
+        );
+
+        let hops = shipped_answer
+            .as_ref()
+            .map_or(0, |(_, path)| path.len() - 1);
+        reaches.push(Reach {
+            label,
+            hops,
+            settled,
+            shipped,
+            transcribed,
+        });
+    }
+
+    AstarRow {
+        nodes: g.node_count(),
+        edges: g.edge_count(),
+        reaches,
     }
 }
 
@@ -620,6 +799,42 @@ async fn main() {
          the headroom still on the table. `back` is in both arms and cannot leave\n\
          either: the return type is BTreeMap<String, _>, and that is the public\n\
          signature.\n"
+    );
+
+    println!("===== the arm that stops early: astar =====");
+    for ids in [Ids::Short, Ids::Ulid] {
+        println!("--- ids: {} ---", ids.name());
+        println!(
+            "{:>7} {:>8} | {:>6} {:>5} {:>8} | {:>9} {:>9} {:>6}",
+            "nodes", "edges", "target", "hops", "settled", "astar", "0.13.27", "x",
+        );
+        for &c in &sizes {
+            let r = measure_astar(c, ids);
+            for reach in &r.reaches {
+                println!(
+                    "{:>7} {:>8} | {:>6} {:>5} {:>8} | {:>9.3} {:>9.3} {:>6.2}",
+                    r.nodes,
+                    r.edges,
+                    reach.label,
+                    reach.hops,
+                    reach.settled,
+                    ms(reach.shipped),
+                    ms(reach.transcribed),
+                    reach.shipped.as_secs_f64() / reach.transcribed.as_secs_f64(),
+                );
+            }
+        }
+        println!();
+    }
+
+    println!(
+        "`x` is the shipped `astar` / its 0.13.27 transcription, and it should be 1:\n\
+         since D-202 they are the same algorithm, and this section is the guard rather\n\
+         than the comparison -- the near rows are microseconds and read as timer noise.
+         `settled` is how many nodes the search popped before it\n\
+         stopped -- six, for a near goal on 49,152. On the dense view D-201 shipped, a\n\
+         near goal cost 16.3 ms against 0.03 ms here, and a far goal 17.2 against 96:\n\
+         flat in the distance, which is the early exit spent rather than used.\n"
     );
 
     println!("===== what the interior is a share of =====");

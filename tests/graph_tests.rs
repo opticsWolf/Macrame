@@ -333,6 +333,102 @@ fn astar_finds_the_same_cost_as_dijkstra_and_returns_the_path() {
 }
 
 #[test]
+fn a_near_goal_does_not_pay_for_the_whole_graph() {
+    // `astar` is the only algorithm in the module that returns before it has
+    // seen the graph, and 0.13.28 briefly took that away by building a dense
+    // index over every node first (D-201). D-202 measured the cost -- a one-hop
+    // goal on 49,152 nodes went from 0.019 ms to 16.3 ms, settling six nodes
+    // either way -- and moved `astar` back onto the string-keyed maps.
+    //
+    // The regression is invisible to every assertion about the *answer*, so
+    // this guards the cost instead. It does not assert a wall-clock number,
+    // which would be a different threshold on every machine and in every
+    // profile. It asserts a *ratio against `dijkstra` on the same graph in the
+    // same test*: `dijkstra` necessarily settles everything, so it prices this
+    // machine's whole-graph pass, and a near goal must come in far under it.
+    // Measured margin is ~1000x; a whole-graph precompute inside `astar` puts
+    // the ratio near 1. The bar below is 20x.
+    //
+    // The fixture is a chain of 12-cliques and not a star, because "near" is a
+    // property of *cost order* and not of hop count: in a star whose edges
+    // ascend in weight, the goal is one hop away and still popped last, so
+    // `astar` settles the whole graph and the early exit it is being tested for
+    // never happens. The first version of this test was that star, and it
+    // failed against correct code.
+    const CLIQUE: usize = 12;
+    const COMMUNITIES: usize = 1_668;
+    const N: usize = CLIQUE * COMMUNITIES;
+
+    let mut g = Subgraph::default();
+    let node = |i: usize| format!("n{i:06}");
+    for i in 0..N {
+        g.insert_node(
+            node(i),
+            macrame::graph::NodeData::new(node(i), T0.to_string(), OPEN.to_string()),
+        );
+    }
+    for c in 0..COMMUNITIES {
+        let base = c * CLIQUE;
+        for i in 0..CLIQUE {
+            for j in 0..CLIQUE {
+                if i != j {
+                    g.add_edge(&node(base + i), &node(base + j), "KNOWS", 1.0, T0, OPEN);
+                }
+            }
+        }
+        if c + 1 < COMMUNITIES {
+            g.add_edge(&node(base), &node(base + CLIQUE), "BRIDGE", 1.0, T0, OPEN);
+        }
+    }
+
+    // Both functions open with `debug_assert!(graph.is_closed())`, which is a
+    // walk of every edge in a debug build and compiled out in release. It is a
+    // precondition check and not the search, and in debug it is larger than
+    // either -- so it is measured here and taken off both sides. Without that
+    // this test compares two closure checks in the profile the suite actually
+    // runs in. The minimum of three runs, because overestimating this baseline
+    // is the direction that would let a regression through.
+    let mut closure_s = f64::MAX;
+    for _ in 0..3 {
+        let t = std::time::Instant::now();
+        assert!(g.is_closed(), "the fixture is closed by construction");
+        closure_s = closure_s.min(t.elapsed().as_secs_f64());
+    }
+    if !cfg!(debug_assertions) {
+        closure_s = 0.0;
+    }
+
+    let t = std::time::Instant::now();
+    let full = dijkstra(&g, &node(0));
+    let dijkstra_s = t.elapsed().as_secs_f64();
+    assert_eq!(full.len(), N, "the chain should reach every node");
+
+    // Inside the start's own clique: one hop, and at the cheapest cost there
+    // is, so it is popped before the search leaves the first twelve nodes.
+    let goal = node(5);
+    let t = std::time::Instant::now();
+    let near = macrame::graph::astar(&g, &node(0), &goal, |_, _| 0.0);
+    let astar_s = t.elapsed().as_secs_f64();
+
+    let (cost, path) = near.expect("the goal is one hop from the start");
+    assert_eq!(path, vec![node(0), goal], "one hop, and the path says so");
+    assert_eq!(cost, 1.0);
+
+    // A floor, so that subtracting a baseline measured on a noisy machine
+    // cannot divide by something at or below zero.
+    let searching = |total: f64| (total - closure_s).max(1e-9);
+    let (astar_search, dijkstra_search) = (searching(astar_s), searching(dijkstra_s));
+
+    assert!(
+        astar_search * 20.0 < dijkstra_search,
+        "a one-hop `astar` searched for {astar_search:.6}s against a whole-graph \
+         `dijkstra` at {dijkstra_search:.6}s on the same graph (closure check \
+         {closure_s:.6}s, taken off both) -- under 20x apart means `astar` is \
+         paying for nodes it never looks at, which is the regression D-202 removed"
+    );
+}
+
+#[test]
 fn astar_returns_none_when_the_goal_is_unreachable() {
     let g = graph_of(&[("A", "B", 1.0), ("C", "D", 1.0)]);
     assert!(macrame::graph::astar(&g, "A", "D", |_, _| 0.0).is_none());

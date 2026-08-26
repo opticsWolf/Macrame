@@ -23,12 +23,19 @@
 //!
 //! **Since 0.13.28 these run on integers, and that changes none of it**
 //! ([D-201](../../docs/architecture/s13-decision-register.md#d-201)). Each
-//! function builds a `Dense` view of the graph — flat CSR adjacency over
+//! function but `astar` builds a `Dense` view of the graph — flat CSR over
 //! `u32` — and translates back at the return. Dense indices are assigned in
 //! `Subgraph::node_ids` order, so `u < v` **iff** `ids[u] < ids[v]`: every tie
 //! listed above is broken by index instead of by string and lands on the same
 //! answer. `the_interior_may_change_but_these_answers_may_not` pins that,
 //! `scc`'s component order included.
+//!
+//! **`astar` is the exception, and since 0.13.29 it is a stated one**
+//! ([D-202](../../docs/architecture/s13-decision-register.md#d-202)). It is the
+//! only function here that can return before it has seen the graph, so a
+//! precompute proportional to the graph is not amortised by it — it *replaces*
+//! the early exit. It runs on the `String`-keyed maps, and D-202 is the
+//! measurement that says why.
 //!
 //! # Edge weights must be non-negative
 //!
@@ -133,6 +140,29 @@ pub fn dijkstra(graph: &Subgraph, start: &str) -> BTreeMap<String, f64> {
 /// `None` when `goal` is unreachable. `heuristic` must be admissible — it must
 /// never overestimate the remaining cost — or the path returned is a path but
 /// not necessarily the shortest one.
+///
+/// # This is the one algorithm here that is *not* on the dense view
+///
+/// Every other function in this module settles every node, so the O(V + E)
+/// cost of building the integer view is charged against work that is O(V + E)
+/// anyway. `astar` returns the moment the goal is popped, and that is the
+/// entire reason to call it rather than [`dijkstra`]. Building a whole-graph
+/// index first makes its cost **independent of how far the goal is** — which
+/// is not a constant factor, it is the early exit itself.
+///
+/// 0.13.28 put it on the dense view without measuring it. [D-202] measured it:
+/// on the 49,152-node fixture a one-hop goal cost **16.3 ms** on the dense view
+/// and **0.019 ms** here, settling six nodes either way. Distant goals go the
+/// other way — the dense view finishes them in about a fifth of the time — but
+/// a goal that is the whole graph away is a [`dijkstra`] call written as an
+/// `astar`, and the cost of serving it well is charging every near query for a
+/// graph it never looks at.
+///
+/// `a_near_goal_does_not_pay_for_the_whole_graph` holds this, by comparing
+/// against [`dijkstra`] on the same graph in the same test rather than against
+/// a wall-clock threshold.
+///
+/// [D-202]: ../../docs/architecture/s13-decision-register.md#d-202
 pub fn astar<F>(
     graph: &Subgraph,
     start: &str,
@@ -143,42 +173,42 @@ where
     F: Fn(&str, &str) -> f64,
 {
     debug_assert!(graph.is_closed(), "{CLOSURE}");
-    let g = Dense::of(graph);
-    let (source, target) = (g.index_of(start)?, g.index_of(goal)?);
+    if !graph.contains_node(start) || !graph.contains_node(goal) {
+        return None;
+    }
 
-    let mut g_score = vec![f64::INFINITY; g.len()];
-    let mut came_from = vec![Dense::not_a_node(); g.len()];
+    let mut g_score: BTreeMap<String, f64> = BTreeMap::new();
+    let mut came_from: BTreeMap<String, String> = BTreeMap::new();
     let mut heap = BinaryHeap::new();
 
-    g_score[source] = 0.0;
-    heap.push(Reverse((OrdF64(heuristic(start, goal)), source)));
+    g_score.insert(start.to_string(), 0.0);
+    heap.push(Reverse((OrdF64(heuristic(start, goal)), start.to_string())));
 
     while let Some(Reverse((OrdF64(f_score), current))) = heap.pop() {
-        let current_g = g_score[current];
+        let current_g = g_score[&current];
 
-        if current == target {
-            return Some((current_g, reconstruct(&came_from, &g, target, g.len())));
+        if current == goal {
+            return Some((current_g, reconstruct(&came_from, goal, graph.node_count())));
         }
 
         // A stale entry, superseded by a cheaper route to the same node.
-        if f_score > current_g + heuristic(g.id(current), goal) {
+        if f_score > current_g + heuristic(&current, goal) {
             continue;
         }
 
-        for &(neighbor, weight) in g.out(current) {
-            let neighbor = neighbor as usize;
-            let tentative_g = current_g + weight;
+        for edge in graph.out_edges(&current) {
+            let neighbor = edge.node(graph);
+            let tentative_g = current_g + edge.weight();
 
-            if tentative_g < g_score[neighbor] {
+            if tentative_g < *g_score.get(neighbor).unwrap_or(&f64::INFINITY) {
                 // `start` never gets a predecessor, so `reconstruct` cannot
                 // walk into a cycle at the head of the path.
-                if neighbor != source {
-                    came_from[neighbor] =
-                        u32::try_from(current).expect("a subgraph cannot hold 2^32 nodes");
+                if neighbor != start {
+                    came_from.insert(neighbor.to_string(), current.clone());
                 }
-                g_score[neighbor] = tentative_g;
-                let f = tentative_g + heuristic(g.id(neighbor), goal);
-                heap.push(Reverse((OrdF64(f), neighbor)));
+                g_score.insert(neighbor.to_string(), tentative_g);
+                let f = tentative_g + heuristic(neighbor, goal);
+                heap.push(Reverse((OrdF64(f), neighbor.to_string())));
             }
         }
     }
@@ -191,15 +221,15 @@ where
 /// `limit` bounds the walk at the node count. The chain cannot exceed that on a
 /// well-formed `came_from`, so exceeding it means the map has a cycle; the walk
 /// stops rather than hanging.
-fn reconstruct(came_from: &[u32], g: &Dense<'_>, goal: usize, limit: usize) -> Vec<String> {
-    let mut path = vec![g.id(goal).to_string()];
-    let mut curr = goal;
-    while came_from[curr] != Dense::not_a_node() {
+fn reconstruct(came_from: &BTreeMap<String, String>, goal: &str, limit: usize) -> Vec<String> {
+    let mut path = vec![goal.to_string()];
+    let mut curr = goal.to_string();
+    while let Some(prev) = came_from.get(&curr) {
         if path.len() > limit {
             break;
         }
-        curr = came_from[curr] as usize;
-        path.push(g.id(curr).to_string());
+        path.push(prev.clone());
+        curr = prev.clone();
     }
     path.reverse();
     path
