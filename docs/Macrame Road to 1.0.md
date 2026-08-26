@@ -266,7 +266,7 @@ branching lands.** This is the one item in this document I would cut first if
 | 2.2 | `CONCEPTS_ARCHIVABLE` quadratic on `links.target_id` | High | W3.2 | 0.13.0 |
 | 2.3 | Per-transaction overhead ~0.8 ms; singular paths pay it per row | Med | W3.4 | 0.13.0 |
 | 2.4 | Snapshot work runs on a tokio worker | Med | W8.1 | 0.13.11 ✅ |
-| 2.5 | `Subgraph` string-keyed adjacency | Low | W10.3 (measured), W10.3b (built), W10.3c (`astar` excepted) | 0.14.0 ✅ |
+| 2.5 | `Subgraph` string-keyed adjacency | Low | W10.3 (measured), W10.3b (built), W10.3c (`astar` excepted, guard repaired 0.13.31) | 0.14.0 ✅ |
 | 2.6 | `reject_overlaps_within` O(n²) | Med | W7.5 | 0.13.6 ✅ |
 | 3.1 | `as_of` mixes valid time and transaction time | High | W5.6 / W7.1 | both |
 | 3.2 | `AtTime` degrades silently after archive | Med | W9.1 | 0.13.16 ✅ |
@@ -2333,6 +2333,20 @@ amortised.
 > its indices are `nodes`' key order. That is the tie-break drift a
 > representation change has to be checked against every time, and here it is
 > what stopped one.
+>
+> **6. The guard flaked once, and was rebuilt in 0.13.31
+> ([D-204](../docs/architecture/s13-decision-register.md#d-204)).** It failed
+> against correct code on attempt 3 of the 0.13.30 battery, then passed 10/10
+> alone. Subtracting a separately measured 175 ms precondition from a 175 ms
+> measurement recovers a 0.1 ms search only as well as the two agree, and they
+> agree to ~2% — 3 ms of phantom search, thirty times the quantity. Each run is
+> now **paired** with its own baseline and the minimum taken over the
+> *differences*, which cancels the drift; the debug margin went from *20×–675×
+> across three runs* to pinned at the measurement floor every run, and the
+> reinstated regression still lands at 0.9×–1.4×. Point 3's reasoning about
+> wall-clock thresholds — that the failure mode is a flake that gets deleted —
+> applies to what replaced them, which is why this was fixed rather than
+> retried.
 
 **W10.6 — The two-dimensional index question, measured before it is answered.**
 Closes F-33. W7.1 makes bitemporal predicates expressible; this asks what they

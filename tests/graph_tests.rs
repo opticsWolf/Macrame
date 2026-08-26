@@ -381,50 +381,71 @@ fn a_near_goal_does_not_pay_for_the_whole_graph() {
         }
     }
 
-    // Both functions open with `debug_assert!(graph.is_closed())`, which is a
-    // walk of every edge in a debug build and compiled out in release. It is a
-    // precondition check and not the search, and in debug it is larger than
-    // either -- so it is measured here and taken off both sides. Without that
-    // this test compares two closure checks in the profile the suite actually
-    // runs in. The minimum of three runs, because overestimating this baseline
-    // is the direction that would let a regression through.
-    let mut closure_s = f64::MAX;
-    for _ in 0..3 {
-        let t = std::time::Instant::now();
-        assert!(g.is_closed(), "the fixture is closed by construction");
-        closure_s = closure_s.min(t.elapsed().as_secs_f64());
-    }
-    if !cfg!(debug_assertions) {
-        closure_s = 0.0;
+    assert!(g.is_closed(), "the fixture is closed by construction");
+
+    // Both functions open with `debug_assert!(graph.is_closed())`, which walks
+    // every edge in a debug build and is compiled out in release. It is a
+    // precondition and not the search, and in debug it is far larger than
+    // either search -- ~175 ms against a one-hop `astar` of ~0.1 ms -- so it
+    // has to come off both sides or this test compares two closure checks in
+    // the profile the suite actually runs in.
+    //
+    // **How it comes off is the repair of 0.13.31 (D-204), and it is not the
+    // obvious way.** 0.13.29 measured the closure once, measured each search
+    // once, and subtracted. That recovers a 0.1 ms quantity from a 175 ms
+    // measurement, so a 2% difference between two runs of the *same* walk
+    // reads as 3 ms of search -- and the margin moved between 20x and 675x
+    // across three consecutive runs on an idle machine. It failed once for
+    // that reason during the 0.13.30 battery while passing 10/10 alone.
+    //
+    // So each run is **paired** with a closure check taken immediately before
+    // it, and the minimum is over the *differences* rather than between two
+    // minima measured at different points in the test. Pairing cancels the
+    // drift that made the subtraction unreliable; the minimum survives a
+    // stall, since a stall inflates a sample and never deflates one. What is
+    // left is floored, because the honest answer for a six-node search is
+    // "below what this can measure" and a floor says that without pretending
+    // to a number.
+    fn search_time(g: &Subgraph, runs: usize, mut run: impl FnMut()) -> f64 {
+        let mut best = f64::MAX;
+        for _ in 0..runs {
+            let baseline = if cfg!(debug_assertions) {
+                let t = std::time::Instant::now();
+                assert!(g.is_closed());
+                t.elapsed().as_secs_f64()
+            } else {
+                0.0
+            };
+            let t = std::time::Instant::now();
+            run();
+            best = best.min(t.elapsed().as_secs_f64() - baseline);
+        }
+        best.max(1e-9)
     }
 
-    let t = std::time::Instant::now();
-    let full = dijkstra(&g, &node(0));
-    let dijkstra_s = t.elapsed().as_secs_f64();
-    assert_eq!(full.len(), N, "the chain should reach every node");
+    let mut reached = 0;
+    let dijkstra_search = search_time(&g, 3, || reached = dijkstra(&g, &node(0)).len());
+    assert_eq!(reached, N, "the chain should reach every node");
 
     // Inside the start's own clique: one hop, and at the cheapest cost there
     // is, so it is popped before the search leaves the first twelve nodes.
     let goal = node(5);
-    let t = std::time::Instant::now();
-    let near = macrame::graph::astar(&g, &node(0), &goal, |_, _| 0.0);
-    let astar_s = t.elapsed().as_secs_f64();
+    let mut near = None;
+    let astar_search = search_time(&g, 5, || {
+        near = macrame::graph::astar(&g, &node(0), &goal, |_, _| 0.0)
+    });
 
     let (cost, path) = near.expect("the goal is one hop from the start");
     assert_eq!(path, vec![node(0), goal], "one hop, and the path says so");
     assert_eq!(cost, 1.0);
 
-    // A floor, so that subtracting a baseline measured on a noisy machine
-    // cannot divide by something at or below zero.
-    let searching = |total: f64| (total - closure_s).max(1e-9);
-    let (astar_search, dijkstra_search) = (searching(astar_s), searching(dijkstra_s));
-
     assert!(
         astar_search * 20.0 < dijkstra_search,
         "a one-hop `astar` searched for {astar_search:.6}s against a whole-graph \
-         `dijkstra` at {dijkstra_search:.6}s on the same graph (closure check \
-         {closure_s:.6}s, taken off both) -- under 20x apart means `astar` is \
-         paying for nodes it never looks at, which is the regression D-202 removed"
+         `dijkstra` at {dijkstra_search:.6}s on the same graph (each the best of \
+         several runs, each paired with the precondition walk it opens with) -- \
+         under 20x apart means `astar` is paying for nodes it never looks at, \
+         which is the regression D-202 removed"
     );
 }
 
