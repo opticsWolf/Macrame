@@ -134,6 +134,7 @@ Every design decision derives from these invariants:
 - **One writer** — a dedicated Tokio task holds the sole write-capable connection
 - **Many readers** — WAL journaling; readers never block on writer
 - **Two-tier priority channels** — high-priority (user-driven) preempts low-priority (background)
+- **Shared as `Arc<Database>`, not cloned** — every method but `close()` takes `&self`, and `close()` takes `self` because shutdown has exactly one owner; `Arc::into_inner(db).expect("last handle").close().await` is the pattern. `Clone` is refused rather than missing: `cadence_stop` is a cloneable `watch::Sender` whose *drop* is what stops the snapshot task, so a second copy keeps it running against a closing database with nothing raising an error ([D-203](docs/architecture/s13-decision-register.md#d-203))
 - **Cooperative chunking** — bounded to ~3 ms per chunk, sized from each chunk's measured hold rather than from a constant, under four per-path ceilings (90 edges, 70 concepts, 600 annotations, 30 embeddings) and a 35-row floor
 
 ### Operational Controls (0.13.0)

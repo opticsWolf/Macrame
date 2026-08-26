@@ -814,6 +814,45 @@ enum LoopCtl {
 }
 
 /// Primary database handle for Macrame bitemporal ledger.
+///
+/// # Why this is not `Clone`, and what a multi-consumer caller uses instead
+///
+/// **Share it as `Arc<Database>`.** Every method here but one takes `&self`, so
+/// an `Arc` is a complete handle and not a workaround: reads run concurrently
+/// off `read_conn`, writes queue behind the actor's channel exactly as they do
+/// through a `&Database`, and nothing becomes serialised that was not
+/// serialised already. The exception is [`Database::close`], which takes `self`,
+/// so the last owner closes with
+/// `Arc::into_inner(db).expect("last handle").close().await`.
+///
+/// That exception is the whole reason `Clone` is absent. Cloning would have to
+/// duplicate **the right to shut down**, and each field carrying that right
+/// breaks differently when duplicated:
+///
+/// - `writer` is a [`tokio::task::JoinHandle`], which is not `Clone` at all —
+///   so a hand-written impl would have to give the copy a `None`, and
+///   `close()` on that copy returns `Ok(())` without ever checking the actor's
+///   exit status. That status is one of the two reasons [`Drop`] tells callers
+///   to prefer `close()`.
+/// - `cadence_stop` is a [`tokio::sync::watch::Sender`], which **is** `Clone`,
+///   and that is the worse case. Its contract is that *dropping* it stops the
+///   snapshot task; a watch channel closes when the last sender goes, so one
+///   surviving copy keeps that task running against a database that is going
+///   away. Nothing returns an error, which is why this is the argument rather
+///   than the `JoinHandle`.
+/// - `closed` is per-handle, so two copies disagree about whether the ledger
+///   was closed: `Drop` warns about a database that *was* closed, or stays
+///   silent about one that was not.
+///
+/// And the ordering `close()` documents — cadence stopped, actor joined, *then*
+/// the final snapshot, so that no write can land between the fold and the file
+/// — is only enforceable while one handle can perform it. A second `close()`
+/// writes a "final" snapshot with the actor still alive.
+///
+/// So the missing impl is the type saying shutdown has exactly one owner. The
+/// Python binding reached the same shape from the other side and for the same
+/// reason: `PyDatabase` holds a `RwLock<Option<Database>>` rather than a copy
+/// per caller (0.13.30, W11.1, D-203).
 pub struct Database {
     db: libsql::Database,
     /// The file this handle opened, kept so [`Database::diagnostic_conn`] can

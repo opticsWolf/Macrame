@@ -845,3 +845,95 @@ async fn every_chunked_path_reports_its_partial_count() {
         err.written as i64
     );
 }
+
+/// A multi-consumer caller shares this handle as `Arc<Database>`, and `Clone` is
+/// refused. This is what keeps it refused (0.13.30, W11.1, D-203).
+///
+/// Two halves, because the decision has two.
+///
+/// **The static half asserts a trait is absent**, which stable Rust has no bound
+/// for, so it is probed instead: an inherent method wins over a trait method
+/// when its bounds hold, and the inherent one below is bounded on `Clone`. So
+/// `is_clone()` answers `true` only for a type that has it, and the control
+/// assertion on `String` is there because a probe that always answered `false`
+/// would pass this test while proving nothing.
+///
+/// `watch::Sender<bool>` is probed too, and deliberately. It is the field that
+/// makes cloning a *silent* hazard rather than a compiler error: `cadence_stop`
+/// stops the snapshot task by being dropped, and a watch channel closes when
+/// the last sender goes. If tokio ever makes it non-`Clone`, that assertion
+/// fails and D-203's sharpest argument gets rewritten rather than quietly
+/// becoming untrue.
+///
+/// **The dynamic half asserts the replacement is real**: four tasks writing and
+/// reading through one `Arc`, then a close through `Arc::into_inner` — the
+/// sentence [`Database`]'s own rustdoc tells callers to write. An `Arc` that
+/// could not be closed would be a worse answer than `Clone`, so the pattern is
+/// executed here rather than only recommended.
+#[tokio::test]
+async fn a_database_is_shared_by_arc_and_is_deliberately_not_clone() {
+    use std::marker::PhantomData;
+    use std::sync::Arc;
+
+    struct Probe<T>(PhantomData<T>);
+    trait NotClone {
+        fn is_clone(&self) -> bool {
+            false
+        }
+    }
+    impl<T> NotClone for Probe<T> {}
+    impl<T: Clone> Probe<T> {
+        fn is_clone(&self) -> bool {
+            true
+        }
+    }
+
+    assert!(
+        Probe::<String>(PhantomData).is_clone(),
+        "the probe answers `false` for a type that is `Clone`, so the assertion \
+         below proves nothing -- fix the probe before trusting it"
+    );
+    assert!(
+        !Probe::<Database>(PhantomData).is_clone(),
+        "`Database` gained `Clone`, which duplicates the right to `close()`: the \
+         copy's `writer` cannot be joined so its exit status goes unchecked, its \
+         `cadence_stop` keeps the snapshot task alive against a closing database, \
+         and whichever copy closes second writes a \"final\" snapshot with the \
+         actor still running. Share it as `Arc<Database>` instead -- D-203."
+    );
+    assert!(
+        Probe::<tokio::sync::watch::Sender<bool>>(PhantomData).is_clone(),
+        "`watch::Sender` is no longer `Clone`, so D-203's argument about \
+         `cadence_stop` no longer holds as written and wants revisiting"
+    );
+
+    let harness = TestHarness::new();
+    let db = Arc::new(Database::open(&harness.db_path).await.unwrap());
+    seed_nodes(&db, ["A".to_string(), "B".to_string()]).await;
+
+    // Four tasks on one handle, through `&self` alone: the writes serialise
+    // behind the actor exactly as they would through a `&Database`, which is
+    // the claim that makes `Arc` a complete handle rather than a workaround.
+    let mut tasks = Vec::new();
+    for i in 0..4 {
+        let db = Arc::clone(&db);
+        tasks.push(tokio::spawn(async move {
+            let concept = ConceptUpsert::new(format!("N{i}"), format!("Node {i}")).valid_from(T1);
+            db.write_concepts(vec![concept]).await.unwrap();
+            count(&db, "SELECT COUNT(*) FROM concepts").await
+        }));
+    }
+    for task in tasks {
+        task.await.unwrap();
+    }
+    assert_eq!(
+        count(&db, "SELECT COUNT(*) FROM concepts").await,
+        6,
+        "two seeded plus one per task"
+    );
+
+    // `into_inner` returning `None` is a caller being told a handle is still
+    // live -- which is what having one owner of shutdown is for.
+    let db = Arc::into_inner(db).expect("every task has finished, so this is the last handle");
+    db.close().await.unwrap();
+}

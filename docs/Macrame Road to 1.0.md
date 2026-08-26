@@ -281,7 +281,7 @@ branching lands.** This is the one item in this document I would cut first if
 | 4.4 | Metrics surface frozen by accident | High | W4.2, W4.3 | 0.13.0 |
 | 4.5 | No WAL / checkpoint surface | Med | W5.2 | 0.13.0 |
 | 4.6 | Six gaps in the Python surface | Med | W6 | 0.13.0 |
-| 4.7 | `Database` is not `Clone` | Low | W11.1 | 0.14.0 |
+| 4.7 | `Database` is not `Clone` | Low | W11.1 (decided: it stays) | 0.14.0 ✅ |
 | 5.1 | R15 reaches the main suite | High | W1 | 0.13.0 |
 | 5.2 | Index registry is one-directional | Med | W2.3 | 0.13.0 |
 | 5.3 | No performance regression detection | Med | W10.1 | 0.14.0 ✅ |
@@ -2419,6 +2419,49 @@ additive** — adding `Clone` never breaks anyone — so this is the one item he
 that is genuinely safe to defer, and it is included because deciding it costs
 ten minutes and leaving it undecided costs every new caller five.
 
+> **✅ Shipped 0.13.30 (recorded as
+> [D-203](../docs/architecture/s13-decision-register.md#d-203)). It stays not
+> `Clone`. `Arc<Database>` is the shared handle, and the reason is stated on the
+> type rather than apologised for in the README.**
+>
+> **1. What `Clone` would duplicate is the right to shut down.** `writer` is a
+> `JoinHandle` and not cloneable at all, so a copy's `close()` could never check
+> the actor's exit status. `closed` is per-handle, so two copies disagree about
+> whether the ledger was closed. **The field that decides it is `cadence_stop`,
+> which *is* `Clone`** — its contract is that *dropping* it stops the snapshot
+> task, and a watch channel closes when the last sender goes, so one surviving
+> copy keeps that task writing against a database that is going away with
+> nothing returning an error. The un-cloneable field is a compiler fact; the
+> cloneable one is the decision.
+>
+> **2. `Arc` is not a consolation prize.** Every method but `close` takes
+> `&self`, so an `Arc` is a complete handle — nothing becomes serialised that
+> the actor was not serialising already. `Arc::into_inner(db).expect("last
+> handle").close().await` is the close, and the `None` arm is a caller being
+> told a handle is still live at the moment it matters.
+>
+> **3. The one multi-consumer caller this repo has already agreed.**
+> `PyDatabase` holds a `RwLock<Option<Database>>` rather than a copy per caller,
+> because Python cannot express a by-value `close()` and the uniqueness had to
+> be rebuilt by hand. It did not want `Clone` and would not have used it.
+>
+> **4. The gate is a probe, and it was mutation-tested.** Stable Rust has no
+> `!Clone` bound, so an inherent `Clone`-bounded method is raced against a trait
+> default of `false`. Three assertions: `String` as a control, `Database` as the
+> subject, and `watch::Sender<bool>` so that point 1 fails loudly if tokio ever
+> changes it. Confirmed by adding `impl Clone for Database` to the crate and
+> watching the test fail — the impl need only *exist*. The same test then runs
+> the replacement end to end: four tasks through one `Arc`, closed through
+> `into_inner`.
+>
+> **5. §15.4's prerequisite is discharged in the negative, and §15.4 is
+> amended.** Wave 15 assumed `Clone` would land and called it a prerequisite for
+> a branch-scoped view. It is a prerequisite, and the answer is that a view
+> **must not** be the same handle with a lineage field — it must not carry the
+> right to close the database it reads through. It is a separate type over an
+> `Arc<Database>` and a `BranchId`, which is `Clone` because it owns no
+> lifecycle.
+
 **W11.2 — Walk the public surface once, deliberately.** `cargo public-api`
 against 0.13.0, and for every item ask whether it is intended to be supported
 for the life of 1.x. Everything that is not either becomes `#[doc(hidden)]`,
@@ -2591,9 +2634,17 @@ same fixture unbranched.
 **In:**
 
 - `Database::fork(name, from) -> BranchId`, `branches()`, and a branch-scoped
-  read view. The view is a handle, which is why **W11.1 (`Database: Clone`) is a
-  prerequisite** — a branch view is the same actor with a lineage attached, and
-  cloning is how it stops being a second `Arc` in every caller's code.
+  read view. **W11.1 was a prerequisite and answered it in the negative
+  ([D-203](../docs/architecture/s13-decision-register.md#d-203)), which changes
+  the shape of this item.** This bullet used to read *"the view is a handle …
+  cloning is how it stops being a second `Arc` in every caller's code"*, on the
+  assumption `Database: Clone` would land in 0.13.x. It does not, and a branch
+  view is the reason it should not: a view must **not** carry the right to
+  `close()` the database it reads through, or a caller who forks one, reads it
+  and drops it is one call away from stopping the actor everyone else is using.
+  So the view is a **separate type** over an `Arc<Database>` and a `BranchId` —
+  `Clone`, because it owns no lifecycle — and not a `Database` with a field
+  added.
 - **`diff(a, b)`** — what branch A asserts that B does not. For the motivating
   use case this is the payload: *what did this exploration conclude that the
   trunk does not know*. It is also cheap in this design, because divergence is
