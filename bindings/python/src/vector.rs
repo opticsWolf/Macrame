@@ -146,6 +146,11 @@ impl From<VectorFilterStrategy> for PyFilterStrategy {
         match s {
             VectorFilterStrategy::PostFilter => PyFilterStrategy::PostFilter,
             VectorFilterStrategy::PreFilterCTE => PyFilterStrategy::PreFilterCte,
+            // See `types.rs`'s arm for `AttributeMode`: mandatory under
+            // `#[non_exhaustive]` (0.13.34, D-207), unreachable while
+            // `binding_parity_tests` passes, and a panic because naming the
+            // wrong strategy is a wrong answer rather than a missing one.
+            other => unreachable!("unmapped VectorFilterStrategy: {other:?}"),
         }
     }
 }
@@ -200,6 +205,11 @@ impl PyCostEstimate {
             match self.inner.strategy {
                 VectorFilterStrategy::PostFilter => "POST_FILTER",
                 VectorFilterStrategy::PreFilterCTE => "PRE_FILTER_CTE",
+                // A `__repr__` must not panic -- it is what a debugger and a
+                // traceback call -- so this one arm degrades instead. The
+                // strategy is still readable through the `strategy` getter,
+                // which does panic, so nothing is silently hidden.
+                _ => "UNKNOWN",
             },
             self.inner.candidates.lower_bound(),
             if self.inner.candidates.is_capped() {

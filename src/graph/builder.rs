@@ -3,6 +3,7 @@ use crate::temporal::as_of::NodeAttributes;
 
 /// Attribute hydration mode for temporal traversals (§5.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
 pub enum AttributeMode {
     /// Live attributes from concepts table. Fast. Documented as WRONG for historical text.
     Current,

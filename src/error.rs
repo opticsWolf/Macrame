@@ -57,6 +57,7 @@ impl Overlap {
 ///
 /// [D-177]: ../docs/architecture/s13-decision-register.md#d-177
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum StatedInstants {
     /// `as_of_valid` alone — *what was true then*.
     Valid(String),
@@ -125,6 +126,7 @@ impl std::fmt::Display for StatedInstants {
 
 /// Central error type for the Macrame bitemporal ledger database.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum DbError {
     #[error("engine: {0}")]
     Engine(#[from] libsql::Error),
@@ -597,6 +599,7 @@ pub type BulkResult<T> = std::result::Result<T, BulkInterrupted>;
 
 /// A guard abort recognised by its message (§4.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum AbortKind {
     SingleOpenInterval,
     RecordedAtRegression,
@@ -633,6 +636,7 @@ pub fn abort_kind(err: &libsql::Error) -> AbortKind {
 }
 
 /// What a failing statement was trying to do, so a guard abort can name it.
+#[non_exhaustive]
 pub enum WriteOp<'a> {
     Edge {
         source_id: &'a str,

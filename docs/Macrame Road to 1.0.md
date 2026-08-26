@@ -2507,8 +2507,10 @@ release so that each ships its own diff:
 > and `LowPriCommand` are `pub`, putting **17 `tokio::sync::oneshot::Sender`
 > signatures** into the API on enums nothing outside can construct — with
 > `ChunkOutcome` public only as collateral, which its own rustdoc already said.
-> `DbError`'s **44 variants** are exhaustive, as are eight domain enums, so
-> adding an error variant post-1.0 would break every downstream `match`. And
+> `DbError`'s variants are exhaustive, as are nine domain enums, so
+> adding an error variant post-1.0 would break every downstream `match`. (This
+> block said **44 variants** and eight enums; W11.2c corrects both to **33**
+> and nine.) And
 > **39 public modules** give most types two to four supported paths, freezing
 > the internal file layout as public API.
 >
@@ -2559,6 +2561,41 @@ release so that each ships its own diff:
 > private items' docs still resolve, because `private_intra_doc_links` fires
 > on the documented item's visibility. One improved: `chunk_rows` now points
 > at `Database::write_bulk_atomic`, which a reader can actually call.
+
+> **✅ W11.2c shipped 0.13.34 (recorded as
+> [D-207](../docs/architecture/s13-decision-register.md#d-207)).**
+>
+> **1. `DbError` and nine domain enums are `#[non_exhaustive]`**, so a post-1.0
+> error variant is a minor version. Four arrived in the last four waves alone
+> — `ArchiveSessionLeaked`, `FutureRecordedAt`, `BulkCancelled`,
+> `SnapshotCorrupt` — and the alternative is that the first one after 1.0 does
+> not get added, so the ledger reports the wrong error rather than a new one.
+>
+> **2. The gate it costs was bought back, not written off.** D-099 argued that
+> completeness of the Python error mapping is the *compiler's* job — and that
+> argument was right. `#[non_exhaustive]` makes the wildcard arm mandatory,
+> which is the exact thing it was written to refuse.
+> `tests/binding_parity_tests.rs` replaces it, in the crate that **defines**
+> `DbError`, reading the binding from disk. Placement is the point: the Python
+> equivalents need a built wheel, and the risk is a variant added by someone
+> who never builds the binding.
+>
+> **3. Weaker in two ways, wider in one.** It runs rather than compiles, and it
+> reads text. But the compiler only ever checked that a variant had an arm;
+> this also pins that every variant is sampled, that no two share an exception
+> class, and that the count is the one recorded.
+>
+> **4. The count was wrong in four places, with four different answers** — 24
+> in the binding plan, 27 in `errors.rs`, §14.3 and D-099, and **44** in
+> D-205, which is the number of *lines* in the listing after fields expand. It
+> is **33**. A count nothing checks is a count that drifts, and the fix is a
+> test rather than more care.
+>
+> **5. Every gate was mutation-tested, and one of them failed.** Deleting an
+> arm, sharing a class, and adding a variant upstream all produced the right
+> failure; deleting one direction of the `AttributeMode` conversion **passed**,
+> because the name survived in the other direction. The test now compares
+> counts per variant rather than sets of names.
 
 [D-147]: ../docs/architecture/s13-decision-register.md#d-147
 

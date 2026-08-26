@@ -80,6 +80,14 @@ impl From<AttributeMode> for PyAttributeMode {
             AttributeMode::Current => PyAttributeMode::Current,
             AttributeMode::AtTime => PyAttributeMode::AtTime,
             AttributeMode::Omit => PyAttributeMode::Omit,
+            // `#[non_exhaustive]` (0.13.34, D-207) makes this mandatory, and
+            // `binding_parity_tests` makes it unreachable. Unlike the error
+            // path there is no honest fallback: `From` cannot fail, and every
+            // candidate answer here is a *wrong* hydration mode silently
+            // applied to a query. Panicking is the only option that does not
+            // return a lie, and it can only fire in a build where a variant was
+            // added upstream and this arm was not.
+            other => unreachable!("unmapped AttributeMode: {other:?}"),
         }
     }
 }

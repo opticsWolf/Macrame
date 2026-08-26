@@ -52,6 +52,7 @@ use crate::vector::{declared_dimension, ModelName, VectorSearchResult};
 
 /// Strategy for combining vector search and graph traversal filters (§5.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
 pub enum VectorFilterStrategy {
     /// Vector top-k′ from the index first, then discard what fails the filter.
     ///
@@ -76,6 +77,7 @@ pub enum VectorFilterStrategy {
 /// under a cap — and a probe that hits its cap has not measured anything except
 /// that the set is too big to care about the exact size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CandidateCount {
     /// The traversal returned this many ids, below the cap.
     Exact(usize),

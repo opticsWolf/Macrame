@@ -23,6 +23,7 @@ pub const DEFAULT_FUTURE_STAMP_TOLERANCE: Duration = Duration::from_secs(24 * 60
 /// guards an invariant, so "leave it alone" must not be spelt with an `Option`
 /// whose `None` turns it off for every caller who never heard of it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum FutureStampPolicy {
     /// Refuse beyond [`DEFAULT_FUTURE_STAMP_TOLERANCE`].
     #[default]

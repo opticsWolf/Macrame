@@ -157,7 +157,7 @@ macrame/
 ├── bindings/python/src/        # §14 — pyo3 0.29, maturin; the wheel `macrame-db`
 │   ├── lib.rs                  #   module init and the exported surface
 │   ├── database.rs             #   the handle: frozen pyclass over RwLock<Option<Database>>
-│   ├── errors.rs               #   wildcard-free match over DbError (D-099)
+│   ├── errors.rs               #   one arm per DbError variant (D-099, D-207)
 │   └── graph.rs, temporal.rs, vector.rs, rows.rs, types.rs, …
 ├── python/macrame/             # the Python-side package: __init__.py, _macrame.pyi
 └── tests_py/                   # pytest suite; probes/ holds the R15 reproducers (D-107)

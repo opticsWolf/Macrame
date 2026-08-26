@@ -126,12 +126,12 @@ pub const macrame::connection::CHUNK_BUDGET: core::time::Duration
 pub const macrame::connection::MAX_ARCHIVE_SESSIONS: usize
 pub fn macrame::connection::estimated_bulk_hold(&[macrame::graph::edge::EdgeAssertion]) -> core::time::Duration
 pub mod macrame::error
-pub enum macrame::error::AbortKind
+#[non_exhaustive] pub enum macrame::error::AbortKind
 pub macrame::error::AbortKind::DeleteOutsideArchive
 pub macrame::error::AbortKind::NotAGuard
 pub macrame::error::AbortKind::RecordedAtRegression
 pub macrame::error::AbortKind::SingleOpenInterval
-pub enum macrame::error::DbError
+#[non_exhaustive] pub enum macrame::error::DbError
 pub macrame::error::DbError::ArchiveSessionLeaked
 pub macrame::error::DbError::ArchiveSessionLeaked::marker: alloc::string::String
 pub macrame::error::DbError::ArchiveViolation
@@ -210,7 +210,7 @@ pub macrame::error::DbError::WriterStopped(alloc::string::String)
 pub macrame::error::DbError::WriterUnavailable
 impl core::convert::From<macrame::error::BulkInterrupted> for macrame::error::DbError
 pub fn macrame::error::DbError::from(macrame::error::BulkInterrupted) -> Self
-pub enum macrame::error::StatedInstants
+#[non_exhaustive] pub enum macrame::error::StatedInstants
 pub macrame::error::StatedInstants::Both
 pub macrame::error::StatedInstants::Both::recorded: alloc::string::String
 pub macrame::error::StatedInstants::Both::valid: alloc::string::String
@@ -222,7 +222,7 @@ pub fn macrame::error::StatedInstants::recorded(&self) -> core::option::Option<&
 pub fn macrame::error::StatedInstants::valid(&self) -> core::option::Option<&str>
 impl core::fmt::Display for macrame::error::StatedInstants
 pub fn macrame::error::StatedInstants::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-pub enum macrame::error::WriteOp<'a>
+#[non_exhaustive] pub enum macrame::error::WriteOp<'a>
 pub macrame::error::WriteOp::Annotation
 pub macrame::error::WriteOp::Annotation::concept_id: &'a str
 pub macrame::error::WriteOp::Concept
@@ -269,7 +269,7 @@ pub fn macrame::graph::algorithms::louvain(&macrame::graph::subgraph::Subgraph) 
 pub fn macrame::graph::algorithms::modularity(&macrame::graph::subgraph::Subgraph, &alloc::collections::btree::map::BTreeMap<alloc::string::String, usize>) -> f64
 pub fn macrame::graph::algorithms::scc(&macrame::graph::subgraph::Subgraph) -> alloc::vec::Vec<alloc::vec::Vec<alloc::string::String>>
 pub mod macrame::graph::builder
-pub enum macrame::graph::builder::AttributeMode
+#[non_exhaustive] pub enum macrame::graph::builder::AttributeMode
 pub macrame::graph::builder::AttributeMode::AtTime
 pub macrame::graph::builder::AttributeMode::Current
 pub macrame::graph::builder::AttributeMode::Omit
@@ -352,13 +352,13 @@ pub fn macrame::graph::subgraph::Subgraph::total_weight(&self) -> f64
 pub fn macrame::graph::subgraph::Subgraph::weighted_degree(&self, &str) -> f64
 pub async fn macrame::graph::subgraph::Subgraph::write_back_annotations(&self, &macrame::connection::Database, &str, &alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::string::String>) -> macrame::error::BulkResult<usize>
 pub mod macrame::graph::vector_filter
-pub enum macrame::graph::vector_filter::CandidateCount
+#[non_exhaustive] pub enum macrame::graph::vector_filter::CandidateCount
 pub macrame::graph::vector_filter::CandidateCount::AtLeast(usize)
 pub macrame::graph::vector_filter::CandidateCount::Exact(usize)
 impl macrame::graph::vector_filter::CandidateCount
 pub fn macrame::graph::vector_filter::CandidateCount::is_capped(self) -> bool
 pub fn macrame::graph::vector_filter::CandidateCount::lower_bound(self) -> usize
-pub enum macrame::graph::vector_filter::VectorFilterStrategy
+#[non_exhaustive] pub enum macrame::graph::vector_filter::VectorFilterStrategy
 pub macrame::graph::vector_filter::VectorFilterStrategy::PostFilter
 pub macrame::graph::vector_filter::VectorFilterStrategy::PreFilterCTE
 pub struct macrame::graph::vector_filter::CostEstimate
@@ -386,17 +386,17 @@ pub fn macrame::graph::vector_filter::FilteredVectorSearch::strategy(self, macra
 pub fn macrame::graph::vector_filter::FilteredVectorSearch::top_k(self, usize) -> Self
 pub const macrame::graph::vector_filter::DEFAULT_BYTE_BUDGET: usize
 pub const macrame::graph::vector_filter::DEFAULT_PROBE_CAP: usize
-pub enum macrame::graph::AttributeMode
+#[non_exhaustive] pub enum macrame::graph::AttributeMode
 pub macrame::graph::AttributeMode::AtTime
 pub macrame::graph::AttributeMode::Current
 pub macrame::graph::AttributeMode::Omit
-pub enum macrame::graph::CandidateCount
+#[non_exhaustive] pub enum macrame::graph::CandidateCount
 pub macrame::graph::CandidateCount::AtLeast(usize)
 pub macrame::graph::CandidateCount::Exact(usize)
 impl macrame::graph::vector_filter::CandidateCount
 pub fn macrame::graph::vector_filter::CandidateCount::is_capped(self) -> bool
 pub fn macrame::graph::vector_filter::CandidateCount::lower_bound(self) -> usize
-pub enum macrame::graph::VectorFilterStrategy
+#[non_exhaustive] pub enum macrame::graph::VectorFilterStrategy
 pub macrame::graph::VectorFilterStrategy::PostFilter
 pub macrame::graph::VectorFilterStrategy::PreFilterCTE
 pub struct macrame::graph::CostEstimate
@@ -512,7 +512,7 @@ pub macrame::integrity::rebuild::RebuildReport::drift_after: usize
 pub macrame::integrity::rebuild::RebuildReport::rows_rebuilt: usize
 pub async fn macrame::integrity::rebuild::rebuild_current(&libsql::connection::Connection) -> macrame::error::Result<macrame::integrity::rebuild::RebuildReport>
 pub mod macrame::integrity::shadow
-pub enum macrame::integrity::shadow::ShadowOutcome
+#[non_exhaustive] pub enum macrame::integrity::shadow::ShadowOutcome
 pub macrame::integrity::shadow::ShadowOutcome::Filled
 pub macrame::integrity::shadow::ShadowOutcome::Filled::last: core::option::Option<alloc::string::String>
 pub macrame::integrity::shadow::ShadowOutcome::Started
@@ -520,14 +520,14 @@ pub macrame::integrity::shadow::ShadowOutcome::Started::build_start: alloc::stri
 pub macrame::integrity::shadow::ShadowOutcome::Started::epoch: u64
 pub macrame::integrity::shadow::ShadowOutcome::Swapped
 pub macrame::integrity::shadow::ShadowOutcome::Swapped::rows: usize
-pub enum macrame::integrity::shadow::ShadowStep
+#[non_exhaustive] pub enum macrame::integrity::shadow::ShadowStep
 pub macrame::integrity::shadow::ShadowStep::Begin
 pub macrame::integrity::shadow::ShadowStep::Fill
 pub macrame::integrity::shadow::ShadowStep::Fill::after: core::option::Option<alloc::string::String>
 pub macrame::integrity::shadow::ShadowStep::Swap
 pub macrame::integrity::shadow::ShadowStep::Swap::build_start: alloc::string::String
 pub macrame::integrity::shadow::ShadowStep::Swap::epoch: u64
-pub enum macrame::integrity::ShadowOutcome
+#[non_exhaustive] pub enum macrame::integrity::ShadowOutcome
 pub macrame::integrity::ShadowOutcome::Filled
 pub macrame::integrity::ShadowOutcome::Filled::last: core::option::Option<alloc::string::String>
 pub macrame::integrity::ShadowOutcome::Started
@@ -535,7 +535,7 @@ pub macrame::integrity::ShadowOutcome::Started::build_start: alloc::string::Stri
 pub macrame::integrity::ShadowOutcome::Started::epoch: u64
 pub macrame::integrity::ShadowOutcome::Swapped
 pub macrame::integrity::ShadowOutcome::Swapped::rows: usize
-pub enum macrame::integrity::ShadowStep
+#[non_exhaustive] pub enum macrame::integrity::ShadowStep
 pub macrame::integrity::ShadowStep::Begin
 pub macrame::integrity::ShadowStep::Fill
 pub macrame::integrity::ShadowStep::Fill::after: core::option::Option<alloc::string::String>
@@ -627,7 +627,7 @@ pub const macrame::prelude::chunk_rows::ANNOTATIONS: usize
 pub const macrame::prelude::chunk_rows::CONCEPTS: usize
 pub const macrame::prelude::chunk_rows::EDGES: usize
 pub const macrame::prelude::chunk_rows::EMBEDDINGS: usize
-pub enum macrame::prelude::AttributeMode
+#[non_exhaustive] pub enum macrame::prelude::AttributeMode
 pub macrame::prelude::AttributeMode::AtTime
 pub macrame::prelude::AttributeMode::Current
 pub macrame::prelude::AttributeMode::Omit
@@ -635,7 +635,7 @@ pub macrame::prelude::AttributeMode::Omit
 pub macrame::prelude::CadencePolicy::Default
 pub macrame::prelude::CadencePolicy::Disabled
 pub macrame::prelude::CadencePolicy::Every(macrame::temporal::snapshot::SnapshotCadence)
-pub enum macrame::prelude::CandidateCount
+#[non_exhaustive] pub enum macrame::prelude::CandidateCount
 pub macrame::prelude::CandidateCount::AtLeast(usize)
 pub macrame::prelude::CandidateCount::Exact(usize)
 impl macrame::graph::vector_filter::CandidateCount
@@ -668,7 +668,7 @@ pub const fn macrame::metrics::CommandKind::exempt_from_budget(self) -> bool
 pub const fn macrame::metrics::CommandKind::index(self) -> usize
 impl core::fmt::Display for macrame::metrics::CommandKind
 pub fn macrame::metrics::CommandKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-pub enum macrame::prelude::DbError
+#[non_exhaustive] pub enum macrame::prelude::DbError
 pub macrame::prelude::DbError::ArchiveSessionLeaked
 pub macrame::prelude::DbError::ArchiveSessionLeaked::marker: alloc::string::String
 pub macrame::prelude::DbError::ArchiveViolation
@@ -747,11 +747,11 @@ pub macrame::prelude::DbError::WriterStopped(alloc::string::String)
 pub macrame::prelude::DbError::WriterUnavailable
 impl core::convert::From<macrame::error::BulkInterrupted> for macrame::error::DbError
 pub fn macrame::error::DbError::from(macrame::error::BulkInterrupted) -> Self
-pub enum macrame::prelude::FutureStampPolicy
+#[non_exhaustive] pub enum macrame::prelude::FutureStampPolicy
 pub macrame::prelude::FutureStampPolicy::Allow
 pub macrame::prelude::FutureStampPolicy::Default
 pub macrame::prelude::FutureStampPolicy::Tolerance(core::time::Duration)
-pub enum macrame::prelude::StatedInstants
+#[non_exhaustive] pub enum macrame::prelude::StatedInstants
 pub macrame::prelude::StatedInstants::Both
 pub macrame::prelude::StatedInstants::Both::recorded: alloc::string::String
 pub macrame::prelude::StatedInstants::Both::valid: alloc::string::String
@@ -763,7 +763,7 @@ pub fn macrame::error::StatedInstants::recorded(&self) -> core::option::Option<&
 pub fn macrame::error::StatedInstants::valid(&self) -> core::option::Option<&str>
 impl core::fmt::Display for macrame::error::StatedInstants
 pub fn macrame::error::StatedInstants::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-pub enum macrame::prelude::VectorFilterStrategy
+#[non_exhaustive] pub enum macrame::prelude::VectorFilterStrategy
 pub macrame::prelude::VectorFilterStrategy::PostFilter
 pub macrame::prelude::VectorFilterStrategy::PreFilterCTE
 #[non_exhaustive] pub enum macrame::prelude::WalCheckpointPolicy
@@ -1250,7 +1250,7 @@ pub async fn macrame::temporal::verify_snapshot_chain(&libsql::connection::Conne
 pub async fn macrame::temporal::write_final(&libsql::connection::Connection, &std::path::Path, &str, core::option::Option<&std::path::Path>) -> macrame::error::Result<std::path::PathBuf>
 pub mod macrame::util
 pub mod macrame::util::clock
-pub enum macrame::util::clock::FutureStampPolicy
+#[non_exhaustive] pub enum macrame::util::clock::FutureStampPolicy
 pub macrame::util::clock::FutureStampPolicy::Allow
 pub macrame::util::clock::FutureStampPolicy::Default
 pub macrame::util::clock::FutureStampPolicy::Tolerance(core::time::Duration)
@@ -1296,7 +1296,7 @@ pub fn macrame::util::timestamp::format(std::time::SystemTime) -> alloc::string:
 pub fn macrame::util::timestamp::is_canonical(&str) -> bool
 pub fn macrame::util::timestamp::normalize(&str) -> macrame::error::Result<alloc::string::String>
 pub fn macrame::util::timestamp::parse(&str) -> macrame::error::Result<std::time::SystemTime>
-pub enum macrame::util::FutureStampPolicy
+#[non_exhaustive] pub enum macrame::util::FutureStampPolicy
 pub macrame::util::FutureStampPolicy::Allow
 pub macrame::util::FutureStampPolicy::Default
 pub macrame::util::FutureStampPolicy::Tolerance(core::time::Duration)
@@ -1415,7 +1415,7 @@ pub async fn macrame::vector::search_vector(&libsql::connection::Connection, &[f
 pub macrame::CadencePolicy::Default
 pub macrame::CadencePolicy::Disabled
 pub macrame::CadencePolicy::Every(macrame::temporal::snapshot::SnapshotCadence)
-pub enum macrame::DbError
+#[non_exhaustive] pub enum macrame::DbError
 pub macrame::DbError::ArchiveSessionLeaked
 pub macrame::DbError::ArchiveSessionLeaked::marker: alloc::string::String
 pub macrame::DbError::ArchiveViolation
@@ -1494,11 +1494,11 @@ pub macrame::DbError::WriterStopped(alloc::string::String)
 pub macrame::DbError::WriterUnavailable
 impl core::convert::From<macrame::error::BulkInterrupted> for macrame::error::DbError
 pub fn macrame::error::DbError::from(macrame::error::BulkInterrupted) -> Self
-pub enum macrame::FutureStampPolicy
+#[non_exhaustive] pub enum macrame::FutureStampPolicy
 pub macrame::FutureStampPolicy::Allow
 pub macrame::FutureStampPolicy::Default
 pub macrame::FutureStampPolicy::Tolerance(core::time::Duration)
-pub enum macrame::StatedInstants
+#[non_exhaustive] pub enum macrame::StatedInstants
 pub macrame::StatedInstants::Both
 pub macrame::StatedInstants::Both::recorded: alloc::string::String
 pub macrame::StatedInstants::Both::valid: alloc::string::String

@@ -1,7 +1,8 @@
 //! The exception hierarchy (P2).
 //!
-//! `DbError` has **27 variants** — the plan said 24, and undercounting it is
-//! part of why this is worth doing carefully — and the crate spent several
+//! `DbError` has **33 variants** — the plan said 24, this file said 27 for
+//! four releases, and undercounting it is part of why this is worth doing
+//! carefully — and the crate spent several
 //! releases making them specific. `DiagnosticConn` exists rather than
 //! `NotFound` because an error naming the wrong subject sends a caller to fix
 //! the wrong thing (D-069); the same argument produced `InvalidTimestamp`
@@ -14,19 +15,38 @@
 //! `str(e)` is still exactly the `#[error]` rendering, so a caller who only
 //! wants the sentence loses nothing.
 //!
-//! # Completeness is enforced by the compiler, not by a test
+//! # Completeness was enforced by the compiler until 0.13.34, and now by a test
 //!
-//! [`build`] is a `match` over `DbError` **with no wildcard arm**. Adding a
-//! variant upstream therefore fails to compile `macrame-py`, at the exact line
-//! that needs a decision, before any wheel is built. That is strictly stronger
-//! than the rule-enforcement test this project would otherwise reach for: a
-//! test can only run after the thing exists, and the failure mode being
-//! guarded against — a new variant quietly falling through to the base class —
-//! is one a wildcard arm would make invisible.
+//! Through 0.13.33 [`build`] was a `match` over `DbError` **with no wildcard
+//! arm**, so adding a variant upstream failed to compile `macrame-py` at the
+//! exact line that needed a decision. That was the stronger mechanism and it
+//! is gone, deliberately: `DbError` is `#[non_exhaustive]` from 0.13.34
+//! ([D-207]), because a crate that will certainly add error variants after 1.0
+//! cannot have each addition be a major version. `#[non_exhaustive]` buys that
+//! by making the wildcard arm below mandatory, and the wildcard arm is exactly
+//! the thing the old paragraph here was written to refuse.
 //!
-//! `tests_py/test_errors.py` still exists, and it checks the half a compiler
-//! cannot: that the classes are reachable from `macrame`, that the hierarchy is
-//! what it claims, and that the attributes are actually populated.
+//! What replaces it is `tests/binding_parity_tests.rs`, in the *defining*
+//! crate, which reads this file from disk and fails when a declared variant has
+//! no arm here. Three honest differences from the compiler, stated rather than
+//! glossed:
+//!
+//! - It runs instead of compiling, so the failure arrives one step later.
+//! - It reads text, so an arm that exists but is unreachable would satisfy it.
+//! - It is in the Rust suite, so unlike `tests_py/test_errors.py` it needs no
+//!   wheel — which matters, because the wildcard arm's whole risk is a variant
+//!   added by someone who never builds the binding.
+//!
+//! It is also strictly wider than the compiler was: the same test pins the
+//! sample table in [`crate::testing`] and the one-class-per-variant rule, and
+//! both of those were previously checked only from Python.
+//!
+//! `tests_py/test_errors.py` still exists, and it checks the half neither a
+//! compiler nor a text test can: that the classes are reachable from
+//! `macrame`, that the hierarchy is what it claims, and that the attributes are
+//! actually populated.
+//!
+//! [D-207]: ../../../docs/architecture/s13-decision-register.md
 //!
 //! # The hierarchy
 //!
@@ -488,7 +508,8 @@ pub(crate) fn to_py_bulk(err: BulkInterrupted) -> PyErr {
     })
 }
 
-/// The mapping. **No wildcard arm** — see the module docs.
+/// The mapping. One arm per variant, plus the wildcard
+/// `#[non_exhaustive]` requires — see the module docs for what guards it.
 fn build(py: Python<'_>, err: DbError) -> PyErr {
     // Taken before the fields are moved out, so every exception's `str()` is
     // the ledger's own `#[error]` rendering verbatim.
@@ -692,6 +713,19 @@ fn build(py: Python<'_>, err: DbError) -> PyErr {
                 e.setattr("limit", limit)
             })
         }
+
+        // Required by `#[non_exhaustive]` (0.13.34, D-207), and unreachable
+        // while `binding_parity_tests` passes.
+        //
+        // `MacrameError` and not a panic. A variant that reaches here is one
+        // this file has never heard of, which means the wheel was built against
+        // a newer `macrame-db` than it was written for -- an ordinary
+        // version-skew situation, not a corrupted one. `str(e)` is still the
+        // ledger's own rendering, so the caller gets the whole sentence and
+        // `except macrame.MacrameError` still catches it; what they lose is the
+        // specific class and the attributes, which is the honest amount to lose
+        // for an error the binding cannot describe.
+        _ => raise::<MacrameError, _>(py, m, |_| Ok(())),
     }
 }
 

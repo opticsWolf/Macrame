@@ -245,7 +245,8 @@ object raises and what pytest surfaces.
 <a id="143-errors"></a>
 ### 14.3 Errors
 
-`DbError` has **27 variants** and every one maps to its own Python class, with its
+`DbError` has **33 variants** — the count was published as 24, then 27, and
+[D-207](s13-decision-register.md#d-207) is where it was finally read off the enum — and every one maps to its own Python class, with its
 structured fields set as attributes and `str(e)` still the `#[error]` rendering verbatim
 ([D-099](s13-decision-register.md#d-099)).
 
@@ -275,15 +276,26 @@ collapsing one is a regression no functional test would notice: both sides still
 **`SnapshotCorruptError` is the third name in a family that had two (0.13.12, W8.2, [D-185](s13-decision-register.md#d-185)).** `SnapshotIncompatibleError` means another build wrote the file, `ReplayCorruptError` means the ledger itself is damaged, and the new one means the *cache* is damaged and the ledger is not — three subjects, three responses, and the middle one is the worst thing this library can say about a database. Until v3 every failure of `load_snapshot` arrived as `ReplayCorruptError` with `seq = 0`, so a Python caller writing `except ReplayCorruptError` to catch a damaged ledger was also catching a snapshot file that could simply be deleted. Nothing on the ordinary path raises the new class — a damaged snapshot is skipped by the scan and the fold runs from the log — which is exactly why it needed the separate name: the case where a caller *does* see it is the case where they were about to act on the wrong diagnosis.
 
 
-**Completeness is enforced by the compiler.** The mapping is a `match` over `DbError`
-with no wildcard arm, so a variant added upstream fails to build `macrame-py` at the line
-that needs a decision — before any wheel exists. That is stronger than the
-rule-enforcement test this project would otherwise reach for, because a test can only run
-after the thing exists and the failure being guarded against is a new variant falling
-silently through to the base class, which a wildcard would hide. Verified by injection,
-not assumed: a probe variant produced `error[E0004]: non-exhaustive patterns`.
+**Completeness was enforced by the compiler until 0.13.33, and is enforced by a test from
+0.13.34 ([D-207](s13-decision-register.md#d-207)).** The mapping was a `match` over
+`DbError` with no wildcard arm, so a variant added upstream failed to build `macrame-py`
+at the line that needed a decision — before any wheel existed. That was the stronger
+mechanism, and it was traded away on purpose: `DbError` is `#[non_exhaustive]` from
+0.13.34, because a crate that will certainly add error variants after 1.0 cannot have
+each addition be a major version, and the price of `#[non_exhaustive]` is that the
+wildcard arm becomes mandatory.
 
-The Python suite checks the half a compiler cannot — that each `setattr` used the right
+`tests/binding_parity_tests.rs` is the replacement, and it lives in the crate that
+*defines* `DbError` rather than in the binding — so it fails for the person adding the
+variant, in the command they were already running, with no wheel built. It is weaker in
+two stated ways (it runs rather than compiles, and it reads text, so an unreachable arm
+would satisfy it) and wider in one: the compiler checked only that a variant had an arm,
+while this also pins that every variant is sampled and that no two share a class. Six
+tests, each verified by mutation rather than assumed — dropping an arm, pointing two
+variants at one class, adding a variant upstream, and deleting one direction of a domain
+enum's conversion each produce the failure they are supposed to.
+
+The Python suite checks the half neither can — that each `setattr` used the right
 name, that classes sit under the right bases, that they are reachable from `macrame` — and
 closes the seam by parsing `src/error.rs` and comparing it against both the Rust sample
 table and its own expectation table.

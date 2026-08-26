@@ -18,7 +18,7 @@ the life of 1.x. That question is answered once; what a file in the repository
 adds is that the answer stays answered. Rust's semver rules make every `pub`
 path a commitment, and the commitments this crate did not mean to make were
 invisible until 0.13.32 generated this list — a public actor-command enum
-carrying `tokio::sync::oneshot::Sender` in its variants, 44 exhaustive
+carrying `tokio::sync::oneshot::Sender` in its variants, 33 exhaustive
 `DbError` variants, and 39 public modules giving most types two to four
 supported paths.
 

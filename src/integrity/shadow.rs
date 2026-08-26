@@ -83,6 +83,7 @@ pub(crate) const SOURCES_PER_CHUNK: usize = 256;
 /// the same trap [`Database::archive_windowed`](crate::Database::archive_windowed)
 /// avoids.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ShadowStep {
     /// Drop any orphan shadow, create a fresh one from the declared DDL.
     Begin,
@@ -100,6 +101,7 @@ pub enum ShadowStep {
 
 /// What a [`ShadowStep`] produced.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ShadowOutcome {
     /// `build_start`, and the actor's archive epoch as of the start.
     Started { build_start: String, epoch: u64 },
