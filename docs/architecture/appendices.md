@@ -325,7 +325,7 @@ back.rowids_reassigned;     // usize -- how many could not keep their original
 let ids: Vec<String> = archivable_concepts(db.read_conn(), cutoff).await?;
 ```
 
-Every method backed by a `HighPriCommand` or a `LowPriCommand` carries the `# Latency` rustdoc section [§5.1.8](s5-modules.md#518-write-queue-latency-and-caller-timeouts-052-d-028) specifies, including the rule that a `tokio::time::timeout` bounds the caller's wait and does not cancel the command ([D-028](s13-decision-register.md#d-028)).
+Every method backed by a `HighPriCommand` or a `LowPriCommand` carries the `# Latency` rustdoc section [§5.1.8](s5-modules.md#518-write-queue-latency-and-caller-timeouts-052-d-028) specifies, including the rule that a `tokio::time::timeout` bounds the caller's wait and does not cancel the command ([D-028](s13-decision-register.md#d-028)). The commands themselves are not part of this surface and never appear below; from 0.13.33 the code agrees, and both enums are `pub(crate)` ([D-206](s13-decision-register.md#d-206)).
 
 A.2 — Divergences from the pre-0.5.4 sketch
 

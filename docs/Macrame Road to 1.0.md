@@ -2529,6 +2529,37 @@ release so that each ships its own diff:
 > by appending a `pub fn` to `lib.rs` and watching it report exactly `+1 -0`
 > with the line named.
 
+> **✅ W11.2b shipped 0.13.33 (recorded as
+> [D-206](../docs/architecture/s13-decision-register.md#d-206)).**
+>
+> **1. `HighPriCommand`, `LowPriCommand` and `ChunkOutcome` are `pub(crate)`.**
+> Measured through W11.2a's gate: **+0 −60 items, 1,692 → 1,632**, of which
+> **17 are `tokio::sync::oneshot::Sender<…>` signatures**. First release to
+> ship that diff in its commit message, which is what the ordering was for.
+>
+> **2. The public-ness conferred nothing.** `highpri_tx` and `lowpri_tx` are
+> private fields, so the only sender for either enum is inside the handle. A
+> caller outside the crate could construct a `HighPriCommand::Shutdown` and
+> then have nowhere to send it — a zero-capability API with a semver
+> commitment attached, and the commitment was the expensive half: a tokio
+> major version would have been a *macrame* major version.
+>
+> **3. The code caught up to the document.** Appendix A is the normative
+> public API and has never listed either enum, in any revision. The `pub` was
+> the default that gets typed while writing an actor. That is the class of
+> commitment W11.2a exists to surface: invisible in a diff of the source.
+>
+> **4. `ChunkOutcome`'s own rustdoc was the release note** — *"Public only
+> because `LowPriCommand` is"* — and now reads *"Crate-internal, along with
+> the command enums that carry it."*
+>
+> **5. `cargo check --all-features --all-targets` passed first try**, which is
+> evidence and not luck: nothing in the workspace constructs a command
+> directly. The cost was three intra-doc links in public items — the two in
+> private items' docs still resolve, because `private_intra_doc_links` fires
+> on the documented item's visibility. One improved: `chunk_rows` now points
+> at `Database::write_bulk_atomic`, which a reader can actually call.
+
 [D-147]: ../docs/architecture/s13-decision-register.md#d-147
 
 **W11.3 — Documentation sweep.** Closes §6.1: the release history table in

@@ -18,63 +18,6 @@ pub const macrame::connection::chunk_rows::EMBEDDINGS: usize
 pub macrame::connection::CadencePolicy::Default
 pub macrame::connection::CadencePolicy::Disabled
 pub macrame::connection::CadencePolicy::Every(macrame::temporal::snapshot::SnapshotCadence)
-pub enum macrame::connection::HighPriCommand
-pub macrame::connection::HighPriCommand::AssertEdge
-pub macrame::connection::HighPriCommand::AssertEdge::edge: macrame::graph::edge::EdgeAssertion
-pub macrame::connection::HighPriCommand::AssertEdge::responder: tokio::sync::oneshot::Sender<macrame::error::Result<()>>
-pub macrame::connection::HighPriCommand::Checkpoint
-pub macrame::connection::HighPriCommand::Checkpoint::responder: tokio::sync::oneshot::Sender<macrame::error::Result<macrame::connection::CheckpointReport>>
-pub macrame::connection::HighPriCommand::RebuildCurrent
-pub macrame::connection::HighPriCommand::RebuildCurrent::responder: tokio::sync::oneshot::Sender<macrame::error::Result<macrame::integrity::rebuild::RebuildReport>>
-pub macrame::connection::HighPriCommand::RegisterModel
-pub macrame::connection::HighPriCommand::RegisterModel::dim: usize
-pub macrame::connection::HighPriCommand::RegisterModel::model: macrame::vector::model::ModelName
-pub macrame::connection::HighPriCommand::RegisterModel::responder: tokio::sync::oneshot::Sender<macrame::error::Result<()>>
-pub macrame::connection::HighPriCommand::RetireEdge
-pub macrame::connection::HighPriCommand::RetireEdge::edge_type: alloc::string::String
-pub macrame::connection::HighPriCommand::RetireEdge::responder: tokio::sync::oneshot::Sender<macrame::error::Result<()>>
-pub macrame::connection::HighPriCommand::RetireEdge::source: alloc::string::String
-pub macrame::connection::HighPriCommand::RetireEdge::target: alloc::string::String
-pub macrame::connection::HighPriCommand::RetireEdge::valid_from: alloc::string::String
-pub macrame::connection::HighPriCommand::RetireEdge::valid_to: alloc::string::String
-pub macrame::connection::HighPriCommand::Shutdown
-pub macrame::connection::HighPriCommand::Shutdown::responder: tokio::sync::oneshot::Sender<macrame::error::Result<()>>
-pub macrame::connection::HighPriCommand::UpsertConcept
-pub macrame::connection::HighPriCommand::UpsertConcept::concept: macrame::connection::ConceptUpsert
-pub macrame::connection::HighPriCommand::UpsertConcept::responder: tokio::sync::oneshot::Sender<macrame::error::Result<()>>
-pub macrame::connection::HighPriCommand::WriteBulkAtomic
-pub macrame::connection::HighPriCommand::WriteBulkAtomic::edges: alloc::vec::Vec<macrame::graph::edge::EdgeAssertion>
-pub macrame::connection::HighPriCommand::WriteBulkAtomic::responder: tokio::sync::oneshot::Sender<macrame::error::Result<usize>>
-pub enum macrame::connection::LowPriCommand
-pub macrame::connection::LowPriCommand::Analyze
-pub macrame::connection::LowPriCommand::Analyze::incremental: bool
-pub macrame::connection::LowPriCommand::Analyze::responder: tokio::sync::oneshot::Sender<macrame::error::Result<()>>
-pub macrame::connection::LowPriCommand::Archive
-pub macrame::connection::LowPriCommand::Archive::archive_path: std::path::PathBuf
-pub macrame::connection::LowPriCommand::Archive::cutoff: alloc::string::String
-pub macrame::connection::LowPriCommand::Archive::responder: tokio::sync::oneshot::Sender<macrame::error::Result<macrame::temporal::archive::ArchiveReport>>
-pub macrame::connection::LowPriCommand::BulkImportChunk
-pub macrame::connection::LowPriCommand::BulkImportChunk::chunk: alloc::vec::Vec<macrame::graph::edge::EdgeAssertion>
-pub macrame::connection::LowPriCommand::BulkImportChunk::responder: tokio::sync::oneshot::Sender<macrame::error::Result<macrame::connection::ChunkOutcome>>
-pub macrame::connection::LowPriCommand::RebuildFts
-pub macrame::connection::LowPriCommand::RebuildFts::responder: tokio::sync::oneshot::Sender<macrame::error::Result<()>>
-pub macrame::connection::LowPriCommand::Rehydrate
-pub macrame::connection::LowPriCommand::Rehydrate::archive_path: std::path::PathBuf
-pub macrame::connection::LowPriCommand::Rehydrate::ids: alloc::vec::Vec<alloc::string::String>
-pub macrame::connection::LowPriCommand::Rehydrate::responder: tokio::sync::oneshot::Sender<macrame::error::Result<macrame::temporal::archive::RehydrateReport>>
-pub macrame::connection::LowPriCommand::ShadowRebuild
-pub macrame::connection::LowPriCommand::ShadowRebuild::responder: tokio::sync::oneshot::Sender<macrame::error::Result<macrame::integrity::shadow::ShadowOutcome>>
-pub macrame::connection::LowPriCommand::ShadowRebuild::step: macrame::integrity::shadow::ShadowStep
-pub macrame::connection::LowPriCommand::UpsertEmbeddingChunk
-pub macrame::connection::LowPriCommand::UpsertEmbeddingChunk::chunk: alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<f32>)>
-pub macrame::connection::LowPriCommand::UpsertEmbeddingChunk::model: macrame::vector::model::ModelName
-pub macrame::connection::LowPriCommand::UpsertEmbeddingChunk::responder: tokio::sync::oneshot::Sender<macrame::error::Result<macrame::connection::ChunkOutcome>>
-pub macrame::connection::LowPriCommand::WriteAnalyticsChunk
-pub macrame::connection::LowPriCommand::WriteAnalyticsChunk::chunk: alloc::vec::Vec<macrame::connection::Annotation>
-pub macrame::connection::LowPriCommand::WriteAnalyticsChunk::responder: tokio::sync::oneshot::Sender<macrame::error::Result<macrame::connection::ChunkOutcome>>
-pub macrame::connection::LowPriCommand::WriteConceptsChunk
-pub macrame::connection::LowPriCommand::WriteConceptsChunk::chunk: alloc::vec::Vec<macrame::connection::ConceptUpsert>
-pub macrame::connection::LowPriCommand::WriteConceptsChunk::responder: tokio::sync::oneshot::Sender<macrame::error::Result<macrame::connection::ChunkOutcome>>
 #[non_exhaustive] pub enum macrame::connection::WalCheckpointPolicy
 pub macrame::connection::WalCheckpointPolicy::Default
 pub macrame::connection::WalCheckpointPolicy::Disabled
@@ -108,9 +51,6 @@ pub macrame::connection::CheckpointReport::checkpointed_frames: u64
 pub macrame::connection::CheckpointReport::log_frames: u64
 impl macrame::connection::CheckpointReport
 pub fn macrame::connection::CheckpointReport::is_complete(&self) -> bool
-pub struct macrame::connection::ChunkOutcome
-pub macrame::connection::ChunkOutcome::held: core::time::Duration
-pub macrame::connection::ChunkOutcome::rows: usize
 pub struct macrame::connection::ConceptUpsert
 pub macrame::connection::ConceptUpsert::content: alloc::string::String
 pub macrame::connection::ConceptUpsert::embedding_model: core::option::Option<alloc::string::String>

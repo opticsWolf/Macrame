@@ -18,9 +18,10 @@ use crate::vector::ModelName;
 ///
 /// The Write Actor holds the sole write connection, so a single large statement
 /// blocks every other writer for its duration. Chunking bounds that stall; the
-/// cost is that a bulk import is *not* atomic across chunks, which is why it is
-/// a separate command from [`HighPriCommand::WriteBulkAtomic`] rather than a
-/// tuning parameter on it.
+/// cost is that a bulk import is *not* atomic across chunks, which is why
+/// all-or-nothing is [`Database::write_bulk_atomic`] — a separate entry point,
+/// with its own command on the actor's protocol — rather than a tuning
+/// parameter here.
 ///
 /// # Why these are four constants and not one
 ///
@@ -173,10 +174,10 @@ pub mod chunk_rows {
 /// `send + await` would shrink chunks as punishment for the actor correctly
 /// serving an interactive write first.
 ///
-/// Public only because [`LowPriCommand`] is. Nothing outside this crate
-/// constructs one, and it is deliberately not re-exported at the crate root.
+/// Crate-internal, along with the command enums that carry it. It was `pub`
+/// through 0.13.32 only because they were (D-206).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ChunkOutcome {
+pub(crate) struct ChunkOutcome {
     /// Rows the transaction actually wrote.
     pub rows: usize,
     /// How long the actor held the write lock for them.
@@ -242,8 +243,8 @@ pub struct BulkProgress {
     /// [`CHUNK_BUDGET`] as it measures them (D-058).
     pub rows: usize,
     /// How long the actor held the write lock for this chunk — the same figure
-    /// the controller steers on, measured inside the actor (see
-    /// [`ChunkOutcome`]).
+    /// the controller steers on. Measured inside the actor, around its own
+    /// transaction, so it excludes the time the command spent queued.
     pub held: std::time::Duration,
 }
 
@@ -421,8 +422,9 @@ fn next_chunk_size(
 ///
 /// 3 ms is §9's number, kept rather than renegotiated. What it buys, end to end:
 /// an interactive assertion arriving at the worst possible moment waits for the
-/// chunk in flight (≤ 3 ms, because the SQLite write lock is not preemptible —
-/// see [`HighPriCommand`]) and then runs its own write (≤ 5 ms, §9), so ≤ 8 ms
+/// chunk in flight (≤ 3 ms — the SQLite write lock is not preemptible, so
+/// priority buys the *next* turn and not this one) and then runs its own write
+/// (≤ 5 ms, §9), so ≤ 8 ms
 /// worst case. That fits inside a 60 Hz frame with room, which is the standard
 /// this bound is ultimately answerable to.
 ///
@@ -648,7 +650,7 @@ impl Annotation {
 }
 
 /// Commands sent to the Write Actor on the high-priority channel (UI-driven work).
-pub enum HighPriCommand {
+pub(crate) enum HighPriCommand {
     AssertEdge {
         edge: EdgeAssertion,
         responder: oneshot::Sender<Result<()>>,
@@ -732,7 +734,7 @@ impl CheckpointReport {
 }
 
 /// Commands sent to the Write Actor on the low-priority channel (background work).
-pub enum LowPriCommand {
+pub(crate) enum LowPriCommand {
     /// One chunk of **concepts** — a ledger write, logged and versioned.
     WriteConceptsChunk {
         chunk: Vec<ConceptUpsert>,
