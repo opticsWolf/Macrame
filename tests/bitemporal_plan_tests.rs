@@ -39,10 +39,13 @@
 
 #[path = "common/harness.rs"]
 mod harness;
+#[path = "common/plan_fixture.rs"]
+mod plan_fixture;
 
 use harness::TestHarness;
 use libsql::Builder;
 use macrame::prelude::*;
+use plan_fixture::{counts, counts_of};
 
 const TS: &str = "2026-01-01T00:00:00.000000Z";
 const VALID_AT: &str = "2026-06-01T00:00:00.000000Z";
@@ -233,5 +236,69 @@ async fn a_two_dimensional_candidate_is_used_as_a_one_dimensional_one() {
         "the two-dimensional candidate changed the shape of the plan and not \
          just the name of the index it seeks on, which is the outcome D-196 \
          measured as not happening"
+    );
+}
+
+/// **The cross-axis read costs what the transaction-time read costs, to the
+/// cursor** (§14 item 11).
+///
+/// The three tests above are about the *plan* — what the planner says it will
+/// do. This is about the program it compiles to, and it is the stronger form of
+/// the same claim: plan equality is an assertion about text SQLite chooses to
+/// print, and `(4, 2, 5)` on both arms is an assertion about work the VDBE
+/// actually does. Adding the valid instant opens no cursor, issues no seek and
+/// rewinds nothing extra.
+///
+/// **Why the valid-time-only arm is here too.** Without it the pinned pair is
+/// passed by any build where both numbers happen to be equal, including one
+/// where the transaction-time bound has quietly stopped being applied. The
+/// valid-only arm is a different shape — `(3, 2, 1)` — so the fixture is shown
+/// to be capable of producing a different answer before the two that matter are
+/// asserted equal.
+///
+/// **These integers were measured before they were written down**, by
+/// `examples/bitemporal_index_probe.rs`, which is the sweep [D-196] closed F-33
+/// on and prints these same three triples. When this goes red on a dependency
+/// bump it is a plan review and not a bug: re-run the probe, read the sweep, and
+/// change the numbers deliberately ([D-195]).
+///
+/// [D-195]: ../docs/architecture/s13-decision-register.md
+/// [D-196]: ../docs/architecture/s13-decision-register.md
+#[tokio::test]
+async fn a_cross_axis_read_costs_what_the_transaction_time_read_costs() {
+    let harness = TestHarness::new();
+    let conn = written_and_analysed(&harness).await;
+
+    let valid_only = counts_of(&conn, &walk().as_of_valid(VALID_AT).build_sql()).await;
+    let recorded_only = counts_of(&conn, &walk().as_of_recorded(RECORDED_AT).build_sql()).await;
+    let both = counts_of(
+        &conn,
+        &walk()
+            .as_of_valid(VALID_AT)
+            .as_of_recorded(RECORDED_AT)
+            .build_sql(),
+    )
+    .await;
+
+    assert_eq!(
+        valid_only,
+        counts(3, 2, 1),
+        "the valid-time-only arm moved. It is the control here: if it stops \
+         differing from the transaction-time arm, the equality this test \
+         asserts below stops meaning anything"
+    );
+    assert_eq!(
+        recorded_only,
+        counts(4, 2, 5),
+        "the transaction-time read's cost moved. Re-run \
+         `cargo run --example bitemporal_index_probe` and read the sweep \
+         before changing this number (D-195)"
+    );
+    assert_eq!(
+        both, recorded_only,
+        "stating a valid instant as well as a transaction instant now costs \
+         something. F-33 closed as *no index* because the two axes never meet \
+         on a table and the second bound reaches no access path; a difference \
+         here means that is no longer true and D-196 is due for review"
     );
 }

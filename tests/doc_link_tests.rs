@@ -39,6 +39,13 @@ use std::collections::{BTreeMap, BTreeSet};
 const DOCS: &[(&str, &str)] = &[
     ("README.md", include_str!("../docs/architecture/README.md")),
     ("REJOIN.md", include_str!("../docs/architecture/REJOIN.md")),
+    // Generated (D-212). It carries no navigation footer and is not part of the
+    // §0-§14 chain, but it is linked from the README and from the register, so
+    // it has to be here or those links point at a file this gate has never seen.
+    (
+        "api-review-0.14.0.md",
+        include_str!("../docs/architecture/api-review-0.14.0.md"),
+    ),
     (
         "appendices.md",
         include_str!("../docs/architecture/appendices.md"),
@@ -214,8 +221,16 @@ fn every_document_in_the_directory_is_checked() {
 /// the third and the chain still *looks* right from either end while skipping
 /// the new document entirely.
 ///
-/// `REJOIN.md` is deliberately outside the chain: it links to the index and
-/// nothing links to it.
+/// Two documents are deliberately outside the chain, and the list is here
+/// rather than inline so that adding to it is a decision someone has to write
+/// down. `REJOIN.md` links to the index and nothing links to it.
+/// `api-review-0.14.0.md` is **generated** (D-212): it is evidence a reader is
+/// sent to from the register, not a section of the architecture document, and
+/// giving it a `previous`/`next` would put a generated file in the middle of a
+/// narrative that has to be read in order.
+/// The documents that are in `DOCS` but not in the narrative chain.
+const OUTSIDE_THE_CHAIN: &[&str] = &["REJOIN.md", "api-review-0.14.0.md"];
+
 #[test]
 fn the_navigation_footers_form_a_single_chain() {
     fn next_of(body: &str) -> Option<String> {
@@ -264,7 +279,7 @@ fn the_navigation_footers_form_a_single_chain() {
     let expected: BTreeSet<String> = DOCS
         .iter()
         .map(|(n, _)| n.to_string())
-        .filter(|n| n != "REJOIN.md")
+        .filter(|n| !OUTSIDE_THE_CHAIN.contains(&n.as_str()))
         .collect();
     let reached: BTreeSet<String> = walked.into_iter().collect();
     assert_eq!(

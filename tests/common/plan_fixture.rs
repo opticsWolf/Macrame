@@ -155,3 +155,66 @@ pub async fn plan_of(conn: &libsql::Connection, sql: &str) -> String {
     }
     lines.join(" | ")
 }
+
+// ---------------------------------------------------------------------------
+// Operation counts (W10.1, D-195; shared with `bitemporal_plan_tests` in
+// 0.13.39, §14 item 11)
+// ---------------------------------------------------------------------------
+
+/// What a statement's VDBE program does, in the three quantities that move with
+/// the plan and with nothing else.
+///
+/// **Here rather than in `operation_count_tests.rs`, where it was written,**
+/// because a second file needed it and copying it would have produced two
+/// definitions of "a seek" that agree until one of them is edited. That is
+/// [D-088]'s defect in a helper instead of in a fixture, and it is the same
+/// argument that moved `populated_and_analysed` into this file in the first
+/// place.
+///
+/// [D-088]: ../../docs/architecture/s13-decision-register.md
+#[derive(Debug, PartialEq, Eq)]
+pub struct Counts {
+    /// Cursors opened for reading. One per table or index the statement
+    /// touches, so a covering index shows one where an index-plus-lookup shows
+    /// two. This is the number D-042's class moves.
+    pub opens: usize,
+    /// Positioning operations: the b-tree is entered at a computed key rather
+    /// than at its start.
+    pub seeks: usize,
+    /// Cursors started at one end of a b-tree. A full scan has one; so does an
+    /// index range scan whose bound is open on that side.
+    pub rewinds: usize,
+}
+
+pub const fn counts(opens: usize, seeks: usize, rewinds: usize) -> Counts {
+    Counts {
+        opens,
+        seeks,
+        rewinds,
+    }
+}
+
+/// The three integers, read out of `EXPLAIN`.
+///
+/// `EXPLAIN` compiles the statement and prints the VDBE program without running
+/// it, so this is a function of the chosen plan and of nothing else — not of
+/// how busy the machine is, which is the whole reason these are gated and
+/// timings are not ([D-055], [D-070]).
+///
+/// [D-055]: ../../docs/architecture/s13-decision-register.md
+/// [D-070]: ../../docs/architecture/s13-decision-register.md
+pub async fn counts_of(conn: &libsql::Connection, sql: &str) -> Counts {
+    let mut rows = conn.query(&format!("EXPLAIN {sql}"), ()).await.unwrap();
+    let mut c = counts(0, 0, 0);
+    while let Some(row) = rows.next().await.unwrap() {
+        let op: String = row.get(1).unwrap();
+        if op == "OpenRead" {
+            c.opens += 1;
+        } else if op.starts_with("Seek") || op == "NotExists" || op == "NotFound" {
+            c.seeks += 1;
+        } else if op == "Rewind" || op == "Last" {
+            c.rewinds += 1;
+        }
+    }
+    c
+}

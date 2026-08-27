@@ -40,6 +40,14 @@
 //! deliberately. A fingerprint nobody re-derives is a fingerprint of whatever
 //! the code did last.
 //!
+//! # Where the counter lives
+//!
+//! `Counts` and `counts_of` are in `tests/common/plan_fixture.rs`, next to
+//! the fixture they are read against. They were declared here until W10.6's
+//! cross-axis read needed the same three integers against a *different*
+//! database — one with a populated `transaction_log` — and two definitions of
+//! "a seek" agree only until one of them is edited.
+//!
 //! [D-055]: ../docs/architecture/s13-decision-register.md
 //! [D-070]: ../docs/architecture/s13-decision-register.md
 
@@ -49,31 +57,9 @@ mod harness;
 mod plan_fixture;
 
 use harness::TestHarness;
-use plan_fixture::{assert_has_statistics, plan_of, populated_and_analysed};
-
-/// What a statement's VDBE program does, in the three quantities that move with
-/// the plan and with nothing else.
-#[derive(Debug, PartialEq, Eq)]
-struct Counts {
-    /// Cursors opened for reading. One per table or index the statement
-    /// touches, so a covering index shows one where an index-plus-lookup shows
-    /// two. This is the number D-042's class moves.
-    opens: usize,
-    /// Positioning operations: the b-tree is entered at a computed key rather
-    /// than at its start.
-    seeks: usize,
-    /// Cursors started at one end of a b-tree. A full scan has one; so does an
-    /// index range scan whose bound is open on that side.
-    rewinds: usize,
-}
-
-const fn counts(opens: usize, seeks: usize, rewinds: usize) -> Counts {
-    Counts {
-        opens,
-        seeks,
-        rewinds,
-    }
-}
+use plan_fixture::{
+    assert_has_statistics, counts, counts_of, plan_of, populated_and_analysed, Counts,
+};
 
 /// The queries `index_plan_tests` justifies an index with, plus one control.
 ///
@@ -145,22 +131,6 @@ const PINNED: &[(&str, &str, Counts)] = &[
 
 /// The control's label, so the two tests below cannot drift apart.
 const CONTROL: &str = "CONTROL: a query with no index to use";
-
-async fn counts_of(conn: &libsql::Connection, sql: &str) -> Counts {
-    let mut rows = conn.query(&format!("EXPLAIN {sql}"), ()).await.unwrap();
-    let mut c = counts(0, 0, 0);
-    while let Some(row) = rows.next().await.unwrap() {
-        let op: String = row.get(1).unwrap();
-        if op == "OpenRead" {
-            c.opens += 1;
-        } else if op.starts_with("Seek") || op == "NotExists" || op == "NotFound" {
-            c.seeks += 1;
-        } else if op == "Rewind" || op == "Last" {
-            c.rewinds += 1;
-        }
-    }
-    c
-}
 
 // ---------------------------------------------------------------------------
 // The gate

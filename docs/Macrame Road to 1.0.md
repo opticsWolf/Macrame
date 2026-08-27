@@ -2749,6 +2749,62 @@ finding.
 
 ## 14. Acceptance for 0.14.0
 
+> **Closed, and the version bumped to 0.14.0 on 2026-08-27
+> ([D-212](architecture/s13-decision-register.md#d-212)).** All eleven items
+> resolved. **Seven were met as written; four were not what they said**, and
+> those four are why this section is read as evidence rather than ticked.
+>
+> - **Item 6 had not been done.** D-205 baselines each release against the last;
+>   nobody had read **0.13.0 against the release that freezes**. The raw diff is
+>   −144 lines and says nothing, because the tool reports one line per *path*.
+>   Reduced to identities: **601 → 619 items** — the surface *grew by 18* while
+>   the listing shrank by 144 — because 25 modules were demoted and 269 surplus
+>   paths removed, neither of which touches an item. **73 identities left, and
+>   all 73 are accounted for**: **60** the actor protocol, which was never a
+>   capability (D-206), 1 an alias that predates the change, and **12 signature
+>   changes each pairing with a named replacement**. No item left this surface without a decision behind it. The
+>   review is checked in at
+>   [`api-review-0.14.0.md`](architecture/api-review-0.14.0.md).
+> - **Item 11 was half met, and the missing half is the stronger half.** D-196
+>   recorded the plan shape and closed F-33 on it. The operation count *had been
+>   measured* since 0.13.23 and lived only in a scratch probe. It is now gated:
+>   the cross-axis read is `(4, 2, 5)` and the transaction-time read is
+>   `(4, 2, 5)` — **identical to the cursor**. Plan equality is a claim about
+>   text SQLite prints; this is a claim about work the VDBE does.
+> - **Item 3 asked for an hour and CI runs 90 seconds.** Never run. Now run:
+>   **one hour per target**, three targets, clean, on a corpus seeded from this
+>   build's own writer — **21.8M / 2.8M / 0.9M executions**, no crash and no
+>   artifact, corpora grown from 5 seeds to **32 / 153 / 202** inputs. The
+>   per-push job stays at 90 seconds — an hour on every push is a gate that gets
+>   deleted.
+> - **Item 8's number was taken, for the third time in three waves.** D-155…D-157
+>   are `Tuning`, `checkpoint()` and `wal_autocheckpoint` — W5, a full minor
+>   version before the cycle this list accepts. The cycle's decisions are
+>   **D-170…D-212**. The rule is now stated rather than rediscovered: *a plan may
+>   name a wave; the register allocates its own numbers when the work lands.*
+>
+> Two items were met **more strongly than they ask**. Item 5 wants a regression
+> induced once; `losing_coverage_moves_the_count_and_not_the_registry_assertion`
+> induces one on every run. Items 9–10 name four search surfaces;
+> `search_visibility_tests` covers five lists, because `search_filtered` is asked
+> once per strategy and a visibility rule that holds under one plan and not the
+> other is a wrong answer selected by a byte estimate.
+>
+> **Item 2's premise is wrong, and D-176 said so at the time.** There is no
+> second annotation path, so “both paths produce identical stored state” is
+> satisfied vacuously. The finding underneath it was real for a different
+> reason — what differed was what the caller was *told*.
+>
+> **`query_as_of_edges` was reviewed under item 1 and kept.** It is the last
+> public name carrying the bare word `as_of`. It is not a Doctrine II violation
+> — it fixes valid time and reads current belief, which is `AsOf::valid_at` —
+> and renaming it costs two languages and the parity gate for no behavioural
+> change. Recorded as *decided*, because after 1.0 it costs a major version.
+>
+> Final state: **503 Rust across 42 targets, 487 with `--no-default-features`,
+> 457 Python**, clippy clean under `--all-features`, schema v11, surface 1,313
+> items, decisions D-001…D-212.
+
 1. `as_of`'s two axes are separate parameters or an explicit refusal, and
    Doctrine II is not violated by any public API.
 2. Both annotation paths produce identical stored state for identical input.
@@ -2771,6 +2827,31 @@ finding.
     operation count, and W10.6's conclusion — index or no index — is a register
     entry with the numbers in it. *(W7.1 shipped 0.13.2 and made the predicate
     expressible; the measurement is W10.6's.)*
+
+### 14.1 Carried forward, and tracked
+
+**Item 7 is met for §1 and was not tracked anywhere else, which is the same
+defect one level up.** Every finding in §1 carries a wave and a release. What
+§1 never carried is the work *discovered while closing them*: five items
+reasoned about inside register entries and then not tracked anywhere. W7.2's own
+block named the problem — *“a rejection inside a register entry is reasoned but
+not tracked”* — and the four carries after it went into register entries.
+
+**“Zero silent carries” is a property of a list, and until 0.14.0 there was no
+list.** This is it. None of these is a defect in a shipped guarantee; each is a
+place where the argument for the work applies and the work was out of scope.
+
+| # | Carried | From | Why it was left | Due |
+|---|---|---|---|---|
+| C-1 | Foreign-key classification on the `links` and `concepts` paths | [D-176](architecture/s13-decision-register.md#d-176) (0.13.3) | W7.2's scope was the annotation path; each of the other two has its own guards and its own tests | 0.15.0 |
+| C-2 | `save_snapshot` reports I/O failure as `ReplayCorrupt` — *the ledger is damaged* | [D-186](architecture/s13-decision-register.md#d-186) (0.13.13) | A new variant was an API change during a wave that was not changing the API | 0.15.0 |
+| C-3 | `DbError::kind()`, a stable discriminant for callers that must match | [D-207](architecture/s13-decision-register.md#d-207) (0.13.34) | `#[non_exhaustive]` makes matching a wildcard arm; the ergonomic answer needed a design, not a wave | 0.15.0 |
+| C-4 | A **build** gate for `--no-default-features`, not a `cargo check` | [D-209](architecture/s13-decision-register.md#d-209) (0.13.36) | The configuration was broken for two releases with every gate green; §8's list is where a CI job is scheduled | 0.15.0 |
+| C-5 | `cargo-semver-checks` | [D-211](architecture/s13-decision-register.md#d-211) (0.13.38) | It understands what a *narrowing* is rather than only what a textual difference is — and it wants a released baseline, which is 1.0 itself | **at 1.0** |
+
+C-1 through C-4 are candidates for v0.15.0 and are named in §17's acceptance
+list. C-5 is not a candidate: it is the instrument that replaces the baseline
+diff once there is a released version to diff against.
 
 ---
 
@@ -2990,6 +3071,19 @@ so it is visible from both places.
    `main`, and the rung test passes.
 7. Python reaches the whole of it in the same release, including `diff`.
 8. Merge and cross-branch traversal are recorded in §16 as refused, with reasons.
+9. **C-1 through C-4 of [§14.1](#141-carried-forward-and-tracked) are closed or
+   re-carried with a reason.** Four items were reasoned about in register entries
+   during the 0.14.0 cycle and tracked nowhere; the point of the table is that
+   the next acceptance section has to look at it. Re-carrying is a legitimate
+   outcome and a silent carry is not — D-212.
+10. D-213 … the register's own next number, whatever it turns out to be. **Not a
+    number this plan chooses**: three acceptance lists in a row have named
+    decision numbers that were already spent by the time the work landed
+    ([D-188](architecture/s13-decision-register.md#d-188),
+    [D-211](architecture/s13-decision-register.md#d-211),
+    [D-212](architecture/s13-decision-register.md#d-212)). What this item asks
+    is that W12 and W13's decisions are *recorded*, not that they carry
+    particular numbers.
 
 ---
 
