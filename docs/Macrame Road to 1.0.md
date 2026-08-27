@@ -288,7 +288,7 @@ branching lands.** This is the one item in this document I would cut first if
 | 5.4 | No snapshot fuzzing | Low | W8.4 | 0.13.14 ✅ |
 | 6.1 | Release history table stops at 0.9.0 | Low | W11.3 | 0.14.0 ✅ |
 | 6.2 | `Cargo.toml` metrics cost model is false | Med | W4.1 | 0.13.0 |
-| 6.3 | Comment-to-code ratio | — | W11.4 | 0.14.0 |
+| 6.3 | Comment-to-code ratio | — | W11.4 | 0.14.0 ✅ |
 | F-28 | No `ANALYZE`; planner runs on default selectivity | High | W2.1, W2.2 | 0.13.0 ✅ |
 | F-29 | Plan-pinning fixture has no rows and no statistics | High | W2.4 | 0.13.0 |
 | F-30 | Autocheckpoint perturbs the chunk controller | Med | W5.3 | 0.13.0 |
@@ -2669,6 +2669,30 @@ release so that each ships its own diff:
 > and therefore not re-checked. Entries added; a build gate for that
 > configuration is named as §8's to schedule rather than fixed here, so the
 > omission stays legible.
+
+> **✅ W11.4 shipped 0.13.37 (recorded as
+> [D-210](../docs/architecture/s13-decision-register.md#d-210)).** Closes §6.3.
+> No action, and the number is now on the record.
+>
+> **1. `src/` is 8,264 comment lines to 8,930 code lines — 0.93.** The rest of
+> the workspace: bindings 0.62, benches 0.38, tests 0.37, examples 0.29. The
+> finding said the ratio was unusually high and never measured it.
+>
+> **2. The distribution says more than the mean.** `util/limits.rs` is **6.67**
+> — forty comment lines on six lines of code, and the six are two constants and
+> a `const` assertion. The floor is 0.00, and it is the `mod.rs` files, which
+> are re-export lists with nothing to say.
+>
+> **3. The claim under the finding was checked, not repeated.** D-059's timing
+> figures are at `ddl.rs:601`, in a comment on the index that changed them:
+> 4.4 ms empty, 18.4 ms at 2,000 edges, 47.7 ms at 8,000, 1.06 s at 90,000 —
+> and 8.0 ms at 8,000 *with* the index. Nowhere else in the repository do those
+> numbers sit together.
+>
+> **4. No gate, in either direction.** A floor rewards padding; a ceiling is an
+> instruction to delete measurements. The instrument this project uses is the
+> other one — gates that hold prose to code rather than counting either
+> (D-209).
 
 [D-147]: ../docs/architecture/s13-decision-register.md#d-147
 
