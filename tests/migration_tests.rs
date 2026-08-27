@@ -6,7 +6,7 @@ mod v7_schema;
 use harness::TestHarness;
 use macrame::error::DbError;
 use macrame::schema::ddl;
-use macrame::schema::migrations::{self, SCHEMA_VERSION};
+use macrame::schema::SCHEMA_VERSION;
 use v7_schema::seeded_v7;
 
 const TS: &str = "2026-01-01T00:00:00.000000Z";
@@ -59,7 +59,7 @@ async fn fresh_database_reaches_the_baseline_version() {
     let harness = TestHarness::new();
     let conn = connect(&harness).await;
 
-    migrations::run(&conn).await.unwrap();
+    macrame::schema::run_migrations(&conn).await.unwrap();
 
     assert_eq!(user_version(&conn).await, SCHEMA_VERSION);
     // The stamp is worth nothing on its own -- confirm the canonical-form CHECK
@@ -81,7 +81,7 @@ async fn run_is_idempotent_and_preserves_data() {
     let harness = TestHarness::new();
     let conn = connect(&harness).await;
 
-    migrations::run(&conn).await.unwrap();
+    macrame::schema::run_migrations(&conn).await.unwrap();
     conn.execute(
         "INSERT INTO concepts (id, title, valid_from, recorded_at) \
          VALUES ('c1', 'T', '2026-01-01T00:00:00.000000Z', '2026-01-01T00:00:00.000000Z')",
@@ -90,7 +90,7 @@ async fn run_is_idempotent_and_preserves_data() {
     .await
     .unwrap();
 
-    migrations::run(&conn).await.unwrap();
+    macrame::schema::run_migrations(&conn).await.unwrap();
 
     assert_eq!(user_version(&conn).await, SCHEMA_VERSION);
     let surviving: i64 = conn
@@ -112,12 +112,12 @@ async fn run_is_idempotent_and_preserves_data() {
 async fn refuses_a_database_from_a_newer_build() {
     let harness = TestHarness::new();
     let conn = connect(&harness).await;
-    migrations::run(&conn).await.unwrap();
+    macrame::schema::run_migrations(&conn).await.unwrap();
     conn.execute(&format!("PRAGMA user_version = {}", SCHEMA_VERSION + 7), ())
         .await
         .unwrap();
 
-    let reason = refusal_reason(migrations::run(&conn).await.unwrap_err());
+    let reason = refusal_reason(macrame::schema::run_migrations(&conn).await.unwrap_err());
     assert!(
         reason.contains(&format!("v{}", SCHEMA_VERSION + 7)),
         "refusal should name the version found: {reason}"
@@ -131,10 +131,10 @@ async fn refuses_a_database_from_a_newer_build() {
 async fn refuses_a_pre_canonical_v1_database() {
     let harness = TestHarness::new();
     let conn = connect(&harness).await;
-    migrations::run(&conn).await.unwrap();
+    macrame::schema::run_migrations(&conn).await.unwrap();
     conn.execute("PRAGMA user_version = 1", ()).await.unwrap();
 
-    let reason = refusal_reason(migrations::run(&conn).await.unwrap_err());
+    let reason = refusal_reason(macrame::schema::run_migrations(&conn).await.unwrap_err());
     assert!(
         reason.contains("v1") && reason.contains("no migration path"),
         "refusal should identify the legacy schema and say there is no path: {reason}"
@@ -151,7 +151,7 @@ async fn refuses_an_unstamped_database_that_is_not_empty() {
         .await
         .unwrap();
 
-    let reason = refusal_reason(migrations::run(&conn).await.unwrap_err());
+    let reason = refusal_reason(macrame::schema::run_migrations(&conn).await.unwrap_err());
     assert!(
         reason.contains("unrelated"),
         "refusal should explain what it is protecting: {reason}"
@@ -173,7 +173,7 @@ async fn a_refused_run_leaves_no_partial_schema() {
         .await
         .unwrap();
 
-    let _ = migrations::run(&conn).await.unwrap_err();
+    let _ = macrame::schema::run_migrations(&conn).await.unwrap_err();
 
     let macrame_objects: i64 = conn
         .query(
@@ -206,7 +206,7 @@ async fn a_refused_run_leaves_no_partial_schema() {
 async fn the_baseline_leaves_every_declared_object_behind() {
     let harness = TestHarness::new();
     let conn = connect(&harness).await;
-    migrations::run(&conn).await.unwrap();
+    macrame::schema::run_migrations(&conn).await.unwrap();
 
     let mut rows = conn
         .query(
@@ -281,7 +281,7 @@ async fn a_v2_database_climbs_to_v3_and_gains_the_annotations_table() {
     }
     conn.execute("PRAGMA user_version = 2", ()).await.unwrap();
 
-    migrations::run(&conn).await.unwrap();
+    macrame::schema::run_migrations(&conn).await.unwrap();
 
     let version: u32 = conn
         .query("PRAGMA user_version", ())
@@ -315,13 +315,13 @@ async fn a_v5_database_climbs_to_v6_and_gains_the_open_interval_index() {
     let harness = TestHarness::new();
     let conn = connect(&harness).await;
 
-    migrations::run(&conn).await.unwrap();
+    macrame::schema::run_migrations(&conn).await.unwrap();
     conn.execute("DROP INDEX idx_lc_open_interval", ())
         .await
         .unwrap();
     conn.execute("PRAGMA user_version = 5", ()).await.unwrap();
 
-    migrations::run(&conn).await.unwrap();
+    macrame::schema::run_migrations(&conn).await.unwrap();
 
     assert_eq!(user_version(&conn).await, SCHEMA_VERSION);
 
@@ -358,7 +358,7 @@ async fn a_v10_database_climbs_to_v11_and_the_archive_read_stops_scanning_links(
     let harness = TestHarness::new();
     let conn = connect(&harness).await;
 
-    migrations::run(&conn).await.unwrap();
+    macrame::schema::run_migrations(&conn).await.unwrap();
     conn.execute("DROP INDEX idx_links_recorded_at", ())
         .await
         .unwrap();
@@ -380,7 +380,7 @@ async fn a_v10_database_climbs_to_v11_and_the_archive_read_stops_scanning_links(
         "the fixture is not starting from the v10 plan — expected a full scan          of `links`, got: {before}"
     );
 
-    migrations::run(&conn).await.unwrap();
+    macrame::schema::run_migrations(&conn).await.unwrap();
 
     assert_eq!(user_version(&conn).await, SCHEMA_VERSION);
 
@@ -455,7 +455,7 @@ async fn a_v6_database_climbs_to_v7_and_gains_the_weight_check() {
     // is built by laying the baseline and rebuilding that one table without the
     // CHECK — for the reason the v5 test gives: a hand-written copy of an old
     // schema is a second description that drifts.
-    migrations::run(&conn).await.unwrap();
+    macrame::schema::run_migrations(&conn).await.unwrap();
     for stmt in [
         "ALTER TABLE links RENAME TO links_old",
         "CREATE TABLE links (
@@ -498,7 +498,7 @@ async fn a_v6_database_climbs_to_v7_and_gains_the_weight_check() {
         .unwrap();
     }
 
-    migrations::run(&conn).await.unwrap();
+    macrame::schema::run_migrations(&conn).await.unwrap();
     assert_eq!(user_version(&conn).await, SCHEMA_VERSION);
 
     let rows: i64 = conn
@@ -592,7 +592,7 @@ async fn a_v7_database_climbs_to_v8_and_gains_rowid_pk() {
     let rowids_before = ids_by_rowid(&conn, "rowid").await;
     assert_eq!(rowids_before.len(), 4);
 
-    migrations::run(&conn).await.unwrap();
+    macrame::schema::run_migrations(&conn).await.unwrap();
     assert_eq!(user_version(&conn).await, SCHEMA_VERSION);
 
     assert_eq!(count(&conn, "SELECT COUNT(*) FROM concepts").await, 4);
@@ -706,7 +706,7 @@ async fn a_v7_database_with_a_pre_existing_orphan_is_refused() {
     .await
     .unwrap();
 
-    let reason = refusal_reason(migrations::run(&conn).await.unwrap_err());
+    let reason = refusal_reason(macrame::schema::run_migrations(&conn).await.unwrap_err());
     assert!(
         reason.contains("suspended foreign keys and left a violation") && reason.contains("links"),
         "the refusal should name the check and the table, not merely fail: {reason}"
@@ -762,7 +762,7 @@ async fn a_negative_weight_already_stored_blocks_the_v7_rung_with_an_explanation
     let harness = TestHarness::new();
     let conn = connect(&harness).await;
 
-    migrations::run(&conn).await.unwrap();
+    macrame::schema::run_migrations(&conn).await.unwrap();
     for stmt in [
         "ALTER TABLE links RENAME TO links_old",
         "CREATE TABLE links (
@@ -800,7 +800,7 @@ async fn a_negative_weight_already_stored_blocks_the_v7_rung_with_an_explanation
     .await
     .unwrap();
 
-    let err = migrations::run(&conn)
+    let err = macrame::schema::run_migrations(&conn)
         .await
         .expect_err("the rung cannot represent this row and must say so");
     let msg = err.to_string();
@@ -845,7 +845,7 @@ async fn a_negative_weight_already_stored_blocks_the_v7_rung_with_an_explanation
 async fn the_single_open_probe_seeks_rather_than_scans() {
     let harness = TestHarness::new();
     let conn = connect(&harness).await;
-    migrations::run(&conn).await.unwrap();
+    macrame::schema::run_migrations(&conn).await.unwrap();
 
     let probe = "SELECT 1 FROM links_current \
                  WHERE source_id = ?1 AND target_id = ?2 AND edge_type = ?3 \
@@ -889,7 +889,7 @@ async fn the_single_open_probe_seeks_rather_than_scans() {
 async fn the_overlap_guard_seeks_on_all_three_equality_columns() {
     let harness = TestHarness::new();
     let conn = connect(&harness).await;
-    migrations::run(&conn).await.unwrap();
+    macrame::schema::run_migrations(&conn).await.unwrap();
 
     // The guard's query, as `connection::OVERLAP_CANDIDATES` states it.
     let probe = "SELECT valid_from, valid_to FROM links_current \
@@ -933,7 +933,7 @@ async fn the_overlap_guard_seeks_on_all_three_equality_columns() {
 async fn the_filtered_subgraph_walk_stays_on_the_traversal_index() {
     let harness = TestHarness::new();
     let conn = connect(&harness).await;
-    migrations::run(&conn).await.unwrap();
+    macrame::schema::run_migrations(&conn).await.unwrap();
 
     // The recursive step as `load_subgraph_with` emits it, with and without the
     // edge-type filter.
@@ -1019,7 +1019,7 @@ async fn the_traversal_walks_inside_the_index_with_and_without_an_edge_type_filt
 
     let harness = TestHarness::new();
     let conn = connect(&harness).await;
-    migrations::run(&conn).await.unwrap();
+    macrame::schema::run_migrations(&conn).await.unwrap();
 
     let plan_of = |sql: String| {
         let conn = conn.clone();
@@ -1075,7 +1075,7 @@ async fn the_traversal_walks_inside_the_index_with_and_without_an_edge_type_filt
 async fn the_subsumed_source_index_is_gone() {
     let harness = TestHarness::new();
     let conn = connect(&harness).await;
-    migrations::run(&conn).await.unwrap();
+    macrame::schema::run_migrations(&conn).await.unwrap();
 
     let n: i64 = conn
         .query(
@@ -1106,7 +1106,7 @@ async fn the_shipped_traversal_cte_stays_on_the_covering_index() {
 
     let harness = TestHarness::new();
     let conn = connect(&harness).await;
-    migrations::run(&conn).await.unwrap();
+    macrame::schema::run_migrations(&conn).await.unwrap();
 
     for (label, builder) in [
         ("unfiltered", TraversalBuilder::new("a").max_depth(3)),
@@ -1187,7 +1187,7 @@ async fn guard_sql(conn: &libsql::Connection) -> String {
 async fn a_v8_database_climbs_past_v9_and_the_concepts_guard_becomes_conditional() {
     let harness = TestHarness::new();
     let conn = connect(&harness).await;
-    migrations::run(&conn).await.unwrap();
+    macrame::schema::run_migrations(&conn).await.unwrap();
     downgrade_guard_to_v8(&conn).await;
 
     // Precondition, asserted rather than assumed: the fixture really is v8.
@@ -1196,7 +1196,7 @@ async fn a_v8_database_climbs_past_v9_and_the_concepts_guard_becomes_conditional
         "the fixture did not start from the v8 guard"
     );
 
-    migrations::run(&conn).await.unwrap();
+    macrame::schema::run_migrations(&conn).await.unwrap();
 
     assert_eq!(user_version(&conn).await, SCHEMA_VERSION);
     let sql = guard_sql(&conn).await;
@@ -1221,7 +1221,7 @@ async fn a_v8_database_climbs_past_v9_and_the_concepts_guard_becomes_conditional
 async fn re_issuing_the_baseline_guard_keeps_the_v8_body() {
     let harness = TestHarness::new();
     let conn = connect(&harness).await;
-    migrations::run(&conn).await.unwrap();
+    macrame::schema::run_migrations(&conn).await.unwrap();
     downgrade_guard_to_v8(&conn).await;
 
     conn.execute(ddl::CREATE_CONCEPTS_GUARD_DELETE, ())
@@ -1247,7 +1247,7 @@ async fn re_issuing_the_baseline_guard_keeps_the_v8_body() {
 async fn a_v9_stamp_over_an_ungated_guard_is_refused() {
     let harness = TestHarness::new();
     let conn = connect(&harness).await;
-    migrations::run(&conn).await.unwrap();
+    macrame::schema::run_migrations(&conn).await.unwrap();
 
     // The stamp says v9; the guard says v8. Nothing in the ladder runs.
     conn.execute("DROP TRIGGER trg_concepts_guard_delete", ())
@@ -1255,7 +1255,7 @@ async fn a_v9_stamp_over_an_ungated_guard_is_refused() {
         .unwrap();
     conn.execute(CONCEPTS_GUARD_V8, ()).await.unwrap();
 
-    let reason = refusal_reason(migrations::run(&conn).await.unwrap_err());
+    let reason = refusal_reason(macrame::schema::run_migrations(&conn).await.unwrap_err());
     assert!(
         reason.contains("trg_concepts_guard_delete") && reason.contains("archive-session"),
         "the refusal should name the guard and what it lacks: {reason}"
@@ -1279,7 +1279,7 @@ async fn a_v7_database_climbs_all_the_way_to_the_top_with_a_working_guard() {
     seeded_v7(&conn, &["c1", "c2"]).await;
     conn.execute("PRAGMA user_version = 7", ()).await.unwrap();
 
-    migrations::run(&conn).await.unwrap();
+    macrame::schema::run_migrations(&conn).await.unwrap();
     assert_eq!(user_version(&conn).await, SCHEMA_VERSION);
 
     let res = conn
@@ -1356,7 +1356,7 @@ async fn log_insert_sql(conn: &libsql::Connection) -> String {
 async fn a_v9_database_climbs_to_v10_and_the_insert_log_becomes_marker_gated() {
     let harness = TestHarness::new();
     let conn = connect(&harness).await;
-    migrations::run(&conn).await.unwrap();
+    macrame::schema::run_migrations(&conn).await.unwrap();
 
     conn.execute("DROP TRIGGER trg_concepts_log_insert", ())
         .await
@@ -1373,7 +1373,7 @@ async fn a_v9_database_climbs_to_v10_and_the_insert_log_becomes_marker_gated() {
         "the fixture did not start from the v9 trigger"
     );
 
-    migrations::run(&conn).await.unwrap();
+    macrame::schema::run_migrations(&conn).await.unwrap();
 
     assert_eq!(user_version(&conn).await, SCHEMA_VERSION);
     assert!(
@@ -1394,7 +1394,7 @@ async fn a_v9_database_climbs_to_v10_and_the_insert_log_becomes_marker_gated() {
 async fn an_insert_inside_a_session_writes_no_log_row_and_outside_one_still_does() {
     let harness = TestHarness::new();
     let conn = connect(&harness).await;
-    migrations::run(&conn).await.unwrap();
+    macrame::schema::run_migrations(&conn).await.unwrap();
 
     let log_rows = |conn: libsql::Connection| async move {
         conn.query("SELECT COUNT(*) FROM transaction_log", ())

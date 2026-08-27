@@ -61,7 +61,7 @@ async fn the_permitted_exception_is_still_a_scalar_column() {
         .await
         .unwrap();
     let conn = db.connect().unwrap();
-    macrame::schema::migrations::run(&conn).await.unwrap();
+    macrame::schema::run_migrations(&conn).await.unwrap();
 
     let mut rows = conn.query("PRAGMA table_info(concepts)", ()).await.unwrap();
     let mut found = None;

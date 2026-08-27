@@ -17,7 +17,7 @@ const NO_EDGES: &[EdgeRef] = &[];
 /// A transient, in-memory graph loaded from `links_current`.
 ///
 /// The maps are `BTreeMap`, not `HashMap`, so iteration follows node id order.
-/// Every algorithm in [`super::algorithms`] inherits its determinism from that
+/// Every algorithm in [`crate::graph`] inherits its determinism from that
 /// choice, and Louvain in particular returns a different partition under a
 /// randomised iteration order.
 ///
@@ -27,7 +27,7 @@ const NO_EDGES: &[EdgeRef] = &[];
 /// [`EdgeRef::node`] — is a key of `nodes`.** `drop_dangling_adjacency` — private,
 /// and named here because it is the sole establisher — establishes it and
 /// [`Subgraph::is_closed`] checks it; every algorithm in
-/// [`super::algorithms`] is written assuming it and none of them re-checks.
+/// [`crate::graph`] is written assuming it and none of them re-checks.
 ///
 /// It did not hold before Wave 1 (defect Z), and the way it failed is the reason
 /// it is now stated on the type rather than left to the loader. Adjacency comes
@@ -87,7 +87,7 @@ const NO_EDGES: &[EdgeRef] = &[];
 ///
 /// **0.13.28 is that rewrite** ([D-201]), and the maps above are unchanged by
 /// it. `Subgraph::build_dense` — crate-private — produces a borrowed CSR view and
-/// [`super::algorithms`] runs on that; at the budget ceiling `louvain` goes
+/// the algorithms in [`crate::graph`] run on that; at the budget ceiling `louvain` goes
 /// 675 ms → 75 ms, `scc` 310 → 34, `dijkstra` 125 → 28, and `k_core` breaks
 /// even. The view is built per call and deliberately not cached — see
 /// `build_dense` and D-201 for why the byte budget decides that.

@@ -6,6 +6,8 @@
 
 Rewritten in 0.5.4 against the implementation ([D-040](s13-decision-register.md#d-040)). The prior text was a sketch written before the code existed and had drifted from it in about half its entries; a normative surface that does not describe the surface is worse than none, because it is cited. A.1 is what the crate exposes today. **Refreshed again in 0.7.0**: it had gone two releases without one and cited nothing past [D-075](s13-decision-register.md#d-075), so the whole 0.6.0 surface was absent from a document marked normative — `diagnostic_conn`, `verify_snapshot_chain`, `rebuild_current_chunked`, `shadow_step`, `archive_windowed`, `estimated_bulk_hold`, `metrics`, `path`, and `TraversalBuilder::as_of`. `tests/doc_sync_tests.rs` now fails the build when a public `Database` method is missing here. A.2 records what the sketch promised and the crate does not have, so the gap is legible from this document rather than only from a compile error.
 
+**Amended in 0.13.35 ([D-208](s13-decision-register.md#d-208)): one canonical path per item.** Everything below is reachable at exactly one module path, plus two convenience surfaces that carry *names* and never *namespaces* — the crate root and `macrame::prelude`. A module is public only where it is the canonical home of what it holds rather than a second route to it, which is three of them: `connection::chunk_rows`, `schema::ddl`, `util::timestamp`. Twenty-three others became `pub(crate)` in that release; the items in them did not move. `tests/public_path_tests.rs` holds the rule against `public-api.txt`.
+
 A.1 — The surface as it exists
 
 ```rust
@@ -153,7 +155,7 @@ match db.bulk_import_with(more_edges, control).await {
 // recorded_at stamps a bulk write produces -- depend on the machine, which
 // is §5.1.6's fidelity boundary and is stated there.
 // chunk_rows::{EDGES 90, CONCEPTS 70, ANNOTATIONS 600,
-// EMBEDDINGS 30}. util::limits::HYDRATE_CHUNK (400) is a different kind of
+// EMBEDDINGS 30}. util::HYDRATE_CHUNK (400) is a different kind of
 // constant -- a bind-variable ceiling SQLite imposes, not a latency choice.
 
 // -- Traversal (read side; takes a connection, not the handle) --

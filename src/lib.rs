@@ -20,9 +20,14 @@ pub use error::{BulkInterrupted, BulkResult, DbError, Overlap, Result, StatedIns
 pub use util::{FutureStampPolicy, DEFAULT_FUTURE_STAMP_TOLERANCE};
 
 pub mod prelude {
+    // Names, not namespaces (D-208). `chunk_rows` was in this list and is a
+    // *module*, so `prelude::chunk_rows::EDGES` was a second canonical path to
+    // all four constants and a second name for the module itself. A prelude
+    // exists so one `use` brings in the names a caller needs; it is not a
+    // second directory tree.
     pub use crate::connection::{
-        chunk_rows, estimated_bulk_hold, Annotation, BulkControl, BulkProgress, CadencePolicy,
-        CancelToken, CheckpointReport, ConceptUpsert, Database, Tuning, WalCheckpointPolicy,
+        estimated_bulk_hold, Annotation, BulkControl, BulkProgress, CadencePolicy, CancelToken,
+        CheckpointReport, ConceptUpsert, Database, Tuning, WalCheckpointPolicy,
         BULK_ATOMIC_WARN_HOLD, CHUNK_BUDGET, MAX_ARCHIVE_SESSIONS,
     };
     pub use crate::error::{BulkInterrupted, BulkResult, DbError, Overlap, Result, StatedInstants};
@@ -34,9 +39,15 @@ pub mod prelude {
     pub use crate::metrics::CommandKind;
     #[cfg(feature = "metrics")]
     pub use crate::metrics::{KindSnapshot, MetricsSnapshot};
+    // `archive` names both a module and a function in `temporal`, and an
+    // explicit import binds the name in *both* namespaces. Listing it here
+    // re-exported the module too — and once that module is `pub(crate)`, this
+    // `pub use` republishes it as public at `prelude::archive`, with neither an
+    // error nor a warning. Naming the function's own path is what imports the
+    // function alone (D-208).
+    pub use crate::temporal::archive::archive;
     pub use crate::temporal::{
-        archive, query_as_of_edges, reconstruct, ArchiveReport, Interval, MaterializedState,
-        SnapshotCadence,
+        query_as_of_edges, reconstruct, ArchiveReport, Interval, MaterializedState, SnapshotCadence,
     };
     pub use crate::util::{
         Clock, FakeClock, FutureStampPolicy, SystemClock, DEFAULT_FUTURE_STAMP_TOLERANCE,

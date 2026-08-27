@@ -11,7 +11,6 @@ const CTS: &str = "2026-01-01T00:00:00.000000Z";
 use harness::TestHarness;
 use macrame::graph::AttributeMode;
 use macrame::integrity::audit_current;
-use macrame::schema::migrations;
 use macrame::temporal::{
     archive, hydrate_attributes, load_snapshot, reconstruct, save_snapshot, AsOf, Interval,
     MaterializedState,
@@ -46,7 +45,7 @@ async fn test_monday_wednesday_friday_scenario() {
         .await
         .unwrap();
     let conn = db.connect().unwrap();
-    migrations::run(&conn).await.unwrap();
+    macrame::schema::run_migrations(&conn).await.unwrap();
 
     // Monday (2026-01-05): Concept created with "Monday Title"
     conn.execute(
@@ -100,7 +99,7 @@ async fn test_reconstruct_now_equals_live_table() {
         .await
         .unwrap();
     let conn = db.connect().unwrap();
-    migrations::run(&conn).await.unwrap();
+    macrame::schema::run_migrations(&conn).await.unwrap();
 
     conn.execute(
         "INSERT INTO concepts (id, title, valid_from, recorded_at) VALUES ('c1', 'Node 1', '2026-01-01T00:00:00.000000Z', '2026-01-01T00:00:00.000000Z')",
@@ -172,7 +171,7 @@ async fn test_archive_moves_closed_intervals_and_leaves_no_drift() {
         .await
         .unwrap();
     let conn = db.connect().unwrap();
-    migrations::run(&conn).await.unwrap();
+    macrame::schema::run_migrations(&conn).await.unwrap();
 
     for id in ["c1", "c2"] {
         conn.execute(
@@ -319,7 +318,7 @@ async fn a_missing_archive_is_an_error_when_rows_were_actually_archived() {
         .unwrap()
         .connect()
         .unwrap();
-    migrations::run(&conn).await.unwrap();
+    macrame::schema::run_migrations(&conn).await.unwrap();
 
     let res = reconstruct(
         &conn,
@@ -655,7 +654,7 @@ const HOT_CURRENT_ROW: &str = "source_id||'|'||target_id||'|'||edge_type||'|'||v
 async fn archivable_fixture(path: &Path) -> (libsql::Database, libsql::Connection) {
     let db = libsql::Builder::new_local(path).build().await.unwrap();
     let conn = db.connect().unwrap();
-    migrations::run(&conn).await.unwrap();
+    macrame::schema::run_migrations(&conn).await.unwrap();
     for id in ["c1", "c2"] {
         conn.execute(
             &format!(
@@ -888,7 +887,7 @@ async fn the_unreachable_archive_error_says_how_much_went_and_how_far_back_the_l
         .unwrap()
         .connect()
         .unwrap();
-    migrations::run(&conn).await.unwrap();
+    macrame::schema::run_migrations(&conn).await.unwrap();
 
     let res = reconstruct(
         &conn,
@@ -984,7 +983,7 @@ async fn a_rehydration_leaves_the_archive_hint_saying_exactly_what_it_said_befor
         .unwrap()
         .connect()
         .unwrap();
-    migrations::run(&conn).await.unwrap();
+    macrame::schema::run_migrations(&conn).await.unwrap();
 
     let res = reconstruct(
         &conn,

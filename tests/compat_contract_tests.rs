@@ -16,7 +16,7 @@ use std::collections::BTreeSet;
 
 use harness::TestHarness;
 use macrame::integrity::{audit_current, rebuild_current};
-use macrame::schema::{ddl, migrations};
+use macrame::schema::ddl;
 
 const TS: &str = "2026-01-01T00:00:00.000000Z";
 const SENTINEL: &str = "9999-12-31T23:59:59.999999Z";
@@ -27,7 +27,7 @@ async fn seeded(harness: &TestHarness) -> (libsql::Database, libsql::Connection)
         .await
         .unwrap();
     let conn = db.connect().unwrap();
-    migrations::run(&conn).await.unwrap();
+    macrame::schema::run_migrations(&conn).await.unwrap();
     for id in ["c0", "c1"] {
         conn.execute(
             "INSERT INTO concepts (id, title, valid_from, recorded_at) VALUES (?1, 'N', ?2, ?2)",

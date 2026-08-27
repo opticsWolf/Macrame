@@ -70,6 +70,7 @@
 
 use std::time::{Duration, Instant};
 
+use macrame::connection::chunk_rows;
 use macrame::prelude::*;
 
 #[path = "../tests/common/fixtures.rs"]

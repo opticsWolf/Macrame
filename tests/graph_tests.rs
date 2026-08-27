@@ -2,9 +2,8 @@
 mod harness;
 
 use harness::TestHarness;
-use macrame::graph::builder::{AttributeMode, TraversalBuilder};
 use macrame::graph::{dijkstra, k_core, louvain, modularity, scc, Subgraph};
-use macrame::schema::migrations;
+use macrame::graph::{AttributeMode, TraversalBuilder};
 use macrame::{Database, DbError};
 
 const T0: &str = "2026-01-01T00:00:00.000000Z";
@@ -106,7 +105,7 @@ async fn test_traversal_execution_and_subgraph_bridge() {
             .await
             .unwrap();
         let w = raw.connect().unwrap();
-        migrations::run(&w).await.unwrap();
+        macrame::schema::run_migrations(&w).await.unwrap();
         for id in ["A", "B", "C"] {
             w.execute(
                 "INSERT INTO concepts (id, title, valid_from, recorded_at) VALUES (?1, ?2, ?3, ?3)",
@@ -907,8 +906,7 @@ async fn a_historical_traversal_must_say_which_titles_it_wants() {
     // II, met in a test fixture, and now met by two parameters rather than by
     // a coincidence of fixture arithmetic.
     let tuesday = "2026-01-06T00:00:00.000000Z";
-    let harness =
-        TestHarness::starting_at(macrame::util::clock::parse_iso8601_utc(tuesday).unwrap());
+    let harness = TestHarness::starting_at(macrame::util::parse_iso8601_utc(tuesday).unwrap());
     let db = harness.db_with_fake_clock().await;
 
     for (id, title) in [("a", "Original A"), ("b", "Original B")] {
@@ -1439,8 +1437,7 @@ fn modularity_prefers_a_merged_partition_over_the_true_one_at_scale() {
 #[tokio::test]
 async fn the_two_axes_answer_differently_and_now_say_which() {
     let tuesday = "2026-01-06T00:00:00.000000Z";
-    let harness =
-        TestHarness::starting_at(macrame::util::clock::parse_iso8601_utc(tuesday).unwrap());
+    let harness = TestHarness::starting_at(macrame::util::parse_iso8601_utc(tuesday).unwrap());
     let db = harness.db_with_fake_clock().await;
 
     db.upsert_concept(macrame::ConceptUpsert::new("a", "Typo A").valid_from(tuesday))
@@ -1536,8 +1533,7 @@ async fn the_two_axes_answer_differently_and_now_say_which() {
 #[tokio::test]
 async fn a_recorded_instant_sees_topology_that_links_current_no_longer_holds() {
     let tuesday = "2026-01-06T00:00:00.000000Z";
-    let harness =
-        TestHarness::starting_at(macrame::util::clock::parse_iso8601_utc(tuesday).unwrap());
+    let harness = TestHarness::starting_at(macrame::util::parse_iso8601_utc(tuesday).unwrap());
     let db = harness.db_with_fake_clock().await;
 
     for id in ["a", "b"] {
@@ -1612,8 +1608,7 @@ async fn a_recorded_instant_sees_topology_that_links_current_no_longer_holds() {
 #[tokio::test]
 async fn load_subgraph_with_honours_the_traversals_instant() {
     let tuesday = "2026-01-06T00:00:00.000000Z";
-    let harness =
-        TestHarness::starting_at(macrame::util::clock::parse_iso8601_utc(tuesday).unwrap());
+    let harness = TestHarness::starting_at(macrame::util::parse_iso8601_utc(tuesday).unwrap());
     let db = harness.db_with_fake_clock().await;
 
     for id in ["a", "b"] {

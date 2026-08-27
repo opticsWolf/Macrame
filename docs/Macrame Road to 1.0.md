@@ -2494,6 +2494,8 @@ release so that each ships its own diff:
 | **W11.2c** | 0.13.34. The `DbError` ↔ binding parity gate, *then* `#[non_exhaustive]`. |
 | **W11.2d** | 0.13.35. The module collapse; `schema` stays public and flattened. |
 
+*W11.2d as shipped keeps `schema::ddl` alongside `schema`, which the one-line entry above does not distinguish from flattening it away. See the block below and [D-208](../docs/architecture/s13-decision-register.md#d-208): the rule the measurement produced is one canonical path per item, and `ddl` is the canonical home of its constants rather than a second path to them.*
+
 > **✅ W11.2a shipped 0.13.32 (recorded as
 > [D-205](../docs/architecture/s13-decision-register.md#d-205)).**
 >
@@ -2596,6 +2598,47 @@ release so that each ships its own diff:
 > failure; deleting one direction of the `AttributeMode` conversion **passed**,
 > because the name survived in the other direction. The test now compares
 > counts per variant rather than sets of names.
+
+> **✅ W11.2d shipped 0.13.35 (recorded as
+> [D-208](../docs/architecture/s13-decision-register.md#d-208)).**
+>
+> **1. One canonical path per item**, plus two convenience surfaces that carry
+> *names* and never *namespaces*: the crate root and the prelude. Twenty-three
+> modules became `pub(crate)`; a module is public now only if its parent does
+> **not** re-export its items. **+321 −640 items, 1,632 → 1,313**, and
+> duplicate lines in the listing fell 549 → 271 — the 271 that remain are
+> the carve-out.
+>
+> **2. −640 is not a removals-only diff, so it was audited rather than read.**
+> Every line was reduced to an identity and the two sets compared: 45 lost, 4
+> gained, all 49 accounted for — 25 `pub mod` lines, 15 items in the prelude's
+> two module namespaces, 1 alias that already had a twin, and 4 signatures
+> where `FutureStampPolicy` now renders from the crate root. **No item left
+> the API.** The ten `pub use` lines the collapse needed are not additions
+> either: each name already existed at the path being removed.
+>
+> **3. Three modules stay public because each *is* the qualification** —
+> `connection::chunk_rows`, `schema::ddl`, `util::timestamp`. None is
+> re-exported by its parent, so each holds exactly one path.
+> `util`'s four `timestamp` re-exports were deleted, at zero call-site cost.
+>
+> **4. `prelude::archive` was a module and nobody knew.** `archive` names both
+> a module and a function in `temporal`, an explicit import binds the name in
+> both namespaces, and re-exporting the now-`pub(crate)` module through a
+> `pub use` is **neither an error nor a warning** — it silently republishes it
+> at `macrame::prelude::archive`. The listing would have read as a clean path
+> move. A test pins it now.
+>
+> **5. The gate was written first and run red.** The hand count was 67; the
+> gate printed **158 identities at 169 surplus paths**, and an earlier draft
+> printed 291 because the *crate root* re-exports too — which is what forced
+> the carve-out to name both surfaces. It stays standing: thirty-nine modules
+> accreted one `pub mod` at a time, each invisible in its own diff.
+>
+> **The plan line said “`schema` stays public and flattened”**, and that is
+> what shipped, disambiguated by measurement rather than deviated from:
+> `schema` is public, its surface is flattened of duplicate paths, and
+> `schema::ddl` survives under the rule the 169 produced.
 
 [D-147]: ../docs/architecture/s13-decision-register.md#d-147
 

@@ -9,8 +9,7 @@ use std::path::{Path, PathBuf};
 
 use harness::TestHarness;
 use macrame::error::DbError;
-use macrame::schema::migrations;
-use macrame::temporal::snapshot::{cleanup_expired_snapshots, save_snapshot};
+use macrame::temporal::{cleanup_expired_snapshots, save_snapshot};
 use macrame::temporal::{reconstruct, MaterializedState};
 
 /// Build a cold archive database holding the given log rows.
@@ -54,7 +53,7 @@ async fn hot_db(harness: &TestHarness) -> libsql::Connection {
         .unwrap()
         .connect()
         .unwrap();
-    migrations::run(&conn).await.unwrap();
+    macrame::schema::run_migrations(&conn).await.unwrap();
     conn
 }
 
@@ -328,7 +327,7 @@ async fn a_snapshot_carries_its_header_and_reloads() {
     assert_eq!(u16::from_le_bytes([raw[4], raw[5]]), 3, "format version");
     assert_eq!(
         u32::from_le_bytes([raw[6], raw[7], raw[8], raw[9]]),
-        migrations::SCHEMA_VERSION,
+        macrame::schema::SCHEMA_VERSION,
         "schema version"
     );
 
@@ -531,7 +530,7 @@ async fn a_snapshot_from_another_schema_version_is_refused_not_parsed() {
     // Bump the recorded schema version; leave the payload byte-identical, so
     // the only thing that can reject it is the header check.
     let mut raw = std::fs::read(&path).unwrap();
-    raw[6..10].copy_from_slice(&(migrations::SCHEMA_VERSION + 1).to_le_bytes());
+    raw[6..10].copy_from_slice(&(macrame::schema::SCHEMA_VERSION + 1).to_le_bytes());
     std::fs::write(&path, &raw).unwrap();
 
     match macrame::temporal::load_snapshot(&path).unwrap_err() {
@@ -587,7 +586,7 @@ async fn a_leaked_cold_attachment_does_not_poison_the_connection() {
         .await
         .unwrap();
     let conn = db.connect().unwrap();
-    migrations::run(&conn).await.unwrap();
+    macrame::schema::run_migrations(&conn).await.unwrap();
 
     // The state a panic between ATTACH and DETACH leaves behind.
     conn.execute(
@@ -788,7 +787,7 @@ async fn an_incompatible_snapshot_is_skipped_and_the_fold_still_answers() {
 
     // Same bytes, a schema version this build does not read.
     let mut raw = std::fs::read(&path).unwrap();
-    raw[6..10].copy_from_slice(&(migrations::SCHEMA_VERSION + 1).to_le_bytes());
+    raw[6..10].copy_from_slice(&(macrame::schema::SCHEMA_VERSION + 1).to_le_bytes());
     std::fs::write(&path, &raw).unwrap();
 
     let composed = reconstruct(db.read_conn(), &now, None, Some(&snaps))
@@ -816,7 +815,7 @@ async fn an_incompatible_snapshot_is_skipped_and_the_fold_still_answers() {
 #[tokio::test]
 async fn an_archive_no_longer_disables_composition() {
     use macrame::prelude::*;
-    use macrame::temporal::as_of::NodeAttributes;
+    use macrame::temporal::NodeAttributes;
 
     let harness = TestHarness::new();
     let db = composed_db(&harness).await;

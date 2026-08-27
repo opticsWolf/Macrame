@@ -39,7 +39,6 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use macrame::schema::migrations;
 use v7_schema::{v7_schema, TS};
 
 /// Concepts per arm. Links are `LINK_FACTOR` times this.
@@ -245,7 +244,7 @@ async fn arm(dir: &Path, n_concepts: usize) -> Row {
 
     let sampler = PeakSampler::start(&path);
     let t0 = Instant::now();
-    let outcome = migrations::run(&conn).await.unwrap();
+    let outcome = macrame::schema::run_migrations(&conn).await.unwrap();
     let migrate = t0.elapsed();
     let peak = sampler.finish();
 

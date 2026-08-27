@@ -59,7 +59,6 @@ use std::future::Future;
 use harness::TestHarness;
 use macrame::error::DbError;
 use macrame::integrity::{audit_current, rebuild_current};
-use macrame::schema::migrations;
 use proptest::prelude::*;
 
 const SENTINEL: &str = "9999-12-31T23:59:59.999999Z";
@@ -357,7 +356,7 @@ async fn fresh(harness: &TestHarness) -> (libsql::Database, libsql::Connection) 
         .await
         .unwrap();
     let conn = db.connect().unwrap();
-    migrations::run(&conn).await.unwrap();
+    macrame::schema::run_migrations(&conn).await.unwrap();
     for id in NODES {
         conn.execute(
             "INSERT INTO concepts (id, title, valid_from, recorded_at) VALUES (?1, 'N', ?2, ?2)",
@@ -385,7 +384,7 @@ async fn fresh_with_concepts(
         .await
         .unwrap();
     let conn = db.connect().unwrap();
-    migrations::run(&conn).await.unwrap();
+    macrame::schema::run_migrations(&conn).await.unwrap();
     for (id, spec) in ARCHIVE_NODES.iter().zip(specs) {
         conn.execute(
             "INSERT INTO concepts (id, title, valid_from, valid_to, recorded_at, retired) \
@@ -899,7 +898,7 @@ async fn fresh_traversal(harness: &TestHarness) -> (libsql::Database, libsql::Co
         .await
         .unwrap();
     let conn = db.connect().unwrap();
-    migrations::run(&conn).await.unwrap();
+    macrame::schema::run_migrations(&conn).await.unwrap();
     for id in TNODES {
         conn.execute(
             "INSERT INTO concepts (id, title, valid_from, recorded_at) VALUES (?1, 'N', ?2, ?2)",

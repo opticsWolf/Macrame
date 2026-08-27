@@ -4,7 +4,6 @@ mod harness;
 use harness::TestHarness;
 use macrame::error::DbError;
 use macrame::integrity::{audit_current, rebuild_current};
-use macrame::schema::migrations;
 
 #[tokio::test]
 async fn test_schema_initialization_and_version() {
@@ -15,7 +14,7 @@ async fn test_schema_initialization_and_version() {
         .unwrap();
     let conn = db.connect().unwrap();
 
-    migrations::run(&conn).await.unwrap();
+    macrame::schema::run_migrations(&conn).await.unwrap();
 
     let version: u32 = conn
         .query("PRAGMA user_version", ())
@@ -39,7 +38,7 @@ async fn test_trg_links_current_sync() {
         .await
         .unwrap();
     let conn = db.connect().unwrap();
-    migrations::run(&conn).await.unwrap();
+    macrame::schema::run_migrations(&conn).await.unwrap();
 
     // Insert concepts
     conn.execute(
@@ -107,7 +106,7 @@ async fn test_trg_links_single_open_violation() {
         .await
         .unwrap();
     let conn = db.connect().unwrap();
-    migrations::run(&conn).await.unwrap();
+    macrame::schema::run_migrations(&conn).await.unwrap();
 
     conn.execute(
         "INSERT INTO concepts (id, title, valid_from, recorded_at) VALUES ('c1', 'Node 1', '2026-01-01T00:00:00.000000Z', '2026-01-01T00:00:00.000000Z')",
@@ -149,7 +148,7 @@ async fn test_trg_concepts_monotonic_ra_violation() {
         .await
         .unwrap();
     let conn = db.connect().unwrap();
-    migrations::run(&conn).await.unwrap();
+    macrame::schema::run_migrations(&conn).await.unwrap();
 
     conn.execute(
         "INSERT INTO concepts (id, title, valid_from, recorded_at) VALUES ('c1', 'Original Title', '2026-01-01T00:00:00.000000Z', '2026-01-01T12:00:00.000000Z')",
@@ -178,7 +177,7 @@ async fn test_delete_guard_triggers() {
         .await
         .unwrap();
     let conn = db.connect().unwrap();
-    migrations::run(&conn).await.unwrap();
+    macrame::schema::run_migrations(&conn).await.unwrap();
 
     conn.execute(
         "INSERT INTO concepts (id, title, valid_from, recorded_at) VALUES ('c1', 'Title', '2026-01-01T00:00:00.000000Z', '2026-01-01T00:00:00.000000Z')",
@@ -243,7 +242,7 @@ async fn test_archive_session_marker_lifecycle() {
         .await
         .unwrap();
     let conn = db.connect().unwrap();
-    migrations::run(&conn).await.unwrap();
+    macrame::schema::run_migrations(&conn).await.unwrap();
 
     conn.execute(
         "INSERT INTO concepts (id, title, valid_from, recorded_at) VALUES ('c1', 'N', '2026-01-01T00:00:00.000000Z', '2026-01-01T00:00:00.000000Z')",
@@ -338,7 +337,7 @@ async fn test_archive_session_marker_rollback_rearms_guard() {
         .await
         .unwrap();
     let conn = db.connect().unwrap();
-    migrations::run(&conn).await.unwrap();
+    macrame::schema::run_migrations(&conn).await.unwrap();
 
     // Give transaction_log a row, so the BEFORE DELETE row trigger can fire.
     conn.execute(
@@ -383,7 +382,7 @@ async fn test_audit_and_rebuild_current() {
         .await
         .unwrap();
     let conn = db.connect().unwrap();
-    migrations::run(&conn).await.unwrap();
+    macrame::schema::run_migrations(&conn).await.unwrap();
 
     conn.execute(
         "INSERT INTO concepts (id, title, valid_from, recorded_at) VALUES ('c1', 'Node 1', '2026-01-01T00:00:00.000000Z', '2026-01-01T00:00:00.000000Z')",
@@ -442,7 +441,7 @@ async fn test_audit_detects_drift_in_both_directions() {
         .await
         .unwrap();
     let conn = db.connect().unwrap();
-    migrations::run(&conn).await.unwrap();
+    macrame::schema::run_migrations(&conn).await.unwrap();
 
     for id in ["c1", "c2"] {
         conn.execute(
@@ -526,7 +525,7 @@ async fn test_non_canonical_timestamps_are_rejected_at_write_time() {
         .await
         .unwrap();
     let conn = db.connect().unwrap();
-    migrations::run(&conn).await.unwrap();
+    macrame::schema::run_migrations(&conn).await.unwrap();
 
     // The exact literal that used to be written freely, and that silently
     // mis-ordered against every microsecond-precision stamp it was compared to.
@@ -576,7 +575,7 @@ async fn test_valid_time_predicate_matches_edge_at_same_instant() {
         .await
         .unwrap();
     let conn = db.connect().unwrap();
-    migrations::run(&conn).await.unwrap();
+    macrame::schema::run_migrations(&conn).await.unwrap();
 
     let ts = "2026-01-01T00:00:00.000000Z";
     for id in ["c1", "c2"] {
@@ -626,7 +625,7 @@ async fn an_archive_leaves_no_drift_although_it_no_longer_checks_itself() {
         .unwrap()
         .connect()
         .unwrap();
-    migrations::run(&conn).await.unwrap();
+    macrame::schema::run_migrations(&conn).await.unwrap();
 
     let t0 = "2026-01-01T00:00:00.000000Z";
     let t1 = "2026-02-01T00:00:00.000000Z";

@@ -28,7 +28,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use macrame::graph::EdgeAssertion;
-use macrame::util::clock::parse_iso8601_utc;
+use macrame::util::parse_iso8601_utc;
 use macrame::util::FakeClock;
 use macrame::{ConceptUpsert, Database};
 

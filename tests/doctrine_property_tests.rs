@@ -35,7 +35,7 @@ use std::future::Future;
 
 use harness::TestHarness;
 use macrame::prelude::*;
-use macrame::temporal::snapshot::save_snapshot;
+use macrame::temporal::save_snapshot;
 use proptest::prelude::*;
 
 const NODES: [&str; 3] = ["c0", "c1", "c2"];

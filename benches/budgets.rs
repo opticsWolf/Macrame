@@ -50,6 +50,7 @@ mod fixtures;
 use std::path::PathBuf;
 
 use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
+use macrame::connection::chunk_rows;
 use macrame::graph::{astar, dijkstra, k_core, louvain, scc};
 use macrame::prelude::*;
 use macrame::temporal::{hydrate_attributes, reconstruct, save_snapshot, AsOf};

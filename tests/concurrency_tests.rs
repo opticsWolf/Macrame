@@ -16,6 +16,7 @@ use std::task::Poll;
 use std::time::Duration;
 
 use harness::TestHarness;
+use macrame::connection::chunk_rows;
 use macrame::prelude::*;
 
 const T1: &str = "2026-01-01T00:00:00.000000Z";

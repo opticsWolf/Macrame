@@ -30,7 +30,6 @@ use harness::TestHarness;
 use macrame::graph::AttributeMode;
 use macrame::graph::EdgeAssertion;
 use macrame::graph::{dijkstra, k_core, louvain, scc};
-use macrame::schema::migrations;
 use macrame::temporal::{hydrate_attributes, AsOf};
 use macrame::{ConceptUpsert, Database};
 
@@ -116,7 +115,7 @@ async fn a_v1_concept_payload_still_folds() {
         .await
         .unwrap();
     let conn = db.connect().unwrap();
-    migrations::run(&conn).await.unwrap();
+    macrame::schema::run_migrations(&conn).await.unwrap();
 
     // Written by hand in the old shape: no `embedding_model`, `'v', 1`.
     conn.execute(
@@ -212,7 +211,7 @@ async fn a_concept_whose_id_looks_like_an_edge_key_survives_reconstruction() {
         .await
         .unwrap();
     let conn = db.connect().unwrap();
-    migrations::run(&conn).await.unwrap();
+    macrame::schema::run_migrations(&conn).await.unwrap();
 
     let colliding_id = format!("a|b|KNOWS|{T0}");
 
@@ -363,7 +362,7 @@ async fn at_time_before_the_retirement_still_sees_the_concept() {
         .await
         .unwrap();
     let conn = db.connect().unwrap();
-    migrations::run(&conn).await.unwrap();
+    macrame::schema::run_migrations(&conn).await.unwrap();
 
     conn.execute(
         "INSERT INTO concepts (id, title, content, valid_from, recorded_at) \
@@ -600,7 +599,7 @@ async fn hydrate_spans_more_than_one_chunk() {
     // Derived, not a literal: the fixture must straddle a chunk boundary, and a
     // hardcoded 450 stops doing that the moment the constant is tuned upward —
     // silently, since the test still passes while testing one chunk (T3.1).
-    let n = macrame::util::limits::HYDRATE_CHUNK + 50;
+    let n = macrame::util::HYDRATE_CHUNK + 50;
     let ids: Vec<String> = (0..n).map(|i| format!("n{i:04}")).collect();
     for id in &ids {
         db.upsert_concept(ConceptUpsert::new(id.clone(), id.clone()).valid_from(T0))
@@ -1688,7 +1687,7 @@ async fn a_delete_row_in_the_log_is_refused_as_corruption() {
         .await
         .unwrap();
     let conn = db.connect().unwrap();
-    migrations::run(&conn).await.unwrap();
+    macrame::schema::run_migrations(&conn).await.unwrap();
 
     conn.execute(
         "INSERT INTO transaction_log (table_name, entity_id, operation, payload, recorded_at) \
@@ -1726,7 +1725,7 @@ async fn a_delete_row_for_a_link_is_refused_too() {
         .await
         .unwrap();
     let conn = db.connect().unwrap();
-    migrations::run(&conn).await.unwrap();
+    macrame::schema::run_migrations(&conn).await.unwrap();
 
     conn.execute(
         "INSERT INTO transaction_log (table_name, entity_id, operation, payload, recorded_at) \
@@ -1881,7 +1880,7 @@ async fn an_upgraded_database_is_re_anchored_at_open() {
     // obligation.
     assert_eq!(
         reopened.schema_version(),
-        macrame::schema::migrations::SCHEMA_VERSION,
+        macrame::schema::SCHEMA_VERSION,
         "the rung must have run"
     );
 

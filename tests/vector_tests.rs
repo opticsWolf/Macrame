@@ -2,9 +2,9 @@
 mod harness;
 
 use harness::TestHarness;
+use macrame::connection::chunk_rows;
 use macrame::error::DbError;
-use macrame::graph::vector_filter::{CandidateCount, CostEstimator, VectorFilterStrategy};
-use macrame::schema::migrations;
+use macrame::graph::{CandidateCount, CostEstimator, VectorFilterStrategy};
 use macrame::vector::{
     declared_dimension, reciprocal_rank_fusion, register_model, registered_models, search_vector,
     upsert_embedding, EmbeddingCodec, ModelName,
@@ -20,7 +20,7 @@ async fn seeded(harness: &TestHarness) -> (libsql::Database, libsql::Connection)
         .unwrap();
     let conn = db.connect().unwrap();
     conn.execute("PRAGMA foreign_keys = ON", ()).await.unwrap();
-    migrations::run(&conn).await.unwrap();
+    macrame::schema::run_migrations(&conn).await.unwrap();
     for id in ["c0", "c1", "c2"] {
         conn.execute(
             "INSERT INTO concepts (id, title, valid_from, recorded_at) VALUES (?1, 'N', ?2, ?2)",
@@ -120,7 +120,7 @@ async fn a_database_with_a_registered_model_still_opens() {
         .await
         .unwrap();
     let conn = db.connect().unwrap();
-    migrations::run(&conn)
+    macrame::schema::run_migrations(&conn)
         .await
         .expect("a database carrying a registered model must reopen");
 

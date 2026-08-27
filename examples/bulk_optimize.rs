@@ -40,6 +40,7 @@
 //! [D-197]: ../docs/architecture/s13-decision-register.md#d-197
 //! [D-198]: ../docs/architecture/s13-decision-register.md#d-198
 
+use macrame::connection::chunk_rows;
 use macrame::metrics::CommandKind;
 use macrame::prelude::*;
 

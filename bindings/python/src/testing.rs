@@ -249,8 +249,7 @@ impl PyFakeClock {
     #[new]
     fn new(initial: &Bound<'_, PyAny>) -> PyResult<Self> {
         let canonical = crate::timestamps::to_canonical(Some(initial))?;
-        let at =
-            macrame::util::clock::parse_iso8601_utc(&canonical).map_err(crate::errors::to_py)?;
+        let at = macrame::util::parse_iso8601_utc(&canonical).map_err(crate::errors::to_py)?;
         Ok(Self {
             inner: std::sync::Arc::new(macrame::prelude::FakeClock::new(at)),
         })

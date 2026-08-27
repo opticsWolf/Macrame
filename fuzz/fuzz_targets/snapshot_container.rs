@@ -21,7 +21,7 @@
 
 use libfuzzer_sys::fuzz_target;
 use macrame::error::DbError;
-use macrame::temporal::snapshot::fuzzing;
+use macrame::temporal::fuzzing;
 
 fuzz_target!(|data: &[u8]| {
     match fuzzing::parse(data) {

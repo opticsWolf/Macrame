@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tempfile::TempDir;
 
-use macrame::util::clock::FakeClock;
+use macrame::util::FakeClock;
 use macrame::Database;
 
 /// A temp directory, a database path, and a clock that can be injected.

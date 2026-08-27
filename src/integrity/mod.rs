@@ -1,6 +1,6 @@
-pub mod audit;
-pub mod rebuild;
-pub mod shadow;
+pub(crate) mod audit;
+pub(crate) mod rebuild;
+pub(crate) mod shadow;
 
 pub use audit::audit_current;
 pub use rebuild::{rebuild_current, RebuildReport};

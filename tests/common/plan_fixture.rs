@@ -32,7 +32,7 @@
 #![allow(dead_code)]
 
 use libsql::Builder;
-use macrame::schema::{ddl, migrations};
+use macrame::schema::ddl;
 
 pub const TS: &str = "2026-01-01T00:00:00.000000Z";
 pub const OPEN: &str = "9999-12-31T23:59:59.999999Z";
@@ -49,7 +49,7 @@ pub const CONCEPTS: usize = 260;
 pub async fn migrated(db_path: &std::path::Path) -> libsql::Connection {
     let db = Builder::new_local(db_path).build().await.unwrap();
     let conn = db.connect().unwrap();
-    migrations::run(&conn).await.unwrap();
+    macrame::schema::run_migrations(&conn).await.unwrap();
     conn
 }
 

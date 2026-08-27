@@ -81,7 +81,7 @@ async fn main() {
     let db = libsql::Builder::new_local(&path).build().await.unwrap();
     let conn = db.connect().unwrap();
     conn.execute("PRAGMA foreign_keys = ON", ()).await.unwrap();
-    macrame::schema::migrations::run(&conn).await.unwrap();
+    macrame::schema::run_migrations(&conn).await.unwrap();
 
     for id in ["c0", "c1"] {
         conn.execute(

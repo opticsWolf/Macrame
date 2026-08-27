@@ -22,9 +22,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use macrame::temporal::as_of::NodeAttributes;
-use macrame::temporal::replay::MaterializedState;
-use macrame::temporal::snapshot::{fuzzing, save_snapshot};
+use macrame::temporal::{fuzzing, save_snapshot, MaterializedState, NodeAttributes};
 
 /// Shapes worth starting from, rather than one arbitrary state.
 ///

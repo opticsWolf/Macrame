@@ -11,6 +11,7 @@
 
 use std::time::{Duration, Instant};
 
+use macrame::connection::chunk_rows;
 use macrame::prelude::*;
 
 const TS: &str = "2026-01-01T00:00:00.000000Z";
