@@ -2874,6 +2874,26 @@ W13 is a finding (F-34) and is here because branching is what makes it bite.
 
 ### 15.1 What a branch is, stated before anything is built
 
+> **Shipped in 0.14.1 on 2026-08-27
+> ([D-213](architecture/s13-decision-register.md#d-213)).** The framing is now in
+> [Doctrine II](architecture/s0-s3-foundations.md#doctrine-ii) rather than only
+> here, because a normative claim that lives in a plan is a claim that stops
+> being read once the plan is done. **The doctrine count did not move** — lineage
+> is a property of the second clock, and the eight are frozen by the stability
+> contract ([D-211](architecture/s13-decision-register.md#d-211)), so the gate
+> that would have caught a ninth doctrine is the gate that confirms this was a
+> clause. `lineage_belongs_to_the_second_clock_and_is_not_a_third_axis` holds all
+> three claims: eight doctrines, the ordering clause in Doctrine II, and no
+> doctrine calling lineage an axis except to refuse it.
+>
+> **Nothing is built.** No `branches` table, no `branch_id`, no rung to v12, no
+> API — those are §15.2 onward, and each is now reviewable against a written
+> model instead of against an intention. That ordering is the decision: it is
+> what [D-160](architecture/s13-decision-register.md#d-160) and
+> [D-174](architecture/s13-decision-register.md#d-174) were deliberately kept one
+> release apart for, and branching touches more surface than `as_of` did.
+
+
 The temptation is to treat a branch as a third axis beside valid time and
 transaction time. It is not, and getting this wrong is how the schema acquires a
 column that means nothing precise.

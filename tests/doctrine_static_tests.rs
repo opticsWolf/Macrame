@@ -79,3 +79,96 @@ async fn the_permitted_exception_is_still_a_scalar_column() {
          in no_payload_carries_a_vector stops being sound"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Lineage is a clause on the second clock (0.14.1, W12.1, D-213)
+// ---------------------------------------------------------------------------
+
+/// The doctrine text these read. Foundations is the normative source; §15's
+/// framing in the roadmap is prose *about* it, and the two are checked against
+/// each other rather than one being trusted.
+const FOUNDATIONS: &str = include_str!("../docs/architecture/s0-s3-foundations.md");
+
+/// **A branch is transaction time with a tree order, and W12 has not started
+/// building yet** (0.14.1, W12.1, [D-213]).
+///
+/// [§15.1](../docs/Macrame%20Road%20to%201.0.md) requires the framing to be
+/// written down before the schema is, for the reason
+/// [D-160](../docs/architecture/s13-decision-register.md#d-160) and
+/// [D-174](../docs/architecture/s13-decision-register.md#d-174) were kept one
+/// release apart: *a break you cannot state is a break you cannot review.* A
+/// framing in a register entry is a framing; a framing a test reads is a
+/// framing that survives the four releases between here and the schema.
+///
+/// Three claims, and the third is the one that will catch a mistake:
+///
+/// 1. **There are still eight doctrines.** A ninth for branching was the easy
+///    edit and the wrong one, and it would also have moved a number
+///    [D-211](../docs/architecture/s13-decision-register.md#d-211) froze.
+/// 2. **Doctrine II owns lineage**, because it owns the axis lineage is a
+///    property of.
+/// 3. **No doctrine calls it an axis or a dimension except to refuse it.**
+///    That is the specific misreading §15.1 exists to name — it is what
+///    produces a `branch_id` column that means nothing precise and a schema
+///    nobody can query correctly. A doctrine that refuses a framing has to
+///    *say* the framing, so the phrase is permitted where a negation
+///    immediately precedes it and forbidden everywhere else. Wording drifts;
+///    this pins the part that is not wording.
+///
+/// [D-213]: ../docs/architecture/s13-decision-register.md
+#[test]
+fn lineage_belongs_to_the_second_clock_and_is_not_a_third_axis() {
+    let doctrines: Vec<&str> = FOUNDATIONS
+        .match_indices("<a id=\"doctrine-")
+        .map(|(i, _)| {
+            let rest = &FOUNDATIONS[i..];
+            &rest[..rest.find("\n\n").unwrap_or(rest.len())]
+        })
+        .collect();
+
+    assert_eq!(
+        doctrines.len(),
+        8,
+        "§0 defines {} doctrines. Branching is a clause on Doctrine II and not a \
+         ninth doctrine (D-213), and the count is frozen by the stability \
+         contract (D-211)",
+        doctrines.len()
+    );
+
+    let second = doctrines
+        .iter()
+        .find(|d| d.starts_with("<a id=\"doctrine-ii\">"))
+        .expect("Doctrine II is anchored");
+    assert!(
+        second.contains("total order within one lineage")
+            && second.contains("partial order across lineages"),
+        "Doctrine II no longer states that transaction time is a total order \
+         within a lineage and a partial order across them. That clause is what \
+         makes a branch a fork in the second clock rather than a new axis \
+         (D-213), and W12's schema is built against it"
+    );
+
+    // Doctrine II says "**not a third axis**", which is the refusal and not the
+    // error. A bare substring search cannot tell one from the other, so the
+    // negation has to be part of what is checked: the phrase is permitted
+    // immediately after one of these and forbidden anywhere else.
+    const REFUSALS: &[&str] = &["not a ", "not the ", "never a ", "rather than a ", "nor a "];
+
+    for d in &doctrines {
+        let lower = d.to_lowercase();
+        for phrase in ["third axis", "third clock", "third temporal", "branch axis"] {
+            for (i, _) in lower.match_indices(phrase) {
+                let before = &lower[..i];
+                assert!(
+                    REFUSALS.iter().any(|r| before.ends_with(r)),
+                    "a doctrine describes lineage as {phrase:?} without refusing \
+                     it. §15.1 refuses that framing by name: a branch is \
+                     transaction time with a tree order, and treating it as a \
+                     dimension is how the schema acquires a column that means \
+                     nothing precise (D-213). Naming the framing is allowed \
+                     where a negation precedes it; asserting it is not"
+                );
+            }
+        }
+    }
+}
