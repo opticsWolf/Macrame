@@ -2694,6 +2694,42 @@ release so that each ships its own diff:
 > other one — gates that hold prose to code rather than counting either
 > (D-209).
 
+> **✅ W11.5 shipped 0.13.38 (recorded as
+> [D-211](../docs/architecture/s13-decision-register.md#d-211)).**
+>
+> **The item's number was taken, for the second time in two waves.** D-157 is
+> `wal_autocheckpoint` (0.12.14), which W11.5's own predecessor block already
+> said in advance. A plan may name a *wave*; the register allocates its own
+> numbers when the work lands. The entry is **D-211**.
+>
+> **1. The contract already existed and was unreadable.** Every clause of the
+> new [Appendix D](../docs/architecture/appendices.md#appendix-d--the-stability-contract-normative)
+> but one is a restatement — D-029, D-036, D-043, D-055, D-147, D-154, D-205,
+> D-207, D-208, and a comment in `Cargo.toml`. A caller asking what a major
+> version would mean had to read nine register entries to find out. A register
+> is a chronology; a contract is a document you can hand to someone.
+>
+> **2. It says what is *not* frozen, at the same weight.** The file layout
+> (except the three modules that are public paths), the derivative tables, the
+> schema version, the snapshot container, §9's figures, the MSRV, and anything
+> `pub(crate)` or `#[doc(hidden)]`. Several of those are expected to move.
+>
+> **3. The one new decision is D.3, the Python wheel**: frozen on the same
+> terms, versions bumped together, and the asymmetry stated — Python has no
+> compiler to enforce it, so the enforcement is `binding_parity_tests` plus
+> `tests_py`, and the two infallible enum conversions panic rather than guess.
+>
+> **4. Appendix D is quantities, so it gets a gate Appendix A does not need.**
+> 1,313 items, schema v11, container v3, MSRV 1.88, eight doctrines — held to
+> the code by `tests/stability_contract_tests.rs`. Five assertions, five
+> mutations, each failing exactly one and naming it. A stale number in a
+> normative document is still a plausible number, which is why it rots quietly.
+>
+> **Named, not adopted:** `cargo-semver-checks` understands what a *narrowing*
+> is rather than only what a textual difference is, which is strictly stronger
+> than the baseline diff for D.1's promise. It wants a released baseline, and
+> the useful one is 1.0 itself — so it is the thing to adopt **at** 1.0.
+
 [D-147]: ../docs/architecture/s13-decision-register.md#d-147
 
 **W11.3 — Documentation sweep.** Closes §6.1: the release history table in

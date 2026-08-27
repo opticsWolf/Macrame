@@ -436,6 +436,60 @@ All three alternatives were answered ([D-146](s13-decision-register.md#d-146)): 
 
 **The trigger that makes either due sooner:** for the first, a report of a visible stall attributable to a bulk import; for the second, a proposal to change the retry budget, or an R15 rate quoted anywhere outside `.cargo/config.toml`.
 
+## Appendix D — The stability contract (normative)
+
+New in 0.13.38 ([D-211](s13-decision-register.md#d-211)). [Appendix A](appendices.md#appendix-a--public-api-normative) says what the surface **is**; this says what changing it **costs** after 1.0, and what it does not cost. Every clause below is either a restatement of a decision already in [the register](s13-decision-register.md#13-decision-register), cited, or marked **New** — in which case this is where it is decided.
+
+**The numbers in this appendix are held to the code by `tests/stability_contract_tests.rs`.** A contract that names a version number and drifts from it is worse than one that names none, because it is cited.
+
+### D.1 — What 1.0 freezes
+
+*Frozen* means a change requires a **major version**.
+
+**1. The public Rust API, item for item and path for path.** [`docs/architecture/public-api.txt`](public-api.txt) is the surface — **1,313 items**. No item is removed, no path stops resolving, and no signature narrows. Each item is reachable at exactly one canonical path, plus flat aliases at the crate root and in `macrame::prelude` ([D-208](s13-decision-register.md#d-208)). Held by `scripts/check_public_api.py` in CI and by `tests/public_path_tests.rs` in `cargo test`.
+
+**2. The ledger tables** — `concepts`, `links`, `transaction_log`. Additive only: `ALTER TABLE ADD COLUMN` and new indexes. A changed primary key, a dropped column or altered bitemporal semantics is a major version with an explicit ETL path, because bitemporal data is the hardest data to migrate: a rebuild means replaying history and recomputing transaction-time boundaries, which is rewriting the past ([D-036](s13-decision-register.md#d-036), [Doctrine III](s0-s3-foundations.md#doctrine-iii)).
+
+**3. The canonical timestamp form** — exactly 27 characters, `YYYY-MM-DDTHH:MM:SS.ffffffZ`, enforced by `CHECK` on all four tables ([D-029](s13-decision-register.md#d-029)). It is a fact about the disk as well as the API, so it is frozen twice over.
+
+**4. The eight doctrines** ([§0](s0-s3-foundations.md#0-doctrine)). Not a version boundary at all: a system that breaks one of these is a different system wearing this one's name.
+
+**5. `DbError` as the error type of every fallible public function**, through `Result<T>` and `BulkResult<T>`. Variants may be *added* (D.2 below); none is removed, renamed, or repurposed to mean something else.
+
+**6. The crate name and the import path.** The package is `macrame-db` on crates.io and the library is `macrame`; the wheel is `macrame-db` on PyPI and the module is `macrame`.
+
+### D.2 — What 1.0 does not freeze
+
+Minor-version changes, and several of them are expected rather than merely permitted.
+
+**1. The file layout.** This is what [D-208](s13-decision-register.md#d-208) bought: a public module freezes the file it names, so all but three of them stopped being public. The three that remain — `connection::chunk_rows`, `schema::ddl`, `util::timestamp` — **are** frozen paths, and those three files cannot move. Everything else in `src/` can be reorganised without a version at all.
+
+**2. The variants of `DbError` and of nine domain enums.** All ten are `#[non_exhaustive]` ([D-207](s13-decision-register.md#d-207)), so a new variant is a minor version. This is deliberate and load-bearing: four error variants arrived in the four waves before 1.0, each because the ledger needed to name the right subject, and a crate that cannot add one reports the wrong error instead.
+
+**3. The derivative tables** — `links_current`, the per-model `embeddings_*` tables, and `concepts_fts`. **No schema-stability guarantee at all.** A minor version needing a different materialization drops the table, recreates it from the DDL and re-derives it inside the same migration step ([D-036](s13-decision-register.md#d-036), [Doctrine VI](s0-s3-foundations.md#doctrine-vi), [Doctrine VII](s0-s3-foundations.md#doctrine-vii)).
+
+**4. The schema version and its migration rungs.** **v11** today. Rungs are forward-only and run at `open()`; adding one is a minor version, and refusing to open a database from a *newer* build is the behaviour, not a bug.
+
+**5. The snapshot container format.** **v3** today. A snapshot is a cache of a fold the ledger can always reproduce, so the format is versioned and an unrecognised version is **refused rather than parsed** ([D-043](s13-decision-register.md#d-043)); a build that cannot read an old snapshot folds from the log instead. Losing every snapshot costs time and no information.
+
+**6. Performance figures.** [§9](s6-s10-flows-to-dependencies.md#9-performance-budgets)'s budgets are measurements on one machine at one population ([D-055](s13-decision-register.md#d-055)), and R15's rate is a property of the machine rather than of this crate ([D-147](s13-decision-register.md#d-147)). Nothing here is a latency promise to a caller.
+
+**7. The minimum supported Rust version.** **1.88** today, and it is not ours: Macrame's own code needs 1.73, and the floor is `home@0.5.12` reached through `libsql-ffi`'s *build*-dependency on bindgen. Raising it is a minor version.
+
+**8. Anything `pub(crate)`, `#[doc(hidden)]`, or gated off the default build.** Including `temporal::fuzzing`, which exists so `fuzz/` can reach the snapshot reader and is invisible to `cargo-public-api` by construction ([D-208](s13-decision-register.md#d-208)). `property-tests` and `fuzzing` are harness features and not API; `metrics` is on by default ([D-154](s13-decision-register.md#d-154)) and that default is a choice this crate may revisit, not a contract.
+
+### D.3 — The Python wheel (New)
+
+**The wheel's surface is frozen on the same terms as the crate's**, and its version tracks the crate's exactly — they are bumped together and there is no independent binding version to reason about ([§14](s14-python-bindings.md#14-python-bindings)).
+
+**One asymmetry, stated rather than glossed: Python has no compiler to enforce it.** On the Rust side an incompatible change fails a build; on the Python side it fails at a call site, in someone else's program. The enforcement is therefore two gates rather than a type system — `tests/binding_parity_tests.rs`, which lives in the crate that *defines* `DbError` and reads the binding from disk, and `tests_py/`, which exercises the built wheel. Where the binding converts a domain enum it does so infallibly, and the wildcard arm **panics** ([D-207](s13-decision-register.md#d-207)): a new Rust variant arriving unmapped is a loud failure rather than a silent misclassification, and the parity gate is what stands between the two.
+
+### D.4 — What this document does not promise
+
+Not frozen, not scheduled, and not defects: the timing of any operation; the query plan the engine chooses (which is why plan pinning is a *gate* and not a guarantee); memory use; the exact text of any error message, as against its variant; the contents of `docs/`, which is rationale rather than surface; and the behaviour of any two Macrame processes against one database file, which is outside [§2](s0-s3-foundations.md#2-system-context)'s single-process context.
+
+---
+
 ---
 
 Document complete. The normative surfaces are [§4](s4-schema.md#4-schema) and [Appendix A](appendices.md#appendix-a--public-api-normative); the decision register is the authoritative record of intent; the first code to be written is the drift-audit property test, the Monday/Wednesday/Friday attribute-fidelity test, and — as of 0.4.5 — the priority-interleaving concurrency test, because together they pin the three invariants every later change must preserve: that belief is honest, that fidelity is declared, and that the user is never made to wait for a background job.
