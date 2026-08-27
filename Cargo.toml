@@ -4,7 +4,7 @@
 # keeps the import path `use macrame::…` unchanged, so this is a registry name
 # and not a rename of the crate anyone writes against.
 name = "macrame-db"
-version = "0.13.35"
+version = "0.13.36"
 edition = "2021"
 # Measured, not declared: `cargo +1.88.0 check --all-features --all-targets`
 # passes and 1.85 does not.
@@ -219,6 +219,25 @@ required-features = ["metrics"]
 # T1.3's evidence, for the same reason.
 [[example]]
 name = "bulk_atomic_diag"
+required-features = ["metrics"]
+
+# The same omission as `analyze_hold`'s above, three examples wide and found the
+# same way: `cargo test --no-default-features` is §8 item 6's configuration, the
+# README published a test count for it, and nothing ran it between 0.12.26 and
+# 0.13.36 (D-209, and D-169 is the first instance). `chunk_matrix` is the fourth
+# metrics user and needs no entry -- it gates the function itself, which is the
+# other correct answer and the one to prefer when only part of an example needs
+# the counters.
+[[example]]
+name = "bulk_optimize"
+required-features = ["metrics"]
+
+[[example]]
+name = "fairness_probe"
+required-features = ["metrics"]
+
+[[example]]
+name = "optimize_hold"
 required-features = ["metrics"]
 
 # T3.4's evidence: the hold must not move while the total does.

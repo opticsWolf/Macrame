@@ -286,7 +286,7 @@ branching lands.** This is the one item in this document I would cut first if
 | 5.2 | Index registry is one-directional | Med | W2.3 | 0.13.0 |
 | 5.3 | No performance regression detection | Med | W10.1 | 0.14.0 ✅ |
 | 5.4 | No snapshot fuzzing | Low | W8.4 | 0.13.14 ✅ |
-| 6.1 | Release history table stops at 0.9.0 | Low | W11.3 | 0.14.0 |
+| 6.1 | Release history table stops at 0.9.0 | Low | W11.3 | 0.14.0 ✅ |
 | 6.2 | `Cargo.toml` metrics cost model is false | Med | W4.1 | 0.13.0 |
 | 6.3 | Comment-to-code ratio | — | W11.4 | 0.14.0 |
 | F-28 | No `ANALYZE`; planner runs on default selectivity | High | W2.1, W2.2 | 0.13.0 ✅ |
@@ -2639,6 +2639,36 @@ release so that each ships its own diff:
 > what shipped, disambiguated by measurement rather than deviated from:
 > `schema` is public, its surface is flattened of duplicate paths, and
 > `schema::ddl` survives under the rule the 169 produced.
+
+> **✅ W11.3 shipped 0.13.36 (recorded as
+> [D-209](../docs/architecture/s13-decision-register.md#d-209)).** Closes §6.1.
+>
+> **1. The table was twenty-six releases behind, not three.** The revision
+> history in `docs/architecture/README.md` stopped at 0.9.0 against a crate at
+> 0.13.35; the header called the document version 0.9.0 and dated it
+> 2026-08-07; the file table offered the register as **`D-001…D-133`** against
+> two hundred and eight entries. Four rows added, three header claims
+> corrected.
+>
+> **2. The sweep is the smaller half.** D-144 named doc drift as a *category*,
+> and a sweep clears the instance. `tests/doc_currency_tests.rs` pins the three
+> mechanical claims — the last row reaches `Cargo.toml`'s version, the header
+> names it, and the file table's `D-001…D-NNN` is the register's real highest
+> anchor. **Three of the four would have failed at 0.10.0**, and all three were
+> mutation-tested.
+>
+> **3. It does not check that a row is true**, because no test can. A wrong row
+> is a row somebody wrote; a missing row is a release nobody can find the
+> substance of later.
+>
+> **4. The sweep found D-169 recurring verbatim.**
+> `cargo test --no-default-features` — §8 item 6's configuration, for which the
+> README publishes a test count — **did not build**: three examples call
+> `Database::metrics()` with no `required-features` entry. That is the same
+> defect 0.12.26 fixed, one release after the configuration had been checked
+> and therefore not re-checked. Entries added; a build gate for that
+> configuration is named as §8's to schedule rather than fixed here, so the
+> omission stays legible.
 
 [D-147]: ../docs/architecture/s13-decision-register.md#d-147
 
