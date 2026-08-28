@@ -3118,6 +3118,40 @@ without the remedy invites somebody to ask for the predicate.
 
 ### 15.3 The hard part, named rather than deferred
 
+> **Measured in 0.14.3 on 2026-08-28 ([D-219](architecture/s13-decision-register.md#d-219)),
+> and three of this section's claims did not survive it.**
+> `examples/branch_traversal_probe.rs` is the deliverable this section asks for.
+>
+> * **The chain is a constant, not a factor.** 1.1–1.3× the unfiltered traversal
+>   at chain depths of 1, 10 *and* 100 — the ancestry CTE is materialised once
+>   per query, so it is an addend on the query rather than a multiplier on the
+>   hops. *"Traversal gains a factor of chain depth"* below is wrong, and it was
+>   the main argument for keeping option (2) close at hand.
+> * **`branch_id` as the lead column is the slowest of three shapes**, by 13%.
+>   It does get a covering plan; it also displaces the column the recursive step
+>   seeks on, which is [D-042](architecture/s13-decision-register.md#d-042)'s
+>   lesson arriving a second time in the same index. Folding `branch_id` in
+>   *after* the range columns is faster than both it and today's shape, and
+>   leaves the unfiltered traversal untouched. Not shipped at 0.14.3: an index
+>   change ahead of the reader that would use it is a rung buying nothing.
+> * **The form this section describes is not a resolution.** `branch_id IN
+>   (ancestry)` returns the branch's corrected edge *and* the ancestor's
+>   superseded one — measured, two rows — and because both name the same nodes
+>   the reachable set is unchanged and nothing in the answer says so. The
+>   nearest-ancestor form that fixes it costs **3.0×** the unfiltered traversal.
+>   So the choice at 0.14.4 is correct versus fast, and (1) as written below is
+>   neither.
+> * **There is no fourth index.** The same index gains a column. Measured, the
+>   cover index costs 15–20% of insert time and *which* shape it is costs
+>   nothing distinguishable.
+>
+> The three options below stand as written, because the ordering argument for
+> (1) survives — what changed is *why*. It is not preferred because the chain is
+> cheap; it is preferred because the chain turned out not to be the cost at all,
+> and the cost that is real — resolving one row per edge per lineage — is one
+> every option has to pay.
+
+
 `links_current` is the projection that makes traversal fast, and it is
 branch-agnostic today. Three ways out, and the crate should take them in this
 order:
@@ -3138,7 +3172,9 @@ order:
 
 **(1) first, measured, with (2) as the escape hatch.** The measurement is the
 deliverable: depth-3 traversal on a chain of 1, 10 and 100 branches, against the
-same fixture unbranched.
+same fixture unbranched. **Done — see the block at the head of this section.**
+The escape hatch is not the one that was needed: (2) sizes a materialisation
+threshold against chain depth, and chain depth is not what costs.
 
 ### 15.4 What ships, and what deliberately does not
 

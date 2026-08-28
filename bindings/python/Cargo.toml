@@ -12,7 +12,7 @@ name = "macrame-py"
 # So the gate is real and lives in the Python suite, which means `cargo test`
 # alone will not tell you this has drifted. It had, from 0.12.6 to 0.12.9 --
 # found by reading the comment and going to look (0.12.10, W4.4).
-version = "0.14.2"
+version = "0.14.3"
 edition = "2021"
 # Not the root's floor restated. pyo3 0.29 declares 1.83, which is *under*
 # `macrame-db`'s 1.88, so the binding adds no MSRV pressure — the floor is
