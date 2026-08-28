@@ -26,6 +26,9 @@
 #[path = "common/harness.rs"]
 mod harness;
 
+#[path = "common/v11_schema.rs"]
+mod v11_schema;
+
 use harness::TestHarness;
 use macrame::graph::AttributeMode;
 use macrame::graph::EdgeAssertion;
@@ -1866,10 +1869,15 @@ async fn an_upgraded_database_is_re_anchored_at_open() {
             .await
             .unwrap();
         let conn = raw.connect().unwrap();
-        conn.execute("DROP INDEX IF EXISTS idx_lc_open_interval", ())
-            .await
-            .unwrap();
-        conn.execute("PRAGMA user_version = 5", ()).await.unwrap();
+        // Wound back rather than merely re-stamped. The ladder is not
+        // re-entrant: stamping a v12 database `user_version = 5` does not
+        // replay history, because the v7 -> v8 rung rebuilds `links` from its
+        // pinned v7 definition and the live v12 trigger then cannot find
+        // `NEW.branch_id`. What this test needs is *a* rung to run at open, and
+        // v11 -> v12 is one — the current one, which is the better fixture
+        // anyway.
+        v11_schema::wind_back_to_v11(&conn).await;
+        conn.execute("PRAGMA user_version = 11", ()).await.unwrap();
     }
 
     let reopened = Database::open(&harness.db_path).await.unwrap();

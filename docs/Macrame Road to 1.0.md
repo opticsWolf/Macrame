@@ -2843,7 +2843,7 @@ place where the argument for the work applies and the work was out of scope.
 
 | # | Carried | From | Why it was left | Due |
 |---|---|---|---|---|
-| C-1 | Foreign-key classification on the `links` and `concepts` paths | [D-176](architecture/s13-decision-register.md#d-176) (0.13.3) | W7.2's scope was the annotation path; each of the other two has its own guards and its own tests | 0.15.0 |
+| C-1 | Foreign-key classification on the `links` and `concepts` paths | [D-176](architecture/s13-decision-register.md#d-176) (0.13.3) | **Closed early, in 0.14.2** ([D-218](architecture/s13-decision-register.md#d-218)). v12 gives `links` a third foreign key, so the release that made the unqualified message worse is the one that answers for it. The `concepts` half is answered by construction — no write in this crate can violate the only outbound key it has — and returns when `fork()` lets a caller name a lineage | ~~0.15.0~~ **0.14.2** |
 | C-2 | `save_snapshot` reports I/O failure as `ReplayCorrupt` — *the ledger is damaged* | [D-186](architecture/s13-decision-register.md#d-186) (0.13.13) | A new variant was an API change during a wave that was not changing the API | 0.15.0 |
 | C-3 | `DbError::kind()`, a stable discriminant for callers that must match | [D-207](architecture/s13-decision-register.md#d-207) (0.13.34) | `#[non_exhaustive]` makes matching a wildcard arm; the ergonomic answer needed a design, not a wave | 0.15.0 |
 | C-4 | A **build** gate for `--no-default-features`, not a `cargo check` | [D-209](architecture/s13-decision-register.md#d-209) (0.13.36) | The configuration was broken for two releases with every gate green; §8's list is where a CI job is scheduled | 0.15.0 |
@@ -2930,6 +2930,32 @@ this, not for replication.
 
 ### 15.2 The storage model: shared ledger, logical versions
 
+> **Shipped in 0.14.2 on 2026-08-28
+> ([D-214](architecture/s13-decision-register.md#d-214) …
+> [D-217](architecture/s13-decision-register.md#d-217)).** Schema **v12**: the
+> `branches` register, `branch_id` on all four ledger tables, `links_current`
+> re-keyed per lineage, three log triggers redefined, four guards, and the four
+> replay folds partitioning per lineage. **Storage only** — no public API can
+> produce a second lineage until 0.14.5, which is why every test in
+> `tests/branch_storage_tests.rs` reaches the schema by raw SQL.
+>
+> **Two things the sketch below got wrong, corrected in
+> [§4.8](architecture/s4-schema.md) rather than left as a discrepancy.** The
+> `branches` DDL had a ULID `id` *and* a `UNIQUE` `name`; those are one column
+> wearing two hats, and the sketch's shape put the opaque one in every ledger
+> row. And `forked_at` was `NOT NULL`, which forces the root to carry a sentinel
+> standing in for the absence of a fork point — it is now nullable, paired to
+> `parent_id` by a `CHECK`.
+>
+> **The public API gate moved, +18 items and −0, and the prediction that it
+> would not was wrong.** Every addition is schema text in `macrame::schema::ddl`,
+> whose purpose is to publish the schema, plus three variants on the
+> `#[non_exhaustive]` `AbortKind`. Nothing removed, nothing narrowed. Recorded
+> here because [D-211](architecture/s13-decision-register.md#d-211) makes the
+> surface count a number the contract states, and a plan that predicted a
+> constant is a plan that has to say when the constant moved.
+
+
 The survey supplies the precedent directly. §6.3, on Gancarski et al. (1999)'s
 Database Version model: valid and transaction time attached to *complete database
 states* rather than to individual tuples, *"supports branching valid-time
@@ -2949,17 +2975,21 @@ Its lesson is the opposite of the obvious design:
 
 ```sql
 CREATE TABLE branches (
-    id          TEXT PRIMARY KEY,          -- ULID
-    name        TEXT NOT NULL UNIQUE,
-    parent_id   TEXT REFERENCES branches(id),  -- NULL for the root only
-    forked_at   TEXT NOT NULL,             -- parent's recorded_at at the fork
-    created_at  TEXT NOT NULL
+    branch_id   TEXT NOT NULL PRIMARY KEY,     -- the name *is* the identity
+    parent_id   TEXT REFERENCES branches(branch_id),  -- NULL for the root only
+    forked_at   TEXT,                          -- NULL for the root, with it
+    created_at  TEXT NOT NULL,
+    CHECK ((parent_id IS NULL) = (forked_at IS NULL))
 );
 ```
 
-`main` is the root: `parent_id IS NULL`, `forked_at` the epoch sentinel. Ledger
-tables gain `branch_id TEXT NOT NULL DEFAULT 'main'` — the default is what makes
-the migration a rung and not a rewrite.
+`main` is the root: `parent_id IS NULL` and `forked_at IS NULL`, paired by the
+`CHECK` so "the root" is one representable state and "a parent with no fork
+point" is not one at all. Ledger tables gain
+`branch_id TEXT NOT NULL DEFAULT 'main' REFERENCES branches(branch_id)` — the
+default is what makes the migration a rung and not a rewrite, and the
+`REFERENCES` clause is taken on measured behaviour rather than documented
+behaviour ([D-215](architecture/s13-decision-register.md#d-215)).
 
 A read on branch B resolves B's ancestry: rows written on B, plus rows written on
 each ancestor A **before the fork point on the path down from A**. Copy-on-write.
@@ -2969,6 +2999,122 @@ its parent.
 **The fork must be O(1), and that requirement is what selects this design.** A
 conversation tree forks at every turn; a fork that copies rows is a fork nobody
 can afford at that rate. One `INSERT` into `branches` and nothing else.
+
+#### The overlay: what Option A cannot say, and what it would cost to say it
+
+The model above is **Option A**: one row per concept, carrying the lineage that
+minted it. The alternative — call it the **overlay** — adds
+`concept_versions (id, branch_id, …)` resolving along ancestry, so a branch can
+hold its own belief about a concept it did not mint. It is deferred, and this
+entry is the deferral rather than a dismissal: it states the delta, the cost, and
+the symptom that reopens it.
+
+**The delta is one sentence, and it is smaller than it first appears.** The
+overlay buys one thing: **correcting or retiring a concept the branch did not
+mint.** Everything else people reach for it to solve is already available.
+Asserting a *new* concept on a branch works — the branch mints it. Asserting or
+retiring *edges* about an inherited concept works — `links` branches. Diffing
+works, abandoning works, and reading a lineage works. What does not work is a
+branch saying "the trunk's concept `c` is wrong, and on my lineage it reads
+differently".
+
+**What it costs, and the count is five rather than six.** An earlier draft
+charged the concept-log defect to the overlay's tab; it is a **v12 rung item**
+wearing overlay-inheritance clothes, it is fixed above, and leaving it here would
+have double-counted it.
+
+1. **`concepts` stops being a table and becomes a view over a resolution.**
+   Every reader that today writes `FROM concepts` — and there are more of them
+   than the ones that obviously read concepts — becomes a reader of an ancestry
+   join. That is not a query rewrite, it is a change in what the name means.
+2. **The write side has the same shape, and it is the half that gets forgotten.**
+   Today a writer knows its lineage: it is the branch it is writing on. Under the
+   overlay a writer has to distinguish the **mint lineage** from the **effective
+   lineage** — where a concept came from, versus which version this write is
+   about — and every write path grows a decision it does not have today.
+3. **FTS goes wrong in two ways and the second is worse.** `concepts_fts` is
+   `content='concepts'` with `content_rowid='rowid_pk'`, one row per concept. An
+   overlay version has no rowid in that table, so a branch's own text is
+   **unfindable** — that is the obvious half. The worse half is that the
+   *trunk's* entry still matches: a search on the branch returns the concept, at
+   the trunk's text, with no indication that the branch believes otherwise. A
+   missing result is a gap somebody notices; a stale result is an answer.
+4. **The resolution has to be monotonic, and that rule has to arrive with it.**
+   Reading along ancestry means picking one version per concept per lineage, and
+   the rule cannot be "the most recent" — `recorded_at` is a total order only
+   *within* a branch ([§15.1](#151-what-a-branch-is-stated-before-anything-is-built)).
+   It has to be "the nearest version on the path from this branch to the root",
+   and it has to stay that under a later write to an ancestor. An overlay shipped
+   without that rule written down is an overlay whose reads are undefined the
+   first time two lineages both hold a version.
+5. **The archive predicate grows a second arm.** Archivability is reachability
+   ([D-128](architecture/s13-decision-register.md#d-128)), evaluated over hot
+   links. With an overlay, a concept is archivable only if no *version* of it on
+   any live lineage is still reachable — and the readers of `cold.concepts`
+   listed below each acquire a lineage question they do not have today.
+
+**The strengths, stated as honestly as the costs, because a deferral that only
+lists costs is a decision that was never actually taken.** The overlay is the
+shape the survey's Database Version model actually describes — versions attached
+to logical database states — and Option A is the narrower reading of it. It
+makes "what does this branch believe" a single uniform question instead of two
+(one for concepts, one for edges). And it is the only design in which a
+conversation-tree harness can *revise* a turn on an alternative continuation,
+which is a plausible thing for the motivating use case to want.
+
+**What it costs after 1.0, softened from an earlier overclaim.** The earlier
+draft said the overlay costs *exactly the same* whenever it is taken. That is
+true of the **schema** — `concept_versions` is a new table, and a new table is
+additive under [D-036](architecture/s13-decision-register.md#d-036) whether it
+arrives in 0.14.3 or 1.4.0. It is **not** true of the machinery: every reader
+added between now and then is another `FROM concepts` to convert, and every
+public type that surfaces a concept is one more thing whose meaning shifts under
+a caller who has shipped against it. The schema stays cheap; the blast radius
+grows with the surface. That is a reason to keep the surface small, not a reason
+to take the overlay now.
+
+**What reopens it.** Two symptoms, and the second is the one to watch for
+because it is quiet:
+
+- **A caller asks to correct a concept on a branch and the answer is "fork the
+  concept instead".** If that answer is given more than occasionally, the model
+  is being worked around rather than used.
+- **The retirement symptom, and its zero-sum converse.** A branch wants to retire
+  an inherited concept — to say "on my lineage this is no longer believed" —
+  and the only thing Option A offers is retiring it on the trunk, which is
+  exactly the corruption of the parent that
+  [Doctrine III](architecture/s0-s3-foundations.md#doctrine-iii) and the whole
+  branching design exist to prevent. The converse is what makes it decisive
+  rather than merely annoying: **there is no version of this that costs the
+  branch alone.** Either the branch cannot say what it means, or the trunk
+  absorbs a retirement it never asserted. A restriction whose workaround damages
+  a *different* lineage is not a restriction, it is a defect with a long fuse.
+
+**The cold-side readers this would touch, registered rather than left to be
+discovered.** Each is a `cold.concepts` reader today and would acquire a lineage
+arm under an overlay:
+
+| reader | why it reads `cold.concepts` | what the overlay adds |
+|---|---|---|
+| `temporal::archive::rehydrate` | moves the row back column for column ([D-130](architecture/s13-decision-register.md#d-130)) | *which version* returns, and whether siblings on other lineages come with it |
+| `temporal::replay`'s cold fold | folds archived log rows into a reconstruction | resolution along ancestry across the hot/cold boundary, where `branches` does not exist |
+| `integrity::audit` | compares the ledger against the projection | a version that is unreachable is not the same as one that is absent |
+| `archive_hint` | reports how much went and how far back what remains reaches | a per-lineage answer, since two branches archive differently |
+
+The gate that holds this honest is
+`tests/branch_storage_tests.rs::a_read_at_this_release_does_not_yet_filter_by_lineage`,
+which pins the fact that reads are lineage-blind at v12 and is **designed to go
+red at 0.14.4** when they stop being. Under an overlay it grows a second arm, for
+concepts as well as edges — recorded here so that arm is added deliberately
+rather than noticed missing.
+
+**The taxonomy, and the remedy that belongs beside it.** Lineage is not a
+security boundary and this design does not make it one: a branch is a logical
+version over a shared physical file, so any client that can open the file can
+read every lineage in it. The remedy, where confidentiality between lineages is
+actually required, is **not** a predicate in this crate — it is one database file
+per tenant, OS file permissions, and no shared process. Stating the boundary
+without the remedy invites somebody to ask for the predicate.
 
 ### 15.3 The hard part, named rather than deferred
 
@@ -3153,6 +3299,28 @@ Exposing this exposes a way to break the architecture from the outside.
 **`foreign_keys` / `recursive_triggers`.** Doctrine enforcement. The delete
 guards and the log triggers are how Doctrines III and V are made real; a caller
 who can turn them off can violate the doctrines through the supported API.
+
+> **Annotated 0.14.2 — the crate now turns `foreign_keys` off itself, twice
+> ([D-215](architecture/s13-decision-register.md#d-215)).** The rejection above
+> is about the *knob*, and it stands: no caller can reach the pragma. But two
+> migration rungs suspend enforcement internally — v7 → v8 to rebuild a table
+> with inbound keys ([D-117](architecture/s13-decision-register.md#d-117)), and
+> v11 → v12 because libSQL refuses a `REFERENCES` column added to a table that
+> already holds rows while keys are on. Worth annotating rather than leaving to
+> be noticed, because "a caller who can turn them off can violate the doctrines"
+> sits oddly beside a rung that turns them off.
+>
+> **What makes the two different is not who does it but what checks the
+> result.** The suspension is bounded to one transaction on a connection created
+> in `open()` and discarded if the migration fails, the pragma is restored on
+> every path including the error one, and `apply_step` runs
+> `PRAGMA foreign_key_check` **inside** the transaction before committing — so a
+> rung that leaves a violation fails and rolls back. Probe §15 confirms that
+> check catches an orphan planted during the window rather than merely being
+> called. A knob has none of that: it is unbounded in time, unchecked at the
+> end, and answerable to nobody. **Enforcement is suspended for a bounded
+> interval; verification is not suspended at all**, and that is the whole
+> difference between a mechanism and a hole.
 
 **`query_only`.** The read-only path already opens `SQLITE_OPEN_READ_ONLY`
 (D-091). A second, weaker mechanism for the same guarantee is a way to get it

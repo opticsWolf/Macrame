@@ -71,7 +71,8 @@ pub(crate) async fn rebuild_within(
 
     let insert_query = format!(
         "INSERT INTO links_current \
-         (source_id, target_id, edge_type, valid_from, valid_to, weight, properties, recorded_at) \
+         (source_id, target_id, edge_type, valid_from, valid_to, weight, properties, \
+          recorded_at, branch_id) \
          {projection}",
         projection = super::LATEST_BELIEF_PROJECTION
     );

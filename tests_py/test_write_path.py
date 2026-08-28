@@ -137,15 +137,24 @@ def test_write_bulk_atomic_returns_a_count_and_lands(db):
     assert count(db, "links_current") == 20
 
 
-def test_an_edge_to_a_concept_that_does_not_exist_is_refused(db):
+def test_an_edge_to_a_concept_that_does_not_exist_names_it(db):
     """The referential guard, from the Python side.
 
     Worth pinning because it is the first thing anyone hits when they write
-    edges before concepts, and the error that comes back is an engine-level FK
-    failure rather than one of the ledger's typed errors — so a reader needs to
-    know it is the schema talking, not a bug in the binding.
+    edges before concepts.
+
+    Until 0.14.2 this expected ``EngineError`` matching ``FOREIGN KEY``, and the
+    docstring explained that the schema was talking rather than the ledger. C-1
+    changed that: ``links`` declares two keys into ``concepts`` and, since v12, a
+    third into ``branches``, so an unqualified engine message does not even say
+    which column — and two of the three name a concept the caller can go and
+    create. The typed error names it instead.
+
+    **This test is why C-1 was caught shipping without Rust coverage.** It was
+    the only thing in either suite pinning the old answer, so it failed, and the
+    three tests it produced now live in ``tests/write_path_tests.rs``.
     """
-    with pytest.raises(macrame.EngineError, match="FOREIGN KEY"):
+    with pytest.raises(macrame.NotFoundError, match="nope"):
         db.assert_edge(macrame.EdgeAssertion("n0", "nope", "LINKS", valid_from=T0))
 
 

@@ -33,6 +33,10 @@
 
 #[path = "../tests/common/v7_schema.rs"]
 mod v7_schema;
+// Declared here because `v7_schema` reads the pinned v11 shapes and no longer
+// declares them itself — see the note at the top of that file.
+#[path = "../tests/common/v11_schema.rs"]
+mod v11_schema;
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

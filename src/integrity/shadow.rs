@@ -121,12 +121,12 @@ fn projection_where(clause: &str) -> String {
     format!(
         r#"
         SELECT source_id, target_id, edge_type, valid_from,
-               valid_to, weight, properties, recorded_at
+               valid_to, weight, properties, recorded_at, branch_id
         FROM (
             SELECT source_id, target_id, edge_type, valid_from,
-                   valid_to, weight, properties, recorded_at,
+                   valid_to, weight, properties, recorded_at, branch_id,
                    ROW_NUMBER() OVER (
-                       PARTITION BY source_id, target_id, edge_type, valid_from
+                       PARTITION BY source_id, target_id, edge_type, valid_from, branch_id
                        ORDER BY recorded_at DESC
                    ) AS rn
             FROM links
@@ -137,7 +137,7 @@ fn projection_where(clause: &str) -> String {
 }
 
 const SHADOW_COLUMNS: &str = "(source_id, target_id, edge_type, valid_from, \
-                              valid_to, weight, properties, recorded_at)";
+                              valid_to, weight, properties, recorded_at, branch_id)";
 
 /// Create the shadow, and report the transaction time the build starts from.
 ///
@@ -259,6 +259,13 @@ pub(crate) async fn swap(
     // Bounded by writes during the rebuild, not by the size of `links`. The
     // `DELETE` and the re-`INSERT` are both restricted by the same subquery, so
     // a key written during the build is replaced rather than duplicated.
+    //
+    // `branch_id` is deliberately *not* in this key, and leaving it out is what
+    // keeps the pass correct rather than what breaks it (v12, §15.2). The
+    // `DELETE` clears every lineage's row for a touched edge and the `INSERT`
+    // re-derives every lineage's winner for the same edges, so the pair stays
+    // symmetric. Narrowing the delete by lineage without narrowing the
+    // projection would insert a second lineage's row beside one never removed.
     let touched = "(source_id, target_id, edge_type, valid_from) IN ( \
                    SELECT source_id, target_id, edge_type, valid_from \
                    FROM links WHERE recorded_at >= ?1)";
@@ -334,10 +341,23 @@ mod tests {
     fn the_shadow_carries_the_declared_schema_not_just_the_columns() {
         let ddl = shadow_ddl();
         assert!(ddl.contains(SHADOW_TABLE), "{ddl}");
+        // Not a pinned literal. The property that matters is that the
+        // shadow's key and the sync trigger's `ON CONFLICT` target are the
+        // *same* columns, so the check reads the target out of the trigger
+        // and asks the shadow for it. Pinning the text instead meant that
+        // widening the key at v12 produced a red test whose fix was to
+        // retype the new spelling — which proves the two were edited
+        // together once, and nothing about whether they still agree.
+        let target = ddl::CREATE_LINKS_CURRENT_SYNC
+            .split_once("ON CONFLICT(")
+            .and_then(|(_, rest)| rest.split_once(')'))
+            .map(|(cols, _)| cols.to_string())
+            .expect("the sync trigger declares an ON CONFLICT target");
         assert!(
-            ddl.contains("PRIMARY KEY (source_id, target_id, edge_type, valid_from)"),
-            "the shadow has no primary key, so the sync trigger's ON CONFLICT \
-             target will not exist after the swap: {ddl}"
+            ddl.contains(&format!("PRIMARY KEY ({target})")),
+            "the shadow's primary key is not the sync trigger's ON CONFLICT \
+             target ({target}), so the trigger breaks on the first write \
+             after the swap: {ddl}"
         );
         assert!(
             ddl.contains("CHECK"),

@@ -3,6 +3,9 @@ mod harness;
 #[path = "common/v7_schema.rs"]
 mod v7_schema;
 
+#[path = "common/v11_schema.rs"]
+mod v11_schema;
+
 use harness::TestHarness;
 use macrame::error::DbError;
 use macrame::schema::ddl;
@@ -260,14 +263,14 @@ async fn a_v2_database_climbs_to_v3_and_gains_the_annotations_table() {
     let conn = connect(&harness).await;
 
     // Build a v2 database: the baseline minus what v3 added, stamped v2.
-    conn.execute(ddl::CREATE_CONCEPTS_TABLE, ()).await.unwrap();
-    conn.execute(ddl::CREATE_LINKS_TABLE, ()).await.unwrap();
-    conn.execute(ddl::CREATE_LINKS_CURRENT_TABLE, ())
-        .await
-        .unwrap();
-    conn.execute(ddl::CREATE_TRANSACTION_LOG_TABLE, ())
-        .await
-        .unwrap();
+    // The four ledger tables as v11 declared them, not as today's constants
+    // do. Since v12 the live `CREATE`s reference a `branches` table this
+    // fixture has no business owning, and carry a `branch_id` the rung under
+    // test is supposed to add — `tests/common/v11_schema.rs` says why at
+    // length.
+    for table in v11_schema::tables_v11() {
+        conn.execute(&table, ()).await.unwrap();
+    }
     for index_ddl in ddl::CREATE_INDICES {
         // Every remaining index has its table in this fixture. Through v7 one
         // did not — `idx_annotations_label`, which is why this loop used to
@@ -276,7 +279,7 @@ async fn a_v2_database_climbs_to_v3_and_gains_the_annotations_table() {
         // none is tolerated.
         conn.execute(index_ddl, ()).await.unwrap();
     }
-    for trigger_ddl in ddl::CREATE_TRIGGERS {
+    for trigger_ddl in v11_schema::triggers_v11() {
         conn.execute(trigger_ddl, ()).await.unwrap();
     }
     conn.execute("PRAGMA user_version = 2", ()).await.unwrap();
@@ -316,6 +319,12 @@ async fn a_v5_database_climbs_to_v6_and_gains_the_open_interval_index() {
     let conn = connect(&harness).await;
 
     macrame::schema::run_migrations(&conn).await.unwrap();
+    // Wound back before the stamp is rolled, because the ladder is not
+    // re-entrant: a v12 database re-stamped v5 does not replay history, it
+    // meets rungs written for shapes it no longer has. `wind_back_to_v11` is
+    // what makes "the baseline minus one index" true again rather than merely
+    // claimed — see `tests/common/v11_schema.rs`.
+    v11_schema::wind_back_to_v11(&conn).await;
     conn.execute("DROP INDEX idx_lc_open_interval", ())
         .await
         .unwrap();
@@ -359,6 +368,7 @@ async fn a_v10_database_climbs_to_v11_and_the_archive_read_stops_scanning_links(
     let conn = connect(&harness).await;
 
     macrame::schema::run_migrations(&conn).await.unwrap();
+    v11_schema::wind_back_to_v11(&conn).await;
     conn.execute("DROP INDEX idx_links_recorded_at", ())
         .await
         .unwrap();
@@ -431,7 +441,7 @@ async fn plan_string(conn: &libsql::Connection, sql: &str) -> String {
 #[test]
 fn a_version_bump_must_bring_its_own_rung_test() {
     assert_eq!(
-        SCHEMA_VERSION, 11,
+        SCHEMA_VERSION, 12,
         "SCHEMA_VERSION moved. Add a test for the new rung — one that starts \
          from a database at the previous version and asserts what the rung is \
          *for*, not merely that `run` reached the top."
@@ -456,6 +466,7 @@ async fn a_v6_database_climbs_to_v7_and_gains_the_weight_check() {
     // CHECK — for the reason the v5 test gives: a hand-written copy of an old
     // schema is a second description that drifts.
     macrame::schema::run_migrations(&conn).await.unwrap();
+    v11_schema::wind_back_to_v11(&conn).await;
     for stmt in [
         "ALTER TABLE links RENAME TO links_old",
         "CREATE TABLE links (
@@ -473,7 +484,7 @@ async fn a_v6_database_climbs_to_v7_and_gains_the_weight_check() {
     ] {
         conn.execute(stmt, ()).await.unwrap();
     }
-    for trigger_ddl in ddl::CREATE_TRIGGERS {
+    for trigger_ddl in v11_schema::triggers_v11() {
         conn.execute(trigger_ddl, ()).await.unwrap();
     }
     conn.execute("PRAGMA user_version = 6", ()).await.unwrap();
@@ -763,6 +774,7 @@ async fn a_negative_weight_already_stored_blocks_the_v7_rung_with_an_explanation
     let conn = connect(&harness).await;
 
     macrame::schema::run_migrations(&conn).await.unwrap();
+    v11_schema::wind_back_to_v11(&conn).await;
     for stmt in [
         "ALTER TABLE links RENAME TO links_old",
         "CREATE TABLE links (
@@ -1160,6 +1172,7 @@ const CONCEPTS_GUARD_V8: &str = "
 /// Put a v9 database back into the v8 state this rung exists to leave behind:
 /// the unconditional guard, and the version stamp to match.
 async fn downgrade_guard_to_v8(conn: &libsql::Connection) {
+    v11_schema::wind_back_to_v11(conn).await;
     conn.execute("DROP TRIGGER trg_concepts_guard_delete", ())
         .await
         .unwrap();
@@ -1357,6 +1370,7 @@ async fn a_v9_database_climbs_to_v10_and_the_insert_log_becomes_marker_gated() {
     let harness = TestHarness::new();
     let conn = connect(&harness).await;
     macrame::schema::run_migrations(&conn).await.unwrap();
+    v11_schema::wind_back_to_v11(&conn).await;
 
     conn.execute("DROP TRIGGER trg_concepts_log_insert", ())
         .await

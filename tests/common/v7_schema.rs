@@ -22,6 +22,13 @@
 
 use macrame::schema::ddl;
 
+// Reached rather than declared. A `#[path]` module is *loaded* where it is
+// declared, so declaring it here as well as in the test root loads the file
+// twice into one binary — two types named `Tables`, two pinned trigger lists,
+// and a diagnostic that names neither. Every binary that pulls this module in
+// declares `v11_schema` at its own root, which is where a `#[path]` belongs.
+use crate::v11_schema;
+
 pub const TS: &str = "2026-01-01T00:00:00.000000Z";
 
 /// `concepts` as v7 declared it: `id` is the primary key and the rowid is
@@ -80,11 +87,16 @@ pub const UNREAD_INDICES_V7: &[&str] = &[
 /// mid-seed if anything opened it.
 pub async fn v7_schema(conn: &libsql::Connection) {
     conn.execute(CONCEPTS_V7, ()).await.unwrap();
-    conn.execute(ddl::CREATE_LINKS_TABLE, ()).await.unwrap();
-    conn.execute(ddl::CREATE_LINKS_CURRENT_TABLE, ())
+    // v11's shapes, not today's: since v12 the live constants reference a
+    // `branches` table and carry a `branch_id` column, neither of which a v7
+    // database has ever seen. The module doc's "byte-identical between v7 and
+    // v8" reasoning still holds — it is just that "today's DDL" stopped being
+    // the right source for the parts v7 and v8 agree on.
+    conn.execute(&v11_schema::links_v11(), ()).await.unwrap();
+    conn.execute(&v11_schema::links_current_v11(), ())
         .await
         .unwrap();
-    conn.execute(ddl::CREATE_TRANSACTION_LOG_TABLE, ())
+    conn.execute(&v11_schema::transaction_log_v11(), ())
         .await
         .unwrap();
     conn.execute(ddl::CREATE_ANALYTICS_ANNOTATIONS_TABLE, ())
@@ -98,7 +110,7 @@ pub async fn v7_schema(conn: &libsql::Connection) {
     // v8's FTS triggers name `rowid_pk`, which this table does not have, so the
     // two FTS ones come from the v7 copy and the delete trigger does not exist
     // yet — it is part of what the rung installs.
-    for trigger_ddl in ddl::CREATE_TRIGGERS {
+    for trigger_ddl in v11_schema::triggers_v11() {
         if trigger_ddl.contains("trg_concepts_fts_") {
             continue;
         }

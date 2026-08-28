@@ -604,6 +604,12 @@ pub enum AbortKind {
     SingleOpenInterval,
     RecordedAtRegression,
     DeleteOutsideArchive,
+    /// A concept id already held by a different lineage (v12, §15.2, D-214).
+    CrossLineage,
+    /// An `UPDATE` that would move a concept between lineages (v12, D-214).
+    BranchImmutable,
+    /// Any write to `branches` other than an insert (v12, §15.2).
+    BranchesFrozen,
     /// Not one of our guards — an ordinary engine error.
     NotAGuard,
 }
@@ -621,7 +627,10 @@ pub enum AbortKind {
 /// The needles are the [`crate::schema::ddl`] constants spliced into the
 /// triggers themselves, so guard and classifier cannot drift.
 pub fn abort_kind(err: &libsql::Error) -> AbortKind {
-    use crate::schema::ddl::{ABORT_DELETE_GUARD, ABORT_MONOTONIC_RA, ABORT_SINGLE_OPEN};
+    use crate::schema::ddl::{
+        ABORT_BRANCHES_FROZEN, ABORT_BRANCH_IMMUTABLE, ABORT_CROSS_LINEAGE, ABORT_DELETE_GUARD,
+        ABORT_MONOTONIC_RA, ABORT_SINGLE_OPEN,
+    };
 
     let text = err.to_string();
     if text.contains(ABORT_SINGLE_OPEN) {
@@ -630,6 +639,12 @@ pub fn abort_kind(err: &libsql::Error) -> AbortKind {
         AbortKind::RecordedAtRegression
     } else if text.contains(ABORT_DELETE_GUARD) {
         AbortKind::DeleteOutsideArchive
+    } else if text.contains(ABORT_CROSS_LINEAGE) {
+        AbortKind::CrossLineage
+    } else if text.contains(ABORT_BRANCH_IMMUTABLE) {
+        AbortKind::BranchImmutable
+    } else if text.contains(ABORT_BRANCHES_FROZEN) {
+        AbortKind::BranchesFrozen
     } else {
         AbortKind::NotAGuard
     }
@@ -724,10 +739,64 @@ pub async fn classify(conn: &libsql::Connection, err: libsql::Error, op: WriteOp
         (_, WriteOp::Annotation { concept_id }) if is_foreign_key_violation(&err) => {
             DbError::NotFound(concept_id.to_string())
         }
+        // The same treatment for an edge, which W7.2 left out because its scope
+        // was the annotation path (C-1, D-176). `links` declares **two** keys
+        // into `concepts`, so unlike the annotation case the message does not
+        // even narrow it to one column: an unqualified "FOREIGN KEY constraint
+        // failed" is all a caller gets for a batch that may have named the
+        // wrong source, the wrong target, or both.
+        //
+        // Which one is missing is a question the database can answer, so it is
+        // asked rather than guessed. The source is reported when both are
+        // absent — one name a caller can act on beats a compound message that
+        // has to be parsed.
+        (
+            _,
+            WriteOp::Edge {
+                source_id,
+                target_id,
+                ..
+            },
+        ) if is_foreign_key_violation(&err) => {
+            DbError::NotFound(missing_endpoint(conn, source_id, target_id).await)
+        }
         // A guard fired for an operation it does not describe. Reporting the raw
         // error is honest; inventing a typed one from the wrong context is not.
         _ => DbError::Engine(err),
     }
+}
+
+/// Which endpoint of a refused edge is not in `concepts` (C-1).
+///
+/// One query on an error path, for the reason [`classify`]'s own rustdoc gives:
+/// it buys an error a caller can act on instead of one they have to reproduce
+/// by hand. Falls back to the source id if the query itself fails, because a
+/// classifier that can fail twice is worse than one that answers approximately.
+///
+/// # The concepts path, and why it needs no arm of its own
+///
+/// C-1 names `links` **and** `concepts`. Since v12 `concepts` does carry an
+/// outbound key — `branch_id` into `branches` (§15.2) — so for the first time
+/// the question is not vacuous. It is also not reachable: every concept write
+/// in this crate omits `branch_id` and takes the `'main'` default, and the row
+/// it names is seeded by the baseline and by the rung, inside the same
+/// transaction, before any row can be stamped. The case is answered by
+/// construction rather than left open, which is what closing C-1 means here.
+/// When `fork()` lets a caller name a lineage, the arm it needs is this one
+/// with a different column.
+async fn missing_endpoint(conn: &libsql::Connection, source_id: &str, target_id: &str) -> String {
+    for id in [source_id, target_id] {
+        let Ok(mut rows) = conn
+            .query("SELECT 1 FROM concepts WHERE id = ?1", libsql::params![id])
+            .await
+        else {
+            return source_id.to_string();
+        };
+        if !matches!(rows.next().await, Ok(Some(_))) {
+            return id.to_string();
+        }
+    }
+    source_id.to_string()
 }
 
 async fn current_recorded_at(conn: &libsql::Connection, id: &str) -> Option<String> {

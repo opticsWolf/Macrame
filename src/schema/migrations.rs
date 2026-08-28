@@ -13,7 +13,7 @@ use crate::schema::ddl::*;
 /// guarantee D-029 buys would be void on it while `user_version` insisted all
 /// was well. Reserving 1 as a value this build refuses by name is what makes
 /// "no legacy support" an enforced property instead of a README sentence.
-pub const SCHEMA_VERSION: u32 = 11;
+pub const SCHEMA_VERSION: u32 = 12;
 
 type StepFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
 
@@ -26,7 +26,27 @@ struct Step {
     /// Suspend foreign-key enforcement **around** this rung's transaction
     /// (0.8.0, B4, D-117).
     ///
-    /// # Why a rung would need this, and why the obvious ways do not work
+    /// # Why a rung would need this
+    ///
+    /// Two rungs need it, for reasons that share only the remedy.
+    ///
+    /// **v7 → v8 rebuilds a table with inbound foreign keys** and so cannot use
+    /// the `links`-style recipe; the four approaches below are what
+    /// `examples/concepts_rebuild_probe.rs` measured and ruled out.
+    ///
+    /// **v11 → v12 adds a column carrying a `REFERENCES` clause** to tables
+    /// that already hold rows. libSQL applies SQLite's
+    /// "a `REFERENCES` column added by `ALTER` must default to NULL" rule
+    /// *dynamically*: it refuses only when the table is non-empty **and** keys
+    /// are on (probe §15). Being inside a transaction is not the axis — the
+    /// pragma is, which is exactly what this flag toggles, and the resulting
+    /// key is fully real (see [`BRANCH_COLUMN`]). Note the asymmetry the flag
+    /// makes visible: a **fresh** v12 database never needs the suspension,
+    /// because there the clause sits in a `CREATE TABLE` with no rows to
+    /// validate. The two paths reach the same schema by different routes,
+    /// which is the shape D-035 says to say out loud rather than discover.
+    ///
+    /// # Why the obvious ways do not work
     ///
     /// A rung that rebuilds a table with inbound foreign keys cannot use the
     /// `links`-style recipe. `links` has no inbound keys; `concepts` has two
@@ -144,6 +164,19 @@ const STEPS: &[Step] = &[
         // involved here at all.
         suspends_foreign_keys: false,
         apply: |conn| Box::pin(gate_concepts_guard_on_marker(conn)),
+    },
+    Step {
+        from: 11,
+        to: 12,
+        name: "branch-storage",
+        // Not for the rebuild — `links_current` carries no inbound foreign key,
+        // so it takes the `links`-style recipe the v7 -> v8 rung could not use.
+        // For the three `ADD COLUMN`s: the new column carries a `REFERENCES`
+        // clause, and libSQL refuses that on a table that already holds rows
+        // while keys are on. Second reason, same flag — see
+        // `Step::suspends_foreign_keys`.
+        suspends_foreign_keys: true,
+        apply: |conn| Box::pin(add_branch_storage(conn)),
     },
     Step {
         from: 10,
@@ -366,7 +399,12 @@ async fn apply_step_inner(conn: &libsql::Connection, step: &Step) -> Result<()> 
 
 /// The 0.5.4 schema, applied to an empty database.
 async fn baseline(conn: &libsql::Connection) -> Result<()> {
-    // concepts first: links declares a foreign key into it.
+    // branches first, and seeded immediately: every ledger table's `branch_id`
+    // defaults to `'main'` and declares a foreign key onto this row, so a
+    // database without it cannot accept a single write (§15.2, D-214).
+    conn.execute(CREATE_BRANCHES_TABLE, ()).await?;
+    seed_root_branch(conn).await?;
+    // concepts next: links declares a foreign key into it.
     conn.execute(CREATE_CONCEPTS_TABLE, ()).await?;
     conn.execute(CREATE_LINKS_TABLE, ()).await?;
     conn.execute(CREATE_LINKS_CURRENT_TABLE, ()).await?;
@@ -388,6 +426,289 @@ async fn baseline(conn: &libsql::Connection) -> Result<()> {
     Ok(())
 }
 
+/// v11 → v12: the branch storage model (§15.2, W12.2, [D-214]).
+///
+/// Storage only, in the sense that matters: no write-path changes, and every
+/// existing `INSERT` in the crate still omits `branch_id` and takes the
+/// default.
+///
+/// **The public API gate does move, by +18 items and -0**, and the plan's
+/// prediction that it would not was wrong rather than nearly right. Every
+/// added item is schema text in [`crate::schema::ddl`], whose whole purpose is
+/// to publish the schema — thirteen new consts for the `branches` table, its
+/// seed, the column, the four guards and the three abort messages; four
+/// promotions of trigger bodies that were anonymous entries in
+/// [`CREATE_TRIGGERS`] until a rung needed to name them; and three variants on
+/// the `#[non_exhaustive]` `AbortKind`, which is what that attribute is for.
+/// Nothing removed, nothing narrowed. The gate is still the check that would
+/// catch a leak — it simply had something true to report.
+///
+/// # What the shape is, and what it refuses to be
+///
+/// Links and the transaction log **branch**; concepts do not. `concepts.id`
+/// stays `NOT NULL UNIQUE` and stays the parent of `links.source_id` and
+/// `links.target_id`, so `branch_id` on `concepts` is **provenance** — where a
+/// concept was minted — and never identity. `examples/branch_identity_probe.rs`
+/// measured the two alternatives and both break something the design depends
+/// on: widening uniqueness to `(id, branch_id)` leaves today's single-column
+/// foreign keys accepting `CREATE` and failing **every insert** with `foreign
+/// key mismatch` (§3), and a composite key `(source_id, branch_id)` forbids
+/// copy-on-write outright (§4), which is the whole economy of a fork.
+///
+/// # Why `links_current` is rebuilt and the other three are altered
+///
+/// `branch_id` has to be **in the primary key** of `links_current`, not merely
+/// on it: the table is one row per open belief about an edge, and two lineages
+/// believing different things about one edge is two rows. Probe §5 confirmed
+/// the split — `links` accepts both rows because `recorded_at` is already in
+/// its key, and `links_current` refuses the second. SQLite cannot add a column
+/// to a primary key, so the table is re-derived rather than described: it is
+/// derivative under Doctrine VI, `rebuild_within` already knows how to
+/// reconstruct it from `links`, and re-deriving cannot disagree with the ledger
+/// the way a hand-written `INSERT … SELECT` can.
+///
+/// `branch_id` goes **last** in the key on purpose. The autoindex keeps its
+/// leading columns, so D-059's primary-key-versus-covering-index contest is
+/// unperturbed by this rung; whether a branch-leading composition reads better
+/// is §15.3's measurement to make, not a shape to guess at now (F-33).
+///
+/// # The triggers, and the one that is easy to miss
+///
+/// Three log triggers are redefined so the log row carries the lineage the
+/// write actually happened on. Without that every entry reads `'main'`, and the
+/// fold's new `PARTITION BY … branch_id` would partition on a constant — the
+/// widened folds and these triggers are one repair in two files, not two
+/// changes. `DROP` then `CREATE`, never a re-issue: `CREATE TRIGGER IF NOT
+/// EXISTS` against an existing name keeps the **old body**, which is the lesson
+/// [`CONCEPTS_GUARD_DELETE_V8`] already records.
+///
+/// # Why this rung suspends foreign keys
+///
+/// Not for the `links_current` rebuild — nothing declares a key into it. For
+/// the three `ADD COLUMN`s: libSQL refuses a `REFERENCES` column added to a
+/// table that already holds rows while enforcement is on, and every database
+/// climbing this rung holds rows by definition. [`Step::suspends_foreign_keys`]
+/// toggles the pragma outside the transaction, which is the only placement that
+/// works, and `apply_step` re-checks with `PRAGMA foreign_key_check` inside it
+/// before committing. The rung is still one transaction and one commit.
+///
+/// [D-214]: ../../docs/architecture/s13-decision-register.md
+async fn add_branch_storage(conn: &libsql::Connection) -> Result<()> {
+    // The register and its root, before any column defaults to a row that has
+    // to exist for the foreign key to be satisfiable.
+    conn.execute(CREATE_BRANCHES_TABLE, ()).await?;
+    seed_root_branch(conn).await?;
+
+    // Metadata-only: SQLite records a constant default in the schema header and
+    // rewrites no row. Measured at 83-139 microseconds over 20,000 rows (probe
+    // §1). The `REFERENCES` clause is why the step suspends foreign keys — on a
+    // populated table with keys on, libSQL refuses it. See [`BRANCH_COLUMN`].
+    for table in ["concepts", "links", "transaction_log"] {
+        conn.execute(
+            &format!("ALTER TABLE {table} ADD COLUMN {BRANCH_COLUMN}"),
+            (),
+        )
+        .await?;
+    }
+
+    // `links_current` instead gets the `links` recipe: drop, re-create with the
+    // widened key, re-derive. Safe here and not on `concepts` because nothing
+    // declares a foreign key into it.
+    conn.execute("DROP TABLE links_current", ()).await?;
+    conn.execute(CREATE_LINKS_CURRENT_TABLE, ()).await?;
+
+    // `DROP TABLE` took the table's indices with it, and neither the `CREATE`
+    // above nor the rebuild below restores them — one declares a table and the
+    // other fills one. Without these two the database is stamped v12 and fails
+    // its own open-time verification, which is how this was found.
+    conn.execute(LC_TRAVERSAL_COVER, ()).await?;
+    conn.execute(LC_OPEN_INTERVAL, ()).await?;
+
+    // Triggers whose bodies name columns that just changed. Dropped by name
+    // first, because `IF NOT EXISTS` would silently keep the pre-v12 body and
+    // leave a database the ladder calls v12 that logs without lineage.
+    for (name, ddl) in [
+        ("trg_concepts_log_insert", CREATE_CONCEPTS_LOG_INSERT),
+        ("trg_concepts_log_update", CREATE_CONCEPTS_LOG_UPDATE),
+        ("trg_links_log_insert", CREATE_LINKS_LOG_INSERT),
+        ("trg_links_current_sync", CREATE_LINKS_CURRENT_SYNC),
+        ("trg_links_single_open", CREATE_LINKS_SINGLE_OPEN),
+    ] {
+        conn.execute(&format!("DROP TRIGGER IF EXISTS {name}"), ())
+            .await?;
+        conn.execute(ddl, ()).await?;
+    }
+
+    // New guards. `IF NOT EXISTS` is correct for these: no earlier body exists
+    // to be kept.
+    for ddl in [
+        CREATE_CONCEPTS_GUARD_LINEAGE,
+        CREATE_CONCEPTS_GUARD_BRANCH,
+        CREATE_BRANCHES_GUARD_UPDATE,
+        CREATE_BRANCHES_GUARD_DELETE,
+    ] {
+        conn.execute(ddl, ()).await?;
+    }
+
+    // Last, and inside the same transaction: the materialization is re-derived
+    // only once every trigger that maintains it speaks v12.
+    crate::integrity::rebuild::rebuild_within(conn, crate::integrity::rebuild::Verify::Yes).await?;
+
+    Ok(())
+}
+
+/// Insert the root lineage, shared by the baseline and the rung.
+///
+/// One helper rather than two call sites composing the same statement, because
+/// `'main'` spliced twice is `'main'` spelled two ways eventually.
+async fn seed_root_branch(conn: &libsql::Connection) -> Result<()> {
+    let now = crate::util::timestamp::format(std::time::SystemTime::now());
+    conn.execute(SEED_MAIN_BRANCH, libsql::params![now]).await?;
+    Ok(())
+}
+
+/// Every trigger v12 introduced or redefined, by name (§15.2, D-214).
+///
+/// Consulted by [`triggers_before_v12`] and by nothing else. Kept as names
+/// rather than folded into that function so the two halves of the rule — what
+/// v12 touched, and what a pre-v12 rung installs instead — are separately
+/// readable.
+const V12_TRIGGERS: &[&str] = &[
+    // New at v12: three of these sit on `branches`, which is why a pre-v12 rung
+    // installing them fails outright rather than merely installing the wrong
+    // body.
+    "trg_concepts_cross_lineage",
+    "trg_concepts_branch_immutable",
+    "trg_branches_frozen_update",
+    "trg_branches_frozen_delete",
+    // Redefined at v12 to name `branch_id`. Their v11 bodies are in
+    // [`TRIGGERS_V11`].
+    "trg_links_current_sync",
+    "trg_links_single_open",
+    "trg_concepts_log_insert",
+    "trg_concepts_log_update",
+    "trg_links_log_insert",
+];
+
+/// The five redefined triggers **as v11 had them** (§15.2, D-214).
+///
+/// Pinned for the reason [`CONCEPTS_LOG_INSERT_V9`] states, and the reason has
+/// now bitten twice: a rung that restores triggers from today's
+/// [`CREATE_TRIGGERS`] installs *today's* bodies on a database several versions
+/// short of them. There it produced a v8 database that stopped logging concept
+/// inserts; here it would produce a v5 database whose sync trigger writes a
+/// column `links_current` does not have.
+///
+/// `trg_concepts_log_insert` is the marker-gated v10 body, not the v9 one —
+/// [`add_concepts_rowid_pk`] still corrects it back to [`CONCEPTS_LOG_INSERT_V9`]
+/// afterwards, because that rung is about v8 and this list is about v11.
+const TRIGGERS_V11: &[&str] = &[
+    r#"
+    CREATE TRIGGER IF NOT EXISTS trg_links_current_sync
+    AFTER INSERT ON links
+    BEGIN
+        INSERT INTO links_current
+            (source_id, target_id, edge_type, valid_from, valid_to,
+             weight, properties, recorded_at)
+        VALUES
+            (NEW.source_id, NEW.target_id, NEW.edge_type, NEW.valid_from,
+             NEW.valid_to, NEW.weight, NEW.properties, NEW.recorded_at)
+        ON CONFLICT(source_id, target_id, edge_type, valid_from) DO UPDATE SET
+            valid_to    = excluded.valid_to,
+            weight      = excluded.weight,
+            properties  = excluded.properties,
+            recorded_at = excluded.recorded_at
+        WHERE excluded.recorded_at > links_current.recorded_at;
+    END;
+    "#,
+    // The abort text is written out rather than spliced from
+    // `abort_single_open!()`, which is private to `ddl`. Held to the const by
+    // `the_pinned_v11_triggers_carry_the_messages_the_crate_declares` below,
+    // so a divergence is a red test rather than a message that reads wrong.
+    r#"
+    CREATE TRIGGER IF NOT EXISTS trg_links_single_open
+    BEFORE INSERT ON links
+    WHEN NEW.valid_to = '9999-12-31T23:59:59.999999Z'
+         AND EXISTS (
+             SELECT 1 FROM links_current
+             WHERE source_id  = NEW.source_id
+               AND target_id  = NEW.target_id
+               AND edge_type  = NEW.edge_type
+               AND valid_from <> NEW.valid_from
+               AND valid_to   = '9999-12-31T23:59:59.999999Z'
+         )
+    BEGIN
+        SELECT RAISE(ABORT, 'macrame: edge already has an open interval; retire it first');
+    END;
+    "#,
+    concat!(
+        r#"
+    CREATE TRIGGER IF NOT EXISTS trg_concepts_log_insert
+    AFTER INSERT ON concepts
+    WHEN NOT EXISTS (
+        SELECT 1 FROM sqlite_master
+        WHERE type = 'table' AND name = '"#,
+        "macrame_archive_session",
+        r#"'
+    )
+    BEGIN
+        INSERT INTO transaction_log (table_name, entity_id, operation, payload, recorded_at)
+        VALUES ('concepts', NEW.id, 'I',
+                json_object('v', 2, 'title', NEW.title, 'content', NEW.content,
+                            'valid_from', NEW.valid_from, 'valid_to', NEW.valid_to,
+                            'retired', NEW.retired,
+                            'embedding_model', NEW.embedding_model),
+                NEW.recorded_at);
+    END;
+    "#
+    ),
+    r#"
+    CREATE TRIGGER IF NOT EXISTS trg_concepts_log_update
+    AFTER UPDATE ON concepts
+    BEGIN
+        INSERT INTO transaction_log (table_name, entity_id, operation, payload, recorded_at)
+        VALUES ('concepts', NEW.id, 'U',
+                json_object('v', 2, 'title', NEW.title, 'content', NEW.content,
+                            'valid_from', NEW.valid_from, 'valid_to', NEW.valid_to,
+                            'retired', NEW.retired,
+                            'embedding_model', NEW.embedding_model),
+                NEW.recorded_at);
+    END;
+    "#,
+    r#"
+    CREATE TRIGGER IF NOT EXISTS trg_links_log_insert
+    AFTER INSERT ON links
+    BEGIN
+        INSERT INTO transaction_log (table_name, entity_id, operation, payload, recorded_at)
+        VALUES ('links',
+                NEW.source_id || '|' || NEW.target_id || '|' || NEW.edge_type || '|' || NEW.valid_from,
+                'I',
+                json_object('v', 1, 'source_id', NEW.source_id, 'target_id', NEW.target_id,
+                            'edge_type', NEW.edge_type, 'valid_from', NEW.valid_from,
+                            'valid_to', NEW.valid_to, 'weight', NEW.weight,
+                            'properties', json(NEW.properties)),
+                NEW.recorded_at);
+    END;
+    "#,
+];
+
+/// The trigger set a rung *below* v12 installs: today's, minus what v12
+/// introduced, plus the v11 bodies of what v12 redefined.
+///
+/// Three rungs rebuild a table and put the triggers back, and each has to put
+/// back the triggers **of its own era**. The alternative — a pinned list per
+/// rung — was rejected because those three eras are identical in every trigger
+/// that matters here, and three copies of one list is the shape [D-124] names.
+///
+/// [D-124]: ../../docs/architecture/s13-decision-register.md
+fn triggers_before_v12() -> impl Iterator<Item = &'static str> {
+    CREATE_TRIGGERS
+        .iter()
+        .copied()
+        .filter(|t| !V12_TRIGGERS.iter().any(|name| t.contains(name)))
+        .chain(TRIGGERS_V11.iter().copied())
+}
+
 /// v4 → v5: add the FTS5 index over concept text (§5.9, D-051).
 ///
 /// Derivative and additive, so D-036 permits it — an FTS index over `concepts`
@@ -403,7 +724,7 @@ async fn baseline(conn: &libsql::Connection) -> Result<()> {
 /// destroyed and no recovery existed.
 async fn add_concepts_fts(conn: &libsql::Connection) -> Result<()> {
     conn.execute(CREATE_CONCEPTS_FTS, ()).await?;
-    for trigger_ddl in CREATE_TRIGGERS {
+    for trigger_ddl in triggers_before_v12() {
         conn.execute(trigger_ddl, ()).await?;
     }
     conn.execute(REBUILD_CONCEPTS_FTS, ()).await?;
@@ -610,7 +931,7 @@ async fn add_weight_check(conn: &libsql::Connection) -> Result<()> {
     conn.execute("ALTER TABLE links_v7 RENAME TO links", ())
         .await?;
 
-    for trigger_ddl in CREATE_TRIGGERS {
+    for trigger_ddl in triggers_before_v12() {
         conn.execute(trigger_ddl, ()).await?;
     }
 
@@ -794,7 +1115,7 @@ async fn add_concepts_rowid_pk(conn: &libsql::Connection) -> Result<()> {
 
     // (c) Put it back, in the order the trigger bodies require.
     conn.execute(CREATE_CONCEPTS_FTS, ()).await?;
-    for trigger_ddl in CREATE_TRIGGERS {
+    for trigger_ddl in triggers_before_v12() {
         conn.execute(trigger_ddl, ()).await?;
     }
 
@@ -891,6 +1212,7 @@ async fn add_traversal_cover(conn: &libsql::Connection) -> Result<()> {
 
 /// The tables the baseline declares, by name, for [`verify`].
 pub(crate) const BASELINE_TABLES: &[&str] = &[
+    "branches",
     "concepts",
     "links",
     "links_current",

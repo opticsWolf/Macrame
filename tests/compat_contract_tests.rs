@@ -109,6 +109,11 @@ async fn the_ledger_tables_have_the_shape_the_contract_freezes() {
             ("valid_to".into(), "TEXT".into(), 1, 0),
             ("weight".into(), "REAL".into(), 1, 0),
             ("properties".into(), "TEXT".into(), 1, 0),
+            // v12 (§15.2, D-214). The diff this contract exists to permit:
+            // one appended entry, every earlier one byte-identical, the
+            // primary key untouched. Post-1.0 this is exactly what an
+            // `ALTER TABLE ADD COLUMN` may do and no more.
+            ("branch_id".into(), "TEXT".into(), 1, 0),
         ],
         "links is a frozen ledger table (D-003: the 5-column bitemporal PK)"
     );
@@ -138,6 +143,13 @@ async fn the_ledger_tables_have_the_shape_the_contract_freezes() {
             ("valid_to".into(), "TEXT".into(), 1, 0),
             ("recorded_at".into(), "TEXT".into(), 1, 0),
             ("retired".into(), "INTEGER".into(), 1, 0),
+            // v12, and **provenance rather than identity** (D-214). `id` keeps
+            // its `UNIQUE`, so this column adds a fact about where a concept
+            // was minted without making two lineages' beliefs about one
+            // concept representable — which is the whole of Option A and the
+            // reason this entry is additive where a widened uniqueness would
+            // not have been.
+            ("branch_id".into(), "TEXT".into(), 1, 0),
         ],
         "concepts is a frozen ledger table"
     );
@@ -151,6 +163,12 @@ async fn the_ledger_tables_have_the_shape_the_contract_freezes() {
             ("operation".into(), "TEXT".into(), 1, 0),
             ("payload".into(), "TEXT".into(), 1, 0),
             ("recorded_at".into(), "TEXT".into(), 1, 0),
+            // v12. Load-bearing rather than descriptive: the four folds in
+            // `temporal::replay` partition on it, and `entity_id` for a link
+            // is `source|target|type|valid_from` with no lineage in it, so
+            // without this column two branches' assertions about one edge
+            // collapse at replay to whichever has the higher `seq_id`.
+            ("branch_id".into(), "TEXT".into(), 1, 0),
         ],
         "transaction_log is a frozen ledger table (D-002)"
     );

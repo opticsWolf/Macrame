@@ -127,6 +127,9 @@ pub const macrame::connection::MAX_ARCHIVE_SESSIONS: usize
 pub fn macrame::connection::estimated_bulk_hold(&[macrame::graph::EdgeAssertion]) -> core::time::Duration
 pub mod macrame::error
 #[non_exhaustive] pub enum macrame::error::AbortKind
+pub macrame::error::AbortKind::BranchImmutable
+pub macrame::error::AbortKind::BranchesFrozen
+pub macrame::error::AbortKind::CrossLineage
 pub macrame::error::AbortKind::DeleteOutsideArchive
 pub macrame::error::AbortKind::NotAGuard
 pub macrame::error::AbortKind::RecordedAtRegression
@@ -910,24 +913,39 @@ pub type macrame::prelude::BulkResult<T> = core::result::Result<T, macrame::erro
 pub type macrame::prelude::Result<T> = core::result::Result<T, macrame::error::DbError>
 pub mod macrame::schema
 pub mod macrame::schema::ddl
+pub const macrame::schema::ddl::ABORT_BRANCHES_FROZEN: &str
+pub const macrame::schema::ddl::ABORT_BRANCH_IMMUTABLE: &str
+pub const macrame::schema::ddl::ABORT_CROSS_LINEAGE: &str
 pub const macrame::schema::ddl::ABORT_DELETE_GUARD: &str
 pub const macrame::schema::ddl::ABORT_MONOTONIC_RA: &str
 pub const macrame::schema::ddl::ABORT_SINGLE_OPEN: &str
 pub const macrame::schema::ddl::ANALYSIS_LIMIT: &str
 pub const macrame::schema::ddl::ANALYZE: &str
 pub const macrame::schema::ddl::ARCHIVE_SESSION_MARKER: &str
+pub const macrame::schema::ddl::BRANCH_COLUMN: &str
 pub const macrame::schema::ddl::CREATE_ANALYTICS_ANNOTATIONS_TABLE: &str
+pub const macrame::schema::ddl::CREATE_BRANCHES_GUARD_DELETE: &str
+pub const macrame::schema::ddl::CREATE_BRANCHES_GUARD_UPDATE: &str
+pub const macrame::schema::ddl::CREATE_BRANCHES_TABLE: &str
 pub const macrame::schema::ddl::CREATE_CONCEPTS_FTS: &str
+pub const macrame::schema::ddl::CREATE_CONCEPTS_GUARD_BRANCH: &str
 pub const macrame::schema::ddl::CREATE_CONCEPTS_GUARD_DELETE: &str
+pub const macrame::schema::ddl::CREATE_CONCEPTS_GUARD_LINEAGE: &str
 pub const macrame::schema::ddl::CREATE_CONCEPTS_LOG_INSERT: &str
+pub const macrame::schema::ddl::CREATE_CONCEPTS_LOG_UPDATE: &str
 pub const macrame::schema::ddl::CREATE_CONCEPTS_TABLE: &str
 pub const macrame::schema::ddl::CREATE_INDICES: &[&str]
+pub const macrame::schema::ddl::CREATE_LINKS_CURRENT_SYNC: &str
 pub const macrame::schema::ddl::CREATE_LINKS_CURRENT_TABLE: &str
+pub const macrame::schema::ddl::CREATE_LINKS_LOG_INSERT: &str
+pub const macrame::schema::ddl::CREATE_LINKS_SINGLE_OPEN: &str
 pub const macrame::schema::ddl::CREATE_LINKS_TABLE: &str
 pub const macrame::schema::ddl::CREATE_TRANSACTION_LOG_TABLE: &str
 pub const macrame::schema::ddl::CREATE_TRIGGERS: &[&str]
+pub const macrame::schema::ddl::MAIN_BRANCH: &str
 pub const macrame::schema::ddl::OPTIMIZE: &str
 pub const macrame::schema::ddl::REBUILD_CONCEPTS_FTS: &str
+pub const macrame::schema::ddl::SEED_MAIN_BRANCH: &str
 pub const macrame::schema::ddl::VERIFY_CONCEPTS_FTS: &str
 pub const macrame::schema::ddl::WEIGHT_CHECK: &str
 pub fn macrame::schema::ddl::create_embeddings_index(&macrame::vector::ModelName) -> alloc::string::String

@@ -27,7 +27,7 @@ pub async fn audit_current(conn: &libsql::Connection) -> Result<usize> {
         r#"
         WITH materialized AS (
             SELECT source_id, target_id, edge_type, valid_from,
-                   valid_to, weight, properties, recorded_at
+                   valid_to, weight, properties, recorded_at, branch_id
             FROM links_current
         ),
         projection AS ({projection})

@@ -499,3 +499,100 @@ Everything above is a constraint the *engine* keeps: a `CHECK`, a key, a trigger
 
 **Stated so it can fail.** `tests/storage_boundary_tests.rs` asserts each row from the other side. For 1 and 2 that means asserting the gap is still open — raw SQL writes the overlapping pair, `read_conn()` refuses a write where `raw()` does not — so the tests fail if a later migration closes one and leaves this section describing a limit that no longer exists. For 3 and for NaN it now runs the *opposite* way, asserting refusal, so they fail if a gap is ever re-opened. A claim about what the storage layer enforces needs a tripwire exactly as much as a claim about what it does not; NaN is the case that taught that ([D-078](s13-decision-register.md#d-078)), and infinity is the case that showed the cost of getting it wrong. A passing suite there is not a virtue — it is a fact about where the checks currently are.
 
+### 4.8 Lineage: the branch register and the column that names it (0.14.2, D-214)
+
+Schema **v12** adds one table and one column to each of the four ledger tables.
+The column is `branch_id TEXT NOT NULL DEFAULT 'main' REFERENCES branches(branch_id)`,
+and the default is what makes the rung an `ALTER TABLE` rather than a rewrite:
+SQLite records a constant default in the schema header and rewrites no row —
+83–139 µs over 20,000 rows, measured in `examples/branch_identity_probe.rs` §1.
+
+```sql
+CREATE TABLE IF NOT EXISTS branches (
+    branch_id   TEXT NOT NULL PRIMARY KEY,
+    parent_id   TEXT REFERENCES branches(branch_id),
+    forked_at   TEXT,
+    created_at  TEXT NOT NULL,
+    CHECK ((parent_id IS NULL) = (forked_at IS NULL)),
+    CHECK (forked_at IS NULL OR forked_at <= created_at)
+);
+```
+
+**The name is the identity, where [§15.2](../Macrame%20Road%20to%201.0.md) sketched
+a ULID `id` and a separate `UNIQUE` `name`.** Two columns that are one-to-one and
+both required are one column wearing two hats, and the sketch's shape would have
+put the *opaque* one in every ledger row — so every row would name a lineage no
+reader could identify without a join. `branch_id` is the name, `main` is the
+root, and [D-061](s13-decision-register.md#d-061)'s reserved separators apply to
+it as they do to every other identifier.
+
+**`forked_at` is nullable, and the paired `CHECK` is why that is not a
+weakening.** The root has no parent and therefore no fork point; the sketch gave
+it an epoch sentinel instead, which is a value standing in for the absence of a
+value — the shape [Doctrine V](s0-s3-foundations.md#doctrine-v) spends its
+argument against. `(parent_id IS NULL) = (forked_at IS NULL)` makes the two
+either both present or both absent, so "the root" is one representable state and
+"a branch with a parent but no fork point" is not one at all.
+
+#### `branch_id` on `concepts` is provenance, never identity
+
+This is the whole of the design and the sentence everything downstream depends
+on. `concepts.id` keeps its `NOT NULL UNIQUE`, and stays the parent of
+`links.source_id` and `links.target_id`. So `concepts` holds **one row per
+concept**, carrying the lineage that *minted* it — and two lineages holding
+different beliefs about one concept is a state this schema cannot represent.
+
+That is a restriction, and it was chosen against the alternative rather than
+inherited from it. `examples/branch_identity_probe.rs` measured both ways out:
+
+- **Widening the uniqueness to `(id, branch_id)`** leaves `links`'s
+  single-column foreign keys pointing at a parent key that no longer exists.
+  libSQL accepts the `CREATE` and then fails **every insert** with `foreign key
+  mismatch` (§3) — a schema that looks correct and refuses all writes.
+- **A composite foreign key `(source_id, branch_id)`** expresses the first
+  correctly and forbids copy-on-write outright (§4): a link asserted on branch
+  `b` routinely names a concept row carrying `branch_id = 'main'`, which is the
+  entire economy of an O(1) fork.
+
+The two point in opposite directions, and that is the finding rather than an
+obstacle to route around. What the restriction actually costs is narrow and
+worth naming precisely: **a branch cannot correct or retire a concept it did not
+mint.** It can assert and retire *edges* about one freely, and it can mint its
+own. [§15.2](../Macrame%20Road%20to%201.0.md) records the overlay that would buy
+the missing case, the five things it costs, and the symptom that reopens it.
+
+Two triggers make the restriction a property of the storage rather than of the
+write path. `trg_concepts_cross_lineage` refuses an insert whose `id` already
+exists under a different lineage; `trg_concepts_branch_immutable` refuses an
+update that changes `branch_id`, because provenance that can be edited is not
+provenance.
+
+#### `links_current` is keyed per lineage, and it is the one table that is rebuilt
+
+`branch_id` has to be **in the primary key** of `links_current`, not merely on
+it: the table is one row per open belief about an edge, and two lineages
+believing different things about one edge is two rows. Probe §5 confirmed the
+split — `links` accepts both rows because `recorded_at` is already in its key,
+and `links_current` refuses the second. SQLite cannot add a column to a primary
+key, so the table is **re-derived rather than described**: it is derivative under
+[Doctrine VI](s0-s3-foundations.md#doctrine-vi), `rebuild_within` already knows
+how to reconstruct it from `links`, and re-deriving cannot disagree with the
+ledger the way a hand-written `INSERT … SELECT` can.
+
+`branch_id` goes **last** in the key on purpose. The autoindex keeps its leading
+columns, so [D-059](s13-decision-register.md#d-059)'s primary-key-versus-covering-index
+contest is unperturbed; whether a branch-leading composition reads better is a
+measurement for §15.3, not a shape to guess at now (F-33).
+
+#### The log triggers and the fold are one repair
+
+Three triggers write the log — `trg_concepts_log_insert`,
+`trg_concepts_log_update` and `trg_links_log_insert` — and all three are
+redefined at v12 so the row carries the lineage the write actually happened on.
+This is not tidiness beside the fold's new `PARTITION BY … branch_id`; it is the
+half without which that partition discriminates nothing. A fold partitioning on
+a column every trigger leaves reading `'main'` partitions on a constant.
+
+`DROP` then `CREATE`, never a re-issue: `CREATE TRIGGER IF NOT EXISTS` against an
+existing name keeps the **old body**, which is the lesson
+[D-129](s13-decision-register.md#d-129) already records.

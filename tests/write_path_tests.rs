@@ -466,6 +466,88 @@ async fn log_len(db: &Database) -> i64 {
     count(db, "SELECT COUNT(*) FROM transaction_log").await
 }
 
+/// A refused edge names the endpoint that is not there, not the constraint that
+/// noticed (C-1, [D-176]'s scope extended past the annotation path).
+///
+/// `links` declares two keys into `concepts` and, since v12, a third into
+/// `branches`. An unqualified "FOREIGN KEY constraint failed" is therefore less
+/// informative than it was when W7.2 left this path alone: it does not say
+/// which of three columns, and two of the three name a concept the caller can
+/// go and create.
+#[tokio::test]
+async fn a_refused_edge_names_the_endpoint_that_is_missing() {
+    let harness = TestHarness::new();
+    let db = db_with_nodes(&harness).await;
+
+    let err = db
+        .assert_edge(EdgeAssertion::new("A", "ghost", "KNOWS").valid_from(T1))
+        .await
+        .expect_err("an edge into a concept that does not exist cannot land");
+
+    match &err {
+        DbError::NotFound(id) => assert_eq!(
+            id, "ghost",
+            "the target is the missing one, so the target is what the error \
+             has to name"
+        ),
+        other => panic!("expected the missing endpoint to be named, got {other:?}"),
+    }
+}
+
+/// The source is reported when both endpoints are absent.
+///
+/// Deliberate, and the reason is in `missing_endpoint`: one name a caller can
+/// act on beats a compound message they have to parse. Pinned because the loop
+/// that produces it reads as an implementation detail and is not one — a future
+/// reader reversing the iteration order would change a documented answer.
+#[tokio::test]
+async fn an_edge_with_neither_endpoint_reports_the_source() {
+    let harness = TestHarness::new();
+    let db = Database::open(&harness.db_path).await.unwrap();
+
+    let err = db
+        .assert_edge(EdgeAssertion::new("nowhere", "nothing", "KNOWS").valid_from(T1))
+        .await
+        .expect_err("neither endpoint exists, so the edge cannot land");
+
+    match &err {
+        DbError::NotFound(id) => assert_eq!(id, "nowhere"),
+        other => panic!("expected the source to be named, got {other:?}"),
+    }
+}
+
+/// The classification survives the bulk path, where it matters most.
+///
+/// A single `assert_edge` failing tells the caller which call failed. A chunk
+/// of up to `chunk_rows::LINKS` failing tells them nothing at all unless the
+/// error names a row, which is the whole argument [D-176] made for the
+/// annotation path and the argument C-1 extends to this one.
+#[tokio::test]
+async fn a_refused_edge_in_a_chunk_still_names_the_endpoint() {
+    let harness = TestHarness::new();
+    let db = db_with_nodes(&harness).await;
+
+    // The good row is first, so the failure is reached mid-chunk.
+    let err = db
+        .write_bulk_atomic(vec![
+            EdgeAssertion::new("A", "B", "KNOWS").valid_from(T1),
+            EdgeAssertion::new("A", "ghost", "KNOWS").valid_from(T1),
+        ])
+        .await
+        .expect_err("a chunk carrying an unresolvable edge cannot commit");
+
+    match &err {
+        DbError::NotFound(id) => assert_eq!(id, "ghost"),
+        other => panic!("expected the missing endpoint to be named, got {other:?}"),
+    }
+    assert_eq!(
+        count(&db, "SELECT COUNT(*) FROM links").await,
+        0,
+        "the row that would have succeeded landed anyway, so `atomic` is not \
+         describing what the call did"
+    );
+}
+
 /// An annotation naming a concept that is not there says which one (W7.2, D-176).
 ///
 /// `write_annotations_atomic` was the one write path that returned the engine

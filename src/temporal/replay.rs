@@ -73,8 +73,8 @@ pub(crate) const PAYLOAD_VERSION: u8 = 2;
 const HOT_FOLD: &str = r#"
     SELECT seq_id, table_name, entity_id, operation, payload
     FROM (
-        SELECT seq_id, table_name, entity_id, operation, payload,
-               ROW_NUMBER() OVER (PARTITION BY table_name, entity_id ORDER BY seq_id DESC) as rn
+        SELECT seq_id, table_name, entity_id, operation, payload, branch_id,
+               ROW_NUMBER() OVER (PARTITION BY table_name, entity_id, branch_id ORDER BY seq_id DESC) as rn
         FROM transaction_log
         WHERE recorded_at <= ?1
     ) WHERE rn = 1
@@ -84,18 +84,23 @@ const HOT_FOLD: &str = r#"
 ///
 /// The hot entry wins for entities present in both files because its `seq_id` is
 /// greater — the same last-writer-wins rule as snapshot composition.
-const COLD_FOLD: &str = r#"
+fn cold_fold(cold_lineage: ColdLineage) -> String {
+    format!(
+        r#"
     SELECT seq_id, table_name, entity_id, operation, payload
     FROM (
-        SELECT seq_id, table_name, entity_id, operation, payload,
-               ROW_NUMBER() OVER (PARTITION BY table_name, entity_id ORDER BY seq_id DESC) as rn
+        SELECT seq_id, table_name, entity_id, operation, payload, branch_id,
+               ROW_NUMBER() OVER (PARTITION BY table_name, entity_id, branch_id ORDER BY seq_id DESC) as rn
         FROM (
-            SELECT seq_id, table_name, entity_id, operation, payload, recorded_at FROM main.transaction_log
+            SELECT seq_id, table_name, entity_id, operation, payload, recorded_at, branch_id FROM main.transaction_log
             UNION ALL
-            SELECT seq_id, table_name, entity_id, operation, payload, recorded_at FROM cold.transaction_log
+            SELECT seq_id, table_name, entity_id, operation, payload, recorded_at, {cold} FROM cold.transaction_log
         ) WHERE recorded_at <= ?1
     ) WHERE rn = 1
-"#;
+"#,
+        cold = cold_lineage.projection()
+    )
+}
 
 /// Fold over the hot log *above a snapshot anchor* (§5.5, D-049).
 ///
@@ -108,8 +113,8 @@ const COLD_FOLD: &str = r#"
 const ANCHORED_HOT_FOLD: &str = r#"
     SELECT seq_id, table_name, entity_id, operation, payload
     FROM (
-        SELECT seq_id, table_name, entity_id, operation, payload,
-               ROW_NUMBER() OVER (PARTITION BY table_name, entity_id ORDER BY seq_id DESC) as rn
+        SELECT seq_id, table_name, entity_id, operation, payload, branch_id,
+               ROW_NUMBER() OVER (PARTITION BY table_name, entity_id, branch_id ORDER BY seq_id DESC) as rn
         FROM transaction_log
         WHERE recorded_at <= ?1 AND seq_id > ?2
     ) WHERE rn = 1
@@ -122,18 +127,77 @@ const ANCHORED_HOT_FOLD: &str = r#"
 /// PRIMARY KEY` precisely so history is not renumbered — so `seq_id > ?2`
 /// partitions the two files consistently and last-writer-wins across them by the
 /// same rule the unanchored folds use.
-const ANCHORED_COLD_FOLD: &str = r#"
+fn anchored_cold_fold(cold_lineage: ColdLineage) -> String {
+    format!(
+        r#"
     SELECT seq_id, table_name, entity_id, operation, payload
     FROM (
-        SELECT seq_id, table_name, entity_id, operation, payload,
-               ROW_NUMBER() OVER (PARTITION BY table_name, entity_id ORDER BY seq_id DESC) as rn
+        SELECT seq_id, table_name, entity_id, operation, payload, branch_id,
+               ROW_NUMBER() OVER (PARTITION BY table_name, entity_id, branch_id ORDER BY seq_id DESC) as rn
         FROM (
-            SELECT seq_id, table_name, entity_id, operation, payload, recorded_at FROM main.transaction_log
+            SELECT seq_id, table_name, entity_id, operation, payload, recorded_at, branch_id FROM main.transaction_log
             UNION ALL
-            SELECT seq_id, table_name, entity_id, operation, payload, recorded_at FROM cold.transaction_log
+            SELECT seq_id, table_name, entity_id, operation, payload, recorded_at, {cold} FROM cold.transaction_log
         ) WHERE recorded_at <= ?1 AND seq_id > ?2
     ) WHERE rn = 1
-"#;
+"#,
+        cold = cold_lineage.projection()
+    )
+}
+
+/// Whether an attached cold file predates the lineage column (§15.2, v12).
+///
+/// Cold files are **read-only media as far as the read path is concerned**.
+/// They get moved (D-026), they can sit on a share, and a fold that upgraded
+/// one in order to read it would be a write on a path callers have every reason
+/// to believe is a read. So the shape is detected and tolerated, never
+/// corrected: the archive *writer* upgrades, and only inside its own
+/// transaction.
+///
+/// Detection is column presence rather than a version stamp, because a cold
+/// file carries no version anyone can trust — it is a file that has been moved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ColdLineage {
+    /// v12 or later: the file stamps its own rows.
+    Stamped,
+    /// Pre-v12: every row in it was written when only the trunk existed.
+    PreV12,
+}
+
+impl ColdLineage {
+    fn projection(self) -> &'static str {
+        match self {
+            ColdLineage::Stamped => "branch_id",
+            // A literal, not a default: rows written before lineage existed
+            // *were* trunk rows, and saying so is a fact about them rather than
+            // a fallback.
+            ColdLineage::PreV12 => "'main' AS branch_id",
+        }
+    }
+}
+
+/// Ask the attached cold file whether it carries `transaction_log.branch_id`.
+///
+/// Returns [`ColdLineage::PreV12`] when the pragma cannot be read at all. That
+/// is the conservative direction: a fold that guesses "stamped" against a v11
+/// file fails with `no such column`, while a fold that guesses "pre-v12"
+/// against a v12 file reads rows it can still fold — it would mislabel a
+/// branch's rows as trunk, which is why the guess is never made when the pragma
+/// answers.
+async fn cold_lineage(conn: &libsql::Connection) -> ColdLineage {
+    let Ok(mut rows) = conn
+        .query("PRAGMA cold.table_info(transaction_log)", ())
+        .await
+    else {
+        return ColdLineage::PreV12;
+    };
+    while let Ok(Some(row)) = rows.next().await {
+        if row.get::<String>(1).is_ok_and(|name| name == "branch_id") {
+            return ColdLineage::Stamped;
+        }
+    }
+    ColdLineage::PreV12
+}
 
 /// The winning log rows for one fold, before they are applied to a base state.
 ///
@@ -288,17 +352,25 @@ pub async fn reconstruct(
     )
     .await?;
 
+    // Asked once, after the ATTACH and before either fold, because both arms
+    // need it and the answer cannot change while we hold the handle.
+    let cold_shape = cold_lineage(conn).await;
+
     // Composition works across the archive boundary because the anchored fold
     // unions both files; before 0.5.5 it was refused here rather than made to
     // work, and the refusal was the only thing keeping the answer right.
     let result = match snapshot_anchor(snapshots_dir, ts).await {
         Some(base) => {
             let anchor = base.seq_anchor;
-            fold_delta(conn, ANCHORED_COLD_FOLD, libsql::params![ts, anchor])
-                .await
-                .map(|delta| delta.apply_to(base, ts))
+            fold_delta(
+                conn,
+                &anchored_cold_fold(cold_shape),
+                libsql::params![ts, anchor],
+            )
+            .await
+            .map(|delta| delta.apply_to(base, ts))
         }
-        None => fold(conn, ts, COLD_FOLD).await,
+        None => fold(conn, ts, &cold_fold(cold_shape)).await,
     };
 
     // Unconditional: see the ATTACH note above.

@@ -113,10 +113,97 @@ macro_rules! abort_delete_guard {
         "macrame: physical delete blocked outside archive session"
     };
 }
+macro_rules! abort_cross_lineage {
+    () => {
+        "macrame: concept belongs to another lineage; a branch inherits concepts, it does not restate them"
+    };
+}
+macro_rules! abort_branch_immutable {
+    () => {
+        "macrame: branch_id is provenance and cannot be changed"
+    };
+}
+macro_rules! abort_branches_frozen {
+    () => {
+        "macrame: branch records are append-only"
+    };
+}
 
 pub const ABORT_SINGLE_OPEN: &str = abort_single_open!();
 pub const ABORT_MONOTONIC_RA: &str = abort_monotonic_ra!();
 pub const ABORT_DELETE_GUARD: &str = abort_delete_guard!();
+pub const ABORT_CROSS_LINEAGE: &str = abort_cross_lineage!();
+pub const ABORT_BRANCH_IMMUTABLE: &str = abort_branch_immutable!();
+pub const ABORT_BRANCHES_FROZEN: &str = abort_branches_frozen!();
+
+/// The root lineage every pre-v12 row is stamped with (§15.2, v12, D-214).
+///
+/// A macro as well as a `const` for [`ts_glob`]'s reason: it is spliced into
+/// the column defaults by `concat!`, which takes only literals. One spelling,
+/// so the default in the DDL, the seed row, and the Rust layer cannot drift
+/// into three databases that disagree about what the trunk is called.
+macro_rules! main_branch {
+    () => {
+        "main"
+    };
+}
+pub const MAIN_BRANCH: &str = main_branch!();
+
+/// The `branch_id` column, identical on all four ledger tables (§15.2, D-214).
+///
+/// The default is what makes the rung `ALTER TABLE` rather than a rewrite —
+/// SQLite records a constant default in the schema header and rewrites no row,
+/// measured at 83–139 µs over 20,000 rows in `examples/branch_identity_probe.rs`
+/// §1.
+///
+/// # The `REFERENCES` clause, and the condition it is actually gated on
+///
+/// SQLite specifies that a column added by `ALTER TABLE … ADD COLUMN` carrying
+/// a `REFERENCES` clause **must default to NULL** when foreign keys are
+/// enabled, because pre-existing rows cannot be validated against the new
+/// parent. That collides head-on with `NOT NULL DEFAULT 'main'`.
+///
+/// libSQL 0.9.30 applies that rule **dynamically rather than statically**, and
+/// probe §15 pins the four cases: the statement is refused only when the table
+/// **holds rows** *and* foreign keys are **on**. An empty table takes it with
+/// keys on; a populated table takes it with keys off. Being inside a
+/// transaction changes nothing either way.
+///
+/// This is the whole reason the v11 → v12 rung sets
+/// [`suspends_foreign_keys`]. It is worth being exact about what that buys,
+/// because "suspend the constraint to install the constraint" invites the
+/// suspicion that the result is decorative — §15 measures it and it is not.
+/// After an ALTER taken with keys suspended the clause is in `sqlite_master`,
+/// `PRAGMA foreign_key_list(concepts)` reports the key, an insert naming an
+/// unknown branch is refused with extended code 787, and deleting a referenced
+/// branch is refused **by the engine** rather than by a trigger. Enforcement is
+/// a per-connection pragma; the constraint is schema. Suspending the first
+/// never weakened the second.
+///
+/// Nor does the suspension launder a violation past the commit: `apply_step`
+/// runs `PRAGMA foreign_key_check` inside the transaction, and §15 confirms it
+/// reports the orphan when one is deliberately planted during the window.
+///
+/// Taken deliberately, with the dependency named in §19 rather than absorbed.
+/// The exposure is narrow and it is on the **upgrade** path only: fresh
+/// databases put the clause in a `CREATE TABLE`, where no engine has ever
+/// disputed it. If upstream ever tightens to SQLite's static reading, the rung
+/// fails **loudly** — at a named step, inside `BEGIN IMMEDIATE`, leaving the
+/// database honestly at v11 — and the fallback is one line: drop the clause
+/// from the ALTER and let the `branches` write guard carry lineage integrity
+/// alone, which is the weaker guarantee and the one D-030 has a name for.
+///
+/// [`suspends_foreign_keys`]: super::migrations
+macro_rules! branch_column {
+    () => {
+        concat!(
+            "branch_id TEXT NOT NULL DEFAULT '",
+            main_branch!(),
+            "' REFERENCES branches(branch_id)"
+        )
+    };
+}
+pub const BRANCH_COLUMN: &str = branch_column!();
 
 /// Marker table probed by the delete guards (D-008 revised).
 ///
@@ -165,13 +252,13 @@ pub const CREATE_CONCEPTS_LOG_INSERT: &str = concat!(
     r#"'
     )
     BEGIN
-        INSERT INTO transaction_log (table_name, entity_id, operation, payload, recorded_at)
+        INSERT INTO transaction_log (table_name, entity_id, operation, payload, recorded_at, branch_id)
         VALUES ('concepts', NEW.id, 'I',
                 json_object('v', 2, 'title', NEW.title, 'content', NEW.content,
                             'valid_from', NEW.valid_from, 'valid_to', NEW.valid_to,
                             'retired', NEW.retired,
                             'embedding_model', NEW.embedding_model),
-                NEW.recorded_at);
+                NEW.recorded_at, NEW.branch_id);
     END;
     "#
 );
@@ -242,6 +329,168 @@ pub const CREATE_CONCEPTS_GUARD_DELETE: &str = concat!(
 /// `links.target_id` and keeps `ON CONFLICT(id)` working, but it **is** a
 /// primary-key change — which [D-036](../../docs/architecture/s13-decision-register.md)
 /// forbids outright after 1.0. Taken pre-1.0 on purpose, or never.
+/// The lineage register (§15.2, v12, D-214).
+///
+/// Four columns and no more, because a branch is **not** a third temporal axis
+/// (Doctrine II): it carries no interval of its own, only the point in the
+/// second clock where it diverged.
+///
+/// `parent_id` is a self-referencing foreign key, declarable here because it
+/// sits in a `CREATE TABLE` where SQLite permits forward and self references
+/// freely. `NULL` marks the root, and the paired `CHECK` makes "root" a single
+/// state rather than two columns that can disagree: a row with a parent and no
+/// fork point is a lineage whose ancestry cannot be resolved, and a row with a
+/// fork point and no parent is a divergence from nothing.
+///
+/// `forked_at` is in the **`recorded_at` domain** — the transaction-time
+/// instant the lineage diverged, which is what §15.3's visibility cutoffs are
+/// computed over. Not a valid-time bound: a branch does not believe things
+/// about a period, it believes them from a moment onward.
+///
+/// The ordering `CHECK` is row-local on purpose. `forked_at <= created_at` is
+/// checkable from the row itself; "the fork point is at or after the parent's
+/// creation" is not, and a `CHECK` cannot see another row. The cross-row half
+/// is `fork()`'s to enforce at D-034's boundary, and saying so here is cheaper
+/// than a constraint that looks complete and is not.
+pub const CREATE_BRANCHES_TABLE: &str = concat!(
+    r#"
+CREATE TABLE IF NOT EXISTS branches (
+    branch_id   TEXT NOT NULL PRIMARY KEY,
+    parent_id   TEXT REFERENCES branches(branch_id),
+    forked_at   TEXT,
+    created_at  TEXT NOT NULL,
+    CHECK ((parent_id IS NULL) = (forked_at IS NULL)),
+    CHECK (forked_at IS NULL OR forked_at <= created_at),
+    CHECK (forked_at IS NULL OR forked_at GLOB '"#,
+    ts_glob!(),
+    r#"'),
+    "#,
+    canonical_ts_check!("created_at"),
+    r#"
+);
+"#
+);
+
+/// Seed the root lineage, idempotently.
+///
+/// One statement shared by the baseline and the v11 → v12 rung, taking
+/// `created_at` as a parameter. `OR IGNORE` rather than `IF NOT EXISTS`
+/// gymnastics because both callers may run against a database that already has
+/// the row — the rung on a retry, the baseline never, but a single statement
+/// that is safe for both is one fewer thing to reason about.
+///
+/// This must run **before** any row is stamped, on both paths: every
+/// `branch_id` default names `'main'`, and the foreign key means a database
+/// without this row cannot accept a single write.
+pub const SEED_MAIN_BRANCH: &str = concat!(
+    "INSERT OR IGNORE INTO branches (branch_id, parent_id, forked_at, created_at) \
+     VALUES ('",
+    main_branch!(),
+    "', NULL, NULL, ?1)"
+);
+
+/// `branches` is append-only, and both guards say the same thing (§15.2).
+///
+/// Not a delete guard in [`CREATE_CONCEPTS_GUARD_DELETE`]'s shape, and the
+/// difference is the point: those three are *gated* on the archive session
+/// because there is a legal way to remove those rows. There is no session in
+/// which removing a lineage record is legal — branches are never archived —
+/// so the guard is unconditional and `verify`'s marker check deliberately does
+/// not cover it.
+///
+/// # Why `UPDATE` is refused whole-row
+///
+/// The foreign key already refuses renaming or deleting a lineage any row
+/// still points at, so this guard is not what keeps the ledger from being
+/// orphaned. What it keeps is narrower and harder to see: `parent_id` and
+/// `forked_at` are the inputs to ancestry, so editing either **re-derives the
+/// visibility of rows already written**, with no new assertion anywhere. That
+/// is the move [Doctrine III] forbids, reachable by one raw-SQL statement, and
+/// no foreign key has anything to say about it.
+///
+/// Whole-row rather than a named subset because nothing on the row legitimately
+/// changes, and a whole-row guard needs no maintenance the day a column is
+/// added.
+///
+/// [Doctrine III]: ../../docs/architecture/README.md
+pub const CREATE_BRANCHES_GUARD_UPDATE: &str = concat!(
+    r#"
+    CREATE TRIGGER IF NOT EXISTS trg_branches_frozen_update
+    BEFORE UPDATE ON branches
+    BEGIN
+        SELECT RAISE(ABORT, '"#,
+    abort_branches_frozen!(),
+    r#"');
+    END;
+    "#
+);
+
+/// The delete half of the same rule. See [`CREATE_BRANCHES_GUARD_UPDATE`].
+pub const CREATE_BRANCHES_GUARD_DELETE: &str = concat!(
+    r#"
+    CREATE TRIGGER IF NOT EXISTS trg_branches_frozen_delete
+    BEFORE DELETE ON branches
+    BEGIN
+        SELECT RAISE(ABORT, '"#,
+    abort_branches_frozen!(),
+    r#"');
+    END;
+    "#
+);
+
+/// A branch inherits concepts; it does not restate them (§15.2, D-214).
+///
+/// `concepts` is a current-state projection keyed by identity — `id` is
+/// `NOT NULL UNIQUE` and the write path uses `ON CONFLICT(id) DO UPDATE` — so
+/// two lineages holding different beliefs about one concept is two rows with
+/// one `id`, which the unique index refuses on its own (probe §2). What it
+/// refuses it refuses as a *constraint failure*, naming nothing; this guard
+/// turns the same refusal into a sentence that says which rule was broken.
+///
+/// It fires **before** `ON CONFLICT` is considered, which is not obvious and
+/// was measured rather than assumed (probe §7): a cross-lineage upsert is
+/// refused, a same-lineage one is accepted, and a new id is accepted.
+///
+/// Exact-branch equality, not ancestry. A branch that may restate its parent's
+/// concepts is the overlay design, and the overlay is deferred with its reopen
+/// trigger named (D-214) — a guard that quietly permitted the ancestry case
+/// would ship half of it with none of the machinery that makes it correct.
+pub const CREATE_CONCEPTS_GUARD_LINEAGE: &str = concat!(
+    r#"
+    CREATE TRIGGER IF NOT EXISTS trg_concepts_cross_lineage
+    BEFORE INSERT ON concepts
+    WHEN EXISTS (
+        SELECT 1 FROM concepts
+        WHERE id = NEW.id AND branch_id <> NEW.branch_id
+    )
+    BEGIN
+        SELECT RAISE(ABORT, '"#,
+    abort_cross_lineage!(),
+    r#"');
+    END;
+    "#
+);
+
+/// `branch_id` records where a row was minted, and minting happened once.
+///
+/// The column is **provenance, not identity** (D-214), and the distinction is
+/// exactly what this guard keeps true. An `UPDATE` that moved a concept between
+/// lineages would rewrite where a belief came from without asserting anything
+/// new — the same shape as editing `branches.parent_id`, and forbidden for the
+/// same reason.
+pub const CREATE_CONCEPTS_GUARD_BRANCH: &str = concat!(
+    r#"
+    CREATE TRIGGER IF NOT EXISTS trg_concepts_branch_immutable
+    BEFORE UPDATE ON concepts
+    WHEN NEW.branch_id <> OLD.branch_id
+    BEGIN
+        SELECT RAISE(ABORT, '"#,
+    abort_branch_immutable!(),
+    r#"');
+    END;
+    "#
+);
+
 pub const CREATE_CONCEPTS_TABLE: &str = concat!(
     r#"
 CREATE TABLE IF NOT EXISTS concepts (
@@ -254,6 +503,9 @@ CREATE TABLE IF NOT EXISTS concepts (
     valid_to         TEXT NOT NULL DEFAULT '9999-12-31T23:59:59.999999Z',
     recorded_at      TEXT NOT NULL,
     retired          INTEGER NOT NULL DEFAULT 0,
+    "#,
+    branch_column!(),
+    r#",
     "#,
     canonical_ts_check!("valid_from", "valid_to", "recorded_at"),
     r#"
@@ -272,6 +524,9 @@ CREATE TABLE IF NOT EXISTS links (
     valid_to    TEXT NOT NULL DEFAULT '9999-12-31T23:59:59.999999Z',
     weight      REAL NOT NULL DEFAULT 1.0,
     properties  TEXT NOT NULL DEFAULT '{}',
+    "#,
+    branch_column!(),
+    r#",
     PRIMARY KEY (source_id, target_id, edge_type, valid_from, recorded_at),
     "#,
     weight_check!(),
@@ -294,7 +549,10 @@ CREATE TABLE IF NOT EXISTS links_current (
     weight      REAL NOT NULL,
     properties  TEXT NOT NULL,
     recorded_at TEXT NOT NULL,
-    PRIMARY KEY (source_id, target_id, edge_type, valid_from),
+    "#,
+    branch_column!(),
+    r#",
+    PRIMARY KEY (source_id, target_id, edge_type, valid_from, branch_id),
     "#,
     canonical_ts_check!("valid_from", "valid_to", "recorded_at"),
     r#"
@@ -311,6 +569,9 @@ CREATE TABLE IF NOT EXISTS transaction_log (
     operation   TEXT NOT NULL,
     payload     TEXT NOT NULL,
     recorded_at TEXT NOT NULL,
+    "#,
+    branch_column!(),
+    r#",
     "#,
     canonical_ts_check!("recorded_at"),
     r#"
@@ -569,6 +830,35 @@ pub const ANALYSIS_LIMIT: &str = "PRAGMA analysis_limit = 400";
 /// D-089's rule was never "no index on a target column". It was "an index needs
 /// a named query that seeks on it", and the registry is what enforces the
 /// difference rather than this paragraph.
+/// The two indices on `links_current`, named because a rung has to restore
+/// them (§15.2, D-214).
+///
+/// `links_current` is derivative, so the v11 → v12 rung re-creates it rather
+/// than altering it — and `DROP TABLE` takes the table's indices with it.
+/// Neither [`CREATE_LINKS_CURRENT_TABLE`] nor `rebuild_within` puts them back:
+/// the first declares a table and the second fills one. The open-time schema
+/// verifier is what noticed, which is the argument for having it.
+///
+/// `pub(crate)` rather than `pub`: every other const this module publishes
+/// describes the schema a caller might want to read, and these two exist
+/// only so a rung can put back what its own `DROP TABLE` removed. The
+/// published form of an index is still [`CREATE_INDICES`], which contains
+/// both of these.
+///
+/// Named consts rather than a `CREATE_INDICES` scan for `ON links_current`,
+/// because a rung should state which indices it owes rather than derive the
+/// list from a definition that will keep changing after it. If a later release
+/// adds a third index here, that release's rung adds it — this one is a
+/// statement about v12 and stays one.
+pub(crate) const LC_TRAVERSAL_COVER: &str = "CREATE INDEX IF NOT EXISTS \
+     idx_lc_traversal_cover ON links_current \
+     (source_id, valid_from, valid_to, weight, edge_type, target_id);";
+
+/// See [`LC_TRAVERSAL_COVER`].
+pub(crate) const LC_OPEN_INTERVAL: &str = "CREATE INDEX IF NOT EXISTS \
+     idx_lc_open_interval ON links_current \
+     (source_id, target_id, edge_type, valid_to, valid_from);";
+
 pub const CREATE_INDICES: &[&str] = &[
     // Covering index for the traversal CTE (§5.2, D-042).
     //
@@ -588,8 +878,7 @@ pub const CREATE_INDICES: &[&str] = &[
     // This subsumes the former idx_lc_src_active (source_id, valid_to): same
     // prefix column, strictly more payload. Keeping both would pay two index
     // writes per assertion on a table that already takes three writes.
-    "CREATE INDEX IF NOT EXISTS idx_lc_traversal_cover ON links_current \
-     (source_id, valid_from, valid_to, weight, edge_type, target_id);",
+    LC_TRAVERSAL_COVER,
     // The single-open-interval probe's own index (D-059, shipped v5 -> v6).
     //
     // `trg_links_single_open` runs an `EXISTS` on every edge insert, keyed on
@@ -614,8 +903,7 @@ pub const CREATE_INDICES: &[&str] = &[
     // on `source_id` alone for the recursive walk, this one needs all three
     // equality columns bound. Both are kept, which is a fourth index write per
     // assertion buying a scan's removal from the same operation.
-    "CREATE INDEX IF NOT EXISTS idx_lc_open_interval ON links_current \
-     (source_id, target_id, edge_type, valid_to, valid_from);",
+    LC_OPEN_INTERVAL,
     "CREATE INDEX IF NOT EXISTS idx_txlog_time ON transaction_log (recorded_at);",
     "CREATE INDEX IF NOT EXISTS idx_txlog_entity ON transaction_log (entity_id);",
     // The archive cutoff's seek column on the ledger table (0.12.6, W3.1,
@@ -695,27 +983,43 @@ pub const CREATE_INDICES: &[&str] = &[
 /// of its own: an old file loses `embedding_model` from its temporal reads, which
 /// is exactly the behaviour it had before, and gains it the moment it is
 /// migrated. Nothing regresses in the meantime.
-pub const CREATE_TRIGGERS: &[&str] = &[
-    r#"
+/// `links_current` maintenance, one row per open belief **per lineage**.
+///
+/// A named `const` since v12 for [`CREATE_CONCEPTS_LOG_INSERT`]'s reason: the
+/// rung has to re-issue this exact body, and a rung with its own copy is a copy
+/// that drifts. The conflict target matches the table's primary key, which now
+/// ends in `branch_id` — without that, a branch asserting an edge its parent
+/// already holds would *overwrite* the parent's row instead of adding its own.
+pub const CREATE_LINKS_CURRENT_SYNC: &str = r#"
     CREATE TRIGGER IF NOT EXISTS trg_links_current_sync
     AFTER INSERT ON links
     BEGIN
         INSERT INTO links_current
             (source_id, target_id, edge_type, valid_from, valid_to,
-             weight, properties, recorded_at)
+             weight, properties, recorded_at, branch_id)
         VALUES
             (NEW.source_id, NEW.target_id, NEW.edge_type, NEW.valid_from,
-             NEW.valid_to, NEW.weight, NEW.properties, NEW.recorded_at)
-        ON CONFLICT(source_id, target_id, edge_type, valid_from) DO UPDATE SET
+             NEW.valid_to, NEW.weight, NEW.properties, NEW.recorded_at,
+             NEW.branch_id)
+        ON CONFLICT(source_id, target_id, edge_type, valid_from, branch_id) DO UPDATE SET
             valid_to    = excluded.valid_to,
             weight      = excluded.weight,
             properties  = excluded.properties,
             recorded_at = excluded.recorded_at
         WHERE excluded.recorded_at > links_current.recorded_at;
     END;
-    "#,
-    concat!(
-        r#"
+"#;
+
+/// One open interval per edge **per lineage** (§4.3, branch-scoped at v12).
+///
+/// The `branch_id` clause is row-level and deliberately not ancestry-aware. A
+/// branch that inherits an open interval from its parent and asserts its own is
+/// not violating this rule — it is superseding a belief, which is the thing a
+/// branch is for. Whether the *inherited* interval should also close is §15.4's
+/// write-path question and is not answered by a trigger that can only see one
+/// row.
+pub const CREATE_LINKS_SINGLE_OPEN: &str = concat!(
+    r#"
     CREATE TRIGGER IF NOT EXISTS trg_links_single_open
     BEFORE INSERT ON links
     WHEN NEW.valid_to = '9999-12-31T23:59:59.999999Z'
@@ -724,16 +1028,78 @@ pub const CREATE_TRIGGERS: &[&str] = &[
              WHERE source_id  = NEW.source_id
                AND target_id  = NEW.target_id
                AND edge_type  = NEW.edge_type
+               AND branch_id  = NEW.branch_id
                AND valid_from <> NEW.valid_from
                AND valid_to   = '9999-12-31T23:59:59.999999Z'
          )
     BEGIN
         SELECT RAISE(ABORT, '"#,
-        abort_single_open!(),
-        r#"');
+    abort_single_open!(),
+    r#"');
     END;
     "#
-    ),
+);
+
+/// The update half of the concepts log. See [`CREATE_CONCEPTS_LOG_INSERT`].
+///
+/// Unconditional where its insert sibling is marker-gated, and the asymmetry is
+/// deliberate: nothing inside an archive session updates a concept, so gating
+/// this would suppress nothing.
+///
+/// `branch_id` is in the column list since v12 and the omission would have been
+/// expensive. `concepts` permits a **same-lineage** update — the guards refuse
+/// cross-lineage inserts and `branch_id` changes, not this — so a branch
+/// correcting a concept it minted would have logged the change against `'main'`,
+/// putting a branch's own history in the trunk's fold and leaving the row
+/// invisible to the abandonment sweep that §15.5's `archive` arm performs.
+pub const CREATE_CONCEPTS_LOG_UPDATE: &str = r#"
+    CREATE TRIGGER IF NOT EXISTS trg_concepts_log_update
+    AFTER UPDATE ON concepts
+    BEGIN
+        INSERT INTO transaction_log (table_name, entity_id, operation, payload, recorded_at, branch_id)
+        VALUES ('concepts', NEW.id, 'U',
+                json_object('v', 2, 'title', NEW.title, 'content', NEW.content,
+                            'valid_from', NEW.valid_from, 'valid_to', NEW.valid_to,
+                            'retired', NEW.retired,
+                            'embedding_model', NEW.embedding_model),
+                NEW.recorded_at, NEW.branch_id);
+    END;
+"#;
+
+/// The links log, and the entry whose `entity_id` is composed rather than copied.
+///
+/// `source|target|type|valid_from` identifies an edge assertion and carries **no
+/// lineage**, which is why `branch_id` had to become a column of its own rather
+/// than a fifth field in that string. Re-keying `entity_id` was the other
+/// option and was rejected: it changes what a log entry identifies, so rows
+/// written before the rung would no longer match rows written after it, and the
+/// fold would silently split one edge's history in two.
+///
+/// With the column present, the four folds in `temporal::replay` — a private
+/// module, so the name is plain text rather than a link that would not resolve —
+/// partition by `(table_name, entity_id, branch_id)` and two lineages'
+/// assertions about one edge stay two beliefs. Without it they collapse to
+/// whichever has the higher `seq_id` — no error, no drift report, just one
+/// lineage's belief gone.
+pub const CREATE_LINKS_LOG_INSERT: &str = r#"
+    CREATE TRIGGER IF NOT EXISTS trg_links_log_insert
+    AFTER INSERT ON links
+    BEGIN
+        INSERT INTO transaction_log (table_name, entity_id, operation, payload, recorded_at, branch_id)
+        VALUES ('links',
+                NEW.source_id || '|' || NEW.target_id || '|' || NEW.edge_type || '|' || NEW.valid_from,
+                'I',
+                json_object('v', 1, 'source_id', NEW.source_id, 'target_id', NEW.target_id,
+                            'edge_type', NEW.edge_type, 'valid_from', NEW.valid_from,
+                            'valid_to', NEW.valid_to, 'weight', NEW.weight,
+                            'properties', json(NEW.properties)),
+                NEW.recorded_at, NEW.branch_id);
+    END;
+"#;
+
+pub const CREATE_TRIGGERS: &[&str] = &[
+    CREATE_LINKS_CURRENT_SYNC,
+    CREATE_LINKS_SINGLE_OPEN,
     concat!(
         r#"
     CREATE TRIGGER IF NOT EXISTS trg_concepts_monotonic_ra
@@ -758,35 +1124,16 @@ pub const CREATE_TRIGGERS: &[&str] = &[
     // which is what makes this safe without a migration rung — see the note on
     // [`CREATE_TRIGGERS`].
     CREATE_CONCEPTS_LOG_INSERT,
-    r#"
-    CREATE TRIGGER IF NOT EXISTS trg_concepts_log_update
-    AFTER UPDATE ON concepts
-    BEGIN
-        INSERT INTO transaction_log (table_name, entity_id, operation, payload, recorded_at)
-        VALUES ('concepts', NEW.id, 'U',
-                json_object('v', 2, 'title', NEW.title, 'content', NEW.content,
-                            'valid_from', NEW.valid_from, 'valid_to', NEW.valid_to,
-                            'retired', NEW.retired,
-                            'embedding_model', NEW.embedding_model),
-                NEW.recorded_at);
-    END;
-    "#,
-    r#"
-    CREATE TRIGGER IF NOT EXISTS trg_links_log_insert
-    AFTER INSERT ON links
-    BEGIN
-        INSERT INTO transaction_log (table_name, entity_id, operation, payload, recorded_at)
-        VALUES ('links',
-                NEW.source_id || '|' || NEW.target_id || '|' || NEW.edge_type || '|' || NEW.valid_from,
-                'I',
-                json_object('v', 1, 'source_id', NEW.source_id, 'target_id', NEW.target_id,
-                            'edge_type', NEW.edge_type, 'valid_from', NEW.valid_from,
-                            'valid_to', NEW.valid_to, 'weight', NEW.weight,
-                            'properties', json(NEW.properties)),
-                NEW.recorded_at);
-    END;
-    "#,
+    CREATE_CONCEPTS_LOG_UPDATE,
+    CREATE_LINKS_LOG_INSERT,
     CREATE_CONCEPTS_GUARD_DELETE,
+    // v12 (§15.2, D-214). Order matters only in that every one of these names a
+    // table the baseline has already created; `verify` recovers the names from
+    // this array, so a trigger added here is a trigger the ladder must produce.
+    CREATE_CONCEPTS_GUARD_LINEAGE,
+    CREATE_CONCEPTS_GUARD_BRANCH,
+    CREATE_BRANCHES_GUARD_UPDATE,
+    CREATE_BRANCHES_GUARD_DELETE,
     // D-008 (revised): probe main.sqlite_master for the archive-session marker.
     // SQLite forbids a trigger in `main` from referencing objects in another
     // database, temp included, so the original temp.sqlite_master probe fails
