@@ -748,6 +748,18 @@ pub fn macrame::graph::EdgeAssertion::properties(self, impl core::convert::Into<
 pub fn macrame::graph::EdgeAssertion::valid_from(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn macrame::graph::EdgeAssertion::valid_to(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn macrame::graph::EdgeAssertion::weight(self, f64) -> Self
+#[non_exhaustive] pub struct macrame::prelude::EdgeBelief
+pub macrame::prelude::EdgeBelief::branch_id: alloc::string::String
+pub macrame::prelude::EdgeBelief::edge_type: alloc::string::String
+pub macrame::prelude::EdgeBelief::source_id: alloc::string::String
+pub macrame::prelude::EdgeBelief::target_id: alloc::string::String
+pub macrame::prelude::EdgeBelief::valid_from: alloc::string::String
+pub macrame::prelude::EdgeBelief::valid_to: alloc::string::String
+impl macrame::temporal::EdgeBelief
+pub fn macrame::temporal::EdgeBelief::belief_key(&self) -> alloc::string::String
+pub fn macrame::temporal::EdgeBelief::entity_id(&self) -> alloc::string::String
+pub fn macrame::temporal::EdgeBelief::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn macrame::temporal::EdgeBelief::on_branch(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub struct macrame::prelude::EmbeddingCodec
 impl macrame::vector::EmbeddingCodec
 pub fn macrame::vector::EmbeddingCodec::decode(&[u8]) -> macrame::error::Result<alloc::vec::Vec<f32>>
@@ -802,7 +814,7 @@ impl macrame::metrics::KindSnapshot
 pub fn macrame::metrics::KindSnapshot::buckets(&self) -> &[u64]
 pub struct macrame::prelude::MaterializedState
 pub macrame::prelude::MaterializedState::concepts: std::collections::hash::map::HashMap<alloc::string::String, macrame::temporal::NodeAttributes>
-pub macrame::prelude::MaterializedState::edges: alloc::vec::Vec<(alloc::string::String, alloc::string::String, alloc::string::String, alloc::string::String, alloc::string::String)>
+pub macrame::prelude::MaterializedState::edges: alloc::vec::Vec<macrame::temporal::EdgeBelief>
 pub macrame::prelude::MaterializedState::predates_recorded_history: bool
 pub macrame::prelude::MaterializedState::seq_anchor: i64
 pub macrame::prelude::MaterializedState::timestamp: alloc::string::String
@@ -994,6 +1006,18 @@ pub const macrame::temporal::ChainCheck::SAMPLE_LIMIT: usize
 pub fn macrame::temporal::ChainCheck::diverged(&self) -> bool
 impl core::fmt::Display for macrame::temporal::ChainCheck
 pub fn macrame::temporal::ChainCheck::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+#[non_exhaustive] pub struct macrame::temporal::EdgeBelief
+pub macrame::temporal::EdgeBelief::branch_id: alloc::string::String
+pub macrame::temporal::EdgeBelief::edge_type: alloc::string::String
+pub macrame::temporal::EdgeBelief::source_id: alloc::string::String
+pub macrame::temporal::EdgeBelief::target_id: alloc::string::String
+pub macrame::temporal::EdgeBelief::valid_from: alloc::string::String
+pub macrame::temporal::EdgeBelief::valid_to: alloc::string::String
+impl macrame::temporal::EdgeBelief
+pub fn macrame::temporal::EdgeBelief::belief_key(&self) -> alloc::string::String
+pub fn macrame::temporal::EdgeBelief::entity_id(&self) -> alloc::string::String
+pub fn macrame::temporal::EdgeBelief::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn macrame::temporal::EdgeBelief::on_branch(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub struct macrame::temporal::Interval
 pub macrame::temporal::Interval::valid_from: alloc::string::String
 pub macrame::temporal::Interval::valid_to: alloc::string::String
@@ -1004,7 +1028,7 @@ pub fn macrame::temporal::Interval::new(impl core::convert::Into<alloc::string::
 pub fn macrame::temporal::Interval::overlaps(&self, &macrame::temporal::Interval) -> bool
 pub struct macrame::temporal::MaterializedState
 pub macrame::temporal::MaterializedState::concepts: std::collections::hash::map::HashMap<alloc::string::String, macrame::temporal::NodeAttributes>
-pub macrame::temporal::MaterializedState::edges: alloc::vec::Vec<(alloc::string::String, alloc::string::String, alloc::string::String, alloc::string::String, alloc::string::String)>
+pub macrame::temporal::MaterializedState::edges: alloc::vec::Vec<macrame::temporal::EdgeBelief>
 pub macrame::temporal::MaterializedState::predates_recorded_history: bool
 pub macrame::temporal::MaterializedState::seq_anchor: i64
 pub macrame::temporal::MaterializedState::timestamp: alloc::string::String

@@ -3181,7 +3181,11 @@ without the remedy invites somebody to ask for the predicate.
 >   partitioned on `entity_id` alone — fixed here. `reconstruct` collapses two
 >   lineages into one edge in *Rust*, downstream of the correct SQL, and is
 >   pinned by a failing-by-design assertion until 0.14.5 can widen a public tuple
->   ([D-221](architecture/s13-decision-register.md#d-221)).
+>   ([D-221](architecture/s13-decision-register.md#d-221)). **Fixed at 0.14.5**
+>   ([D-222](architecture/s13-decision-register.md#d-222)) — the pin is now the
+>   property, asserting the pairing of lineage to interval rather than a count,
+>   because two rows both labelled `main` would satisfy a count and would have
+>   lost exactly what the label is for.
 > * **`links` is not keyed by lineage** while `links_current` is: two lineages
 >   asserting one edge key at the same `recorded_at` collide with a bare `UNIQUE`
 >   error. Unreachable through the crate until branch-scoped writes exist, which
@@ -3251,6 +3255,8 @@ lever that would is the v13 index, which is measured and scheduled.
   enforcing it and the existing-rows default proving the migration is additive.
 - **The Python surface, in the same release.** W6's finding was that a binding
   gap opened in the release that created the feature never becomes a convention.
+  **Held twice so far:** `branch=` on the four traversal entry points at 0.14.4,
+  and the belief's lineage label on `MaterializedState.edges` at 0.14.5.
 
 **Out, and stated as a decision rather than an omission:**
 

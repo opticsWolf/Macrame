@@ -5,13 +5,140 @@ use std::path::{Path, PathBuf};
 use crate::error::{DbError, Result};
 use crate::temporal::as_of::NodeAttributes;
 
+/// One lineage's belief about one edge, at the instant a fold asked (§15.2).
+///
+/// # Why this is a struct and was a five-tuple until 0.14.5
+///
+/// The tuple had nowhere to put `branch_id`, and that was not a cosmetic
+/// shortfall: [D-216](../../docs/architecture/s13-decision-register.md) widened
+/// the four SQL folds to partition by `(table_name, entity_id, branch_id)` so
+/// two lineages' beliefs about one edge would stay two rows, and then the
+/// composition immediately downstream re-collapsed them, because `edge_key`
+/// composed `source|target|type|valid_from` and the map it fed had one slot per
+/// edge key. The widened partition was handing two rows to a container that
+/// could not hold two. That is [D-221](../../docs/architecture/s13-decision-register.md#d-221),
+/// and this type is its fix.
+///
+/// A struct rather than a six-tuple because the next field to arrive should be
+/// additive, which is why it is also `#[non_exhaustive]` — the same call
+/// [D-207](../../docs/architecture/s13-decision-register.md#d-207) made for
+/// `DbError`, one release earlier, for the same reason. Construct these by
+/// reading a [`MaterializedState`]; the crate is the only writer.
+///
+/// **Ordered by the tuple order of its fields**, so a `Vec<EdgeBelief>` sorts to
+/// a canonical form and two reconstructions of the same instant are *equal*
+/// rather than merely equivalent — a property the snapshot suite compares on.
+///
+/// # Constructing one
+///
+/// `#[non_exhaustive]` means no crate but this one may write the literal, and
+/// [`save_snapshot`](crate::temporal::save_snapshot) is public and takes a
+/// `MaterializedState` — so without a constructor the attribute would not make
+/// the next field additive, it would make a public function uncallable. Use
+/// [`EdgeBelief::new`], which takes the five fields that were the tuple and
+/// defaults the sixth to the trunk, with [`EdgeBelief::on_branch`] for the
+/// rest. That is [`EdgeAssertion::new`](crate::graph::EdgeAssertion::new)'s
+/// shape, deliberately: the two are the same fact travelling in opposite
+/// directions and should not need two idioms.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct EdgeBelief {
+    pub source_id: String,
+    pub target_id: String,
+    pub edge_type: String,
+    pub valid_from: String,
+    pub valid_to: String,
+    /// The lineage that holds this belief (0.14.5, D-221).
+    ///
+    /// `#[serde(default = "default_branch")]` so the field is additive at the
+    /// bincode level. It is belt and braces — the snapshot container refuses any
+    /// file whose format version is not this build's, and 0.14.5 bumps it
+    /// precisely so a state written without this field gets a named refusal
+    /// rather than a deserialisation error — but a default that is *right* costs
+    /// nothing and `'main'` is what every pre-v12 row actually carried.
+    #[serde(default = "default_branch")]
+    pub branch_id: String,
+}
+
+fn default_branch() -> String {
+    crate::schema::ddl::MAIN_BRANCH.to_string()
+}
+
+impl EdgeBelief {
+    /// A belief held by the trunk. Use [`Self::on_branch`] for any other.
+    ///
+    /// Five arguments rather than six because `main` is what every belief
+    /// written before 0.14.5 carried, so a caller porting a five-tuple wraps it
+    /// and is correct rather than being asked a question the old shape could
+    /// not have answered.
+    pub fn new(
+        source_id: impl Into<String>,
+        target_id: impl Into<String>,
+        edge_type: impl Into<String>,
+        valid_from: impl Into<String>,
+        valid_to: impl Into<String>,
+    ) -> Self {
+        Self {
+            source_id: source_id.into(),
+            target_id: target_id.into(),
+            edge_type: edge_type.into(),
+            valid_from: valid_from.into(),
+            valid_to: valid_to.into(),
+            branch_id: default_branch(),
+        }
+    }
+
+    /// The lineage holding this belief.
+    ///
+    /// Unchecked against `branches`, because this type is a value and not a
+    /// write: a `MaterializedState` naming a lineage the register has never
+    /// heard of is a snapshot that will disagree with the log, which
+    /// `verify_snapshot_chain` is there to report.
+    pub fn on_branch(mut self, branch_id: impl Into<String>) -> Self {
+        self.branch_id = branch_id.into();
+        self
+    }
+
+    /// The log `entity_id` this belief was folded under.
+    ///
+    /// Must match `trg_links_log_insert`'s
+    /// `source_id || '|' || target_id || '|' || edge_type || '|' || valid_from`
+    /// exactly, or a delta row will fail to replace the snapshot row it
+    /// supersedes. Safe because ULIDs are Crockford base32 and edge types are
+    /// `[A-Z0-9]+`, so `|` cannot occur inside a component (§4.3).
+    ///
+    /// **This is not a unique key across lineages** and must not be used as one
+    /// — see [`Self::belief_key`], which is.
+    pub fn entity_id(&self) -> String {
+        format!(
+            "{}|{}|{}|{}",
+            self.source_id, self.target_id, self.edge_type, self.valid_from
+        )
+    }
+
+    /// What identifies this belief: the edge key **and** the lineage holding it.
+    pub fn belief_key(&self) -> String {
+        format!("{}|{}", self.entity_id(), self.branch_id)
+    }
+}
+
 /// Full materialized state reconstructed from transaction_log replay (§5.5).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MaterializedState {
     pub seq_anchor: i64,
     pub timestamp: String,
     pub concepts: HashMap<String, NodeAttributes>,
-    pub edges: Vec<(String, String, String, String, String)>,
+    /// Every lineage's belief, each labelled with the lineage holding it.
+    ///
+    /// **Not resolved to one lineage's view**, and deliberately: `reconstruct`
+    /// asks a whole-ledger question — *what did the ledger hold at `ts`* — and
+    /// the ledger held both. Resolving here would require an ancestry, which
+    /// requires a connection this type does not have, and would silently answer
+    /// a narrower question than the one asked. A caller wanting one lineage's
+    /// view uses `graph::TraversalBuilder::on_branch` or
+    /// `temporal::query_as_of_edges_on`, which resolve against the register
+    /// ([D-220](../../docs/architecture/s13-decision-register.md#d-220)).
+    pub edges: Vec<EdgeBelief>,
     /// **Nothing had been recorded yet at `timestamp`** (0.8.0, B5, D-121).
     ///
     /// An empty state has two meanings and a caller can act differently on
@@ -71,7 +198,7 @@ pub(crate) const PAYLOAD_VERSION: u8 = 2;
 /// having at the fold. `table_name` leads the partition because the log is
 /// already indexed on `entity_id` and the discriminator is two values wide.
 const HOT_FOLD: &str = r#"
-    SELECT seq_id, table_name, entity_id, operation, payload
+    SELECT seq_id, table_name, entity_id, operation, payload, branch_id
     FROM (
         SELECT seq_id, table_name, entity_id, operation, payload, branch_id,
                ROW_NUMBER() OVER (PARTITION BY table_name, entity_id, branch_id ORDER BY seq_id DESC) as rn
@@ -87,7 +214,7 @@ const HOT_FOLD: &str = r#"
 fn cold_fold(cold_lineage: ColdLineage) -> String {
     format!(
         r#"
-    SELECT seq_id, table_name, entity_id, operation, payload
+    SELECT seq_id, table_name, entity_id, operation, payload, branch_id
     FROM (
         SELECT seq_id, table_name, entity_id, operation, payload, branch_id,
                ROW_NUMBER() OVER (PARTITION BY table_name, entity_id, branch_id ORDER BY seq_id DESC) as rn
@@ -111,7 +238,7 @@ fn cold_fold(cold_lineage: ColdLineage) -> String {
 /// first code D-024's rule has ever bound — before this the rule was vacuous,
 /// not satisfied.
 const ANCHORED_HOT_FOLD: &str = r#"
-    SELECT seq_id, table_name, entity_id, operation, payload
+    SELECT seq_id, table_name, entity_id, operation, payload, branch_id
     FROM (
         SELECT seq_id, table_name, entity_id, operation, payload, branch_id,
                ROW_NUMBER() OVER (PARTITION BY table_name, entity_id, branch_id ORDER BY seq_id DESC) as rn
@@ -130,7 +257,7 @@ const ANCHORED_HOT_FOLD: &str = r#"
 fn anchored_cold_fold(cold_lineage: ColdLineage) -> String {
     format!(
         r#"
-    SELECT seq_id, table_name, entity_id, operation, payload
+    SELECT seq_id, table_name, entity_id, operation, payload, branch_id
     FROM (
         SELECT seq_id, table_name, entity_id, operation, payload, branch_id,
                ROW_NUMBER() OVER (PARTITION BY table_name, entity_id, branch_id ORDER BY seq_id DESC) as rn
@@ -233,23 +360,16 @@ async fn cold_lineage(conn: &libsql::Connection) -> ColdLineage {
 #[derive(Default)]
 struct Delta {
     concepts: HashMap<String, NodeAttributes>,
-    /// Keyed by `transaction_log.entity_id`: `source|target|type|valid_from`.
-    edges: HashMap<String, (String, String, String, String, String)>,
+    /// Keyed by `entity_id` **and** `branch_id` — see [`EdgeBelief::belief_key`].
+    ///
+    /// `entity_id` alone was the collapse [D-221](../../docs/architecture/s13-decision-register.md#d-221)
+    /// records: it is the edge key, shared across lineages by design, so an
+    /// ancestor's assertion and a descendant's correction landed in one slot.
+    edges: HashMap<String, EdgeBelief>,
     /// Concepts retired as of the fold's instant. See the type's note for why
     /// there is no edge equivalent.
     concepts_gone: HashSet<String>,
     max_seq: i64,
-}
-
-/// The log's `entity_id` for a link, rebuilt from a materialised edge tuple.
-///
-/// Must match `trg_links_log_i`'s
-/// `source_id || '|' || target_id || '|' || edge_type || '|' || valid_from`
-/// exactly, or a delta row will fail to replace the snapshot row it supersedes.
-/// Safe because ULIDs are Crockford base32 and edge types are `[A-Z0-9]+`, so
-/// `|` cannot occur inside a component (§4.3).
-fn edge_key(e: &(String, String, String, String, String)) -> String {
-    format!("{}|{}|{}|{}", e.0, e.1, e.2, e.3)
 }
 
 /// Release a `cold` handle left attached by an earlier call (§5.5, D-044).
@@ -501,9 +621,11 @@ impl ChainCheck {
         // divergence for a reordering, which is not one — and that false
         // positive is worse than useless here, because the whole point of this
         // check is that a report means "go and find the bug".
-        let key = |e: &(String, String, String, String, String)| {
-            format!("{}|{}|{}|{}|{}", e.0, e.1, e.2, e.3, e.4)
-        };
+        // `valid_to` is in the key as well as the identity, because a
+        // divergence in *what* the two paths believe is exactly what this
+        // reports — two rows agreeing on the edge and the lineage and
+        // disagreeing on the interval are a disagreement, not one row.
+        let key = |e: &EdgeBelief| format!("{}|{}", e.belief_key(), e.valid_to);
         let ca: HashSet<String> = composed.edges.iter().map(key).collect();
         let fa: HashSet<String> = folded.edges.iter().map(key).collect();
         let mut edge_disagreements: Vec<String> = ca.symmetric_difference(&fa).cloned().collect();
@@ -925,6 +1047,10 @@ async fn fold_delta(
         let _entity_id: String = row.get(2)?;
         let op: String = row.get(3)?;
         let payload_str: String = row.get(4)?;
+        // Projected by all four folds since 0.14.5. They have partitioned on it
+        // since D-216; what was missing was carrying it out of the query, which
+        // is why the correct partition produced a collapsed result anyway.
+        let branch_id: String = row.get(5)?;
 
         if seq_id > *max_seq {
             *max_seq = seq_id;
@@ -1033,7 +1159,15 @@ async fn fold_delta(
                 .and_then(|s| s.as_str())
                 .unwrap_or("")
                 .to_string();
-            edges.insert(_entity_id, (src, tgt, edge_type, vf, vt));
+            let belief = EdgeBelief {
+                source_id: src,
+                target_id: tgt,
+                edge_type,
+                valid_from: vf,
+                valid_to: vt,
+                branch_id,
+            };
+            edges.insert(belief.belief_key(), belief);
         }
     }
 
@@ -1051,8 +1185,11 @@ impl Delta {
     /// this comment (§8).
     fn apply_to(self, base: MaterializedState, ts: &str) -> MaterializedState {
         let mut concepts = base.concepts;
-        let mut edges: HashMap<String, (String, String, String, String, String)> =
-            base.edges.into_iter().map(|e| (edge_key(&e), e)).collect();
+        let mut edges: HashMap<String, EdgeBelief> = base
+            .edges
+            .into_iter()
+            .map(|e| (e.belief_key(), e))
+            .collect();
 
         for id in self.concepts_gone {
             concepts.remove(&id);

@@ -255,7 +255,7 @@ async fn a_concept_whose_id_looks_like_an_edge_key_survives_reconstruction() {
         state
             .edges
             .iter()
-            .any(|e| e.0 == "a" && e.1 == "b" && e.2 == "KNOWS"),
+            .any(|e| e.source_id == "a" && e.target_id == "b" && e.edge_type == "KNOWS"),
         "and the edge is still there too"
     );
 }
@@ -1809,11 +1809,11 @@ async fn a_retired_edge_is_superseded_rather_than_removed() {
     let edges: Vec<_> = state
         .edges
         .iter()
-        .filter(|e| e.0 == "a" && e.1 == "b")
+        .filter(|e| e.source_id == "a" && e.target_id == "b")
         .collect();
 
     assert_eq!(edges.len(), 1, "one interval key, one edge: {edges:?}");
-    assert_eq!(edges[0].4, T2, "and it is closed, not absent");
+    assert_eq!(edges[0].valid_to, T2, "and it is closed, not absent");
 
     db.close().await.unwrap();
 }

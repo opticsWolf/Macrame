@@ -55,10 +55,33 @@ def test_reconstruct_returns_the_world_at_an_instant(db):
 
 
 def test_reconstructed_edges_carry_datetimes_and_none_for_open(db):
-    (source, target, edge_type, valid_from, valid_to) = db.reconstruct(now()).edges[0]
+    (source, target, edge_type, valid_from, valid_to, branch) = db.reconstruct(
+        now()
+    ).edges[0]
     assert (source, target, edge_type) == ("a", "b", "CITES")
     assert valid_from == dt.datetime(2026, 1, 1, tzinfo=UTC)
     assert valid_to is None
+    assert branch == "main"
+
+
+def test_a_belief_is_labelled_with_the_lineage_holding_it(db):
+    """The sixth field, and why it is not the fifth-and-a-half (0.14.5, D-221).
+
+    ``reconstruct`` folds the whole ledger rather than one lineage's view of it,
+    so on a forked database one edge key can arrive twice. Until 0.14.5 those
+    two rows were indistinguishable and one of them was dropped on the way out
+    of the fold, with the survivor decided by write order.
+
+    There is no ``fork()`` from Python yet, so what this can reach is the shape
+    and the default: every belief is labelled, and on a database that has never
+    forked every label is the trunk. The two-lineage case is
+    ``branch_storage_tests::a_reconstruction_keeps_both_lineages_beliefs``.
+    """
+    edges = db.reconstruct(now()).edges
+    assert edges, "the fixture asserts edges"
+    for e in edges:
+        assert len(e) == 6, f"a belief without its lineage: {e}"
+        assert e[5] == "main"
 
 
 def test_reconstruct_before_anything_was_recorded_is_an_empty_state(db):

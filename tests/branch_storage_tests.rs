@@ -366,41 +366,44 @@ async fn two_lineages_asserting_one_edge_do_not_collapse_in_the_log() {
     assert_eq!(logged, 2);
 }
 
-/// The reconstruction still collapses them, and this pins that it does (D-221).
+/// The reconstruction keeps both, and says which lineage holds which (0.14.5).
 ///
-/// **This assertion is the wrong answer, written down.** The test above used to
-/// restate the fold's `ROW_NUMBER() … PARTITION BY table_name, entity_id,
-/// branch_id` inline and assert two winners, which is a test of a SQL snippet
-/// in the test file rather than of the crate. Calling
-/// [`macrame::temporal::reconstruct`] instead — the shipped path, the one a
-/// caller reaches — returns **one** edge where the ledger holds two beliefs.
+/// **This test found D-221 by not restating what it was testing.** Through
+/// 0.14.4 the test above restated the fold's `ROW_NUMBER() … PARTITION BY
+/// table_name, entity_id, branch_id` inline and asserted two winners — a test
+/// of a SQL snippet in the test file, which was green while the shipped path
+/// was wrong. Calling [`macrame::temporal::reconstruct`] instead returned
+/// **one** edge where the ledger holds two beliefs, and the assertion below
+/// pinned that wrong answer through 0.14.4 rather than leaving it to be found
+/// later.
 ///
-/// D-216 widened the partitions in `temporal::replay`'s four SQL folds, and
-/// they are correct. What was not swept is the composition immediately
-/// downstream, which is Rust rather than SQL: `fold_delta` keys its edge map on
-/// `entity_id`, `edge_key` composes `source|target|type|valid_from`, and
-/// `MaterializedState::edges` is a five-tuple with nowhere to put a lineage. So
-/// the widened partition hands two rows to a map that has one slot for them.
+/// D-216 widened the partitions in `temporal::replay`'s four SQL folds and they
+/// were correct; what it did not sweep was the composition immediately
+/// downstream, which is Rust. `fold_delta` keyed its edge map on `entity_id`
+/// alone — the edge key, shared across lineages by design — and
+/// `MaterializedState::edges` was a five-tuple with nowhere to put a lineage.
+/// **The widened partition was handing two rows to a container that could not
+/// hold two.** 0.14.5 projects `branch_id` out of all four folds, keys the map
+/// on the pair, and makes the element an
+/// [`EdgeBelief`](macrame::temporal::EdgeBelief).
 ///
-/// Not fixed at 0.14.4, and the reason is scope rather than difficulty: the
-/// field is public, it is serialised into snapshots, and widening a tuple's
-/// arity is not the additive change `predates_recorded_history`'s own note
-/// describes as the tolerated shape. It belongs with 0.14.5's other breaking
-/// surface. Until then the failure is written here rather than discovered
-/// later — and `branch_read_tests` shows the *traversal* fold, which is a
-/// different fold, resolving correctly at this release.
+/// The assertion is on the *pairing* and not on the count, because two rows
+/// both labelled `main` would satisfy a count and would have lost exactly what
+/// the label is for.
 #[tokio::test]
-async fn a_reconstruction_still_collapses_two_lineages_into_one_edge() {
+async fn a_reconstruction_keeps_both_lineages_beliefs() {
     let harness = TestHarness::new();
     let conn = connect(&harness).await;
     macrame::schema::run_migrations(&conn).await.unwrap();
     seed_concepts(&conn).await;
     register(&conn, "b", "main", TS2).await;
 
-    // The two beliefs differ in valid time, so they are distinguishable in the
-    // five-tuple the reconstruction returns. A weight disagreement would not be
-    // — `MaterializedState::edges` does not carry one — which is a second way
-    // the same shortfall shows.
+    // The two beliefs differ in valid time as well as in lineage, so this
+    // stays a test of the composition rather than of the label alone: a fold
+    // that dropped one row would return one interval, not two identical ones.
+    // A weight disagreement still would not show — `MaterializedState::edges`
+    // does not carry a weight — and that is a different shortfall from D-221's,
+    // left alone because nothing yet asks the fold about weights.
     conn.execute(
         "INSERT INTO links (source_id, target_id, edge_type, valid_from, valid_to, \
          weight, properties, recorded_at, branch_id) \
@@ -424,21 +427,24 @@ async fn a_reconstruction_still_collapses_two_lineages_into_one_edge() {
 
     assert_eq!(
         state.edges.len(),
-        1,
-        "if this is red the composition was widened — good; update this test to \
-         assert two edges and retire D-221's open half: {:?}",
+        2,
+        "one edge key, two lineages, two beliefs: {:?}",
         state.edges
     );
-    // Which of the two survives is not decided by anything a caller could
-    // reason about. Both rows reach the Rust composition — the SQL fold's
-    // partition is correct and emits two — and the map they land in has one
-    // slot, so the winner is whichever the fold happened to emit last. Measured
-    // here it is the trunk's, and that is an observation rather than a
-    // contract: the loss is the assertion, not the survivor.
-    assert!(
-        !state.edges.iter().any(|e| e.4 == TS2),
-        "the branch's belief was the one silently dropped: {:?}",
-        state.edges
+    // Which lineage holds which belief, and not merely that two arrived. The
+    // shape this replaced kept whichever row the fold emitted last — so a
+    // composition that returned two rows both labelled `main` would satisfy a
+    // length check and still have lost the thing the label is for.
+    let mut got: Vec<(&str, &str)> = state
+        .edges
+        .iter()
+        .map(|e| (e.branch_id.as_str(), e.valid_to.as_str()))
+        .collect();
+    got.sort_unstable();
+    assert_eq!(
+        got,
+        vec![("b", TS2), (ddl::MAIN_BRANCH, SENTINEL)],
+        "the trunk still believes the edge open and the branch has closed it"
     );
 }
 

@@ -456,9 +456,15 @@ proptest! {
             for t in TS {
                 let materialized: BTreeSet<_> = query_as_of_edges(db.read_conn(), t)
                     .await.unwrap().into_iter().collect();
+                // Projected to the five-tuple `query_as_of_edges` answers
+                // with. The generator never forks, so every belief carries
+                // `main` and the fold's rows are the trunk's resolved rows;
+                // dropping the label here compares the two paths rather than
+                // comparing a label against nothing.
                 let folded: BTreeSet<_> = state.edges.iter()
-                    .filter(|(_, _, _, vf, vt)| vf.as_str() <= t && t < vt.as_str())
-                    .cloned()
+                    .filter(|e| e.valid_from.as_str() <= t && t < e.valid_to.as_str())
+                    .map(|e| (e.source_id.clone(), e.target_id.clone(),
+                              e.edge_type.clone(), e.valid_from.clone(), e.valid_to.clone()))
                     .collect();
                 prop_assert_eq!(
                     &materialized, &folded,
@@ -500,7 +506,8 @@ proptest! {
             for ts in &stamps {
                 let state = reconstruct(db.read_conn(), ts, None, None).await.unwrap();
                 let keys: BTreeSet<_> = state.edges.iter()
-                    .map(|(s, t, e, vf, _)| (s.clone(), t.clone(), e.clone(), vf.clone()))
+                    .map(|e| (e.source_id.clone(), e.target_id.clone(),
+                              e.edge_type.clone(), e.valid_from.clone()))
                     .collect();
                 let forgotten: Vec<_> = previous.difference(&keys).cloned().collect();
                 prop_assert!(

@@ -2,12 +2,36 @@
 //!
 //! # Edges are tuples, and the timestamps inside them are not strings
 //!
-//! [`macrame::temporal::MaterializedState::edges`] and
-//! [`macrame::temporal::query_as_of_edges`] both answer with
-//! `(source, target, edge_type, valid_from, valid_to)`. Those stay tuples here
+//! [`macrame::temporal::query_as_of_edges`] answers with
+//! `(source, target, edge_type, valid_from, valid_to)`. That stays a tuple here
 //! — a five-field record with no behaviour is what a tuple is for, and a
 //! `#[pyclass]` per shape would be three more names in `dir(macrame)` for no
 //! capability.
+//!
+//! # `MaterializedState.edges` carries a sixth field, and the two shapes differ
+//! # for a reason rather than by accident (0.14.5, D-221)
+//!
+//! A belief is `(source, target, edge_type, valid_from, valid_to, branch)`, and
+//! the split is exactly **resolved against unresolved**. `query_as_of_edges`
+//! answers for one lineage — the caller's, or the trunk when they named none —
+//! so the label would repeat what the caller already said. `reconstruct` asks a
+//! whole-ledger question and a forked ledger answers it with two beliefs about
+//! one edge; without the label those are two indistinguishable rows, which is
+//! the defect [D-221](../../../docs/architecture/s13-decision-register.md#d-221)
+//! records rather than a shape worth copying. So the difference is visible in
+//! the type, and a caller who wants one lineage's view of an instant calls the
+//! reader that resolves rather than filtering a fold by hand.
+//!
+//! **Six fields, and the rule below says more than five should be a class.** It
+//! does not reach here, for the reason that rule is a proxy for: there is
+//! nothing new to get wrong. `branch` is a `str` appended after a
+//! `datetime | None`, so a misindex fails on type rather than returning a
+//! plausible wrong value, and it carries no relationship to another field and no
+//! derived question. What it does cost is that the *next* field would break
+//! unpacking again — which the Rust `EdgeBelief` avoids with
+//! `#[non_exhaustive]` and Python cannot. Recorded as the price of the shape
+//! rather than argued away: at that point this becomes a class, and the trigger
+//! is a seventh field, not a preference.
 //!
 //! The two timestamps are rendered as aware `datetime`s all the same, with the
 //! open sentinel as `None`, because P3's rule is about the boundary rather than
@@ -40,12 +64,16 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
 
-use macrame::temporal::{ArchiveReport, ChainCheck, MaterializedState, RehydrateReport};
+use macrame::temporal::{
+    ArchiveReport, ChainCheck, EdgeBelief, MaterializedState, RehydrateReport,
+};
 
 use crate::graph::PyNodeAttributes;
 use crate::timestamps::from_canonical;
 
 /// `(source, target, edge_type, valid_from, valid_to)`, timestamps rendered.
+///
+/// The **resolved** shape: one lineage's view, so there is no label to carry.
 pub(crate) fn edge_to_py<'py>(
     py: Python<'py>,
     e: &(String, String, String, String, String),
@@ -58,6 +86,27 @@ pub(crate) fn edge_to_py<'py>(
             e.2.clone().into_pyobject(py)?.into_any(),
             from_canonical(py, &e.3)?,
             from_canonical(py, &e.4)?,
+        ],
+    )
+}
+
+/// `(source, target, edge_type, valid_from, valid_to, branch)`, as above plus
+/// the lineage holding the belief (0.14.5, D-221).
+///
+/// The **unresolved** shape. Not written in terms of `edge_to_py` and a
+/// concatenation, because the two are only incidentally a prefix of each other:
+/// they answer different questions and one of them is free to stop being a
+/// tuple without dragging the other with it.
+pub(crate) fn belief_to_py<'py>(py: Python<'py>, e: &EdgeBelief) -> PyResult<Bound<'py, PyTuple>> {
+    PyTuple::new(
+        py,
+        [
+            e.source_id.clone().into_pyobject(py)?.into_any(),
+            e.target_id.clone().into_pyobject(py)?.into_any(),
+            e.edge_type.clone().into_pyobject(py)?.into_any(),
+            from_canonical(py, &e.valid_from)?,
+            from_canonical(py, &e.valid_to)?,
+            e.branch_id.clone().into_pyobject(py)?.into_any(),
         ],
     )
 }
@@ -104,10 +153,18 @@ impl PyMaterializedState {
         Ok(out)
     }
 
-    /// `[(source, target, edge_type, valid_from, valid_to)]`.
+    /// `[(source, target, edge_type, valid_from, valid_to, branch)]`.
+    ///
+    /// One entry per lineage per edge, not one per edge: a fork and its ancestor
+    /// believing different things about one edge key are two beliefs, and this
+    /// is the reader that says so (0.14.5, D-221).
     #[getter]
     fn edges<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyTuple>>> {
-        self.inner.edges.iter().map(|e| edge_to_py(py, e)).collect()
+        self.inner
+            .edges
+            .iter()
+            .map(|e| belief_to_py(py, e))
+            .collect()
     }
 
     /// Whether nothing had been recorded yet at [`timestamp`] (0.8.0, D-121).

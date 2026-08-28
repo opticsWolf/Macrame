@@ -23,12 +23,26 @@ const SNAP_MAGIC: [u8; 4] = *b"MACR";
 ///
 /// * **v2 (0.5.5)** adds the snapshot's own instant to the header (D-054).
 /// * **v3 (0.13.12)** adds both lengths and a checksum (W8.2, D-185).
+/// * **v4 (0.14.5)** labels each edge with the lineage holding it (D-221).
 ///
 /// A v2 file meets a v3 build as [`DbError::SnapshotIncompatible`], which is
 /// the case this versioned container was built for: the scan skips it and
 /// folds from the log. No migration, because there is nothing to migrate —
 /// a snapshot is a cache.
-const SNAP_FORMAT_VERSION: u16 = 3;
+///
+/// **v4 bumps for a payload change and not a header one**, which is exactly
+/// what [D-043](../../docs/architecture/s13-decision-register.md#d-043) says
+/// this number is for: the header layout below is still v3's, and what moved
+/// is `MaterializedState::edges`, from a five-tuple to
+/// [`EdgeBelief`](super::replay::EdgeBelief). `bincode` is not self-describing,
+/// so a v3 payload read as v4 does not fail — it reads the *next* edge's
+/// `source_id` as this edge's `branch_id` and runs off the end of the buffer
+/// somewhere later, reported as `ReplayCorrupt`, which is a fault to chase and
+/// this is not one. `EdgeBelief::branch_id` carries `#[serde(default)]` as
+/// well, and the two are not redundant: the default is what makes the *field*
+/// additive if the container is ever versioned some other way, and this
+/// constant is what makes the *file* refused today.
+const SNAP_FORMAT_VERSION: u16 = 4;
 
 /// The v3 container header, little-endian throughout:
 ///
@@ -854,6 +868,7 @@ pub mod fuzzing {
 mod tests {
     use super::*;
     use crate::temporal::as_of::NodeAttributes;
+    use crate::temporal::replay::EdgeBelief;
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
@@ -1145,13 +1160,14 @@ mod tests {
             seq_anchor: seq,
             timestamp: TS.to_string(),
             concepts,
-            edges: vec![(
-                "c0".to_string(),
-                "c1".to_string(),
-                "relates_to".to_string(),
-                TS.to_string(),
-                "A".to_string(),
-            )],
+            edges: vec![EdgeBelief {
+                source_id: "c0".to_string(),
+                target_id: "c1".to_string(),
+                edge_type: "relates_to".to_string(),
+                valid_from: TS.to_string(),
+                valid_to: "A".to_string(),
+                branch_id: crate::schema::ddl::MAIN_BRANCH.to_string(),
+            }],
             predates_recorded_history: false,
         }
     }

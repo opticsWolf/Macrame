@@ -176,8 +176,8 @@ async fn a_tampered_snapshot_is_caught() {
         "expected exactly the dropped edge: {check}"
     );
     assert!(
-        check.edge_disagreements[0].contains(&dropped.0)
-            && check.edge_disagreements[0].contains(&dropped.1),
+        check.edge_disagreements[0].contains(&dropped.source_id)
+            && check.edge_disagreements[0].contains(&dropped.target_id),
         "the reported edge is not the one dropped ({dropped:?}): {check}"
     );
 

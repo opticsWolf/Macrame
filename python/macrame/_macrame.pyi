@@ -42,7 +42,11 @@ Timestamp = str | datetime
 # Packed little-endian f32 bytes (the fast path), or any sequence of floats.
 Embedding = bytes | Sequence[float]
 # `(source, target, edge_type, valid_from, valid_to)`, timestamps as datetimes.
+# One lineage's view — the caller named it, or meant the trunk.
 Edge = tuple[str, str, str, datetime, datetime]
+# The same, plus the lineage holding the belief. What a fold of the whole ledger
+# answers with, where one edge key may be believed by several lineages at once.
+EdgeBelief = tuple[str, str, str, datetime, datetime, str]
 
 # ---------------------------------------------------------------- constants ---
 
@@ -356,7 +360,16 @@ class MaterializedState:
     @property
     def concepts(self) -> dict[str, NodeAttributes]: ...
     @property
-    def edges(self) -> list[Edge]: ...
+    def edges(self) -> list[EdgeBelief]:
+        """One entry per lineage per edge, not one per edge.
+
+        A fork and its ancestor believing different things about one edge key
+        are two beliefs, and both are here, each labelled. For one lineage's
+        view of an instant use ``query_as_of_edges`` or a traversal's
+        ``branch=``, which resolve; do not filter this list by hand, because
+        resolution is nearest-ancestor and not equality.
+        """
+
     @property
     def predates_recorded_history(self) -> bool:
         """Whether nothing had been recorded yet at ``timestamp``.

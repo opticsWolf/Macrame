@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use macrame::temporal::{fuzzing, save_snapshot, MaterializedState, NodeAttributes};
+use macrame::temporal::{fuzzing, save_snapshot, EdgeBelief, MaterializedState, NodeAttributes};
 
 /// Shapes worth starting from, rather than one arbitrary state.
 ///
@@ -45,15 +45,26 @@ fn states() -> Vec<MaterializedState> {
         for i in 0..n_concepts {
             concepts.insert(format!("c{i}"), concept(i));
         }
+        // Every fourth belief is on a lineage other than the trunk, and the
+        // names are of different lengths on purpose (0.14.5). `branch_id` is
+        // the newest variable-length field in the payload, so a corpus in which
+        // every one of them is the same four bytes exercises the length prefix
+        // at exactly one value — which is the shape of coverage that reads as
+        // covered and finds nothing.
         let edges = (0..n_edges)
             .map(|i| {
-                (
+                let belief = EdgeBelief::new(
                     format!("c{}", i % n_concepts.max(1)),
                     format!("c{}", (i + 1) % n_concepts.max(1)),
-                    "relates_to".to_string(),
+                    "relates_to",
                     ts.clone(),
-                    "A".to_string(),
-                )
+                    "A",
+                );
+                match i % 4 {
+                    1 => belief.on_branch("b"),
+                    3 => belief.on_branch(format!("exploration-{i}")),
+                    _ => belief,
+                }
             })
             .collect();
         MaterializedState {

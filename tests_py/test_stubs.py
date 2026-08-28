@@ -37,7 +37,10 @@ STUB = REPO / "python" / "macrame" / "_macrame.pyi"
 # `BulkProgress` is a `TypedDict` describing the dict a `progress=` callback is
 # handed (0.13.8) — a shape a checker enforces at the call site, with no class
 # to export, which is the same reason `Timestamp` and `Embedding` are here.
-STUB_ONLY = {"Timestamp", "Embedding", "Edge", "BulkProgress"}
+# `EdgeBelief` joined at 0.14.5 (D-222): the unresolved counterpart of
+# `Edge`, six fields rather than five, and an alias for the same reason —
+# a tuple shape a checker enforces at the call site with no class behind it.
+STUB_ONLY = {"Timestamp", "Embedding", "Edge", "EdgeBelief", "BulkProgress"}
 
 # Inherited from `Exception`/`object`; every exception class has them and none
 # of them is this project's to describe.

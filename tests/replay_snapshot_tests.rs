@@ -310,7 +310,11 @@ async fn cleanup_skips_files_it_cannot_order() {
 
 // -- D-043: the snapshot container is versioned -----------------------------
 
-/// The v3 header length, in one place, so the tests below index it by name.
+/// The header length, in one place, so the tests below index it by name.
+///
+/// Unchanged at container v4 (0.14.5, D-222), which is the point of that bump:
+/// the *payload* changed shape and the header did not, so the offsets below
+/// stay valid while every file written before it is refused.
 const HEADER_LEN: usize = 38;
 
 /// A snapshot written by this build must carry the header and round-trip.
@@ -323,8 +327,11 @@ async fn a_snapshot_carries_its_header_and_reloads() {
     let raw = std::fs::read(&path).unwrap();
     assert_eq!(&raw[0..4], b"MACR", "missing magic: {:?}", &raw[0..4]);
     // v2 (D-054) added the snapshot's own instant; v3 (W8.2, D-185) added both
-    // lengths and the checksum over them.
-    assert_eq!(u16::from_le_bytes([raw[4], raw[5]]), 3, "format version");
+    // lengths and the checksum over them; v4 (D-222) changed the payload's edge
+    // shape and left the header alone. Restated here rather than read from the
+    // crate, deliberately — the constant is private and this is the assertion
+    // that a bump was intended rather than incidental.
+    assert_eq!(u16::from_le_bytes([raw[4], raw[5]]), 4, "format version");
     assert_eq!(
         u32::from_le_bytes([raw[6], raw[7], raw[8], raw[9]]),
         macrame::schema::SCHEMA_VERSION,
@@ -744,7 +751,10 @@ async fn the_anchored_fold_steps_over_a_seq_id_gap() {
         "the delta was truncated at the gap"
     );
     assert!(
-        composed.edges.iter().any(|(s, t, ..)| s == "A" && t == "C"),
+        composed
+            .edges
+            .iter()
+            .any(|e| e.source_id == "A" && e.target_id == "C"),
         "the edge written after the gap is missing: {:?}",
         composed.edges
     );
@@ -947,7 +957,10 @@ async fn the_handle_reconstructs_through_its_own_snapshot_directory() {
     let now = max_recorded_at(&db).await;
     let state = db.reconstruct(&now).await.unwrap();
     assert!(
-        state.edges.iter().any(|(s, t, ..)| s == "A" && t == "B"),
+        state
+            .edges
+            .iter()
+            .any(|e| e.source_id == "A" && e.target_id == "B"),
         "{:?}",
         state.edges
     );

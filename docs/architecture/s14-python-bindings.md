@@ -651,6 +651,10 @@ On the vector side, a model name is the one string in this crate that cannot be 
 ---
 
 <a id="1412-algorithms"></a>
+**Two edge shapes from 0.14.5, and the split is resolved against unresolved ([D-222](s13-decision-register.md#d-222)).** `query_as_of_edges` answers `(source, target, edge_type, valid_from, valid_to)`; `MaterializedState.edges` answers the same with a sixth field, the lineage holding the belief. The reader that *resolved* answers for one lineage — the caller's, or the trunk when they named none — so a label would repeat what the caller already said. The reader that *folds the whole ledger* is answering a question a forked ledger answers with two beliefs about one edge key, and without the label those are two indistinguishable rows. The stub carries both as named aliases, `Edge` and `EdgeBelief`, so the difference is visible at a type checker rather than only at a length.
+
+**Six fields, against the rule above that more than five should be a class.** The rule is a proxy for *is there anything here to get wrong*, and here there is not: `branch` is a `str` appended after a `datetime | None`, so a misindex fails on type rather than returning a plausible wrong value, and it carries no relationship to another field and no derived question. What six does cost is that a seventh field breaks unpacking again — which `#[non_exhaustive]` spares the Rust `EdgeBelief` and Python has no counterpart for. Recorded as the price of the shape rather than argued away: a seventh field is when this becomes a class, and that is a trigger rather than a preference.
+
 ### 14.12 The algorithms, and `astar`'s inversion
 
 `dijkstra`, `scc`, `k_core`, `modularity` and `louvain` are methods on `Subgraph` rather than free functions, because `g.louvain()` is where a Python caller looks and there is no second kind of graph they could apply to. **All of them release the GIL**: pure CPU over Rust-owned data with no Python object in reach, and `louvain` on a budget-sized graph is long enough that holding it would stall every other thread for no reason.

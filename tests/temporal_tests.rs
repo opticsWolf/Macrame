@@ -129,8 +129,8 @@ async fn test_reconstruct_now_equals_live_table() {
     assert!(state.concepts.contains_key("c1"));
     assert!(state.concepts.contains_key("c2"));
     assert_eq!(state.edges.len(), 1);
-    assert_eq!(state.edges[0].0, "c1");
-    assert_eq!(state.edges[0].1, "c2");
+    assert_eq!(state.edges[0].source_id, "c1");
+    assert_eq!(state.edges[0].target_id, "c2");
 }
 
 #[test]
@@ -142,12 +142,12 @@ fn test_snapshot_save_load_roundtrip() {
         seq_anchor: 100,
         timestamp: "2026-01-01T00:00:00.000000Z".to_string(),
         concepts: std::collections::HashMap::new(),
-        edges: vec![(
-            "c1".to_string(),
-            "c2".to_string(),
-            "KNOWS".to_string(),
-            "2026-01-01T00:00:00.000000Z".to_string(),
-            "9999-12-31T23:59:59.999999Z".to_string(),
+        edges: vec![macrame::temporal::EdgeBelief::new(
+            "c1",
+            "c2",
+            "KNOWS",
+            "2026-01-01T00:00:00.000000Z",
+            "9999-12-31T23:59:59.999999Z",
         )],
         predates_recorded_history: false,
     };
@@ -158,7 +158,7 @@ fn test_snapshot_save_load_roundtrip() {
     let loaded = load_snapshot(&path).unwrap();
     assert_eq!(loaded.seq_anchor, 100);
     assert_eq!(loaded.edges.len(), 1);
-    assert_eq!(loaded.edges[0].0, "c1");
+    assert_eq!(loaded.edges[0].source_id, "c1");
 }
 
 /// End-to-end archive session: rows move to the cold file, the guards are
@@ -469,11 +469,24 @@ fn at_valid_time(
     state: &MaterializedState,
     t: &str,
 ) -> std::collections::BTreeSet<(String, String, String, String, String)> {
+    // Projected back to the five-tuple `query_as_of_edges` answers with, which
+    // is what the caller of this helper compares against. Sound because the
+    // fixtures here never fork: on a single-lineage ledger the fold's beliefs
+    // and the trunk's resolved view are the same rows. A forked fixture would
+    // need the resolution, not a projection — see `branch_read_tests`.
     state
         .edges
         .iter()
-        .filter(|(_, _, _, vf, vt)| vf.as_str() <= t && t < vt.as_str())
-        .cloned()
+        .filter(|e| e.valid_from.as_str() <= t && t < e.valid_to.as_str())
+        .map(|e| {
+            (
+                e.source_id.clone(),
+                e.target_id.clone(),
+                e.edge_type.clone(),
+                e.valid_from.clone(),
+                e.valid_to.clone(),
+            )
+        })
         .collect()
 }
 

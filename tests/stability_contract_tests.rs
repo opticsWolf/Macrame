@@ -148,5 +148,5 @@ fn the_documents_are_shaped_the_way_these_tests_assume() {
     );
     assert!(contract().contains("### D.1 — What 1.0 freezes"));
     assert!(contract().contains("### D.2 — What 1.0 does not freeze"));
-    assert_eq!(const_value(SNAPSHOT_RS, "SNAP_FORMAT_VERSION"), "3");
+    assert_eq!(const_value(SNAPSHOT_RS, "SNAP_FORMAT_VERSION"), "4");
 }
