@@ -788,6 +788,7 @@ class Database:
         min_weight: float = 0.0,
         as_of_valid: Timestamp | None = None,
         as_of_recorded: Timestamp | None = None,
+        branch: str | None = None,
         now: Timestamp | None = None,
     ) -> list[str]: ...
     def traverse(
@@ -800,6 +801,7 @@ class Database:
         attribute_mode: AttributeMode | None = None,
         as_of_valid: Timestamp | None = None,
         as_of_recorded: Timestamp | None = None,
+        branch: str | None = None,
         now: Timestamp | None = None,
     ) -> list[NodeAttributes]:
         """Traverse and hydrate node text.
@@ -825,6 +827,7 @@ class Database:
         min_weight: float | None = None,
         as_of_valid: Timestamp | None = None,
         as_of_recorded: Timestamp | None = None,
+        branch: str | None = None,
         now: Timestamp | None = None,
         content: bool = False,
     ) -> Subgraph:
@@ -1012,6 +1015,7 @@ class Database:
         strategy: FilterStrategy | None = None,
         now: Timestamp | None = None,
         as_of_valid: Timestamp | None = None,
+        branch: str | None = None,
     ) -> tuple[list[VectorHit], CostEstimate]:
         """Vector search restricted to a traversed neighbourhood.
 

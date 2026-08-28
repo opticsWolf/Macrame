@@ -64,16 +64,67 @@ pub struct NodeAttributes {
 use crate::util::limits::HYDRATE_CHUNK;
 
 /// Query valid-time graph edges under current belief as of `ts` (§5.2).
+///
+/// Reads the **trunk**, which is what this function has always meant and what
+/// every database without a fork holds. On a forked ledger that is now a
+/// resolution rather than an unfiltered scan: before 0.14.4 it returned every
+/// lineage's rows at once, which is the failure `TraversalBuilder::build_sql`'s
+/// own note describes — extra edges that look entirely ordinary.
+///
+/// Use [`query_as_of_edges_on`] to read another lineage. The signature here is
+/// unchanged rather than gaining a parameter, because a breaking change to the
+/// most-called reader in the crate is not what fixing its default is worth; the
+/// two share one implementation, so neither can drift from the other.
 pub async fn query_as_of_edges(
     conn: &libsql::Connection,
     ts: &str,
 ) -> Result<Vec<(String, String, String, String, String)>> {
-    let sql = r#"
+    query_as_of_edges_on(conn, ts, None).await
+}
+
+/// [`query_as_of_edges`] on a named lineage (§15.3, D-220).
+///
+/// # Errors
+///
+/// [`DbError::NotFound`](crate::DbError::NotFound), naming the branch, when it
+/// is not registered — refused rather than answered for the trunk, for the
+/// reason `graph::lineage::lineage_shape` gives.
+pub async fn query_as_of_edges_on(
+    conn: &libsql::Connection,
+    ts: &str,
+    branch: Option<&str>,
+) -> Result<Vec<(String, String, String, String, String)>> {
+    use crate::graph::lineage::{ancestry_cte, lineage_shape, visible_cte, LineageShape};
+
+    // The same two shapes the traversal picks between, and for the same
+    // measured reason (D-219): the resolved form is 3x on a database with
+    // nothing to resolve, and a `branches` table holding one row is a
+    // *sufficient* condition for the plain form rather than a heuristic.
+    let (sql, params): (String, Vec<libsql::Value>) =
+        match lineage_shape(conn, branch).await? {
+            LineageShape::Trunk => (
+                r#"
         SELECT source_id, target_id, edge_type, valid_from, valid_to
         FROM links_current
         WHERE valid_from <= ?1 AND ?1 < valid_to
-    "#;
-    let mut rows = conn.query(sql, libsql::params![ts]).await?;
+    "#
+                .to_string(),
+                vec![ts.into()],
+            ),
+            LineageShape::Resolved => (
+                format!(
+                    "WITH RECURSIVE {},\n{}\n                     SELECT source_id, target_id, edge_type, valid_from, valid_to \
+                     FROM visible WHERE valid_from <= ?1 AND ?1 < valid_to",
+                    ancestry_cte(2),
+                    visible_cte("links_current"),
+                ),
+                vec![
+                    ts.into(),
+                    branch.unwrap_or(crate::schema::ddl::MAIN_BRANCH).into(),
+                ],
+            ),
+        };
+    let mut rows = conn.query(&sql, params).await?;
     let mut edges = Vec::new();
     while let Some(row) = rows.next().await? {
         let src: String = row.get(0)?;
@@ -292,6 +343,24 @@ async fn hydrate_at_time(
     let mut found = HashMap::new();
 
     for chunk in node_ids.chunks(HYDRATE_CHUNK) {
+        // **`entity_id` alone, and unlike the link folds that is correct here.**
+        //
+        // The sweep that widened the four folds in `replay.rs` to carry
+        // `branch_id` (D-216) and the traversal's own fold at 0.14.4 (D-220)
+        // both left this one alone, so the reason is written down rather than
+        // left as an omission that happens to be safe.
+        //
+        // A link's `entity_id` is the edge key and is shared across lineages by
+        // design — that is how a branch corrects an edge it inherited — so a
+        // partition on it alone puts two lineages' beliefs in one group. A
+        // *concept*'s `entity_id` is the concept id, and under Option A there is
+        // exactly one concept row per id across the whole ledger: the guards
+        // refuse a second lineage restating one at all, and `branch_id` on
+        // `concepts` is provenance rather than identity. One row per id means
+        // one `branch_id` per partition, so adding it would change nothing.
+        //
+        // `table_name = 'concepts'` is in the `WHERE` rather than the partition,
+        // which is the same discriminator applied one step earlier.
         let sql = format!(
             r#"
             SELECT entity_id, seq_id, payload FROM (

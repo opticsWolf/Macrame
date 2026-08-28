@@ -358,6 +358,7 @@ pub struct macrame::graph::TraversalBuilder
 pub macrame::graph::TraversalBuilder::as_of_recorded: core::option::Option<alloc::string::String>
 pub macrame::graph::TraversalBuilder::as_of_valid: core::option::Option<alloc::string::String>
 pub macrame::graph::TraversalBuilder::attribute_mode: core::option::Option<macrame::graph::AttributeMode>
+pub macrame::graph::TraversalBuilder::branch: core::option::Option<alloc::string::String>
 pub macrame::graph::TraversalBuilder::content: bool
 pub macrame::graph::TraversalBuilder::edge_types: alloc::vec::Vec<alloc::string::String>
 pub macrame::graph::TraversalBuilder::max_depth: usize
@@ -375,6 +376,7 @@ pub async fn macrame::graph::TraversalBuilder::execute_ids(&self, &libsql::conne
 pub fn macrame::graph::TraversalBuilder::max_depth(self, usize) -> Self
 pub fn macrame::graph::TraversalBuilder::min_weight(self, f64) -> Self
 pub fn macrame::graph::TraversalBuilder::new(impl core::convert::Into<alloc::string::String>) -> Self
+pub fn macrame::graph::TraversalBuilder::on_branch(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub const macrame::graph::DEFAULT_BYTE_BUDGET: usize
 pub const macrame::graph::DEFAULT_PROBE_CAP: usize
 pub fn macrame::graph::astar<F>(&macrame::graph::Subgraph, &str, &str, F) -> core::option::Option<(f64, alloc::vec::Vec<alloc::string::String>)> where F: core::ops::function::Fn(&str, &str) -> f64
@@ -854,6 +856,7 @@ pub struct macrame::prelude::TraversalBuilder
 pub macrame::prelude::TraversalBuilder::as_of_recorded: core::option::Option<alloc::string::String>
 pub macrame::prelude::TraversalBuilder::as_of_valid: core::option::Option<alloc::string::String>
 pub macrame::prelude::TraversalBuilder::attribute_mode: core::option::Option<macrame::graph::AttributeMode>
+pub macrame::prelude::TraversalBuilder::branch: core::option::Option<alloc::string::String>
 pub macrame::prelude::TraversalBuilder::content: bool
 pub macrame::prelude::TraversalBuilder::edge_types: alloc::vec::Vec<alloc::string::String>
 pub macrame::prelude::TraversalBuilder::max_depth: usize
@@ -871,6 +874,7 @@ pub async fn macrame::graph::TraversalBuilder::execute_ids(&self, &libsql::conne
 pub fn macrame::graph::TraversalBuilder::max_depth(self, usize) -> Self
 pub fn macrame::graph::TraversalBuilder::min_weight(self, f64) -> Self
 pub fn macrame::graph::TraversalBuilder::new(impl core::convert::Into<alloc::string::String>) -> Self
+pub fn macrame::graph::TraversalBuilder::on_branch(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub struct macrame::prelude::Tuning
 pub macrame::prelude::Tuning::cadence: macrame::connection::CadencePolicy
 pub macrame::prelude::Tuning::clock: core::option::Option<alloc::sync::Arc<dyn macrame::util::Clock>>
@@ -904,6 +908,7 @@ pub fn macrame::prelude::escape_fts5_query(&str) -> alloc::string::String
 pub fn macrame::prelude::estimated_bulk_hold(&[macrame::graph::EdgeAssertion]) -> core::time::Duration
 pub async fn macrame::prelude::keyword_search(&libsql::connection::Connection, &str, usize, core::option::Option<&str>, core::option::Option<core::time::Duration>) -> macrame::error::Result<alloc::vec::Vec<(alloc::string::String, f64)>>
 pub async fn macrame::prelude::query_as_of_edges(&libsql::connection::Connection, &str) -> macrame::error::Result<alloc::vec::Vec<(alloc::string::String, alloc::string::String, alloc::string::String, alloc::string::String, alloc::string::String)>>
+pub async fn macrame::prelude::query_as_of_edges_on(&libsql::connection::Connection, &str, core::option::Option<&str>) -> macrame::error::Result<alloc::vec::Vec<(alloc::string::String, alloc::string::String, alloc::string::String, alloc::string::String, alloc::string::String)>>
 pub async fn macrame::prelude::rebuild_current(&libsql::connection::Connection) -> macrame::error::Result<macrame::integrity::RebuildReport>
 pub fn macrame::prelude::reciprocal_rank_fusion(&[alloc::string::String], &[alloc::string::String], usize) -> alloc::vec::Vec<(alloc::string::String, f64)>
 pub async fn macrame::prelude::reconstruct(&libsql::connection::Connection, &str, core::option::Option<&std::path::Path>, core::option::Option<&std::path::Path>) -> macrame::error::Result<macrame::temporal::MaterializedState>
@@ -1022,6 +1027,7 @@ pub fn macrame::temporal::cleanup_expired_snapshots(&std::path::Path) -> macrame
 pub async fn macrame::temporal::hydrate_attributes(&libsql::connection::Connection, &[alloc::string::String], &macrame::temporal::AsOf, macrame::graph::AttributeMode) -> macrame::error::Result<alloc::vec::Vec<macrame::temporal::NodeAttributes>>
 pub fn macrame::temporal::load_snapshot(&std::path::Path) -> macrame::error::Result<macrame::temporal::MaterializedState>
 pub async fn macrame::temporal::query_as_of_edges(&libsql::connection::Connection, &str) -> macrame::error::Result<alloc::vec::Vec<(alloc::string::String, alloc::string::String, alloc::string::String, alloc::string::String, alloc::string::String)>>
+pub async fn macrame::temporal::query_as_of_edges_on(&libsql::connection::Connection, &str, core::option::Option<&str>) -> macrame::error::Result<alloc::vec::Vec<(alloc::string::String, alloc::string::String, alloc::string::String, alloc::string::String, alloc::string::String)>>
 pub async fn macrame::temporal::reconstruct(&libsql::connection::Connection, &str, core::option::Option<&std::path::Path>, core::option::Option<&std::path::Path>) -> macrame::error::Result<macrame::temporal::MaterializedState>
 pub async fn macrame::temporal::rehydrate(&libsql::connection::Connection, &[&str], &std::path::Path) -> macrame::error::Result<macrame::temporal::RehydrateReport>
 pub fn macrame::temporal::save_snapshot(&std::path::Path, &macrame::temporal::MaterializedState) -> macrame::error::Result<std::path::PathBuf>

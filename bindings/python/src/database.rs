@@ -792,9 +792,18 @@ impl PyDatabase {
     /// `as_of_recorded` raises `RecordedInstantUnreachableError` when the hot log
     /// has been archived below the instant asked for; `reconstruct` takes the
     /// archive path and answers the same question.
+    ///
+    /// `branch` reads one lineage's belief instead of the trunk's (0.14.4,
+    /// D-220): the edges on the path from it to the root, one per edge key,
+    /// from the nearest branch holding it — so a branch that corrected or
+    /// retired an inherited edge is seen to have done so. Unset is the trunk.
+    /// A lineage that is not registered raises `NotFoundError` naming it,
+    /// rather than quietly answering for the trunk. Until `fork()` lands there
+    /// is no way to create a second lineage from Python, which is why this
+    /// parameter arrives with the read rather than after the write.
     #[pyo3(signature = (
         start_node, *, max_depth = 2, edge_types = None, min_weight = 0.0,
-        as_of_valid = None, as_of_recorded = None, now = None
+        as_of_valid = None, as_of_recorded = None, branch = None, now = None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn traverse_ids(
@@ -806,6 +815,7 @@ impl PyDatabase {
         min_weight: f64,
         as_of_valid: Option<&Bound<'_, PyAny>>,
         as_of_recorded: Option<&Bound<'_, PyAny>>,
+        branch: Option<String>,
         now: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Vec<String>> {
         let as_of_valid = as_of_valid.map(|t| to_canonical(Some(t))).transpose()?;
@@ -819,6 +829,7 @@ impl PyDatabase {
             None,
             as_of_valid,
             as_of_recorded,
+            branch,
         );
         self.with_db(py, move |db| {
             runtime()
@@ -845,6 +856,15 @@ impl PyDatabase {
     /// asks what we believed then about what was true then, which no surface in
     /// the crate could express before.
     ///
+    ///
+    /// `branch` reads one lineage's belief instead of the trunk's (0.14.4,
+    /// D-220): the edges on the path from it to the root, one per edge key,
+    /// from the nearest branch holding it — so a branch that corrected or
+    /// retired an inherited edge is seen to have done so. Unset is the trunk.
+    /// A lineage that is not registered raises `NotFoundError` naming it,
+    /// rather than quietly answering for the trunk. Until `fork()` lands there
+    /// is no way to create a second lineage from Python, which is why this
+    /// parameter arrives with the read rather than after the write.
     /// `AttributeMode.OMIT` is **refused** here, with a message naming
     /// `traverse_ids`. Under that mode there are no attributes to hydrate, so
     /// the Rust method answers with an empty list that no caller can tell apart
@@ -853,7 +873,7 @@ impl PyDatabase {
     #[pyo3(signature = (
         start_node, *, max_depth = 2, edge_types = None, min_weight = 0.0,
         attribute_mode = None, as_of_valid = None, as_of_recorded = None,
-        now = None
+        branch = None, now = None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn traverse(
@@ -866,6 +886,7 @@ impl PyDatabase {
         attribute_mode: Option<PyAttributeMode>,
         as_of_valid: Option<&Bound<'_, PyAny>>,
         as_of_recorded: Option<&Bound<'_, PyAny>>,
+        branch: Option<String>,
         now: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Vec<graph::PyNodeAttributes>> {
         if attribute_mode == Some(PyAttributeMode::Omit) {
@@ -887,6 +908,7 @@ impl PyDatabase {
             attribute_mode,
             as_of_valid,
             as_of_recorded,
+            branch,
         );
         let hydrated = self.with_db(py, move |db| {
             runtime()
@@ -944,7 +966,7 @@ impl PyDatabase {
     #[pyo3(signature = (
         start_node, max_hops, byte_budget, *, edge_types = None,
         min_weight = None, as_of_valid = None, as_of_recorded = None,
-        now = None, content = false
+        branch = None, now = None, content = false
     ))]
     #[allow(clippy::too_many_arguments)]
     fn load_subgraph(
@@ -957,6 +979,7 @@ impl PyDatabase {
         min_weight: Option<f64>,
         as_of_valid: Option<&Bound<'_, PyAny>>,
         as_of_recorded: Option<&Bound<'_, PyAny>>,
+        branch: Option<String>,
         now: Option<&Bound<'_, PyAny>>,
         content: bool,
     ) -> PyResult<graph::PySubgraph> {
@@ -971,6 +994,7 @@ impl PyDatabase {
             None,
             as_of_valid,
             as_of_recorded,
+            branch,
         )
         .content(content);
         let inner = self.with_db(py, move |db| {
@@ -1380,7 +1404,7 @@ impl PyDatabase {
     #[pyo3(signature = (
         model, query, start_node, *, max_depth = 2, edge_types = None,
         min_weight = 0.0, top_k = 10, byte_budget = None, probe_cap = None,
-        strategy = None, now = None, as_of_valid = None
+        strategy = None, now = None, as_of_valid = None, branch = None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn search_filtered(
@@ -1398,6 +1422,7 @@ impl PyDatabase {
         strategy: Option<vector::PyFilterStrategy>,
         now: Option<&Bound<'_, PyAny>>,
         as_of_valid: Option<&Bound<'_, PyAny>>,
+        branch: Option<String>,
     ) -> PyResult<(Vec<vector::PyVectorHit>, vector::PyCostEstimate)> {
         let model = vector::model_name(model)?;
         let query = crate::types::coerce_embedding(query)?;
@@ -1413,6 +1438,7 @@ impl PyDatabase {
             None,
             as_of_valid,
             None,
+            branch,
         );
 
         let mut search =

@@ -3152,6 +3152,43 @@ without the remedy invites somebody to ask for the predicate.
 > every option has to pay.
 
 
+> **Shipped in 0.14.4 on 2026-08-28
+> ([D-220](architecture/s13-decision-register.md#d-220),
+> [D-221](architecture/s13-decision-register.md#d-221)).** Option (1), in the
+> nearest-ancestor form rather than the one written below, and in **two shapes**
+> rather than one.
+>
+> * **Nearest-ancestor, and retirement is what decided it.** Probe §4b measures
+>   the case the 0.14.3 block could only reason about: a branch retiring an
+>   inherited edge by shadowing — its own row at the ancestor's key with a closed
+>   interval, which is the only cross-lineage retirement Doctrine III permits.
+>   Union form: 1,111 nodes, the retirement had **no effect at all**. Nearest
+>   form: 1,000. So `branch_id IN (ancestry)` does not merely report a stale
+>   weight; it makes the mechanism branching exists for a no-op.
+> * **Two shapes, chosen by one probe of `branches`.** Resolution is 3.02× on a
+>   database with a single lineage (probe §6), which is every database this crate
+>   has written and stays the common case after `fork()`. One row in `branches`
+>   is an *exact* condition for the plain form, not a heuristic: `branch_id` is
+>   `NOT NULL DEFAULT 'main' REFERENCES branches(branch_id)` with a real key, so
+>   a one-row register is a database in which every ledger row reads `'main'`.
+> * **The v13 index rung is still not shipped.** [D-219](architecture/s13-decision-register.md#d-219)
+>   measured folding `branch_id` in after the range columns as the fastest of
+>   three; now that the reader exists, the rung has something to buy. It is the
+>   next schema change rather than part of this one, so that the reader's
+>   correctness and the index's speed are separately revertible.
+> * **A third fold was carrying [D-216](architecture/s13-decision-register.md#d-216)'s
+>   defect**, and a fourth still is. `TraversalBuilder::links_at_tx_cte`
+>   partitioned on `entity_id` alone — fixed here. `reconstruct` collapses two
+>   lineages into one edge in *Rust*, downstream of the correct SQL, and is
+>   pinned by a failing-by-design assertion until 0.14.5 can widen a public tuple
+>   ([D-221](architecture/s13-decision-register.md#d-221)).
+> * **`links` is not keyed by lineage** while `links_current` is: two lineages
+>   asserting one edge key at the same `recorded_at` collide with a bare `UNIQUE`
+>   error. Unreachable through the crate until branch-scoped writes exist, which
+>   is 0.14.5 — so it is the v13 rung's to widen or to decline in writing.
+>   Pinned by `branch_read_tests::the_append_only_table_is_not_keyed_by_lineage`.
+
+
 `links_current` is the projection that makes traversal fast, and it is
 branch-agnostic today. Three ways out, and the crate should take them in this
 order:
@@ -3174,14 +3211,24 @@ order:
 deliverable: depth-3 traversal on a chain of 1, 10 and 100 branches, against the
 same fixture unbranched. **Done — see the block at the head of this section.**
 The escape hatch is not the one that was needed: (2) sizes a materialisation
-threshold against chain depth, and chain depth is not what costs.
+threshold against chain depth, and chain depth is not what costs. **(1) shipped
+at 0.14.4 and (2) is not held in reserve for the reason it was written down:**
+what the resolution costs is the window function over one row per edge per
+lineage, and materialising a branch's own projection would not remove it. The
+lever that would is the v13 index, which is measured and scheduled.
 
 ### 15.4 What ships, and what deliberately does not
 
 **In:**
 
 - `Database::fork(name, from) -> BranchId`, `branches()`, and a branch-scoped
-  read view. **W11.1 was a prerequisite and answered it in the negative
+  read view. **The read half landed early, at 0.14.4**
+  ([D-220](architecture/s13-decision-register.md#d-220)):
+  `TraversalBuilder::on_branch`, `query_as_of_edges_on` and a lineage-resolving
+  `load_subgraph_with` are the surface a branch view will delegate to, so what
+  remains here is the type and its lifecycle rather than the query. Shipping the
+  read first was deliberate — a write that creates something unreadable is the
+  worse order, and the read was the half that had to be measured. **W11.1 was a prerequisite and answered it in the negative
   ([D-203](../docs/architecture/s13-decision-register.md#d-203)), which changes
   the shape of this item.** This bullet used to read *"the view is a handle …
   cloning is how it stops being a second `Arc` in every caller's code"*, on the

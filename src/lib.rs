@@ -47,7 +47,8 @@ pub mod prelude {
     // function alone (D-208).
     pub use crate::temporal::archive::archive;
     pub use crate::temporal::{
-        query_as_of_edges, reconstruct, ArchiveReport, Interval, MaterializedState, SnapshotCadence,
+        query_as_of_edges, query_as_of_edges_on, reconstruct, ArchiveReport, Interval,
+        MaterializedState, SnapshotCadence,
     };
     pub use crate::util::{
         Clock, FakeClock, FutureStampPolicy, SystemClock, DEFAULT_FUTURE_STAMP_TOLERANCE,

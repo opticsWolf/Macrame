@@ -441,3 +441,42 @@ def test_a_subgraph_outlives_the_handle_that_loaded_it(db_path):
         g = handle.load_subgraph("a", 1, ROOMY)
     assert len(g) == 1
     assert g.node("a").title == "A"
+
+
+# ───────────────────────────────────────────────────────────────────────────
+# Lineage (0.14.4, D-220)
+# ───────────────────────────────────────────────────────────────────────────
+#
+# What is reachable from Python at this release is the *parameter*, not the
+# resolution: there is no `fork()` yet and no raw-SQL escape hatch here, so a
+# second lineage cannot be built from this side. `tests/branch_read_tests.rs`
+# holds the resolution itself. What these pin is the half that would rot
+# silently — the keyword existing on every traversal entry point, meaning the
+# trunk when unset, and refusing a lineage that is not there.
+#
+# The binding ships in the same release as the feature deliberately (§15.4, W6):
+# a binding gap opened in the release that created a feature never becomes a
+# convention afterwards.
+
+
+@pytest.mark.parametrize("branch", [None, "main"])
+def test_naming_the_trunk_means_the_same_as_not_naming_it(db, branch):
+    """Unset and ``"main"`` are one answer on a database that never forked."""
+    assert db.traverse_ids("a", max_depth=3, branch=branch) == ["a", "b", "c", "d"]
+
+
+def test_every_traversal_entry_point_takes_a_branch(db):
+    """One keyword, four surfaces — the gap W6 is about is a missing one."""
+    assert db.traverse(
+        "a", max_depth=1, attribute_mode=macrame.AttributeMode.CURRENT, branch="main"
+    )
+    graph = db.load_subgraph("a", 3, ROOMY, min_weight=0.0, branch="main")
+    assert len(graph) == 4
+
+
+def test_an_unregistered_lineage_is_refused_rather_than_defaulted(db):
+    """The trunk's view is the answer a caller is least able to detect."""
+    with pytest.raises(macrame.NotFoundError, match="ghost"):
+        db.traverse_ids("a", branch="ghost")
+    with pytest.raises(macrame.NotFoundError, match="ghost"):
+        db.load_subgraph("a", 2, ROOMY, min_weight=0.0, branch="ghost")

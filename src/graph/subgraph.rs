@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 
 use crate::connection::{Annotation, Database};
 use crate::error::{BulkResult, DbError, Result};
+use crate::graph::lineage::lineage_shape;
 
 /// Edges returned to a caller asking for a node with no edges in that direction.
 const NO_EDGES: &[EdgeRef] = &[];
@@ -873,11 +874,18 @@ impl Database {
         // See `estimated_bytes` for why this is not recomputed per row (D-047).
         let mut bytes = 0usize;
 
+        // Which lineage this reads, and whether there is more than one to
+        // resolve between (0.14.4, D-220). Asked of the database rather than of
+        // the builder for the reason `TraversalBuilder::build_sql` gives: an
+        // unbranched traversal on a forked ledger that skips the resolution
+        // reads every lineage's rows at once, and the extra edges look ordinary.
+        let shape = lineage_shape(conn, traversal.branch.as_deref()).await?;
+
         // Placeholder layout is `TraversalBuilder`'s to decide and
         // `bind_params` to fill; see `edge_type_base` for why it is computed
         // there rather than agreed here.
-        let edge_filter = traversal.edge_filter_sql();
-        let link_source = traversal.link_source();
+        let edge_filter = traversal.edge_filter_sql(shape);
+        let link_source = traversal.link_source(shape);
 
         // A transaction-time traversal folds the log, and the fold can be short.
         // Checked before the query rather than after, so an unanswerable instant
@@ -891,7 +899,7 @@ impl Database {
         // builder took both.
         let sql = format!(
             "{}{}",
-            traversal.walk_cte(),
+            traversal.walk_cte(shape),
             format_args!(
                 r#"
 -- **The `DISTINCT` is why this query is superlinear, and it is not removable.**
@@ -932,7 +940,7 @@ ORDER BY l.source_id, l.target_id, l.edge_type
             )
         );
 
-        let params = traversal.bind_params(now_ts);
+        let params = traversal.bind_params(now_ts, shape);
 
         let mut rows = conn.query(&sql, params).await?;
 

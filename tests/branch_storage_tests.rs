@@ -347,31 +347,99 @@ async fn two_lineages_asserting_one_edge_do_not_collapse_in_the_log() {
         .unwrap();
     }
 
-    // The fold's own partition, run directly: one winner per (entity, lineage).
-    let winners: i64 = count(
-        &conn,
-        "SELECT COUNT(*) FROM (
-             SELECT ROW_NUMBER() OVER (
-                 PARTITION BY table_name, entity_id, branch_id ORDER BY seq_id DESC
-             ) AS rn
-             FROM transaction_log WHERE table_name = 'links'
-         ) WHERE rn = 1",
-        (),
-    )
-    .await;
-    assert_eq!(
-        winners, 2,
-        "the log folded two lineages' assertions about one edge into one belief"
-    );
-
-    // And the materialization keeps them apart too, which is what the widened
-    // primary key buys.
+    // The materialization keeps them apart, which is what the widened primary
+    // key buys and is the claim v12 actually shipped.
     let materialized: i64 = count(&conn, "SELECT COUNT(*) FROM links_current", ()).await;
     assert_eq!(
         materialized, 2,
         "links_current collapsed two lineages' open beliefs into one row"
     );
     assert_eq!(macrame::integrity::audit_current(&conn).await.unwrap(), 0);
+
+    // And the log holds both rows to fold from.
+    let logged: i64 = count(
+        &conn,
+        "SELECT COUNT(*) FROM transaction_log WHERE table_name = 'links'",
+        (),
+    )
+    .await;
+    assert_eq!(logged, 2);
+}
+
+/// The reconstruction still collapses them, and this pins that it does (D-221).
+///
+/// **This assertion is the wrong answer, written down.** The test above used to
+/// restate the fold's `ROW_NUMBER() … PARTITION BY table_name, entity_id,
+/// branch_id` inline and assert two winners, which is a test of a SQL snippet
+/// in the test file rather than of the crate. Calling
+/// [`macrame::temporal::reconstruct`] instead — the shipped path, the one a
+/// caller reaches — returns **one** edge where the ledger holds two beliefs.
+///
+/// D-216 widened the partitions in `temporal::replay`'s four SQL folds, and
+/// they are correct. What was not swept is the composition immediately
+/// downstream, which is Rust rather than SQL: `fold_delta` keys its edge map on
+/// `entity_id`, `edge_key` composes `source|target|type|valid_from`, and
+/// `MaterializedState::edges` is a five-tuple with nowhere to put a lineage. So
+/// the widened partition hands two rows to a map that has one slot for them.
+///
+/// Not fixed at 0.14.4, and the reason is scope rather than difficulty: the
+/// field is public, it is serialised into snapshots, and widening a tuple's
+/// arity is not the additive change `predates_recorded_history`'s own note
+/// describes as the tolerated shape. It belongs with 0.14.5's other breaking
+/// surface. Until then the failure is written here rather than discovered
+/// later — and `branch_read_tests` shows the *traversal* fold, which is a
+/// different fold, resolving correctly at this release.
+#[tokio::test]
+async fn a_reconstruction_still_collapses_two_lineages_into_one_edge() {
+    let harness = TestHarness::new();
+    let conn = connect(&harness).await;
+    macrame::schema::run_migrations(&conn).await.unwrap();
+    seed_concepts(&conn).await;
+    register(&conn, "b", "main", TS2).await;
+
+    // The two beliefs differ in valid time, so they are distinguishable in the
+    // five-tuple the reconstruction returns. A weight disagreement would not be
+    // — `MaterializedState::edges` does not carry one — which is a second way
+    // the same shortfall shows.
+    conn.execute(
+        "INSERT INTO links (source_id, target_id, edge_type, valid_from, valid_to, \
+         weight, properties, recorded_at, branch_id) \
+         VALUES ('c0','c1','A',?1,?2,1.0,'{}',?1,'main')",
+        libsql::params![TS, SENTINEL],
+    )
+    .await
+    .unwrap();
+    conn.execute(
+        "INSERT INTO links (source_id, target_id, edge_type, valid_from, valid_to, \
+         weight, properties, recorded_at, branch_id) \
+         VALUES ('c0','c1','A',?1,?2,1.0,'{}',?2,'b')",
+        libsql::params![TS, TS2],
+    )
+    .await
+    .unwrap();
+
+    let state = macrame::temporal::reconstruct(&conn, TS3, None, None)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        state.edges.len(),
+        1,
+        "if this is red the composition was widened — good; update this test to \
+         assert two edges and retire D-221's open half: {:?}",
+        state.edges
+    );
+    // Which of the two survives is not decided by anything a caller could
+    // reason about. Both rows reach the Rust composition — the SQL fold's
+    // partition is correct and emits two — and the map they land in has one
+    // slot, so the winner is whichever the fold happened to emit last. Measured
+    // here it is the trunk's, and that is an observation rather than a
+    // contract: the loss is the assertion, not the survivor.
+    assert!(
+        !state.edges.iter().any(|e| e.4 == TS2),
+        "the branch's belief was the one silently dropped: {:?}",
+        state.edges
+    );
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -521,15 +589,24 @@ async fn a_row_cannot_name_a_lineage_that_was_never_registered() {
 // Visibility, pinned as it stands today
 // ───────────────────────────────────────────────────────────────────────────
 
-/// Reads are lineage-blind at this release, and that is deliberate.
+/// Concept reads are lineage-blind, and at 0.14.4 that stopped being temporary.
 ///
-/// **This test is designed to go red at 0.14.4**, when the visibility predicate
-/// lands in `visible_concept`. Its failure is the signal that a read default
-/// changed, which is the one thing a storage-only release must not do quietly —
-/// and the reason the predicate is scheduled *before* `fork()` rather than
-/// after it. To update: a scoped read on `main` returns one row, not two.
+/// **This pin was written to go red at 0.14.4 and it does not, which is the
+/// finding rather than a stale comment.** It said the visibility predicate
+/// would land in `visible_concept` and a scoped read on `main` would return one
+/// row instead of two. That was written before Option A settled: concepts do
+/// not branch. `branch_id` on `concepts` is *provenance* — where the row was
+/// minted — and every lineage sees every concept, which is why the guards refuse
+/// a branch restating one at all. There is no predicate to add here, and adding
+/// one would split a namespace the design deliberately keeps whole.
+///
+/// What did change at 0.14.4 is the *edge* read, which is where lineage lives:
+/// `branch_read_tests` holds it. Kept and renamed rather than deleted, because
+/// a schedule that turned out to be wrong about which read would move is worth
+/// more written down than removed — the same reason D-219 records the probe's
+/// first draft instead of quietly correcting it.
 #[tokio::test]
-async fn a_read_at_this_release_does_not_yet_filter_by_lineage() {
+async fn concepts_are_shared_across_lineages_and_the_read_does_not_filter() {
     let harness = TestHarness::new();
     let conn = connect(&harness).await;
     macrame::schema::run_migrations(&conn).await.unwrap();
@@ -547,10 +624,23 @@ async fn a_read_at_this_release_does_not_yet_filter_by_lineage() {
     let visible: i64 = count(&conn, "SELECT COUNT(*) FROM concepts WHERE retired = 0", ()).await;
     assert_eq!(
         visible, 3,
-        "a lineage-blind read still returns every lineage's concepts at v12. \
-         If this is red, the visibility predicate has landed — update the \
-         expectation to the scoped count and move this pin to 0.14.4."
+        "every lineage sees every concept under Option A. If this is red, a \
+         visibility predicate has landed on concepts — which is a change to \
+         what a branch *is*, not an optimisation, and belongs in §15.2 before \
+         it belongs in the schema."
     );
+
+    // The lineage is still recorded, because provenance is what the column is
+    // for: `fork()`'s abandonment sweep at §15.5 needs to know which rows a
+    // discarded branch minted, and that question is unanswerable from a
+    // namespace with no provenance in it.
+    let minted_on_b: i64 = count(
+        &conn,
+        "SELECT COUNT(*) FROM concepts WHERE branch_id = 'b'",
+        (),
+    )
+    .await;
+    assert_eq!(minted_on_b, 1, "shared visibility is not shared provenance");
 }
 
 // ───────────────────────────────────────────────────────────────────────────

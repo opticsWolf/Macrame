@@ -531,6 +531,11 @@ impl PySubgraph {
 /// `NegativeEdgeWeightError` exists to report given that Dijkstra and A* are
 /// unsound over them. So `traverse` defaults to `0.0` and `load_subgraph`
 /// defaults to `-inf`, exactly as their Rust counterparts do.
+// The parameter list is the point: this exists so the four traversal entry
+// points in `database.rs` cannot assemble a builder differently from one
+// another, which is the drift D-030 and D-035 are about. Splitting it into a
+// struct to satisfy the lint would put the same fields behind one more name.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn builder(
     start_node: &str,
     max_depth: usize,
@@ -539,6 +544,7 @@ pub(crate) fn builder(
     attribute_mode: Option<PyAttributeMode>,
     as_of_valid: Option<String>,
     as_of_recorded: Option<String>,
+    branch: Option<String>,
 ) -> macrame::graph::TraversalBuilder {
     let mut b = macrame::graph::TraversalBuilder::new(start_node)
         .max_depth(max_depth)
@@ -554,6 +560,14 @@ pub(crate) fn builder(
     }
     if let Some(ts) = as_of_recorded {
         b = b.as_of_recorded(ts);
+    }
+    // `None` is the trunk and is not the same as `Some("main")` on the Rust
+    // side — one leaves the field unset, the other sets it — but the two read
+    // identically by construction, and `lineage_shape` answers for the database
+    // either way. Passed through rather than defaulted here so the binding does
+    // not decide something the library decides (D-220).
+    if let Some(id) = branch {
+        b = b.on_branch(id);
     }
     b
 }

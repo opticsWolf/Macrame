@@ -496,6 +496,104 @@ async fn main() {
     );
     println!();
 
+    // ---- 4b. Retirement on a branch, which is the case that decides it ----
+    //
+    // §4 is a *correction*: the branch disagrees about a weight, both rows name
+    // the same nodes, and the reachable set is unchanged either way. Retirement
+    // is the case where the reachable set is the whole point — a branch saying
+    // "on my lineage this edge is no longer believed" — and the mechanism
+    // available to it is **shadowing**: since `links_current` is keyed per
+    // lineage, the branch writes its own row at the ancestor's key with a closed
+    // interval, and the ancestor's row is left untouched. That is the only form
+    // of retirement Doctrine III permits across lineages, because closing the
+    // ancestor's own row is the parent corruption branching exists to prevent.
+    //
+    // Whether shadowing *works* is a property of the read, not of the write, and
+    // it is the question 0.14.4 turns on. Two traversals, one edge, one node
+    // that is only reachable through it.
+    println!("--- 4b. retiring an inherited edge, by shadowing ---");
+    let conn = fresh().await;
+    let path = build_chain(&conn, 10).await;
+    build_graph(&conn, None).await;
+    for idx in [LC_COVER_V12, LC_OPEN_V12] {
+        conn.execute(idx, ()).await.unwrap();
+    }
+    let leaf = path.last().unwrap().clone();
+
+    // `n1` is one of the root's ten children and the sole route to its own
+    // hundred descendants, so retiring `n0 -> n1` should cost the branch 111
+    // nodes — itself, its ten children and their hundred.
+    conn.execute(
+        "INSERT INTO links_current \
+             (source_id, target_id, edge_type, valid_from, valid_to, weight, \
+              properties, recorded_at, branch_id) \
+         VALUES ('n0', 'n1', 'LINKS', ?1, ?2, 1.0, '{}', ?1, ?3)",
+        libsql::params![TS, TS, leaf.as_str()],
+    )
+    .await
+    .unwrap();
+
+    let (union_n, _) = run(&conn, RESOLVED_UNION, Some(&leaf)).await;
+    let (near_n, _) = run(&conn, RESOLVED_NEAREST, Some(&leaf)).await;
+    let (plain_n, _) = run(&conn, UNBRANCHED, None).await;
+    println!("  trunk    : {plain_n} nodes");
+    println!(
+        "  union    : {union_n} nodes — {}",
+        if union_n == plain_n {
+            "the retirement had no effect at all"
+        } else {
+            "the retirement was seen"
+        }
+    );
+    println!(
+        "  nearest  : {near_n} nodes — {}",
+        if near_n < plain_n {
+            "the shadow closed the edge and the subtree went with it"
+        } else {
+            "the shadow did not take"
+        }
+    );
+    println!();
+    // ---- 6. What resolution costs a database that never forked ----
+    //
+    // Every database this crate has written so far has exactly one lineage, and
+    // that stays the common case after `fork()` ships. If the resolved form is
+    // still 3x here, then emitting it unconditionally makes every existing
+    // caller pay for a feature none of them use, and the read path needs to pick
+    // a shape the way `cold_lineage` picks one at the archive boundary.
+    //
+    // The `branches` register holds one row; the ancestry is `{main}`; the
+    // `ROW_NUMBER()` partition has exactly one row per group and every `rn` is 1.
+    // The question is whether the planner can see that, and it cannot be
+    // reasoned about — a window function is opaque to it.
+    println!("--- 6. single lineage: what the resolution costs when it cannot help ---");
+    let conn = fresh().await;
+    build_graph(&conn, None).await;
+    for idx in [LC_COVER_V12, LC_OPEN_V12] {
+        conn.execute(idx, ()).await.unwrap();
+    }
+    let (plain_n, plain_ms) = run(&conn, UNBRANCHED, None).await;
+    let (union_n, union_ms) = run(&conn, RESOLVED_UNION, Some(MAIN)).await;
+    let (near_n, near_ms) = run(&conn, RESOLVED_NEAREST, Some(MAIN)).await;
+    println!("  plain   : {plain_n} nodes, {plain_ms:.3} ms");
+    println!(
+        "  union   : {union_n} nodes, {union_ms:.3} ms  ({:.2}x plain)",
+        union_ms / plain_ms
+    );
+    println!(
+        "  nearest : {near_n} nodes, {near_ms:.3} ms  ({:.2}x plain)",
+        near_ms / plain_ms
+    );
+    println!(
+        "  {}",
+        if near_ms / plain_ms > 1.5 {
+            "one shape for both cases would charge every existing caller for a \
+             feature none of them use"
+        } else {
+            "one shape is affordable and the read path does not need to branch"
+        }
+    );
+    println!();
     // ---- 5. The write side, which is what an index costs ----
     //
     // §15.3 calls the index change *"a fourth index write per assertion on a
