@@ -3192,10 +3192,64 @@ without the remedy invites somebody to ask for the predicate.
 >   is 0.14.5 — so it is the v13 rung's to widen or to decline in writing.
 >   Pinned by `branch_read_tests::the_append_only_table_is_not_keyed_by_lineage`.
 
+> **Shipped in 0.14.6 on 2026-08-28 ([D-223](architecture/s13-decision-register.md#d-223)).**
+> The fork point becomes a visibility cutoff, and **option (4) below is the form
+> that ships** — the three original options did not contain it.
+>
+> * **Which half of this section was wrong, precisely.** The *semantics* above
+>   are right as written: a read on B is B's rows plus each ancestor's rows
+>   before the fork point on the path down from A. What was wrong is **option
+>   (1)'s cost analysis**, which rested on the premise that resolving over
+>   `links_current` is sufficient. It is not, and the reason is structural
+>   rather than a missing clause: the projection holds one belief per key per
+>   lineage and `trg_links_current_sync` is `ON CONFLICT … DO UPDATE …
+>   recorded_at = excluded.recorded_at`, so it answers *current as of now* and
+>   **cannot** answer *current as of t*. Once an ancestor churns an edge, the
+>   version the branch inherited is not in the table to be filtered.
+> * **So the naive repair is wrong in a new and quieter direction.** A
+>   `recorded_at <= cutoff` predicate over `links_current` does not restore the
+>   inherited edge — it deletes it, and the subtree below it goes too. Probe §3
+>   measures four churn kinds and neither historical form is right on all of
+>   them: 0.14.4 admits post-fork writes; the naive filter removes edges it
+>   should have restored; both lose a *retired* edge's whole subtree, and
+>   nothing in either answer says a subtree went missing.
+> * **Option (4) strictly contains option (2).** The hybrid *is* the log fold,
+>   applied only to the keys where the projection cannot serve. Its escalation
+>   under bad numbers is "fold more keys", which is (2) arriving incrementally,
+>   so this is not a genuine four-way choice: (1) as written is not correct, (3)
+>   is a different feature, and (2) is (4) at 100% churn.
+> * **The equivalence that makes it resolvable in one pass.** Under cutoffs,
+>   nearest-ancestor-wins and latest-`recorded_at`-wins coincide — each
+>   ancestor's visible window ends where its descendant's begins — so the fold
+>   bounds per lineage and the resolution orders by `dist`, with no tiebreak
+>   between ancestors anywhere. It holds because a branch's own writes follow
+>   its fork, which the write path guarantees and no `CHECK` does.
+> * **The cost disagreed with the prediction, in the half that matters.**
+>   Expected: ~1× on untouched keys, ~3× on churned ones, blended ≈ 1 + 2·churn
+>   and independent of history size. Measured on 11,110 trunk edges with one
+>   long-lived branch (probe §4): **1.45×** 0.14.4's read at *zero* churn,
+>   1.81× at 9%, 2.65× at 90%. Churn-linear held; the fixed cost did not, and
+>   zero churn is what a fresh fork looks like. Probe §6 locates it in the fold
+>   arm's machinery — an automatic index and a temp b-tree built whether or not
+>   the arm yields a row — rather than in rows scanned, which is why probe §5
+>   prices the obvious index at **3–13%** and this release declines it.
+> * **The named escalation is a third read shape, not a cache and not an
+>   index**: one probe asking whether any ancestor holds a post-cutoff row, and
+>   the naive filter emitted when the answer is no — exact for the same reason
+>   [D-220](architecture/s13-decision-register.md#d-220)'s two shapes are.
+>   Recorded, not built, per F-33.
+> * **`fork()` is not in this release.** The wrongness above is unreachable
+>   through the public surface — nothing but raw SQL can create a branch today —
+>   and it becomes a semantic break the moment `fork()` exists. That is
+>   [D-160](architecture/s13-decision-register.md#d-160) →
+>   [D-174](architecture/s13-decision-register.md#d-174)'s ordering a third
+>   time, and 0.14.4's own precedent that the read half ships first.
+
+
 
 `links_current` is the projection that makes traversal fast, and it is
-branch-agnostic today. Three ways out, and the crate should take them in this
-order:
+branch-agnostic today. Four ways out — the fourth added in 0.14.6, after (1)
+turned out not to be one:
 
 1. **Resolve at read.** `links_current` gains `branch_id`; a traversal joins the
    ancestry chain. Fork stays O(1); traversal gains a factor of chain depth, and
@@ -3210,6 +3264,19 @@ order:
    fork. Correct for a handful of long-lived branches; wrong for the use case
    that motivates the wave. Recorded so that it is rejected on evidence rather
    than re-proposed.
+4. **Hybrid: the projection for what has not moved, the log for what has**
+   (0.14.6, [D-223](architecture/s13-decision-register.md#d-223)). A branch read
+   takes the `links_current` rows each ancestor may still show — its own, and
+   every row recorded at or before that ancestor's cutoff — unioned with a log
+   fold over exactly the `(edge key, lineage)` pairs whose projected row is
+   *younger* than the cutoff. The two arms are disjoint by one comparison on one
+   row, so nothing has to reason about which of them wins. **Read-path only**:
+   no schema rung, `links_current`'s definition unchanged, `audit_current`
+   untouched, and the fold arm is `LATEST_BELIEF_PROJECTION`'s shape with a
+   `recorded_at` bound — [D-035](architecture/s13-decision-register.md#d-035)'s
+   single-projection rule is what makes this a small repair rather than a
+   subsystem. Cost scales with post-fork churn on the ancestors rather than with
+   history size, plus a fixed cost measured at 1.45× and located in probe §6.
 
 **(1) first, measured, with (2) as the escape hatch.** The measurement is the
 deliverable: depth-3 traversal on a chain of 1, 10 and 100 branches, against the
@@ -3221,13 +3288,25 @@ what the resolution costs is the window function over one row per edge per
 lineage, and materialising a branch's own projection would not remove it. The
 lever that would is the v13 index, which is measured and scheduled.
 
+**And (1) turned out not to be a way out at all** (0.14.6). It is written above
+as *"`links_current` gains `branch_id`; a traversal joins the ancestry chain"*,
+and both halves shipped — at 0.14.2 and 0.14.4 — while the thing the section
+promised, a read bounded by the fork point, did not. What (1) assumed is that
+the projection can serve a cutoff read, and it cannot: see the 0.14.6 block at
+the head of this section. Option (4) is (1) with that assumption replaced by a
+second source rather than by a second table, which is why the fork stays O(1)
+and the schema does not move.
+
 ### 15.4 What ships, and what deliberately does not
 
 **In:**
 
 - `Database::fork(name, from) -> BranchId`, `branches()`, and a branch-scoped
-  read view. **The read half landed early, at 0.14.4**
-  ([D-220](architecture/s13-decision-register.md#d-220)):
+  read view. **The read half landed early, at 0.14.4 and 0.14.6**
+  ([D-220](architecture/s13-decision-register.md#d-220),
+  [D-223](architecture/s13-decision-register.md#d-223)) — 0.14.4 resolved which
+  lineage holds an edge, 0.14.6 bounded that resolution by the fork point, and
+  the second was owed to the first rather than an addition to it:
   `TraversalBuilder::on_branch`, `query_as_of_edges_on` and a lineage-resolving
   `load_subgraph_with` are the surface a branch view will delegate to, so what
   remains here is the type and its lifecycle rather than the query. Shipping the
@@ -3256,7 +3335,11 @@ lever that would is the v13 index, which is measured and scheduled.
 - **The Python surface, in the same release.** W6's finding was that a binding
   gap opened in the release that created the feature never becomes a convention.
   **Held twice so far:** `branch=` on the four traversal entry points at 0.14.4,
-  and the belief's lineage label on `MaterializedState.edges` at 0.14.5.
+  and the belief's lineage label on `MaterializedState.edges` at 0.14.5. 0.14.6
+  adds no surface in either language and is not a third holding or a lapse: the
+  cutoff changes what the existing `branch=` *means*, so a binding written for
+  0.14.4 gets the repair by reading through it. The convention is about gaps
+  between languages, and a semantics-only release opens none.
 
 **Out, and stated as a decision rather than an omission:**
 

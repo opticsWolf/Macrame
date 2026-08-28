@@ -1,5 +1,7 @@
 use crate::error::{Result, StatedInstants};
-use crate::graph::lineage::{ancestry_cte, lineage_shape, visible_cte, LineageShape};
+use crate::graph::lineage::{
+    ancestry_cte, churned_cte, lineage_shape, links_cut_cte, visible_cte, LineageShape,
+};
 use crate::schema::ddl;
 use crate::temporal::as_of::NodeAttributes;
 
@@ -436,9 +438,10 @@ ORDER BY w.node_id;
     /// The relation the walk and the projections read edges from.
     ///
     /// Under [`LineageShape::Resolved`] that is always `visible`, which holds
-    /// one row per edge key from the nearest lineage that has one; the walk and
-    /// the projection do not need to know which relation it reduced. Under
-    /// `Trunk` it is that relation directly.
+    /// one row per edge key from the nearest lineage that has one *and was
+    /// entitled to be seen*; the walk and the projection do not need to know
+    /// which relation it reduced, nor that the reduction had two arms
+    /// (D-223). Under `Trunk` it is that relation directly.
     pub(crate) fn link_source(&self, shape: LineageShape) -> &'static str {
         match shape {
             LineageShape::Resolved => "visible",
@@ -446,16 +449,38 @@ ORDER BY w.node_id;
         }
     }
 
-    /// The relation the resolution reduces, or that the walk reads directly.
+    /// The relation a [`LineageShape::Trunk`] walk reads directly.
     ///
     /// `links_current` under current belief; the `links_at_tx` fold otherwise.
-    /// Both expose the same columns under the same names, which is what lets the
-    /// rest of the SQL — and [`visible_cte`] — be written once.
+    /// On a database with one lineage there is nothing to resolve and nothing
+    /// to bound: the only cutoff a read could apply is a fork point, and a
+    /// one-row `branches` has none.
     pub(crate) fn unresolved_source(&self) -> &'static str {
         if self.as_of_recorded.is_some() {
             "links_at_tx"
         } else {
             "links_current"
+        }
+    }
+
+    /// The relation [`visible_cte`] reduces under [`LineageShape::Resolved`].
+    ///
+    /// Not the same pair as [`Self::unresolved_source`], and the difference is
+    /// the whole of D-223. A transaction-time read already folds the log, so
+    /// `links_at_tx` takes the ancestry's cutoffs as one more bound on rows it
+    /// was going to read anyway. A **current-belief** read cannot: the
+    /// projection holds one row per key per lineage and the sync trigger
+    /// overwrites it, so a lineage's pre-fork belief about a churned edge is
+    /// not in `links_current` to be filtered — it is in the log, and
+    /// [`links_cut_cte`] is the hybrid that goes and gets exactly those.
+    ///
+    /// Both expose the columns `links_current` does, which is what lets the
+    /// rest of the SQL — and [`visible_cte`] — be written once.
+    pub(crate) fn resolved_source(&self) -> &'static str {
+        if self.as_of_recorded.is_some() {
+            "links_at_tx"
+        } else {
+            "links_cut"
         }
     }
 
@@ -499,9 +524,31 @@ ORDER BY w.node_id;
     /// There is no `'D'` arm because there are no link deletes:
     /// `trg_links_guard_delete` refuses them outside an archive session, and an
     /// archive session removes the *log rows* rather than logging a removal.
+    ///
+    /// # The second bound, which is per row rather than per query (D-223)
+    ///
+    /// Under [`LineageShape::Resolved`] the fold is bounded twice: by the
+    /// traversal's own transaction instant, which is one value for the whole
+    /// query, and by each ancestor's visibility cutoff, which is a different
+    /// value per lineage. Joining `lineage` here rather than filtering after
+    /// the window is not a style choice — `ROW_NUMBER()` picks the last entry
+    /// *per partition*, so a post-cutoff row left in the input wins its
+    /// partition and is then discarded, taking the pre-cutoff row that should
+    /// have won with it. The bound has to be inside.
+    ///
+    /// This is also why the transaction-time path needs no
+    /// [`links_cut_cte`]: it is already reading the log, so the cutoff is one
+    /// more `WHERE` clause rather than a second source.
     fn links_at_tx_cte(&self, shape: LineageShape) -> Option<String> {
         self.as_of_recorded.as_ref()?;
         let ts = Self::recorded_slot(shape);
+        let (lineage_join, cutoff) = match shape {
+            LineageShape::Resolved => (
+                "\n        JOIN lineage g ON g.branch_id = transaction_log.branch_id",
+                "\n          AND (g.cutoff IS NULL OR transaction_log.recorded_at <= g.cutoff)",
+            ),
+            LineageShape::Trunk => ("", ""),
+        };
         Some(format!(
             r#"links_at_tx(source_id, target_id, edge_type, valid_from, valid_to, weight, branch_id) AS (
     SELECT json_extract(payload, '$.source_id'),
@@ -512,12 +559,14 @@ ORDER BY w.node_id;
            json_extract(payload, '$.weight'),
            branch_id
     FROM (
-        SELECT payload, branch_id,
+        SELECT transaction_log.payload, transaction_log.branch_id,
                ROW_NUMBER() OVER (
-                   PARTITION BY entity_id, branch_id ORDER BY seq_id DESC
+                   PARTITION BY transaction_log.entity_id, transaction_log.branch_id
+                   ORDER BY transaction_log.seq_id DESC
                ) AS rn
-        FROM transaction_log
-        WHERE table_name = 'links' AND recorded_at <= ?{ts}
+        FROM transaction_log{lineage_join}
+        WHERE transaction_log.table_name = 'links'
+          AND transaction_log.recorded_at <= ?{ts}{cutoff}
     ) WHERE rn = 1
 )"#
         ))
@@ -606,7 +655,13 @@ ORDER BY w.node_id;
         }
         prelude.extend(self.links_at_tx_cte(shape));
         if shape == LineageShape::Resolved {
-            prelude.push(visible_cte(self.unresolved_source()));
+            // The hybrid is for *current* belief only; see `resolved_source`
+            // for why the folded path applies its cutoffs in place instead.
+            if self.as_of_recorded.is_none() {
+                prelude.push(churned_cte().to_string());
+                prelude.push(links_cut_cte().to_string());
+            }
+            prelude.push(visible_cte(self.resolved_source()));
         }
         let prelude: String = prelude.iter().map(|cte| format!("{cte},\n")).collect();
 
@@ -1013,8 +1068,19 @@ mod tests {
         let sql = folded.walk_cte(LineageShape::Resolved);
 
         assert!(
-            sql.contains("PARTITION BY entity_id, branch_id"),
+            sql.contains("PARTITION BY transaction_log.entity_id, transaction_log.branch_id"),
             "two lineages' assertions collapse to one without this: {sql}"
+        );
+        // Qualified by table name rather than by an alias, and that is a plan
+        // decision rather than a style one: 0.14.6's cutoff join brings a
+        // second `branch_id` into scope so the columns must be qualified, and
+        // `EXPLAIN QUERY PLAN` prints whatever the FROM clause named the table.
+        // An alias would rewrite every plan guard that names `transaction_log`
+        // — including the Trunk-shape seek assertion in `bitemporal_plan_tests`,
+        // which is about a query this release does not otherwise touch.
+        assert!(
+            sql.contains("FROM transaction_log\n"),
+            "the fold's table must keep its own name in the plan: {sql}"
         );
         // Carried out of the fold as well as partitioned on, because it is the
         // column the ancestry joins against.

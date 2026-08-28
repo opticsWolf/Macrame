@@ -534,6 +534,16 @@ argument against. `(parent_id IS NULL) = (forked_at IS NULL)` makes the two
 either both present or both absent, so "the root" is one representable state and
 "a branch with a parent but no fork point" is not one at all.
 
+**And `forked_at` is read from 0.14.6 rather than merely stored**
+([D-223](s13-decision-register.md#d-223)). It is in the `recorded_at` domain, and
+a branched read resolves each ancestor's rows only up to the fork point on the
+path down from it — the running minimum of the fork instants between the reader
+and that ancestor, so inheritance narrows at every hop and never widens. v12
+wrote the column and 0.14.4 resolved lineage without it, which is two releases in
+which the schema described a semantics the reader did not have; the note that
+called this column *"what §15.3's visibility cutoffs are computed over"* was a
+statement about the plan, not about the crate, until that release.
+
 #### `branch_id` on `concepts` is provenance, never identity
 
 This is the whole of the design and the sentence everything downstream depends

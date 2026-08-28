@@ -26,6 +26,22 @@
 //! coming back. `a_branch_that_retires_an_inherited_edge_loses_what_it_reached`
 //! is the test that separates the two forms, and it is the reason this file
 //! exists rather than a smaller one about `on_branch` returning rows.
+//!
+//! # The fork point, which 0.14.4 resolved without (0.14.6, D-223)
+//!
+//! Everything above is about *which lineage holds an edge*. It says nothing
+//! about *when*, and 0.14.4 shipped a reader that never looked at
+//! `branches.forked_at` — so a branch kept absorbing its parent's later writes.
+//! `examples/branch_cutoff_probe.rs` §1 is that measurement, and §2 is why the
+//! repair is a hybrid rather than a `WHERE` clause: the sync trigger's
+//! `DO UPDATE` carries `recorded_at` forward, so once an ancestor churns an
+//! edge the pre-fork version is not in `links_current` to be filtered.
+//!
+//! The section at the foot of this file is the matrix that separates the churn
+//! kinds, because they fail *differently*. A branch that wrongly inherits a
+//! post-fork **new edge** gains a node; one that wrongly inherits a post-fork
+//! **reweight** gets a plausible number; one whose ancestor **retired** an edge
+//! loses a subtree under the naive filter, silently.
 
 #[path = "common/harness.rs"]
 mod harness;
@@ -41,6 +57,8 @@ const TS2: &str = "2026-02-01T00:00:00.000000Z";
 /// The instant every traversal below reads at — after every write, so nothing
 /// here turns on valid time except where a fixture closes an interval on purpose.
 const TS3: &str = "2026-03-01T00:00:00.000000Z";
+/// A second post-fork instant, so an ancestor can churn one key twice.
+const TS4: &str = "2026-04-01T00:00:00.000000Z";
 const NOW: &str = "2026-06-01T00:00:00.000000Z";
 const SENTINEL: &str = "9999-12-31T23:59:59.999999Z";
 
@@ -578,5 +596,363 @@ async fn the_edge_query_reads_one_lineage_at_a_time() {
     assert!(
         matches!(err, DbError::NotFound(ref w) if w == "ghost"),
         "{err:?}"
+    );
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// The fork point as a visibility cutoff (0.14.6, D-223)
+// ───────────────────────────────────────────────────────────────────────────
+
+/// The chain depths every case below is run at.
+///
+/// Not because the semantics change with depth — the cutoff a chain resolves
+/// for the trunk is the *first* fork off it whether that is one hop away or a
+/// hundred — but because the ancestry is a recursion that now carries a running
+/// minimum, and [D-219] measured its cost as an addend on the query rather than
+/// a factor on the hops. Running the same assertions at 1, 10 and 100 keeps
+/// both claims under test with one fixture. Composition down the chain is a
+/// separate question and has its own test: `a_grandchild_reads_its_parent_as_of
+/// _its_own_fork`, which needs a write on an *intermediate* lineage and cannot
+/// be reached by deepening a chain the trunk alone writes to.
+///
+/// [D-219]: ../docs/architecture/s13-decision-register.md
+const DEPTHS: [usize; 3] = [1, 10, 100];
+
+/// Fork instants, one microsecond apart and all after the trunk's own writes.
+fn fork_instant(hop: usize) -> String {
+    format!("2026-02-01T00:00:00.{hop:06}Z")
+}
+
+/// `a → b → c → d` on the trunk, and a chain of `depth` lineages under it.
+///
+/// Returns the deepest branch's name, which is the reader in every case below.
+/// The trunk's edges are recorded at `TS`, before every fork instant, so they
+/// are inherited; anything the trunk writes at `TS3` or later is post-fork for
+/// the whole chain.
+async fn chain(conn: &libsql::Connection, depth: usize) -> String {
+    macrame::schema::run_migrations(conn).await.unwrap();
+    for id in ["a", "b", "c", "d"] {
+        conn.execute(
+            "INSERT INTO concepts (id, title, valid_from, recorded_at) VALUES (?1, 'N', ?2, ?2)",
+            libsql::params![id, TS],
+        )
+        .await
+        .unwrap();
+    }
+    let mut parent = "main".to_string();
+    for hop in 1..=depth {
+        let child = format!("L{hop}");
+        conn.execute(
+            "INSERT INTO branches (branch_id, parent_id, forked_at, created_at) \
+             VALUES (?1, ?2, ?3, ?3)",
+            libsql::params![child.as_str(), parent.as_str(), fork_instant(hop)],
+        )
+        .await
+        .unwrap();
+        parent = child;
+    }
+    for (source, target) in [("a", "b"), ("b", "c"), ("c", "d")] {
+        edge(conn, source, target, "main", SENTINEL, 1.0, TS).await;
+    }
+    parent
+}
+
+/// A concept minted on the trunk after every fork on the chain.
+async fn late_concept(conn: &libsql::Connection, id: &str) {
+    conn.execute(
+        "INSERT INTO concepts (id, title, valid_from, recorded_at) VALUES (?1, 'N', ?2, ?2)",
+        libsql::params![id, TS3],
+    )
+    .await
+    .unwrap();
+}
+
+/// **The finding, as an assertion.** A post-fork trunk write is not inherited.
+///
+/// This is the case `examples/branch_cutoff_probe.rs` §1 probed and found
+/// wrong: the branch forked in February, the trunk recorded `d → e` in March,
+/// and the branch saw it. §15.3 says a branch reads its ancestors *before the
+/// fork point on the path down from A*, and nothing computed that point.
+///
+/// It is the *cheapest* of the kinds to get right — the new edge's
+/// `links_current` row is post-cutoff, so the projection arm simply declines it
+/// — and it motivates none of the machinery. The three below are why the repair
+/// is a hybrid rather than a predicate.
+#[tokio::test]
+async fn a_branch_does_not_inherit_what_its_parent_recorded_after_the_fork() {
+    for depth in DEPTHS {
+        let harness = TestHarness::new();
+        let conn = connect(&harness).await;
+        let reader = chain(&conn, depth).await;
+
+        late_concept(&conn, "e").await;
+        edge(&conn, "d", "e", "main", SENTINEL, 1.0, TS3).await;
+
+        assert_eq!(
+            reached(&conn, None).await,
+            ["a", "b", "c", "d", "e"],
+            "depth {depth}: the trunk lost its own write"
+        );
+        assert_eq!(
+            reached(&conn, Some(&reader)).await,
+            ["a", "b", "c", "d"],
+            "depth {depth}: {reader} absorbed a trunk write made after it forked"
+        );
+    }
+}
+
+/// A reweight after the fork leaves the branch on the weight it inherited.
+///
+/// The first kind the naive filter cannot serve. `trg_links_current_sync` is
+/// `ON CONFLICT … DO UPDATE … recorded_at = excluded.recorded_at`, so once the
+/// trunk corrects `b → c` the projection holds **only** the March row: the
+/// weight the branch inherited is in `transaction_log` and nowhere else. A
+/// `recorded_at <= cutoff` predicate over `links_current` would drop the edge
+/// rather than restore its weight.
+///
+/// Asserted through a weight floor rather than by reading the number back,
+/// because the floor is what a caller's query does with it — and because a
+/// wrong weight that still clears the floor is a difference no reachability
+/// assertion could see.
+#[tokio::test]
+async fn a_branch_keeps_the_weight_its_parent_had_at_the_fork() {
+    for depth in DEPTHS {
+        let harness = TestHarness::new();
+        let conn = connect(&harness).await;
+        let reader = chain(&conn, depth).await;
+
+        // The trunk drops `b → c` to a tenth, after every fork on the chain.
+        edge(&conn, "b", "c", "main", SENTINEL, 0.1, TS3).await;
+
+        assert_eq!(
+            reached_above(&conn, "main", 0.5).await,
+            ["a", "b"],
+            "depth {depth}: the trunk's own correction did not take"
+        );
+        assert_eq!(
+            reached_above(&conn, &reader, 0.5).await,
+            ["a", "b", "c", "d"],
+            "depth {depth}: {reader} was handed a weight recorded after it forked"
+        );
+    }
+}
+
+/// **The kind that fails silently.** A post-fork retirement must not reach the
+/// branch, and the naive filter deletes the edge instead of preserving it.
+///
+/// The trunk closes `b → c` in March by writing its own row at the same key
+/// with a closed interval. `links_current` now holds one row for that key on
+/// `main`: closed, recorded post-cutoff. Three behaviours are possible and only
+/// one is right:
+///
+/// | read | `c`, `d` |
+/// |---|---|
+/// | 0.14.4, no cutoff | reachable, **wrongly** — the branch inherits a retirement asserted after it forked |
+/// | `recorded_at <= cutoff` over `links_current` alone | unreachable, **wrongly** — the row is filtered and nothing replaces it |
+/// | the hybrid | reachable, from the log entry the trunk wrote before the fork |
+///
+/// The middle row is why this is a separate test from the reweight above. Both
+/// wrong answers are *plausible* — a subtree that quietly stops being reachable
+/// looks like a branch that never had it — and they are wrong in opposite
+/// directions, so a fixture that only checked "the branch differs from the
+/// trunk" would pass on either.
+#[tokio::test]
+async fn a_branch_still_reaches_what_its_parent_retired_after_the_fork() {
+    for depth in DEPTHS {
+        let harness = TestHarness::new();
+        let conn = connect(&harness).await;
+        let reader = chain(&conn, depth).await;
+
+        // Closed in March, which is after every fork instant on the chain.
+        edge(&conn, "b", "c", "main", TS3, 1.0, TS3).await;
+
+        assert_eq!(
+            reached(&conn, None).await,
+            ["a", "b"],
+            "depth {depth}: the trunk's own retirement did not take"
+        );
+        assert_eq!(
+            reached(&conn, Some(&reader)).await,
+            ["a", "b", "c", "d"],
+            "depth {depth}: {reader} lost a subtree to a retirement asserted \
+             after it forked — the projection row was filtered and the log \
+             entry that should have replaced it did not arrive"
+        );
+    }
+}
+
+/// A key an ancestor first asserted *after* the cutoff contributes nothing.
+///
+/// The fold arm's own bound, from the side where returning something is the
+/// failure. The trunk asserts `a → e` in March and corrects it in April: both
+/// entries are post-cutoff, the projection row is post-cutoff, so the key
+/// reaches the fold arm — and the fold must come back **empty** rather than
+/// hand the branch the older of two beliefs it was never entitled to.
+///
+/// This is also what pins the bound *inside* the window rather than after it.
+/// `ROW_NUMBER()` picks the last entry per partition, so a `recorded_at <=
+/// cutoff` applied to the fold's output instead of its input would discard the
+/// winner and return nothing here — right answer, wrong reason — while doing
+/// the same thing to the retirement case above, where nothing is exactly what
+/// must not be returned. One placement is correct for both.
+#[tokio::test]
+async fn an_ancestor_that_first_asserted_after_the_fork_contributes_nothing() {
+    for depth in DEPTHS {
+        let harness = TestHarness::new();
+        let conn = connect(&harness).await;
+        let reader = chain(&conn, depth).await;
+
+        late_concept(&conn, "e").await;
+        edge(&conn, "a", "e", "main", SENTINEL, 1.0, TS3).await;
+        edge(&conn, "a", "e", "main", SENTINEL, 0.2, TS4).await;
+
+        assert_eq!(
+            reached(&conn, None).await,
+            ["a", "b", "c", "d", "e"],
+            "depth {depth}: the trunk lost the key it asserted twice"
+        );
+        assert_eq!(
+            reached(&conn, Some(&reader)).await,
+            ["a", "b", "c", "d"],
+            "depth {depth}: the fold resurrected a belief with no pre-fork \
+             version — {reader} was handed the earlier of two post-cutoff rows"
+        );
+    }
+}
+
+/// The transaction-time path applies the same cutoffs, in its own way.
+///
+/// `links_at_tx` is a second reader and a second chance to be wrong: it folds
+/// `transaction_log` rather than `links_current`, so it needs no hybrid — but
+/// it does need the cutoff *inside* its window, for the reason the case above
+/// states. The retirement fixture is reused deliberately, because it is the one
+/// where a misplaced bound returns an empty partition that looks like an honest
+/// absence.
+#[tokio::test]
+async fn a_transaction_time_read_honours_the_fork_point_too() {
+    for depth in DEPTHS {
+        let harness = TestHarness::new();
+        let conn = connect(&harness).await;
+        let reader = chain(&conn, depth).await;
+
+        edge(&conn, "b", "c", "main", TS3, 1.0, TS3).await;
+
+        assert_eq!(
+            reached_at_tx(&conn, "main").await,
+            ["a", "b"],
+            "depth {depth}: the trunk's fold lost its own retirement"
+        );
+        assert_eq!(
+            reached_at_tx(&conn, &reader).await,
+            ["a", "b", "c", "d"],
+            "depth {depth}: the fold applied the trunk's post-fork retirement \
+             to {reader}"
+        );
+    }
+}
+
+/// **Inheritance composes**, and an empty fold falls through to the next
+/// ancestor rather than to nothing.
+///
+/// `L2` forks from `L1` in April and `L1` from `main` in February, so `L2` sees
+/// `L1` as of April and `main` as of February — each step can only narrow the
+/// window, which is why `ancestry_cte` carries a running minimum rather than an
+/// assignment. The chain fixture above cannot show this: the trunk is the only
+/// writer there, so every ancestor's cutoff resolves to the same first fork.
+/// This needs a write on the *intermediate* lineage, and its own instants.
+///
+/// The third assertion is the one worth having. `L1` retires the trunk's
+/// `b → c` in May, after `L2` forked, so for `L2` that key is churned on `L1` —
+/// and `L1` wrote nothing about it before April, so the fold arm returns
+/// **empty** for that `(key, lineage)` pair. `L2` must then fall through to
+/// `main`'s row, which is pre-February and stands. An implementation reading an
+/// empty fold as "the nearest holder says this does not exist" would drop the
+/// edge instead, which is the retirement failure one lineage further down.
+#[tokio::test]
+async fn a_grandchild_reads_its_parent_as_of_its_own_fork() {
+    /// After `L2` forks, so `L1`'s writes here are its own alone.
+    const T5: &str = "2026-05-01T00:00:00.000000Z";
+
+    let harness = TestHarness::new();
+    let conn = connect(&harness).await;
+    macrame::schema::run_migrations(&conn).await.unwrap();
+
+    for id in ["a", "b", "c", "d"] {
+        conn.execute(
+            "INSERT INTO concepts (id, title, valid_from, recorded_at) VALUES (?1, 'N', ?2, ?2)",
+            libsql::params![id, TS],
+        )
+        .await
+        .unwrap();
+    }
+    // February and April, far enough apart that `L1` can write between them.
+    for (child, parent, forked) in [("L1", "main", TS2), ("L2", "L1", TS4)] {
+        conn.execute(
+            "INSERT INTO branches (branch_id, parent_id, forked_at, created_at)              VALUES (?1, ?2, ?3, ?3)",
+            libsql::params![child, parent, forked],
+        )
+        .await
+        .unwrap();
+    }
+    for (source, target) in [("a", "b"), ("b", "c"), ("c", "d")] {
+        edge(&conn, source, target, "main", SENTINEL, 1.0, TS).await;
+    }
+    // `e` in March — before `L2` forked. `f` in May — after.
+    for (id, at) in [("e", TS3), ("f", T5)] {
+        conn.execute(
+            "INSERT INTO concepts (id, title, valid_from, recorded_at, branch_id)              VALUES (?1, 'N', ?2, ?2, 'L1')",
+            libsql::params![id, at],
+        )
+        .await
+        .unwrap();
+    }
+    edge(&conn, "b", "e", "L1", SENTINEL, 1.0, TS3).await;
+    edge(&conn, "b", "f", "L1", SENTINEL, 1.0, T5).await;
+    edge(&conn, "b", "c", "L1", T5, 1.0, T5).await;
+
+    assert_eq!(
+        reached(&conn, Some("L1")).await,
+        ["a", "b", "e", "f"],
+        "L1 must see all of its own writes, its retirement of b → c included"
+    );
+    assert_eq!(
+        reached(&conn, Some("L2")).await,
+        ["a", "b", "c", "d", "e"],
+        "L2 must read L1 as of its own fork: the edge L1 asserted before it,          neither the one after nor the retirement after — and `c` is reached          through main because L1's fold came back empty rather than negative"
+    );
+}
+
+/// Reading the trunk of a forked ledger is unchanged by any of this.
+///
+/// `main` is the root: no parent, no `forked_at`, and therefore no cutoff. The
+/// ancestry it resolves is itself with a `NULL` cutoff, `churned` is empty by
+/// its own `cutoff IS NOT NULL` clause, and the hybrid reduces to the read
+/// 0.14.4 shipped. Asserted rather than assumed because it is the case every
+/// existing caller is in the moment anybody calls `fork()`, and a cutoff that
+/// leaked onto the trunk would make the trunk stop seeing its own writes.
+#[tokio::test]
+async fn the_trunk_of_a_forked_ledger_has_no_cutoff() {
+    let harness = TestHarness::new();
+    let conn = connect(&harness).await;
+    chain(&conn, 3).await;
+
+    late_concept(&conn, "e").await;
+    edge(&conn, "d", "e", "main", SENTINEL, 1.0, TS3).await;
+    edge(&conn, "b", "c", "main", SENTINEL, 0.1, TS4).await;
+
+    assert_eq!(
+        reached(&conn, None).await,
+        ["a", "b", "c", "d", "e"],
+        "the trunk stopped seeing writes it made itself"
+    );
+    assert_eq!(
+        reached(&conn, Some("main")).await,
+        ["a", "b", "c", "d", "e"],
+        "naming the trunk must mean what not naming it means"
+    );
+    assert_eq!(
+        reached_above(&conn, "main", 0.5).await,
+        ["a", "b"],
+        "the trunk's own correction stopped taking"
     );
 }
