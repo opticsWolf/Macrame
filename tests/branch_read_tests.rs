@@ -166,6 +166,49 @@ async fn reached_at_tx(conn: &libsql::Connection, branch: &str) -> Vec<String> {
         .unwrap()
 }
 
+/// The **other** public reader's edges, as `source→target`, sorted.
+async fn as_of_arrows(conn: &libsql::Connection, branch: Option<&str>) -> Vec<String> {
+    let mut arrows: Vec<String> = macrame::temporal::query_as_of_edges_on(conn, NOW, branch)
+        .await
+        .unwrap()
+        .iter()
+        .map(|e| format!("{}→{}", e.0, e.1))
+        .collect();
+    arrows.sort_unstable();
+    arrows
+}
+
+/// That same reader's answer, reduced the way the traversal's is.
+///
+/// `reached` walks from `a` in SQL; this takes the edge set
+/// `query_as_of_edges_on` returns for the same lineage at the same instant and
+/// walks it in Rust. The two are answering one question about one lineage, so
+/// they have to agree — and until 0.14.10 they did not ([D-227]). The walk is
+/// written out here rather than reused, because reusing the traversal would be
+/// comparing the reader against itself.
+///
+/// [D-227]: ../docs/architecture/s13-decision-register.md#d-227
+async fn reached_via_as_of(conn: &libsql::Connection, branch: Option<&str>) -> Vec<String> {
+    let edges = macrame::temporal::query_as_of_edges_on(conn, NOW, branch)
+        .await
+        .unwrap();
+    let mut seen = std::collections::BTreeSet::from(["a".to_string()]);
+    // One layer per hop, and the fixtures are shorter than the traversal's own
+    // `max_depth(5)`.
+    for _ in 0..5 {
+        let grew: Vec<String> = edges
+            .iter()
+            .filter(|e| seen.contains(&e.0) && !seen.contains(&e.1))
+            .map(|e| e.1.clone())
+            .collect();
+        if grew.is_empty() {
+            break;
+        }
+        seen.extend(grew);
+    }
+    seen.into_iter().collect()
+}
+
 // ───────────────────────────────────────────────────────────────────────────
 // What a lineage sees
 // ───────────────────────────────────────────────────────────────────────────
@@ -966,5 +1009,170 @@ async fn the_trunk_of_a_forked_ledger_has_no_cutoff() {
         reached_above(&conn, "main", 0.5).await,
         ["a", "b"],
         "the trunk's own correction stopped taking"
+    );
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// The other public reader and the fork point (0.14.10, D-227)
+// ───────────────────────────────────────────────────────────────────────────
+
+/// **The finding.** `query_as_of_edges_on` never applied the cutoff at all.
+///
+/// [D-220](../docs/architecture/s13-decision-register.md#d-220) gave three read
+/// paths one resolution and
+/// [D-223](../docs/architecture/s13-decision-register.md#d-223) bounded it by
+/// the fork point. **The bound reached two of them.** The traversal and
+/// `load_subgraph_with` share `TraversalBuilder`, which carries the lineage and
+/// chooses its own source relation, so a repair written there arrives at both;
+/// this reader takes the branch as a bare parameter and spells its own SQL, so
+/// it kept 0.14.4's `visible` over `links_current` for four releases.
+///
+/// The general shape, worth naming because it is not about this function: **the
+/// surface that does not go through the shared builder is the surface that
+/// misses every repair made to the shared builder** — and it misses them
+/// quietly, because the repair's tests are written against the builder.
+///
+/// This is the cheap direction: a post-fork trunk edge handed to a branch that
+/// forked before it existed. The one below is the direction that loses rows.
+#[tokio::test]
+async fn the_as_of_reader_does_not_hand_a_branch_a_post_fork_edge() {
+    for depth in DEPTHS {
+        let harness = TestHarness::new();
+        let conn = connect(&harness).await;
+        let reader = chain(&conn, depth).await;
+
+        late_concept(&conn, "e").await;
+        edge(&conn, "d", "e", "main", SENTINEL, 1.0, TS3).await;
+
+        assert_eq!(
+            as_of_arrows(&conn, None).await,
+            ["a→b", "b→c", "c→d", "d→e"],
+            "depth {depth}: the trunk lost its own write"
+        );
+        assert_eq!(
+            as_of_arrows(&conn, Some(&reader)).await,
+            ["a→b", "b→c", "c→d"],
+            "depth {depth}: {reader} was handed a trunk edge recorded after it \
+             forked — the reader resolved lineage and never looked at the cutoff"
+        );
+    }
+}
+
+/// **The direction that loses rows, and the one nothing announces.**
+///
+/// The trunk retires `b → c` after the fork. `trg_links_current_sync` carries
+/// `recorded_at` forward on conflict, so the projection then holds one row for
+/// that key on `main` — closed, post-cutoff — and the version the branch is
+/// entitled to see is in `transaction_log` and nowhere else. A reader without
+/// the hybrid does not merely show a stale edge here: it shows **no** edge, and
+/// a caller cannot tell a branch that lost `b → c` apart from a branch that
+/// never had it.
+///
+/// Measured on this fixture before the repair: the reader returned `a→b, c→d`
+/// while the traversal on the same lineage reached `a, b, c, d`. Two public
+/// readers, one lineage, and a disagreement neither answer mentioned.
+#[tokio::test]
+async fn the_as_of_reader_keeps_what_its_parent_retired_after_the_fork() {
+    for depth in DEPTHS {
+        let harness = TestHarness::new();
+        let conn = connect(&harness).await;
+        let reader = chain(&conn, depth).await;
+
+        edge(&conn, "b", "c", "main", TS3, 1.0, TS3).await;
+
+        assert_eq!(
+            as_of_arrows(&conn, None).await,
+            ["a→b", "c→d"],
+            "depth {depth}: the trunk's own retirement did not take"
+        );
+        assert_eq!(
+            as_of_arrows(&conn, Some(&reader)).await,
+            ["a→b", "b→c", "c→d"],
+            "depth {depth}: {reader} lost an inherited edge to a retirement \
+             recorded after it forked — the projection row was the trunk's \
+             closed one, and nothing went to the log for the entry behind it"
+        );
+    }
+}
+
+/// The two public readers agree about what a lineage sees, on every churn kind.
+///
+/// The matrix above pins the traversal against four post-fork churn kinds
+/// because they fail differently. This runs the same four and requires the
+/// *other* reader to reach the same nodes — which is the property, rather than
+/// four more hand-written expectations free to drift from the first four.
+///
+/// **The reweight kind is the one this reader structurally cannot see**, since
+/// its tuple carries no weight (`branch_write_tests` makes the same observation
+/// from the write side). It is run anyway and it is not padding: a reweight
+/// that *also* went missing would surface here as a lost node, which is exactly
+/// what the naive `recorded_at <= cutoff` filter does to it.
+#[tokio::test]
+async fn the_two_public_readers_agree_about_what_a_lineage_sees() {
+    for kind in ["new-edge", "reweight", "retirement", "post-fork-only"] {
+        for depth in DEPTHS {
+            let harness = TestHarness::new();
+            let conn = connect(&harness).await;
+            let reader = chain(&conn, depth).await;
+
+            match kind {
+                "new-edge" => {
+                    late_concept(&conn, "e").await;
+                    edge(&conn, "d", "e", "main", SENTINEL, 1.0, TS3).await;
+                }
+                "reweight" => edge(&conn, "b", "c", "main", SENTINEL, 0.1, TS3).await,
+                "retirement" => edge(&conn, "b", "c", "main", TS3, 1.0, TS3).await,
+                _ => {
+                    late_concept(&conn, "e").await;
+                    edge(&conn, "a", "e", "main", SENTINEL, 1.0, TS3).await;
+                    edge(&conn, "a", "e", "main", SENTINEL, 0.2, TS4).await;
+                }
+            }
+
+            for branch in [None, Some(reader.as_str())] {
+                assert_eq!(
+                    reached_via_as_of(&conn, branch).await,
+                    reached(&conn, branch).await,
+                    "{kind} at depth {depth}: the two public readers disagree \
+                     about what {} sees",
+                    branch.unwrap_or("main")
+                );
+            }
+        }
+    }
+}
+
+/// The trunk's answer is what it was, and that is the point.
+///
+/// `main` has no ancestors and no cutoff, so `churned` is empty by its own
+/// `cutoff IS NOT NULL` clause and `links_cut` reduces to `links_current`. The
+/// hybrid is therefore not a behaviour change for the case every existing
+/// caller is in the moment somebody calls `fork()` — asserted rather than
+/// argued, because a cutoff leaking onto the trunk would make the trunk stop
+/// seeing its own writes.
+#[tokio::test]
+async fn the_as_of_reader_leaves_the_trunk_of_a_forked_ledger_alone() {
+    let harness = TestHarness::new();
+    let conn = connect(&harness).await;
+    chain(&conn, 3).await;
+
+    late_concept(&conn, "e").await;
+    edge(&conn, "d", "e", "main", SENTINEL, 1.0, TS3).await;
+    edge(&conn, "b", "c", "main", SENTINEL, 0.1, TS4).await;
+
+    assert_eq!(
+        as_of_arrows(&conn, None).await,
+        ["a→b", "b→c", "c→d", "d→e"],
+        "the trunk stopped seeing writes it made itself"
+    );
+    // Naming it explicitly still means the same thing, on a ledger where both
+    // spellings now take the *hybrid* shape rather than 0.14.4's.
+    assert_eq!(
+        macrame::temporal::query_as_of_edges_on(&conn, NOW, Some("main"))
+            .await
+            .unwrap(),
+        macrame::temporal::query_as_of_edges(&conn, NOW)
+            .await
+            .unwrap()
     );
 }

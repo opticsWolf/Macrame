@@ -3410,7 +3410,15 @@ and the schema does not move.
   lineage holds an edge, 0.14.6 bounded that resolution by the fork point, and
   the second was owed to the first rather than an addition to it:
   `TraversalBuilder::on_branch`, `query_as_of_edges_on` and a lineage-resolving
-  `load_subgraph_with` are the surface a branch view will delegate to, so what
+  `load_subgraph_with` are the surface a branch view will delegate to — **and
+  the middle one of those three carried 0.14.6's repair only from 0.14.10**
+  ([D-227](architecture/s13-decision-register.md#d-227)): the cutoff is emitted
+  by `TraversalBuilder`, so it reached the two paths built from the builder and
+  not the one that spells its own SQL. The same fact is why that reader was the
+  one read surface 0.14.4 never bound into Python. One cause, two symptoms, and
+  the general shape is worth carrying past this wave — *a surface outside the
+  shared builder misses every repair made to the shared builder, quietly,
+  because the repair's tests are written against the builder*, so what
   remains here is the type and its lifecycle rather than the query. Shipping the
   read first was deliberate — a write that creates something unreadable is the
   worse order, and the read was the half that had to be measured. **W11.1 was a prerequisite and answered it in the negative
@@ -3438,7 +3446,7 @@ and the schema does not move.
   enforcing it and the existing-rows default proving the migration is additive.
 - **The Python surface, in the same release.** W6's finding was that a binding
   gap opened in the release that created the feature never becomes a convention.
-  **Held four times so far:** `branch=` on the four traversal entry points at
+  **Held five times so far:** `branch=` on the four traversal entry points at
   0.14.4, the belief's lineage label on `MaterializedState.edges` at 0.14.5,
   `Database.fork` / `branches()` / `Branch` plus four error classes at 0.14.7,
   `branch=` on both assertion builders, `retire_edge(..., branch=…)` and
@@ -3448,6 +3456,17 @@ and the schema does not move.
   Rust splits `retire_edge` / `retire_edge_on` because a sixth positional
   argument would make every existing call site read as though it had made a
   lineage decision, and Python has keyword defaults, so one method takes both.
+  **And once, a lapse** ([D-227](architecture/s13-decision-register.md#d-227)).
+  0.14.4's entry above says "the four traversal entry points", and there were
+  **five** surfaces taking a lineage in Rust: `query_as_of_edges_on` is the
+  fifth, and the only one `graph::builder` does not construct, so binding the
+  keyword at the shared helper bound four at once and left that one at nothing.
+  Closed at 0.14.10 alongside the Rust repair that the same fact had cost it,
+  because a repair Python cannot observe is a repair nobody there can test. The
+  rule the lapse suggests: a convention checked per *feature* gets checked on
+  the surfaces that share an implementation, and the surfaces that do not share
+  it are where it silently holds four times out of five.
+
   0.14.6 adds no surface in either language and is neither a holding nor a lapse:
   the cutoff changes what the existing `branch=` *means*, so a binding written
   for 0.14.4 gets the repair by reading through it. The convention is about gaps

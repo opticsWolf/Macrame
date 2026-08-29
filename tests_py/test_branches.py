@@ -111,6 +111,55 @@ def test_a_fork_reads_its_parents_history_and_stops_at_the_fork_point(db):
     assert db.traverse_ids("a", max_depth=5, branch=alt.id) == ["a", "b", "c"]
 
 
+def test_the_as_of_reader_stops_at_the_fork_point_as_well(db):
+    """The same fixture as above, through the reader that is not a traversal.
+
+    ``query_as_of_edges`` took no lineage from Python until 0.14.10 — it was the
+    fifth surface that took one in Rust and the one 0.14.4 missed, because it is
+    the read that does not go through the traversal builder. The Rust side of
+    it had missed the fork-point cutoff for the same reason and for four
+    releases (D-227), so the keyword and the cutoff arrive together: a repair
+    Python cannot observe is a repair nobody here can test.
+
+    Both directions are asserted, and the second is the one that loses rows. A
+    post-fork *assertion* on the trunk must not reach the branch; a post-fork
+    *retirement* on the trunk must not reach it either, which means the edge is
+    still there — and before the repair it was not, because the retirement had
+    overwritten the projection row the branch was reading through.
+    """
+    alt = db.fork("alt")
+
+    db.assert_edge(macrame.EdgeAssertion("c", "d", "LEADSTO", valid_from=T0))
+
+    def pairs(**kw):
+        return sorted((e[0], e[1]) for e in db.query_as_of_edges(**kw))
+
+    assert pairs() == [("a", "b"), ("b", "c"), ("c", "d")]
+    assert pairs(branch=alt.id) == [("a", "b"), ("b", "c")]
+
+    # And now the trunk retires an edge the branch inherited.
+    db.retire_edge("b", "c", "LEADSTO", T0, "2026-01-01T00:00:00.000000Z")
+
+    assert pairs() == [("a", "b"), ("c", "d")]
+    assert pairs(branch=alt.id) == [
+        ("a", "b"),
+        ("b", "c"),
+    ], "alt lost an inherited edge to a retirement recorded after it forked"
+
+
+def test_the_as_of_reader_refuses_a_lineage_that_does_not_exist(db):
+    """The same refusal the traversal entry points make, from the same reason.
+
+    Answering an unregistered name with the trunk's view is the answer a caller
+    is least able to detect, because on a ledger that has never forked the
+    trunk's view is what they expected anyway (D-069).
+    """
+    db.fork("alt")
+    with pytest.raises(macrame.UnknownBranchError) as caught:
+        db.query_as_of_edges(branch="ghost")
+    assert caught.value.branch == "ghost"
+
+
 def test_the_fork_point_is_a_datetime_and_the_trunks_is_none(db):
     """P3's timestamp rule reaches these fields like every other instant."""
     import datetime as dt

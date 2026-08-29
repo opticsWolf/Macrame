@@ -239,6 +239,11 @@ let seen = TraversalBuilder::new(root)
     .on_branch(alt.id.clone())                 // unset means the trunk, never a union
     .execute_ids(db.read_conn(), ts).await?;
 let edges = query_as_of_edges_on(db.read_conn(), ts, Some(&alt.id)).await?;
+// ^ resolved since 0.14.4 and CUT AT THE FORK POINT only since 0.14.10
+//   (D-227): it is the read that does not go through TraversalBuilder,
+//   so D-223's repair reached the other two and not this one. Same
+//   cause, second symptom: it is also the read that had no `branch=` in
+//   Python until then -- `db.query_as_of_edges(ts, branch=...)` (§14).
 let g = db.load_subgraph_with(&builder.on_branch(alt.id), ts, budget).await?;
 // Refusals: UnknownBranch (unregistered, in `fork` and in every read that names
 // one), BranchExists (taken, `"main"` included), InvalidBranchId, and

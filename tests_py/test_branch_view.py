@@ -88,6 +88,30 @@ def test_a_view_reads_what_passing_branch_by_hand_reads(db):
     assert g.edge_count() == 2
 
 
+def test_the_view_reads_the_as_of_edges_of_its_own_lineage(db):
+    """The sixth read on the view, and the last one Python was missing.
+
+    The Rust view has had ``query_as_of_edges`` since 0.14.9; this one could not
+    have it, because the binding underneath took no lineage until 0.14.10
+    (D-227). One delegating line, like every other method here — the assertion
+    is that it means the same thing as naming the branch by hand, and that the
+    trunk is not moved by either.
+    """
+    db.assert_edge(edge("a", "b"))
+    alt = db.fork("alt")
+    view = macrame.BranchView(db, alt.id)
+    view.assert_edge(edge("b", "c"))
+
+    def pairs(rows):
+        return sorted((e[0], e[1]) for e in rows)
+
+    assert pairs(view.query_as_of_edges()) == pairs(
+        db.query_as_of_edges(branch="alt")
+    )
+    assert pairs(view.query_as_of_edges()) == [("a", "b"), ("b", "c")]
+    assert pairs(db.query_as_of_edges()) == [("a", "b")]
+
+
 def test_a_view_of_the_trunk_is_the_trunk(db):
     db.fork("alt")
     trunk = macrame.BranchView(db, "main")

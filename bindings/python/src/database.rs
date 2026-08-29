@@ -1054,16 +1054,37 @@ impl PyDatabase {
     /// node: this is the whole of `links_current` filtered to the instant. On a
     /// large ledger that is a large answer, and there is no budget on it —
     /// `load_subgraph` is the bounded neighbourhood read.
-    #[pyo3(signature = (ts = None))]
+    ///
+    /// # `branch=`, four releases after the other read surfaces got it
+    ///
+    /// 0.14.4 bound `branch=` on the four traversal entry points, and this
+    /// reader was the fifth surface that took a lineage in Rust and did not get
+    /// one here. It went unnoticed because it is the read that does not go
+    /// through `graph::builder` — the same reason the fork-point cutoff did not
+    /// reach the Rust side of it until 0.14.10 ([D-227]). Closing the two
+    /// together is deliberate: a repair Python cannot observe is a repair
+    /// nobody here can test.
+    ///
+    /// The name is passed through rather than validated, exactly as the
+    /// traversal entry points pass theirs, so an unregistered lineage raises
+    /// `UnknownBranchError` naming it and the two surfaces refuse alike.
+    ///
+    /// [D-227]: ../../docs/architecture/s13-decision-register.md#d-227
+    #[pyo3(signature = (ts = None, *, branch = None))]
     fn query_as_of_edges<'py>(
         &self,
         py: Python<'py>,
         ts: Option<&Bound<'py, PyAny>>,
+        branch: Option<String>,
     ) -> PyResult<Vec<Bound<'py, pyo3::types::PyTuple>>> {
         let ts = self.instant(py, ts)?;
         let raw = self.with_db(py, move |db| {
             runtime()
-                .block_on(macrame::temporal::query_as_of_edges(db.read_conn(), &ts))
+                .block_on(macrame::temporal::query_as_of_edges_on(
+                    db.read_conn(),
+                    &ts,
+                    branch.as_deref(),
+                ))
                 .map_err(to_py)
         })?;
         raw.iter().map(|e| temporal::edge_to_py(py, e)).collect()

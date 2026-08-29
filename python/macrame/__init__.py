@@ -406,6 +406,15 @@ class BranchView:
             start_node, max_hops, byte_budget, branch=self._id, **kwargs
         )
 
+    def query_as_of_edges(self, ts=None):
+        """`Database.query_as_of_edges` on this lineage.
+
+        The read the Rust view has had since 0.14.9 and this one has had
+        since 0.14.10, because the binding it delegates to did not take a
+        lineage until then.
+        """
+        return self._db.query_as_of_edges(ts, branch=self._id)
+
     def search_filtered(self, *args, **kwargs):
         """`Database.search_filtered` on this lineage."""
         return self._db.search_filtered(*args, branch=self._id, **kwargs)

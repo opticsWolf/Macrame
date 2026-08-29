@@ -82,19 +82,51 @@ pub async fn query_as_of_edges(
     query_as_of_edges_on(conn, ts, None).await
 }
 
-/// [`query_as_of_edges`] on a named lineage (§15.3, D-220).
+/// [`query_as_of_edges`] on a named lineage (§15.3, D-220; the cutoff 0.14.10,
+/// [D-227]).
+///
+/// # The repair this function was left out of
+///
+/// 0.14.4 gave three read paths the same resolution — this one, the traversal,
+/// and `load_subgraph_with` — and 0.14.6 bounded that resolution by the fork
+/// point ([D-223]). **The bound reached two of the three.** The traversal and
+/// the subgraph loader share [`TraversalBuilder`](crate::graph::TraversalBuilder),
+/// which carries the lineage and picks its own source relation, so a repair
+/// written there arrived at both. This function takes the branch as a bare
+/// parameter and spells its own SQL, so it kept 0.14.4's `visible` over
+/// `links_current` and went on absorbing an ancestor's post-fork writes for
+/// four releases.
+///
+/// It was wrong in both directions D-223 names, and the second is the silent
+/// one: a branch was handed a trunk edge recorded after it forked, **and** lost
+/// an inherited edge the moment the trunk retired it — because the retirement
+/// overwrote the projection row the branch was reading through. The reader
+/// returned four edges where the traversal on the same lineage reached five
+/// nodes, and nothing in either answer said they disagreed.
+///
+/// So the resolved form is now the hybrid the traversal emits, assembled from
+/// the same functions in `graph::lineage` rather than a second copy of
+/// it: `links_cut` for what each ancestor may still show, and `visible` to pick
+/// the nearest lineage holding each key. **The trunk's answer is unchanged** —
+/// `main` has no ancestors and no cutoff, so `churned` is empty and `links_cut`
+/// is `links_current` — and an unforked database never reaches this arm at all.
 ///
 /// # Errors
 ///
 /// [`DbError::UnknownBranch`](crate::DbError::UnknownBranch), naming it, when it
 /// is not registered — refused rather than answered for the trunk, for the
 /// reason `graph::lineage::lineage_shape` gives.
+///
+/// [D-223]: ../../docs/architecture/s13-decision-register.md#d-223
+/// [D-227]: ../../docs/architecture/s13-decision-register.md#d-227
 pub async fn query_as_of_edges_on(
     conn: &libsql::Connection,
     ts: &str,
     branch: Option<&str>,
 ) -> Result<Vec<(String, String, String, String, String)>> {
-    use crate::graph::lineage::{ancestry_cte, lineage_shape, visible_cte, LineageShape};
+    use crate::graph::lineage::{
+        ancestry_cte, churned_cte, lineage_shape, links_cut_cte, visible_cte, LineageShape,
+    };
 
     // The same two shapes the traversal picks between, and for the same
     // measured reason (D-219): the resolved form is 3x on a database with
@@ -112,11 +144,17 @@ pub async fn query_as_of_edges_on(
                 vec![ts.into()],
             ),
             LineageShape::Resolved => (
+                // The CTE order is the prelude `TraversalBuilder::walk_cte`
+                // assembles, and it is an order rather than a list: `churned`
+                // reads `lineage`, `links_cut` reads `churned`, `visible` reads
+                // `links_cut`, and SQLite resolves a `WITH` list as written.
                 format!(
-                    "WITH RECURSIVE {},\n{}\n                     SELECT source_id, target_id, edge_type, valid_from, valid_to \
+                    "WITH RECURSIVE {},\n{},\n{},\n{}\n                     SELECT source_id, target_id, edge_type, valid_from, valid_to \
                      FROM visible WHERE valid_from <= ?1 AND ?1 < valid_to",
                     ancestry_cte(2),
-                    visible_cte("links_current"),
+                    churned_cte(),
+                    links_cut_cte(),
+                    visible_cte("links_cut"),
                 ),
                 vec![
                     ts.into(),

@@ -785,6 +785,44 @@ on the Rust value, where a new field comes along for free — the reasoning
 [D-225](s13-decision-register.md#d-225) used when it took `#[non_exhaustive]` on
 both structs.
 
+<a id="fifth-read-surface"></a>
+
+### 14.18 The fifth read surface, and the convention's first lapse (0.14.10, W12.10, [D-227](s13-decision-register.md#d-227))
+
+Every section above records W6's convention being **held** — the binding ships
+in the release that creates the feature, not the one after. This one records it
+being missed, and the interesting part is not that it happened but *where*.
+
+0.14.4 bound `branch=` on "the four traversal entry points". There were five
+surfaces that took a lineage in Rust. The fifth is
+`temporal::query_as_of_edges_on`, and it is the only one `graph::builder` does
+not construct: `traverse_ids`, `traverse`, `load_subgraph` and `search_filtered`
+all end at one helper that appends `on_branch`, so binding the keyword there
+bound it four times at once — and left the surface that was not on that path
+with nothing.
+
+**The same fact had already cost something on the Rust side.** The fork-point
+cutoff ([D-223](s13-decision-register.md#d-223)) is emitted by
+`TraversalBuilder::resolved_source`, so it reached the traversal and the
+subgraph loader and not this reader, which spells its own SQL. One cause — *not
+built by the shared builder* — and two symptoms four releases apart in nothing
+but where somebody looked. They are closed together on purpose: **a repair
+Python cannot observe is a repair nobody there can test**, and the cutoff would
+otherwise have shipped with its Rust cases and no Python assertion at all.
+
+What ships is `Database.query_as_of_edges(ts, *, branch=None)`, keyword-only for
+the reason every other read here is — a positional lineage would make existing
+call sites read as though they had made a decision they never made — and
+`BranchView.query_as_of_edges`, the sixth read on a Python view that had five
+where the Rust view has six. The name is passed through unvalidated, exactly as
+the traversal entry points pass theirs, so an unregistered lineage raises
+`UnknownBranchError` naming it and the two surfaces refuse alike.
+
+**The rule this suggests, stated rather than left as a moral.** W6's convention
+is checked per *feature*, and a feature that arrives on several surfaces at once
+gets checked on the surfaces that share an implementation. The surfaces that do
+not share it are where a convention silently holds four times out of five.
+
 <!--nav-->
 ← [previous](s13-decision-register.md) · [index](README.md) · [next](appendices.md) →
 <!--/nav-->
