@@ -140,6 +140,20 @@ impl PyConceptUpsert {
         })
     }
 
+    /// This upsert on `branch`, as a **new** object (0.14.9).
+    ///
+    /// [`PyEdgeAssertion::on_branch`]'s reason: `BranchView` stamps assertions
+    /// it did not build, and rebuilding from the getters would drop any field
+    /// added later.
+    fn on_branch(&self, branch: &str) -> PyResult<Self> {
+        Ok(Self {
+            inner: self
+                .inner
+                .clone()
+                .on_branch(crate::branch::branch_id(branch)?),
+        })
+    }
+
     /// The lineage this concept is minted on, or `None` for the trunk.
     ///
     /// A branch **inherits** its parent's concepts and may not restate them —
@@ -234,6 +248,22 @@ impl PyEdgeAssertion {
         }
         Ok(Self {
             inner: e.normalized().map_err(to_py)?,
+        })
+    }
+
+    /// This assertion on `branch`, as a **new** object (0.14.9).
+    ///
+    /// The constructor's `branch=` is the ordinary path; this exists because
+    /// `BranchView` is handed assertions it did not build and has to stamp its
+    /// own lineage without knowing which fields the caller set. Rebuilding from
+    /// the getters would silently drop any field added later, so the stamp
+    /// happens on the Rust value, where a new field comes along for free.
+    fn on_branch(&self, branch: &str) -> PyResult<Self> {
+        Ok(Self {
+            inner: self
+                .inner
+                .clone()
+                .on_branch(crate::branch::branch_id(branch)?),
         })
     }
 
@@ -460,10 +490,7 @@ fn decode_f32_le(bytes: &[u8]) -> PyResult<Vec<f32>> {
         )));
     }
     let (chunks, _) = bytes.as_chunks::<4>();
-    Ok(chunks
-        .iter()
-        .map(|c| f32::from_le_bytes(*c))
-        .collect())
+    Ok(chunks.iter().map(|c| f32::from_le_bytes(*c)).collect())
 }
 
 /// `_coerce_embedding(value)` — exposed so P3 can test the coercion before

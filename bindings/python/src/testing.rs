@@ -49,6 +49,7 @@ pub(crate) const DB_ERROR_VARIANTS: &[&str] = &[
     "BranchExists",
     "ForkPrecedesParent",
     "CrossLineage",
+    "BranchMismatch",
     "ModelNotRegistered",
     "SubgraphTooLarge",
     "NegativeEdgeWeight",
@@ -132,6 +133,10 @@ fn sample(name: &str) -> Option<DbError> {
             id: "socrates".into(),
             held_by: "main".into(),
             attempted: "alt".into(),
+        },
+        "BranchMismatch" => DbError::BranchMismatch {
+            view: "alt".into(),
+            named: "other".into(),
         },
         "ModelNotRegistered" => DbError::ModelNotRegistered {
             model: "nomic_v1".into(),

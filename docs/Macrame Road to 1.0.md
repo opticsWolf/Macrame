@@ -3391,7 +3391,19 @@ and the schema does not move.
   so §17's second acceptance criterion is assertable in both languages. What
   remains of this bullet is the **view**, and it is now purely ergonomic: every
   operation it would wrap exists and takes a lineage, so the type saves a caller
-  from threading a `BranchId` through and buys no capability. **The read half landed
+  from threading a `BranchId` through and buys no capability. **Shipped at
+  0.14.9** ([D-226](architecture/s13-decision-register.md#d-226)), which closes
+  this bullet. Buying no capability is what made it one release rather than a
+  fifth of them, and the tests pin exactly that — the view produces the same
+  rows and the same errors as naming the branch by hand. The `Arc` predicted
+  here turned out to be the whole argument for a separate type rather than an
+  implementation detail: `close` takes `self` by value, so a view *cannot* end
+  the handle it reads through, and the restriction is structural rather than
+  documented. **The half that does not cross to Python is that guarantee** —
+  `close()` is a method on the handle the caller already holds — so the Python
+  view is written in Python, gives the ergonomics and not the structural half,
+  and says so; a pyo3 class would have been a parallel implementation implying
+  otherwise. **The read half landed
   earlier still, at 0.14.4 and 0.14.6**
   ([D-220](architecture/s13-decision-register.md#d-220),
   [D-223](architecture/s13-decision-register.md#d-223)) — 0.14.4 resolved which
@@ -3429,8 +3441,10 @@ and the schema does not move.
   **Held four times so far:** `branch=` on the four traversal entry points at
   0.14.4, the belief's lineage label on `MaterializedState.edges` at 0.14.5,
   `Database.fork` / `branches()` / `Branch` plus four error classes at 0.14.7,
-  and `branch=` on both assertion builders, `retire_edge(..., branch=…)` and
-  `CrossLineageError` at 0.14.8 — where the asymmetry is the other way round:
+  `branch=` on both assertion builders, `retire_edge(..., branch=…)` and
+  `CrossLineageError` at 0.14.8, and `BranchView` plus `on_branch` on both
+  builders and `BranchMismatchError` at 0.14.9 — where the asymmetry is the
+  other way round:
   Rust splits `retire_edge` / `retire_edge_on` because a sixth positional
   argument would make every existing call site read as though it had made a
   lineage decision, and Python has keyword defaults, so one method takes both.

@@ -168,6 +168,12 @@ class ConceptUpsert:
         retired: bool = False,
         branch: str | None = None,
     ) -> None: ...
+    def on_branch(self, branch: str) -> ConceptUpsert:
+        """This upsert on `branch`, as a **new** object (0.14.9).
+
+        The constructor's ``branch=`` is the ordinary path; this is what
+        `BranchView` uses to stamp an upsert it did not build.
+        """
     @property
     def branch(self) -> str | None:
         """The lineage this concept is minted on, or None for the trunk.
@@ -212,6 +218,13 @@ class EdgeAssertion:
         properties: str = ...,
         branch: str | None = None,
     ) -> None: ...
+    def on_branch(self, branch: str) -> EdgeAssertion:
+        """This assertion on `branch`, as a **new** object (0.14.9).
+
+        The constructor's ``branch=`` is the ordinary path; this is what
+        `BranchView` uses to stamp an assertion it did not build, without
+        having to know which fields the caller set.
+        """
     @property
     def branch(self) -> str | None:
         """The lineage this edge is asserted on, or None for the trunk.
@@ -1230,6 +1243,16 @@ class CrossLineageError(BranchError):
     id: str
     held_by: str
     attempted: str
+
+class BranchMismatchError(BranchError):
+    """A `BranchView` was handed a write naming a different lineage.
+
+    The view stamps its own lineage on an assertion that names none. One that
+    names a *different* lineage is contradicted rather than relabelled.
+    """
+
+    view: str
+    named: str
 
 class EngineError(MacrameError):
     """An error from libSQL itself, carried across without interpretation."""

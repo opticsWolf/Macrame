@@ -1922,6 +1922,27 @@ impl Database {
             .await
     }
 
+    /// A handle on one lineage (§15.4, 0.14.9, [D-226]).
+    ///
+    /// Takes `&Arc<Self>` rather than `&self` because the view holds the handle
+    /// and must not be able to end it: `close` takes `self` by value and an
+    /// `Arc` cannot surrender that while a clone survives, so the restriction
+    /// is structural rather than documented. Sharing the handle is already
+    /// `Arc<Database>` (§5.1.11), so this asks for nothing a caller did not
+    /// have.
+    ///
+    /// Does no I/O and cannot fail. Whether the lineage is *registered* is
+    /// asked by every operation on the view, which is where
+    /// [`DbError::UnknownBranch`] names it.
+    ///
+    /// [D-226]: ../../docs/architecture/s13-decision-register.md#d-226
+    pub fn view(
+        self: &std::sync::Arc<Self>,
+        branch: crate::branch::BranchId,
+    ) -> crate::branch::BranchView {
+        crate::branch::BranchView::new(std::sync::Arc::clone(self), branch)
+    }
+
     /// Cut a new lineage from an existing one (§15.2, §15.4).
     ///
     /// # A fork is O(1) in rows written

@@ -191,6 +191,271 @@ pub struct Branch {
     pub created_at: String,
 }
 
+/// One lineage's handle on the ledger (§15.4, 0.14.9, [D-226]).
+///
+/// A `Database` plus a [`BranchId`], so a caller who forked writes and reads
+/// through the fork instead of naming it at every call. Every operation here
+/// exists on [`Database`](crate::Database) already and takes a lineage there —
+/// **this type buys ergonomics and no capability**, which is what makes it the
+/// last piece of §15.4's first bullet rather than a fifth release of it.
+///
+/// ```no_run
+/// # use std::sync::Arc;
+/// # use macrame::graph::EdgeAssertion;
+/// # use macrame::{Database, BranchId};
+/// # async fn f(db: Arc<Database>) -> macrame::Result<()> {
+/// let alt = db.fork(BranchId::new("turn/17/alt/1")?, BranchId::main()).await?;
+/// let view = db.view(alt.id);
+///
+/// view.assert_edge(EdgeAssertion::new("a", "b", "CITES").valid_from(ts())).await?;
+/// let seen = view.traversal("a").execute_ids(view.read_conn(), ts()).await?;
+/// # Ok(())
+/// # }
+/// # fn ts() -> &'static str { "2020-01-01T00:00:00.000000Z" }
+/// ```
+///
+/// # It holds an `Arc<Database>` and cannot close it
+///
+/// [`Database::close`](crate::Database::close) takes `self` by value, and an
+/// `Arc` cannot give that up while any clone survives. So the borrow is
+/// structural rather than a documented request: a caller who forks a view,
+/// reads it and drops it is not one call away from stopping the actor everyone
+/// else is using. That is why the view is a **separate type** over an
+/// `Arc<Database>` and not a `Database` with a field added, and it is the same
+/// argument [D-203] made when `Database: Clone` was declined — a handle that can
+/// be cloned freely must not carry the right to end the thing it handles.
+///
+/// `Clone` is therefore free of that concern and is derived: the view owns no
+/// lifecycle, so cloning it is cloning an `Arc` and a short string.
+///
+/// # What it does with an assertion that names a lineage
+///
+/// It stamps its own on one that names none, and **refuses** one that names a
+/// different lineage with [`DbError::BranchMismatch`].
+/// Stamping over is the shape a caller building through the view produces and
+/// costs nothing; relabelling a write that already named somewhere else would
+/// discard a belief rather than contradict it. See that variant for the failure
+/// it catches.
+///
+/// [D-203]: ../../docs/architecture/s13-decision-register.md#d-203
+/// [D-226]: ../../docs/architecture/s13-decision-register.md#d-226
+#[derive(Clone)]
+pub struct BranchView {
+    db: std::sync::Arc<crate::Database>,
+    branch: BranchId,
+}
+
+/// Hand-written because [`Database`](crate::Database) is not `Debug` — it owns
+/// a connection, a channel and a clock, none of which prints usefully. What a
+/// reader of this type wants is which lineage against which file, so that is
+/// what it prints.
+impl std::fmt::Debug for BranchView {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BranchView")
+            .field("branch", &self.branch)
+            .field("path", &self.db.path())
+            .finish()
+    }
+}
+
+impl BranchView {
+    /// Bind a lineage to a handle.
+    ///
+    /// Infallible and does no I/O: the name is already validated by
+    /// [`BranchId`], and whether it is *registered* is a question every
+    /// operation on this view asks for itself, answering
+    /// [`DbError::UnknownBranch`] by name. A
+    /// constructor that checked would buy one round trip's worth of earlier
+    /// notice and cost the type its `const`-cheapness, and the check would be
+    /// stale by the next call anyway — `branches` is append-only, but the view
+    /// outlives the answer.
+    pub fn new(db: std::sync::Arc<crate::Database>, branch: BranchId) -> Self {
+        Self { db, branch }
+    }
+
+    /// The lineage this view reads and writes.
+    pub fn id(&self) -> &BranchId {
+        &self.branch
+    }
+
+    /// The handle underneath, for the operations that are not lineage-scoped.
+    ///
+    /// `archive`, `checkpoint`, `verify` and the rest are properties of the
+    /// file rather than of a lineage, so they are reached through here rather
+    /// than duplicated onto a view that would answer the same thing for every
+    /// branch.
+    pub fn database(&self) -> &std::sync::Arc<crate::Database> {
+        &self.db
+    }
+
+    /// The read connection, so a [`TraversalBuilder`] from
+    /// [`Self::traversal`] can be executed without reaching for the handle.
+    ///
+    /// [`TraversalBuilder`]: crate::graph::TraversalBuilder
+    pub fn read_conn(&self) -> &libsql::Connection {
+        self.db.read_conn()
+    }
+
+    /// A traversal already pointed at this lineage.
+    ///
+    /// The one read this type needs to wrap, because everything downstream of
+    /// it — `execute_ids`, `execute`,
+    /// [`load_subgraph_with`](crate::Database::load_subgraph_with) — takes the
+    /// lineage *from the builder*. Seeding it here is therefore the whole of
+    /// the read side rather than a first method of several.
+    pub fn traversal(&self, start_node: impl Into<String>) -> crate::graph::TraversalBuilder {
+        crate::graph::TraversalBuilder::new(start_node).on_branch(self.branch.as_str())
+    }
+
+    /// [`Database::load_subgraph`](crate::Database::load_subgraph) on this
+    /// lineage.
+    ///
+    /// The sugar form has no builder to carry the branch, so it is wrapped;
+    /// `load_subgraph_with` is not, because a builder from [`Self::traversal`]
+    /// already carries it.
+    pub async fn load_subgraph(
+        &self,
+        start_node: &str,
+        max_hops: u32,
+        now_ts: &str,
+        byte_budget: usize,
+    ) -> Result<crate::graph::Subgraph> {
+        self.db
+            .load_subgraph_with(
+                &self
+                    .traversal(start_node)
+                    .max_depth(max_hops as usize)
+                    .min_weight(f64::NEG_INFINITY),
+                now_ts,
+                byte_budget,
+            )
+            .await
+    }
+
+    /// Every edge this lineage believes in at `ts`.
+    #[allow(clippy::type_complexity)]
+    pub async fn query_as_of_edges(
+        &self,
+        ts: &str,
+    ) -> Result<Vec<(String, String, String, String, String)>> {
+        crate::temporal::query_as_of_edges_on(self.read_conn(), ts, Some(self.branch.as_str()))
+            .await
+    }
+
+    /// Assert an edge on this lineage.
+    pub async fn assert_edge(&self, edge: crate::graph::EdgeAssertion) -> Result<()> {
+        self.db.assert_edge(self.claim_edge(edge)?).await
+    }
+
+    /// Retire an edge on this lineage — [`Database::retire_edge_on`] without
+    /// the argument.
+    ///
+    /// An inherited edge is retired by writing this lineage's **own** closed
+    /// row at the ancestor's key; the parent's row is never touched.
+    ///
+    /// [`Database::retire_edge_on`]: crate::Database::retire_edge_on
+    pub async fn retire_edge(
+        &self,
+        source: impl Into<String>,
+        target: impl Into<String>,
+        edge_type: impl Into<String>,
+        valid_from: &str,
+        valid_to: &str,
+    ) -> Result<()> {
+        self.db
+            .retire_edge_on(
+                source,
+                target,
+                edge_type,
+                valid_from,
+                valid_to,
+                self.branch.clone(),
+            )
+            .await
+    }
+
+    /// Mint a concept on this lineage.
+    ///
+    /// A branch **inherits** its parent's concepts and may not restate one:
+    /// `concepts` is keyed by identity, so that is
+    /// [`DbError::CrossLineage`].
+    pub async fn upsert_concept(&self, concept: crate::ConceptUpsert) -> Result<()> {
+        self.db.upsert_concept(self.claim_concept(concept)?).await
+    }
+
+    /// [`Database::write_bulk_atomic`](crate::Database::write_bulk_atomic) with
+    /// every edge on this lineage.
+    pub async fn write_bulk_atomic(
+        &self,
+        edges: Vec<crate::graph::EdgeAssertion>,
+    ) -> Result<usize> {
+        self.db.write_bulk_atomic(self.claim_edges(edges)?).await
+    }
+
+    /// [`Database::bulk_import`](crate::Database::bulk_import) with every edge
+    /// on this lineage.
+    pub async fn bulk_import(
+        &self,
+        edges: Vec<crate::graph::EdgeAssertion>,
+    ) -> crate::error::BulkResult<usize> {
+        let edges = self
+            .claim_edges(edges)
+            .map_err(|cause| crate::error::BulkInterrupted { written: 0, cause })?;
+        self.db.bulk_import(edges).await
+    }
+
+    /// [`Database::write_concepts`](crate::Database::write_concepts) with every
+    /// concept on this lineage.
+    pub async fn write_concepts(
+        &self,
+        concepts: Vec<crate::ConceptUpsert>,
+    ) -> crate::error::BulkResult<usize> {
+        let concepts = concepts
+            .into_iter()
+            .map(|c| self.claim_concept(c))
+            .collect::<Result<Vec<_>>>()
+            .map_err(|cause| crate::error::BulkInterrupted { written: 0, cause })?;
+        self.db.write_concepts(concepts).await
+    }
+
+    /// Refuse a foreign lineage, stamp an unnamed one.
+    fn claim_edge(&self, edge: crate::graph::EdgeAssertion) -> Result<crate::graph::EdgeAssertion> {
+        match &edge.branch {
+            Some(named) if named != &self.branch => Err(DbError::BranchMismatch {
+                view: self.branch.as_str().to_string(),
+                named: named.as_str().to_string(),
+            }),
+            Some(_) => Ok(edge),
+            None => Ok(edge.on_branch(self.branch.clone())),
+        }
+    }
+
+    /// [`Self::claim_edge`] for a batch, refusing on the **first** foreign
+    /// lineage rather than reporting all of them.
+    ///
+    /// A batch that names two lineages is a caller error about the batch, not a
+    /// list of independent mistakes, and the first one names the confusion as
+    /// well as the tenth would.
+    fn claim_edges(
+        &self,
+        edges: Vec<crate::graph::EdgeAssertion>,
+    ) -> Result<Vec<crate::graph::EdgeAssertion>> {
+        edges.into_iter().map(|e| self.claim_edge(e)).collect()
+    }
+
+    /// [`Self::claim_edge`] for a concept.
+    fn claim_concept(&self, concept: crate::ConceptUpsert) -> Result<crate::ConceptUpsert> {
+        match &concept.branch {
+            Some(named) if named != &self.branch => Err(DbError::BranchMismatch {
+                view: self.branch.as_str().to_string(),
+                named: named.as_str().to_string(),
+            }),
+            Some(_) => Ok(concept),
+            None => Ok(concept.on_branch(self.branch.clone())),
+        }
+    }
+}
+
 /// Register a lineage, refusing the three things a `CHECK` cannot (§15.2).
 ///
 /// Runs inside the write actor, so the three reads and the insert are one turn

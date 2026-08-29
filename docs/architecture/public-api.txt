@@ -26,6 +26,23 @@ impl core::convert::From<macrame::branch::BranchId> for alloc::string::String
 pub fn alloc::string::String::from(macrame::branch::BranchId) -> Self
 impl core::fmt::Display for macrame::branch::BranchId
 pub fn macrame::branch::BranchId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct macrame::branch::BranchView
+impl macrame::branch::BranchView
+pub async fn macrame::branch::BranchView::assert_edge(&self, macrame::graph::EdgeAssertion) -> macrame::error::Result<()>
+pub async fn macrame::branch::BranchView::bulk_import(&self, alloc::vec::Vec<macrame::graph::EdgeAssertion>) -> macrame::error::BulkResult<usize>
+pub fn macrame::branch::BranchView::database(&self) -> &alloc::sync::Arc<macrame::connection::Database>
+pub fn macrame::branch::BranchView::id(&self) -> &macrame::branch::BranchId
+pub async fn macrame::branch::BranchView::load_subgraph(&self, &str, u32, &str, usize) -> macrame::error::Result<macrame::graph::Subgraph>
+pub fn macrame::branch::BranchView::new(alloc::sync::Arc<macrame::connection::Database>, macrame::branch::BranchId) -> Self
+pub async fn macrame::branch::BranchView::query_as_of_edges(&self, &str) -> macrame::error::Result<alloc::vec::Vec<(alloc::string::String, alloc::string::String, alloc::string::String, alloc::string::String, alloc::string::String)>>
+pub fn macrame::branch::BranchView::read_conn(&self) -> &libsql::connection::Connection
+pub async fn macrame::branch::BranchView::retire_edge(&self, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, &str, &str) -> macrame::error::Result<()>
+pub fn macrame::branch::BranchView::traversal(&self, impl core::convert::Into<alloc::string::String>) -> macrame::graph::TraversalBuilder
+pub async fn macrame::branch::BranchView::upsert_concept(&self, macrame::connection::ConceptUpsert) -> macrame::error::Result<()>
+pub async fn macrame::branch::BranchView::write_bulk_atomic(&self, alloc::vec::Vec<macrame::graph::EdgeAssertion>) -> macrame::error::Result<usize>
+pub async fn macrame::branch::BranchView::write_concepts(&self, alloc::vec::Vec<macrame::connection::ConceptUpsert>) -> macrame::error::BulkResult<usize>
+impl core::fmt::Debug for macrame::branch::BranchView
+pub fn macrame::branch::BranchView::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub const macrame::branch::MAX_BRANCH_ID: usize
 pub mod macrame::connection
 pub mod macrame::connection::chunk_rows
@@ -126,6 +143,7 @@ pub async fn macrame::connection::Database::upsert_concept(&self, macrame::conne
 pub async fn macrame::connection::Database::upsert_embeddings(&self, &macrame::vector::ModelName, alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<f32>)>) -> macrame::error::BulkResult<usize>
 pub async fn macrame::connection::Database::upsert_embeddings_with(&self, &macrame::vector::ModelName, alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<f32>)>, macrame::connection::BulkControl) -> macrame::error::BulkResult<usize>
 pub async fn macrame::connection::Database::verify_snapshot_chain(&self, &str) -> macrame::error::Result<macrame::temporal::ChainCheck>
+pub fn macrame::connection::Database::view(&alloc::sync::Arc<Self>, macrame::branch::BranchId) -> macrame::branch::BranchView
 pub async fn macrame::connection::Database::write_analytics_annotations(&self, alloc::vec::Vec<macrame::connection::Annotation>) -> macrame::error::BulkResult<usize>
 pub async fn macrame::connection::Database::write_analytics_annotations_with(&self, alloc::vec::Vec<macrame::connection::Annotation>, macrame::connection::BulkControl) -> macrame::error::BulkResult<usize>
 pub async fn macrame::connection::Database::write_bulk_atomic(&self, alloc::vec::Vec<macrame::graph::EdgeAssertion>) -> macrame::error::Result<usize>
@@ -169,6 +187,9 @@ pub macrame::error::DbError::ArchiveWindow::window: core::time::Duration
 pub macrame::error::DbError::AttributeModeUnstated
 pub macrame::error::DbError::AttributeModeUnstated::instants: macrame::error::StatedInstants
 pub macrame::error::DbError::BranchExists(alloc::string::String)
+pub macrame::error::DbError::BranchMismatch
+pub macrame::error::DbError::BranchMismatch::named: alloc::string::String
+pub macrame::error::DbError::BranchMismatch::view: alloc::string::String
 pub macrame::error::DbError::BulkCancelled
 pub macrame::error::DbError::CrossLineage
 pub macrame::error::DbError::CrossLineage::attempted: alloc::string::String
@@ -563,6 +584,9 @@ pub macrame::prelude::DbError::ArchiveWindow::window: core::time::Duration
 pub macrame::prelude::DbError::AttributeModeUnstated
 pub macrame::prelude::DbError::AttributeModeUnstated::instants: macrame::error::StatedInstants
 pub macrame::prelude::DbError::BranchExists(alloc::string::String)
+pub macrame::prelude::DbError::BranchMismatch
+pub macrame::prelude::DbError::BranchMismatch::named: alloc::string::String
+pub macrame::prelude::DbError::BranchMismatch::view: alloc::string::String
 pub macrame::prelude::DbError::BulkCancelled
 pub macrame::prelude::DbError::CrossLineage
 pub macrame::prelude::DbError::CrossLineage::attempted: alloc::string::String
@@ -798,6 +822,7 @@ pub async fn macrame::connection::Database::upsert_concept(&self, macrame::conne
 pub async fn macrame::connection::Database::upsert_embeddings(&self, &macrame::vector::ModelName, alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<f32>)>) -> macrame::error::BulkResult<usize>
 pub async fn macrame::connection::Database::upsert_embeddings_with(&self, &macrame::vector::ModelName, alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<f32>)>, macrame::connection::BulkControl) -> macrame::error::BulkResult<usize>
 pub async fn macrame::connection::Database::verify_snapshot_chain(&self, &str) -> macrame::error::Result<macrame::temporal::ChainCheck>
+pub fn macrame::connection::Database::view(&alloc::sync::Arc<Self>, macrame::branch::BranchId) -> macrame::branch::BranchView
 pub async fn macrame::connection::Database::write_analytics_annotations(&self, alloc::vec::Vec<macrame::connection::Annotation>) -> macrame::error::BulkResult<usize>
 pub async fn macrame::connection::Database::write_analytics_annotations_with(&self, alloc::vec::Vec<macrame::connection::Annotation>, macrame::connection::BulkControl) -> macrame::error::BulkResult<usize>
 pub async fn macrame::connection::Database::write_bulk_atomic(&self, alloc::vec::Vec<macrame::graph::EdgeAssertion>) -> macrame::error::Result<usize>
@@ -1233,6 +1258,9 @@ pub macrame::DbError::ArchiveWindow::window: core::time::Duration
 pub macrame::DbError::AttributeModeUnstated
 pub macrame::DbError::AttributeModeUnstated::instants: macrame::error::StatedInstants
 pub macrame::DbError::BranchExists(alloc::string::String)
+pub macrame::DbError::BranchMismatch
+pub macrame::DbError::BranchMismatch::named: alloc::string::String
+pub macrame::DbError::BranchMismatch::view: alloc::string::String
 pub macrame::DbError::BulkCancelled
 pub macrame::DbError::CrossLineage
 pub macrame::DbError::CrossLineage::attempted: alloc::string::String
@@ -1356,6 +1384,23 @@ impl core::convert::From<macrame::branch::BranchId> for alloc::string::String
 pub fn alloc::string::String::from(macrame::branch::BranchId) -> Self
 impl core::fmt::Display for macrame::branch::BranchId
 pub fn macrame::branch::BranchId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct macrame::BranchView
+impl macrame::branch::BranchView
+pub async fn macrame::branch::BranchView::assert_edge(&self, macrame::graph::EdgeAssertion) -> macrame::error::Result<()>
+pub async fn macrame::branch::BranchView::bulk_import(&self, alloc::vec::Vec<macrame::graph::EdgeAssertion>) -> macrame::error::BulkResult<usize>
+pub fn macrame::branch::BranchView::database(&self) -> &alloc::sync::Arc<macrame::connection::Database>
+pub fn macrame::branch::BranchView::id(&self) -> &macrame::branch::BranchId
+pub async fn macrame::branch::BranchView::load_subgraph(&self, &str, u32, &str, usize) -> macrame::error::Result<macrame::graph::Subgraph>
+pub fn macrame::branch::BranchView::new(alloc::sync::Arc<macrame::connection::Database>, macrame::branch::BranchId) -> Self
+pub async fn macrame::branch::BranchView::query_as_of_edges(&self, &str) -> macrame::error::Result<alloc::vec::Vec<(alloc::string::String, alloc::string::String, alloc::string::String, alloc::string::String, alloc::string::String)>>
+pub fn macrame::branch::BranchView::read_conn(&self) -> &libsql::connection::Connection
+pub async fn macrame::branch::BranchView::retire_edge(&self, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, &str, &str) -> macrame::error::Result<()>
+pub fn macrame::branch::BranchView::traversal(&self, impl core::convert::Into<alloc::string::String>) -> macrame::graph::TraversalBuilder
+pub async fn macrame::branch::BranchView::upsert_concept(&self, macrame::connection::ConceptUpsert) -> macrame::error::Result<()>
+pub async fn macrame::branch::BranchView::write_bulk_atomic(&self, alloc::vec::Vec<macrame::graph::EdgeAssertion>) -> macrame::error::Result<usize>
+pub async fn macrame::branch::BranchView::write_concepts(&self, alloc::vec::Vec<macrame::connection::ConceptUpsert>) -> macrame::error::BulkResult<usize>
+impl core::fmt::Debug for macrame::branch::BranchView
+pub fn macrame::branch::BranchView::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct macrame::BulkControl
 impl macrame::connection::BulkControl
 pub fn macrame::connection::BulkControl::cancel_with(self, macrame::connection::CancelToken) -> Self
@@ -1446,6 +1491,7 @@ pub async fn macrame::connection::Database::upsert_concept(&self, macrame::conne
 pub async fn macrame::connection::Database::upsert_embeddings(&self, &macrame::vector::ModelName, alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<f32>)>) -> macrame::error::BulkResult<usize>
 pub async fn macrame::connection::Database::upsert_embeddings_with(&self, &macrame::vector::ModelName, alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<f32>)>, macrame::connection::BulkControl) -> macrame::error::BulkResult<usize>
 pub async fn macrame::connection::Database::verify_snapshot_chain(&self, &str) -> macrame::error::Result<macrame::temporal::ChainCheck>
+pub fn macrame::connection::Database::view(&alloc::sync::Arc<Self>, macrame::branch::BranchId) -> macrame::branch::BranchView
 pub async fn macrame::connection::Database::write_analytics_annotations(&self, alloc::vec::Vec<macrame::connection::Annotation>) -> macrame::error::BulkResult<usize>
 pub async fn macrame::connection::Database::write_analytics_annotations_with(&self, alloc::vec::Vec<macrame::connection::Annotation>, macrame::connection::BulkControl) -> macrame::error::BulkResult<usize>
 pub async fn macrame::connection::Database::write_bulk_atomic(&self, alloc::vec::Vec<macrame::graph::EdgeAssertion>) -> macrame::error::Result<usize>

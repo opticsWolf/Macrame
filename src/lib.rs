@@ -13,7 +13,7 @@ pub mod vector;
 // `[`crate::CHUNK_BUDGET`]` in their rustdoc — an intra-doc link that resolved
 // to nothing, since the const lives in `connection`. The bound is the crate's
 // one cross-cutting number; the root is where a reader looks for it.
-pub use branch::{Branch, BranchId, MAX_BRANCH_ID};
+pub use branch::{Branch, BranchId, BranchView, MAX_BRANCH_ID};
 pub use connection::{
     Annotation, BulkControl, BulkProgress, CadencePolicy, CancelToken, CheckpointReport,
     ConceptUpsert, Database, Tuning, WalCheckpointPolicy, CHUNK_BUDGET,

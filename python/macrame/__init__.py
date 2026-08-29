@@ -95,6 +95,7 @@ from ._macrame import (
     Branch,
     BranchError,
     BranchExistsError,
+    BranchMismatchError,
     CrossLineageError,
     DiagnosticConnError,
     DimMismatchError,
@@ -243,6 +244,9 @@ __all__ = [
     "BranchExistsError",
     "ForkPrecedesParentError",
     "CrossLineageError",
+    "BranchMismatchError",
+    # view
+    "BranchView",
     # writer
     "WriterUnavailableError",
     "WriterDroppedResponderError",
@@ -254,6 +258,157 @@ __all__ = [
     "chunk_budget_ms",
     "engine_linked",
 ]
+
+
+class BranchView:
+    """One lineage's handle on the ledger (§15.4, 0.14.9).
+
+    A `Database` plus a branch name, so a caller who forked reads and writes
+    through the fork instead of passing ``branch=`` at every call::
+
+        alt = db.fork("turn/17/alt/1", "main")
+        view = macrame.BranchView(db, alt.id)
+
+        view.assert_edge(macrame.EdgeAssertion("a", "b", "CITES", valid_from=t0))
+        view.traverse_ids("a", max_depth=5)
+
+    Every method here is the `Database` method of the same name with ``branch=``
+    filled in, so **the view buys ergonomics and no capability**. Operations
+    that are properties of the *file* rather than of a lineage — ``archive``,
+    ``checkpoint``, ``verify``, ``close`` — stay on the handle and are reached
+    through `database`.
+
+    Written in Python rather than in the extension, deliberately
+    -----------------------------------------------------------
+    The Rust `BranchView` wraps an ``Arc<Database>``, and that `Arc` is the
+    point: ``Database::close`` takes ``self`` by value, so a view there
+    *cannot* end the handle it reads through — the restriction is structural.
+    Python has no move semantics to build that guarantee out of. ``close()`` is
+    a method on the `Database` object the caller already holds, and no wrapper
+    can take it away, so a Python view offers the convenience and **not** the
+    guarantee. Implementing it here rather than duplicating the delegation in
+    pyo3 makes that honest and keeps the two surfaces from drifting: each method
+    below passes ``branch=`` through to the binding and does nothing else.
+
+    This is the second deliberate asymmetry in the branch surface, after
+    `BranchId` having no Python class. It is also why there is no
+    ``db.view(...)``: in Rust that method exists to clone the `Arc`, and here
+    there is no `Arc` to clone.
+
+    A write that names another lineage
+    ----------------------------------
+    An assertion carrying no ``branch`` is stamped with this view's. One
+    carrying a *different* branch raises `BranchMismatchError` rather than being
+    relabelled — it is evidence the caller believed something about where the
+    write was going. The failure that motivates it is holding two views and
+    passing one's assertion to the other.
+    """
+
+    __slots__ = ("_db", "_id")
+
+    def __init__(self, database: Database, branch: str) -> None:
+        self._db = database
+        self._id = str(branch)
+
+    # -- identity ----------------------------------------------------------
+
+    @property
+    def id(self) -> str:
+        """The lineage this view reads and writes."""
+        return self._id
+
+    @property
+    def database(self) -> Database:
+        """The handle underneath, for what is not lineage-scoped."""
+        return self._db
+
+    def __repr__(self) -> str:
+        return f"BranchView(branch={self._id!r}, path={self._db.path!r})"
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, BranchView):
+            return NotImplemented
+        return self._id == other._id and self._db is other._db
+
+    def __hash__(self) -> int:
+        return hash((self._id, id(self._db)))
+
+    # -- writes ------------------------------------------------------------
+
+    def _claim(self, item):
+        """Stamp this lineage on an unnamed write; refuse a foreign one."""
+        named = item.branch
+        if named is None:
+            return item.on_branch(self._id)
+        if named != self._id:
+            err = BranchMismatchError(
+                f"view of branch {self._id} was handed a write naming {named}"
+            )
+            err.view = self._id
+            err.named = named
+            raise err
+        return item
+
+    def assert_edge(self, edge: EdgeAssertion) -> None:
+        """`Database.assert_edge` on this lineage."""
+        self._db.assert_edge(self._claim(edge))
+
+    def retire_edge(
+        self,
+        source: str,
+        target: str,
+        edge_type: str,
+        valid_from,
+        valid_to,
+    ) -> None:
+        """`Database.retire_edge` on this lineage.
+
+        An inherited edge is retired by writing this lineage's **own** closed
+        row at the ancestor's key; the parent's row is never touched.
+        """
+        self._db.retire_edge(
+            source, target, edge_type, valid_from, valid_to, branch=self._id
+        )
+
+    def upsert_concept(self, concept: ConceptUpsert) -> None:
+        """`Database.upsert_concept`, minting on this lineage.
+
+        A branch **inherits** its parent's concepts and may not restate one;
+        that raises `CrossLineageError`.
+        """
+        self._db.upsert_concept(self._claim(concept))
+
+    def write_bulk_atomic(self, edges) -> int:
+        """`Database.write_bulk_atomic` with every edge on this lineage."""
+        return self._db.write_bulk_atomic([self._claim(e) for e in edges])
+
+    def bulk_import(self, edges) -> int:
+        """`Database.bulk_import` with every edge on this lineage."""
+        return self._db.bulk_import([self._claim(e) for e in edges])
+
+    def write_concepts(self, concepts) -> int:
+        """`Database.write_concepts` with every concept on this lineage."""
+        return self._db.write_concepts([self._claim(c) for c in concepts])
+
+    # -- reads -------------------------------------------------------------
+
+    def traverse_ids(self, start_node: str, **kwargs):
+        """`Database.traverse_ids` on this lineage."""
+        return self._db.traverse_ids(start_node, branch=self._id, **kwargs)
+
+    def traverse(self, start_node: str, **kwargs):
+        """`Database.traverse` on this lineage."""
+        return self._db.traverse(start_node, branch=self._id, **kwargs)
+
+    def load_subgraph(self, start_node: str, max_hops: int, byte_budget: int, **kwargs):
+        """`Database.load_subgraph` on this lineage."""
+        return self._db.load_subgraph(
+            start_node, max_hops, byte_budget, branch=self._id, **kwargs
+        )
+
+    def search_filtered(self, *args, **kwargs):
+        """`Database.search_filtered` on this lineage."""
+        return self._db.search_filtered(*args, branch=self._id, **kwargs)
 
 
 def _install_fork_guard() -> None:

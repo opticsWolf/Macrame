@@ -357,6 +357,19 @@ create_exception!(
 );
 create_exception!(
     macrame,
+    BranchMismatchError,
+    BranchError,
+    "A `BranchView` was handed a write naming a different lineage. Attributes: \
+     `view`, `named`.\n\n\
+     The view stamps its own lineage on an assertion that names none, which is \
+     what building through the view produces. An assertion that names a \
+     *different* lineage is evidence the caller believed something about where \
+     the write was going, so it is contradicted rather than silently \
+     relabelled — typically two views held at once and one's assertion passed \
+     to the other."
+);
+create_exception!(
+    macrame,
     AttributeModeUnstatedError,
     ValidationError,
     "A traversal asked about the past without saying which text it wanted. \
@@ -669,6 +682,11 @@ fn build(py: Python<'_>, err: DbError) -> PyErr {
             e.setattr("attempted", attempted)
         }),
 
+        DbError::BranchMismatch { view, named } => raise::<BranchMismatchError, _>(py, m, |e| {
+            e.setattr("view", view)?;
+            e.setattr("named", named)
+        }),
+
         DbError::ModelNotRegistered { model, table } => {
             raise::<ModelNotRegisteredError, _>(py, m, |e| {
                 e.setattr("model", model)?;
@@ -919,6 +937,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
         BranchExistsError,
         ForkPrecedesParentError,
         CrossLineageError,
+        BranchMismatchError,
         // writer
         WriterUnavailableError,
         WriterDroppedResponderError,

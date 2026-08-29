@@ -128,6 +128,12 @@ pub enum DbError {
         attempted: String,
     },
 
+    #[error("view of branch {view} was handed a write naming {named}")]
+    BranchMismatch {
+        view: String,
+        named: String,
+    },
+
     #[error("subgraph exceeds budget ({n} > {budget})")]
     SubgraphTooLarge { n: usize, budget: usize },
 

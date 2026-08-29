@@ -749,6 +749,42 @@ None of that can see a wrong *type*. `mypy --strict` over `python/macrame` runs 
 
 **Four docstrings had to survive the crossing in substance, not just in signature**, and they are the ones where the Python surface would otherwise mislead: `close()` (why it is not optional — the final snapshot *and* the write actor's exit status, which no other method can return), `AttributeMode` (that `None` is *unstated*, not `CURRENT`), `write_bulk_atomic` (the hold ceiling, with T1.3's measured numbers, and the pointer to `bulk_import` for callers who want the latency bound instead), and `diagnostic_query` (a boundary — `SQLITE_OPEN_READ_ONLY` on its own connection — not a guardrail, returning values as stored). They live in the Rust source, where they are the same text a `cargo doc` reader sees, and the load-bearing ones are repeated in the stub because editors read stubs first.
 
+### 14.17 `BranchView` is a Python class, and the reason is that the guarantee does not cross (0.14.9, W12.9, [D-226](s13-decision-register.md#d-226))
+
+Fifth holding of [W6's convention](#1416-parity-with-0130-w6) — the binding ships
+in the release that creates the feature — and the first that is **not** a pyo3
+class. Two facts make that the right shape rather than a shortcut.
+
+`PyDatabase` holds an owned `Database` behind an `RwLock<Option<…>>`, not an
+`Arc`, so a pyo3 `BranchView` could not wrap the Rust one. It would be a
+**parallel implementation** of the same delegation, and the two would be free to
+drift in exactly the way §14's whole apparatus exists to prevent.
+
+More to the point, the property the Rust type is built on is unavailable here.
+`Database::close` takes `self` by value and an `Arc` cannot surrender that while
+a clone survives, so a Rust view *cannot* end the handle it reads through — the
+restriction is structural. Python has no move semantics to build that out of:
+`close()` is a method on the `Database` object the caller already holds, and no
+wrapper can take it away. **The Python view therefore delivers the ergonomics
+and not the guarantee, and its own docstring says so.** Writing it as a Python
+class makes each method visibly one line that passes `branch=` through to the
+binding, which is the strongest available statement that the two surfaces mean
+the same thing — a pyo3 class would have implied a guarantee it could not keep.
+
+That is also why there is no `db.view(...)` in Python. In Rust the method exists
+to clone the `Arc`; here there is no `Arc` to clone, so `macrame.BranchView(db,
+alt.id)` is the constructor. **Second deliberate asymmetry in the branch
+surface**, after [`BranchId` having no Python
+class](s13-decision-register.md#d-224), and recorded the same way — a language
+difference stated rather than a parity gap.
+
+What *did* have to cross into the extension is `on_branch` on `EdgeAssertion`
+and `ConceptUpsert`, which is what the view stamps with. Rebuilding an assertion
+from its getters would silently drop any field added later, so the stamp happens
+on the Rust value, where a new field comes along for free — the reasoning
+[D-225](s13-decision-register.md#d-225) used when it took `#[non_exhaustive]` on
+both structs.
+
 <!--nav-->
 ← [previous](s13-decision-register.md) · [index](README.md) · [next](appendices.md) →
 <!--/nav-->

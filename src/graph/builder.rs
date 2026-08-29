@@ -118,11 +118,14 @@ impl TraversalBuilder {
 
     /// Read one lineage's belief rather than the trunk's (§15.3, D-220).
     ///
-    /// At this release the only way to put a second lineage into a database is
-    /// raw SQL; `fork()` arrives at 0.14.5 and is what makes this reachable
-    /// through the crate. The read ships first because it is the half that had
-    /// to be measured (D-219), and because a write that creates something
-    /// unreadable is the worse order to ship the two halves in.
+    /// When this shipped, the only way to put a second lineage into a database
+    /// was raw SQL. The read went first because it is the half that had to be
+    /// measured (D-219), and because a write that creates something unreadable
+    /// is the worse order to ship the two halves in. `fork()` arrived at
+    /// **0.14.7** — this comment said 0.14.5 until 0.14.9, which is a stale
+    /// prediction rather than a record, and the kind D-223 and D-224 were both
+    /// found by reading. [`BranchView::traversal`](crate::BranchView::traversal)
+    /// seeds this from a lineage the caller already holds.
     pub fn on_branch(mut self, branch: impl Into<String>) -> Self {
         self.branch = Some(branch.into());
         self

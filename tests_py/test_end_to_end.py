@@ -203,7 +203,22 @@ def test_the_counters_saw_the_whole_session(kb):
     } <= kinds, sorted(kinds)
 
     assert snapshot.turns == sum(k.turns for k in snapshot.kinds)
-    assert snapshot.violations() == []
+
+    # `violations() == []` is what this asserted until 0.14.9, and it asserted
+    # the opposite of a decision the crate had already made and written down.
+    # `CommandKind::ShadowRebuild` is deliberately not budget-exempt because its
+    # *fill* chunks are meant to fit and its *swap* turn is not going to — the
+    # swap rebuilds three indexes under the lock, which is the residual cost
+    # T1.2 could not remove, and exempting the kind "would hide the first to
+    # excuse the second" (`src/metrics.rs`, `exempt_from_budget`).
+    #
+    # So a `shadow_rebuild` violation here is the counter working. The old
+    # assertion passed only because the swap happened to come in under 3 ms on
+    # a quiet machine; it began failing when the suite grew by ten tests, which
+    # is a load-dependent gate rather than a property. What is worth pinning is
+    # the half that *is* a property: no other kind may break the budget.
+    unexpected = [k.kind for k in snapshot.violations() if k.kind != "shadow_rebuild"]
+    assert unexpected == [], unexpected
 
 
 def test_a_reopened_ledger_answers_the_same_questions(db_path):

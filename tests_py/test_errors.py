@@ -115,11 +115,16 @@ EXPECTED: dict[str, tuple[str, str, dict]] = {
             "parent_forked_at": "2999-01-01T00:00:00.000000Z",
         },
     ),
-    # -- branch (W12.8) --
+    # -- branch (W12.8, W12.9) --
     "CrossLineage": (
         "CrossLineageError",
         "BranchError",
         {"id": "socrates", "held_by": "main", "attempted": "alt"},
+    ),
+    "BranchMismatch": (
+        "BranchMismatchError",
+        "BranchError",
+        {"view": "alt", "named": "other"},
     ),
     # Both axes on the sample, so the pair is checked rather than one of them
     # (0.13.10, D-183). `as_of` was the old single field and named a keyword

@@ -711,6 +711,52 @@ is invisible in a green suite. `concepts` is keyed by identity, so a branch
 **inherits** its parent's concepts and may mint its own; what it may not do is
 restate an inherited one.
 
+<a id="branch-view"></a>
+
+#### `BranchView` — the lineage threaded once instead of at every call (0.14.9, [D-226](s13-decision-register.md#d-226))
+
+The last piece of §15.4's first bullet, and the smallest: a `Database` plus a
+`BranchId`, so a caller who forked reads and writes through the fork. **Every
+method on it exists on `Database` already and takes a lineage there** — the type
+buys ergonomics and no capability, which is what made it one release rather than
+a fifth of them. What the tests pin is exactly that: going through the view
+produces the same rows, and the same errors, as naming the branch by hand.
+
+**The `Arc` is the design.** `Database::close` takes `self` by value and an `Arc`
+cannot surrender that while a clone survives, so *a view cannot end the handle it
+reads through* — structural rather than documented. That is
+[§5.1.11](#5111-sharing-the-handle-arcdatabase-and-not-clone)'s decision reaching
+the use §15.4 reserved it for: `Database: Clone` was declined because a freely
+cloned handle carrying `close()` puts every caller one call away from stopping
+the actor, and a branch view was named at the time as the reason it should stay
+declined. `Database::view` therefore takes `&Arc<Self>`, which asks for nothing a
+caller sharing a handle did not already have, and `BranchView` derives `Clone`
+because it owns no lifecycle.
+
+**Construction does no I/O and cannot fail.** Whether the lineage is *registered*
+is a question every operation on the view already asks — the read path since
+0.14.4, the write path since [D-225](s13-decision-register.md#d-225) — answering
+`UnknownBranch` by name. A checking constructor would buy one round trip's worth
+of earlier notice and be stale by the next call.
+
+**One read is wrapped and the rest are not.** `execute_ids`, `execute` and
+`load_subgraph_with` take the lineage *from the builder*, so `BranchView::traversal`
+seeding it once is the whole of the read side; what is wrapped is the two calls
+that take the branch as a bare parameter — `load_subgraph`, whose sugar form has
+no builder, and `query_as_of_edges_on`. `read_conn()` is lent so a seeded builder
+runs without reaching back for the handle. `database()` is exposed because
+`archive`, `checkpoint` and `verify` are properties of the *file*: duplicating
+them onto a view would answer the same thing for every branch.
+
+**A write naming a different lineage is refused, not relabelled** —
+`DbError::BranchMismatch`, the thirty-ninth variant. An assertion naming *none*
+is stamped, which is what building through the view produces; one naming a
+different lineage is evidence the caller believed something about where the write
+was going, and relabelling it discards the belief rather than contradicting it.
+The failure is two views held at once with one's assertion passed to the other,
+which nothing in the type system prevents — both have the same methods and the
+call site reads correctly.
+
 ### 5.3 graph/vector_filter.rs — strategies and the byte-budget cost model
 
 Vector queries rarely arrive naked: the caller wants "the ten nearest neighbours of this embedding *among concepts reachable in two hops*", or "*among edges of type `CITES` with weight ≥ 0.7*". DiskANN answers the pure-vector question and the relational engine answers the pure-filter question; the composition is where naive implementations go wrong, because the two access paths cannot be nested — the DiskANN index is opaque to SQL predicates, and the relational filter is opaque to the index.

@@ -243,6 +243,34 @@ pub enum DbError {
         attempted: String,
     },
 
+    /// A write reached a [`BranchView`](crate::branch::BranchView) carrying a
+    /// different lineage's name (§15.4, 0.14.9, D-226).
+    ///
+    /// # Why this is refused rather than overwritten
+    ///
+    /// The view exists to spare a caller from threading a `BranchId` through
+    /// every call, so the obvious reading is that it should simply *stamp* its
+    /// own lineage on whatever it is handed. That is right for an assertion
+    /// that names none — which is the shape a caller building through the view
+    /// produces, and the one this does not refuse. It is wrong for an assertion
+    /// that names a **different** lineage, because that assertion is evidence
+    /// the caller believed something about where the write was going, and
+    /// silently relabelling it discards the belief instead of contradicting it.
+    ///
+    /// The failure this catches is holding two views and passing one's
+    /// assertion to the other, which nothing in the type system prevents:
+    /// `BranchView` is `Clone` and both views have the same methods, so the
+    /// mistake reads correctly at the call site and produces rows on the wrong
+    /// lineage. On a ledger where a lineage is what a belief *means*, that is
+    /// not a misfiled row — it is an assertion attributed to the wrong belief.
+    #[error("view of branch {view} was handed a write naming {named}")]
+    BranchMismatch {
+        /// The lineage the view carries.
+        view: String,
+        /// The lineage the assertion named.
+        named: String,
+    },
+
     #[error("subgraph exceeds budget ({n} > {budget})")]
     SubgraphTooLarge { n: usize, budget: usize },
 
