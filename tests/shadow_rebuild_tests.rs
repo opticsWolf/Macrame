@@ -235,6 +235,11 @@ async fn the_indexes_come_back_with_their_declared_names() {
         // rung: no query in the crate seeks on `target_id` as a leading column
         // (D-089, D-118), so it was an index write per assertion buying nothing.
         vec![
+            // v14 (0.14.14, D-231). The swap rebuilds whatever
+            // `CREATE_INDICES` declares, so a third index on this table needed
+            // no code change here — only this list, which is the point of
+            // asserting names rather than a count.
+            "idx_lc_lineage_cut".to_string(),
             "idx_lc_open_interval".to_string(),
             "idx_lc_traversal_cover".to_string(),
         ],

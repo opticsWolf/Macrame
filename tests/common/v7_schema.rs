@@ -104,7 +104,10 @@ pub async fn v7_schema(conn: &libsql::Connection) {
         .unwrap();
     conn.execute(CONCEPTS_FTS_V7, ()).await.unwrap();
 
-    for index_ddl in ddl::CREATE_INDICES.iter().chain(UNREAD_INDICES_V7) {
+    for index_ddl in v11_schema::indices_v11()
+        .iter()
+        .chain(UNREAD_INDICES_V7.iter())
+    {
         conn.execute(index_ddl, ()).await.unwrap();
     }
     // v8's FTS triggers name `rowid_pk`, which this table does not have, so the

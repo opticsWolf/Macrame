@@ -3176,6 +3176,19 @@ without the remedy invites somebody to ask for the predicate.
 >   three; now that the reader exists, the rung has something to buy. It is the
 >   next schema change rather than part of this one, so that the reader's
 >   correctness and the index's speed are separately revertible.
+>
+>   **Shipped at 0.14.14 as schema v14, and it is not this index**
+>   ([D-231](architecture/s13-decision-register.md#d-231)). Separating the two
+>   is what made the correction findable: re-measured against the reader that
+>   actually shipped, folding `branch_id` in buys nothing, because the resolved
+>   walk joins a CTE and never consults this index. D-219's numbers were taken
+>   against `branch_id IN (ancestry)` — the form the *same probe run* proved is
+>   not a resolution — so the rung's justification had described a query path
+>   that stopped existing at 0.14.4. What ships is `idx_lc_lineage_cut`, a
+>   **second** index on `(branch_id, recorded_at, …)` for the two CTEs that do
+>   read the projection by lineage, leaving `idx_lc_traversal_cover` untouched:
+>   every shape that folds `branch_id` into *that* index and helps the branched
+>   read also evicts the trunk walk from its covering plan.
 > * **A third fold was carrying [D-216](architecture/s13-decision-register.md#d-216)'s
 >   defect**, and a fourth still is. `TraversalBuilder::links_at_tx_cte`
 >   partitioned on `entity_id` alone — fixed here. `reconstruct` collapses two
@@ -3191,6 +3204,15 @@ without the remedy invites somebody to ask for the predicate.
 >   error. Unreachable through the crate until branch-scoped writes exist, which
 >   is 0.14.5 — so it is the v13 rung's to widen or to decline in writing.
 >   Pinned by `branch_read_tests::the_append_only_table_is_not_keyed_by_lineage`.
+>
+>   **Neither, at v13 or v14, and deliberately: it is its own release.** The two
+>   items this bullet and the one above assigned to a single rung are not the
+>   same size. An index is one `CREATE INDEX` on a derivative table; widening
+>   the primary key of `links` is a **rebuild of the ledger's largest table**,
+>   which is the operation [D-083](architecture/s13-decision-register.md#d-083)
+>   made pin its own pre-image as text and
+>   [D-119](architecture/s13-decision-register.md#d-119) had to suspend foreign
+>   keys for. Bundling it behind an index would have made one revert undo both.
 
 > **Shipped in 0.14.6 on 2026-08-28 ([D-223](architecture/s13-decision-register.md#d-223)).**
 > The fork point becomes a visibility cutoff, and **option (4) below is the form
@@ -3493,6 +3515,15 @@ and the schema does not move.
   record.
 - **Schema rung to v12**, with `a_version_bump_must_bring_its_own_rung_test`
   enforcing it and the existing-rows default proving the migration is additive.
+
+  **This wave has spent four rungs, not one**, and the arithmetic is worth
+  keeping: v12 the storage (0.14.2), v13 the archive gate (0.14.13), v14 the
+  lineage index (0.14.14), and the `links` key below still owed. The gate held
+  every time — each bump arrived with a test that asserts what its rung is
+  *for*, and the v14 one caught the shape of its own release: an index rung
+  whose only assertion is the version stamp would have shipped the index
+  §15.4 asked for, which the plans show buys nothing and costs a guarantee
+  ([D-231](architecture/s13-decision-register.md#d-231)).
 - **The Python surface, in the same release.** W6's finding was that a binding
   gap opened in the release that created the feature never becomes a convention.
   **Held six times so far:** `branch=` on the four traversal entry points at
@@ -3520,6 +3551,13 @@ and the schema does not move.
   repair is observable through `archive`, `retire_edge(branch=)` and
   `query_as_of_edges(branch=)`, and D-227's finding is that a repair Python
   cannot observe is a repair nobody there can test.
+
+  0.14.14 is the one release in this wave with **nothing to cross**. It adds no
+  surface and, unlike 0.14.12, no observable repair either: what changes is
+  which index the planner picks, and the only Python-visible consequence is that
+  a branched read is faster. A timing assertion is not a test of that, so the
+  convention is satisfied by there being no gap rather than by a case that
+  crosses.
 
   0.14.6 adds no surface in either language and is neither a holding nor a lapse:
   the cutoff changes what the existing `branch=` *means*, so a binding written

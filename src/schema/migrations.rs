@@ -13,7 +13,7 @@ use crate::schema::ddl::*;
 /// guarantee D-029 buys would be void on it while `user_version` insisted all
 /// was well. Reserving 1 as a value this build refuses by name is what makes
 /// "no legacy support" an enforced property instead of a README sentence.
-pub const SCHEMA_VERSION: u32 = 13;
+pub const SCHEMA_VERSION: u32 = 14;
 
 type StepFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
 
@@ -175,6 +175,16 @@ const STEPS: &[Step] = &[
         // are not involved.
         suspends_foreign_keys: false,
         apply: |conn| Box::pin(gate_branches_delete_guard(conn)),
+    },
+    Step {
+        from: 13,
+        to: 14,
+        name: "lineage-cut-index",
+        // One `CREATE INDEX` on an existing derivative table. Nothing is
+        // rebuilt and no row moves, which is the same ground the v3 -> v4,
+        // v5 -> v6 and v10 -> v11 rungs stood on.
+        suspends_foreign_keys: false,
+        apply: |conn| Box::pin(add_lineage_cut_index(conn)),
     },
     Step {
         from: 11,
@@ -750,11 +760,14 @@ async fn add_concepts_fts(conn: &libsql::Connection) -> Result<()> {
 /// `concepts.content`, which is the defect, and there is no way to tell a label
 /// that landed there from the document text it replaced. Recomputing is the
 /// recovery, and recomputing is what this table exists to make cheap.
+/// **No index.** This rung used to re-issue the whole of [`CREATE_INDICES`],
+/// which it needed for exactly one entry — `idx_annotations_label`, the index
+/// on the table it creates. [D-089](../../docs/architecture/s13-decision-register.md#d-089)
+/// found nothing seeks on that index and the v7 → v8 rung dropped it, which
+/// left this loop re-issuing six indices belonging to other rungs and owning
+/// none of them. See [`create_indices`] for why that shape had to go.
 async fn add_analytics_annotations(conn: &libsql::Connection) -> Result<()> {
     conn.execute(CREATE_ANALYTICS_ANNOTATIONS_TABLE, ()).await?;
-    for index_ddl in CREATE_INDICES {
-        conn.execute(index_ddl, ()).await?;
-    }
     Ok(())
 }
 
@@ -806,10 +819,35 @@ async fn gate_branches_delete_guard(conn: &libsql::Connection) -> Result<()> {
 }
 
 async fn add_links_archive_indices(conn: &libsql::Connection) -> Result<()> {
-    for index_ddl in CREATE_INDICES {
-        conn.execute(index_ddl, ()).await?;
-    }
-    Ok(())
+    create_indices(conn, &["idx_links_recorded_at", "idx_links_target"]).await
+}
+
+/// v13 → v14: the lineage read gets an index to seek on (0.14.14, §15.4,
+/// [D-231](../../docs/architecture/s13-decision-register.md#d-231)).
+///
+/// Index-only and on a derivative table, so [D-036] permits it on the same two
+/// grounds every index rung before it stood on. Nothing is dropped:
+/// [`LC_LINEAGE_CUT`] leads on `branch_id` and the two indices already here
+/// lead on `source_id`, so no pair subsumes another.
+///
+/// **This is not the rung §15.4 owes, and the difference is the release.** The
+/// plan asked for `idx_lc_traversal_cover` to *gain* `branch_id`, and
+/// [D-219](../../docs/architecture/s13-decision-register.md#d-219) measured
+/// three placements of it. Both were reasoning about a reader that resolved
+/// with `branch_id IN (ancestry)` — the form the same probe run then showed is
+/// not a resolution at all, and which 0.14.4 consequently did not ship. Under
+/// the reader that did ship, that index is not on the branched path and the
+/// folded shape buys nothing measurable; and any shape leading on `branch_id`
+/// evicts the *trunk* walk from its covering index. See [`CREATE_INDICES`] for
+/// the numbers and the plans.
+///
+/// Nothing is backfilled, because an index has nothing to backfill — `CREATE
+/// INDEX` populates it from the table — so the cost is a function of existing
+/// row count alone.
+///
+/// [D-036]: ../../docs/architecture/s13-decision-register.md#d-036
+async fn add_lineage_cut_index(conn: &libsql::Connection) -> Result<()> {
+    create_indices(conn, &["idx_lc_lineage_cut"]).await
 }
 
 /// v5 → v6: index the single-open-interval probe (D-059).
@@ -829,10 +867,7 @@ async fn add_links_archive_indices(conn: &libsql::Connection) -> Result<()> {
 /// INDEX` populates it from the table. That makes this the cheapest rung on the
 /// ladder and the only one whose cost is a function of existing row count alone.
 async fn add_open_interval_index(conn: &libsql::Connection) -> Result<()> {
-    for index_ddl in CREATE_INDICES {
-        conn.execute(index_ddl, ()).await?;
-    }
-    Ok(())
+    create_indices(conn, &["idx_lc_open_interval"]).await
 }
 
 /// The v7 shape of `links`, pinned as text (T2.1, D-083).
@@ -1225,6 +1260,41 @@ async fn gate_concepts_guard_on_marker(conn: &libsql::Connection) -> Result<()> 
     Ok(())
 }
 
+/// The entries of [`CREATE_INDICES`] a rung names, created in declaration
+/// order (0.14.14, D-231).
+///
+/// # Why a rung names its indices instead of running the list
+///
+/// Every index rung before v14 ran the whole of [`CREATE_INDICES`], which was
+/// correct for eleven versions and stopped being correct silently. A rung is a
+/// statement about the schema at *its* version, and that loop makes it a
+/// statement about the schema at **today's** — so the moment v14 declared an
+/// index over `links_current.branch_id`, the v3 → v4, v5 → v6 and v10 → v11
+/// rungs all began failing with `no such column: branch_id` on databases that
+/// legitimately had no such column yet. Ten migration tests, one cause.
+///
+/// The blanket loop was never load-bearing: each of those rungs owes exactly
+/// the indices its own decision record names, and the extras it re-issued were
+/// already there under `IF NOT EXISTS`. So this takes the DDL from the one
+/// place that declares it and lets the rung say which of it applies, which is
+/// what [`ddl::LC_TRAVERSAL_COVER`](crate::schema::ddl::CREATE_INDICES)'s own
+/// note already argued for: *"a rung should state which indices it owes rather
+/// than derive the list from a definition that will keep changing after it."*
+///
+/// A name that matches no declaration is a panic rather than a silent no-op,
+/// because the failure it prevents — a rung that creates nothing and stamps a
+/// version anyway — is exactly the one `verify` had to be written to catch.
+async fn create_indices(conn: &libsql::Connection, names: &[&str]) -> Result<()> {
+    for name in names {
+        let ddl = CREATE_INDICES
+            .iter()
+            .find(|sql| sql.contains(name))
+            .unwrap_or_else(|| panic!("{name} is not declared in ddl::CREATE_INDICES"));
+        conn.execute(ddl, ()).await?;
+    }
+    Ok(())
+}
+
 /// v3 → v4: swap `idx_lc_src_active` for the traversal covering index (D-042).
 ///
 /// Index-only, and on a derivative table, so D-036 permits it twice over. The
@@ -1234,9 +1304,7 @@ async fn gate_concepts_guard_on_marker(conn: &libsql::Connection) -> Result<()> 
 /// disk — create first so the traversal is never left without an index at all,
 /// even though the whole rung is one transaction.
 async fn add_traversal_cover(conn: &libsql::Connection) -> Result<()> {
-    for index_ddl in CREATE_INDICES {
-        conn.execute(index_ddl, ()).await?;
-    }
+    create_indices(conn, &["idx_lc_traversal_cover"]).await?;
     conn.execute("DROP INDEX IF EXISTS idx_lc_src_active", ())
         .await?;
     Ok(())
@@ -1480,16 +1548,53 @@ mod tests {
 
     /// The ladder has to actually reach the version this build stamps, or every
     /// fresh open fails with "no migration step leads out of v0".
+    ///
+    /// **Starting at v2 and not at v0, which is the whole test** (0.14.14,
+    /// [D-231](../../docs/architecture/s13-decision-register.md#d-231)). The
+    /// baseline step is `from: 0, to: SCHEMA_VERSION`, so a walk beginning at
+    /// v0 takes it, lands on the top, and reports success — *on any `STEPS`
+    /// array whatsoever*, including one with every incremental rung deleted.
+    /// The previous version of this test did exactly that: removing the v13 →
+    /// v14 rung left it green while ten integration tests went red. It was
+    /// checking that the baseline is the baseline.
+    ///
+    /// The walk that means something starts at the lowest version a *stored*
+    /// database can hold. That is v2: v1 is pre-canonical and refused
+    /// deliberately, which [`legacy_v1_has_no_rung`]
+    /// pins from the other side.
     #[test]
     fn the_ladder_reaches_the_current_version() {
-        let mut current = 0;
+        let mut current = 2;
         for _ in 0..STEPS.len() {
             match STEPS.iter().find(|s| s.from == current) {
                 Some(step) => current = step.to,
                 None => break,
             }
         }
-        assert_eq!(current, SCHEMA_VERSION);
+        assert_eq!(
+            current, SCHEMA_VERSION,
+            "the incremental ladder stops at v{current} and this build stamps \
+             v{SCHEMA_VERSION}: a database stored at v{current} has no rung out \
+             of it and cannot be opened"
+        );
+    }
+
+    /// Every version a stored database can hold has a rung out of it.
+    ///
+    /// The chain walk above finds the *first* break and stops. This says the
+    /// same thing per version, so the failure names which rung is missing
+    /// rather than which version the walk happened to stall on — and it also
+    /// refuses a gap the walk would jump over, because a step is free to skip
+    /// versions and none of them does.
+    #[test]
+    fn every_stored_version_has_a_rung_out_of_it() {
+        for v in 2..SCHEMA_VERSION {
+            assert!(
+                STEPS.iter().any(|s| s.from == v),
+                "no rung leads out of v{v}, so a database stored at v{v} cannot \
+                 be opened by this build"
+            );
+        }
     }
 
     /// `verify` requires every name this returns, so a parse that silently

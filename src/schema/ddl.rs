@@ -915,6 +915,16 @@ pub(crate) const LC_OPEN_INTERVAL: &str = "CREATE INDEX IF NOT EXISTS \
      idx_lc_open_interval ON links_current \
      (source_id, target_id, edge_type, valid_to, valid_from);";
 
+/// The lineage read's own index (0.14.14, §15.4, D-231, shipped v13 -> v14).
+///
+/// See [`CREATE_INDICES`] for what seeks on it and why it is a **second** index
+/// rather than a column added to [`LC_TRAVERSAL_COVER`], which is what §15.4
+/// asked for.
+pub(crate) const LC_LINEAGE_CUT: &str = "CREATE INDEX IF NOT EXISTS \
+     idx_lc_lineage_cut ON links_current \
+     (branch_id, recorded_at, source_id, target_id, edge_type, valid_from, \
+      valid_to, weight);";
+
 pub const CREATE_INDICES: &[&str] = &[
     // Covering index for the traversal CTE (§5.2, D-042).
     //
@@ -960,6 +970,48 @@ pub const CREATE_INDICES: &[&str] = &[
     // equality columns bound. Both are kept, which is a fourth index write per
     // assertion buying a scan's removal from the same operation.
     LC_OPEN_INTERVAL,
+    // The lineage read's base scans (0.14.14, W12.14, §15.4, D-231, shipped
+    // v13 -> v14).
+    //
+    // `graph::lineage::churned_cte` and `links_cut_cte` are the only two
+    // statements in the crate that read `links_current` **by lineage**, and
+    // five call sites emit them: the traversal, `query_as_of_edges_on`,
+    // `load_subgraph_with` and `diff`'s two tagged copies. Both drive from the
+    // materialised `lineage` set — `JOIN lineage g ON g.branch_id =
+    // lc.branch_id` — and both then compare `lc.recorded_at` to that lineage's
+    // cutoff. So the seek is `(branch_id, recorded_at)` and the payload is
+    // every other column the two arms project.
+    //
+    // Without it SQLite builds the index itself, three times per branched read:
+    // `AUTOMATIC PARTIAL COVERING INDEX (branch_id=?)` twice over
+    // `links_current` and once over the `links_cut` co-routine. The third is
+    // not a table and no index can serve it; the first two are, and this is
+    // them. Measured (`examples/branch_index_rung_probe.rs`, 1,110 edges,
+    // chain of 10, best of 25):
+    //
+    //   branched read, no post-fork churn    6.50 -> 5.43 ms   1.20x
+    //   branched read, 10% post-fork churn  16.94 -> 7.45 ms   2.28x
+    //   trunk traversal                      1.64 -> 1.64 ms   unchanged
+    //   2,000 assertions                     18.3 -> 20.6 ms   +12.6%
+    //
+    // **Why a second index and not a column on `idx_lc_traversal_cover`,
+    // against what §15.4 and D-219 both say.** D-219 measured three shapes and
+    // preferred folding `branch_id` in after the range columns; it measured
+    // them against `branch_id IN (ancestry)`, which that same probe run proved
+    // is not a resolution and which 0.14.4 therefore did not ship. Under the
+    // reader that did ship, the walk joins a CTE and never touches this table,
+    // so the folded shape is never consulted and buys **nothing** — 6.18 vs
+    // 6.27 ms, inside the run-to-run spread. And every single-index shape that
+    // leads on `branch_id` — the one §15.3 proposed included — takes the trunk
+    // walk off its covering index altogether:
+    //
+    //   SEARCH l USING INDEX idx_lc_open_interval (source_id=?)
+    //
+    // one bound column and not covering, which is what
+    // `the_shipped_traversal_cte_stays_on_the_covering_index` exists to refuse.
+    // The two shapes stopped sharing an access path when the reader stopped
+    // walking `links_current` directly, so they can no longer share an index.
+    LC_LINEAGE_CUT,
     "CREATE INDEX IF NOT EXISTS idx_txlog_time ON transaction_log (recorded_at);",
     "CREATE INDEX IF NOT EXISTS idx_txlog_entity ON transaction_log (entity_id);",
     // The archive cutoff's seek column on the ledger table (0.12.6, W3.1,

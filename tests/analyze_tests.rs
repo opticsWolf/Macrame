@@ -123,6 +123,7 @@ async fn analyze_creates_statistics_that_did_not_exist() {
     for idx in [
         "idx_lc_traversal_cover",
         "idx_lc_open_interval",
+        "idx_lc_lineage_cut",
         "idx_txlog_time",
         "idx_txlog_entity",
     ] {

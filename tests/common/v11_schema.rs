@@ -247,6 +247,33 @@ pub fn tables_v11() -> Vec<String> {
 /// Lay a complete v11 schema — tables, indices and triggers — and stamp
 /// nothing.
 ///
+/// The indices that existed at v11, which is every one `ddl` declares except
+/// the v14 addition (0.14.14, D-231).
+///
+/// Three fixtures build a pre-v12 database — v2 and v7 in `migration_tests`,
+/// v11 here — and all three used to scan `CREATE_INDICES` whole. That was
+/// exact for as long as the index set had not changed since v11, and it broke
+/// the moment v14 declared one over `links_current.branch_id`: a column those
+/// fixtures deliberately do not have, so the fixture died with `no such
+/// column` before the rung under test ever ran.
+///
+/// Filtered from the live declaration rather than pinned as text. The six
+/// entries really are byte-identical to v11's, and copying them into a fixture
+/// would trade a list that cannot drift for six that can — which is the trap
+/// `wind_back_to_v11` accepts deliberately for the two `links_current` indices
+/// it must recreate *after* dropping the table, and which is worth avoiding
+/// wherever the DDL can simply be read.
+///
+/// The exclusion is by name and not by position, so a v15 index appended after
+/// this one does not silently rejoin the v11 set.
+pub fn indices_v11() -> Vec<&'static str> {
+    ddl::CREATE_INDICES
+        .iter()
+        .copied()
+        .filter(|sql| !sql.contains("idx_lc_lineage_cut"))
+        .collect()
+}
+
 /// The caller stamps `user_version` after seeding, for the reason
 /// [`v7_schema::v7_schema`] gives: a database stamped before its rows exist is
 /// one the ladder could legally migrate mid-seed.
@@ -259,7 +286,7 @@ pub async fn v11_schema(conn: &libsql::Connection) {
         .unwrap();
     conn.execute(ddl::CREATE_CONCEPTS_FTS, ()).await.unwrap();
 
-    for index_ddl in ddl::CREATE_INDICES {
+    for index_ddl in indices_v11() {
         conn.execute(index_ddl, ()).await.unwrap();
     }
     for trigger_ddl in triggers_v11() {

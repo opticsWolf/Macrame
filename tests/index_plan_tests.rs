@@ -92,6 +92,24 @@ const REGISTRY: &[(&str, Justification)] = &[
         },
     ),
     (
+        "idx_lc_lineage_cut",
+        Query {
+            label: "the lineage read's two base scans over the projection",
+            // `churned_cte` and `links_cut_cte` both drive from the
+            // materialised ancestry — `JOIN lineage g ON g.branch_id =
+            // lc.branch_id` — and then compare the row's `recorded_at` to that
+            // lineage's cutoff. Per ancestry row that reduces to exactly this,
+            // which is what the index is shaped for and what the planner has to
+            // pick for the branched read to stop building the index itself.
+            sql: "SELECT source_id, target_id, edge_type, valid_from, valid_to, weight \
+                  FROM links_current WHERE branch_id = ?1 AND recorded_at > ?2",
+            source: Some((
+                include_str!("../src/graph/lineage.rs"),
+                "WHERE g.cutoff IS NOT NULL AND lc.recorded_at > g.cutoff",
+            )),
+        },
+    ),
+    (
         "idx_txlog_time",
         Query {
             label: "the fold's recorded_at window",

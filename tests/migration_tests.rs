@@ -271,12 +271,13 @@ async fn a_v2_database_climbs_to_v3_and_gains_the_annotations_table() {
     for table in v11_schema::tables_v11() {
         conn.execute(&table, ()).await.unwrap();
     }
-    for index_ddl in ddl::CREATE_INDICES {
-        // Every remaining index has its table in this fixture. Through v7 one
-        // did not — `idx_annotations_label`, which is why this loop used to
-        // swallow its result — and v8 dropped it (D-118). Swallowing errors is
-        // how a fixture stops testing anything, so now that none is expected,
-        // none is tolerated.
+    for index_ddl in v11_schema::indices_v11() {
+        // Every remaining index has its table *and its columns* in this
+        // fixture. Through v7 one did not have its table —
+        // `idx_annotations_label`, which is why this loop used to swallow its
+        // result — and v8 dropped it (D-118). v14 is the column version of the
+        // same problem and is excluded by `indices_v11` rather than swallowed,
+        // because swallowing errors is how a fixture stops testing anything.
         conn.execute(index_ddl, ()).await.unwrap();
     }
     for trigger_ddl in v11_schema::triggers_v11() {
@@ -441,7 +442,7 @@ async fn plan_string(conn: &libsql::Connection, sql: &str) -> String {
 #[test]
 fn a_version_bump_must_bring_its_own_rung_test() {
     assert_eq!(
-        SCHEMA_VERSION, 13,
+        SCHEMA_VERSION, 14,
         "SCHEMA_VERSION moved. Add a test for the new rung — one that starts \
          from a database at the previous version and asserts what the rung is \
          *for*, not merely that `run` reached the top."
@@ -1274,6 +1275,114 @@ async fn the_shipped_traversal_cte_stays_on_the_covering_index() {
             "{label}: the walk is no longer index-only: {plan}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// v13 → v14 — the lineage read gets an index to seek on (0.14.14, D-231)
+// ---------------------------------------------------------------------------
+
+/// The rung is index-only, so *what it is for* is a plan and not a row count.
+///
+/// Two assertions, and the second is the one that makes this rung the shape it
+/// is rather than the one §15.4 asked for. Before the rung the branched read
+/// has no persistent index leading on `branch_id` and SQLite builds one per
+/// execution; after it, the two base scans over `links_current` seek
+/// `idx_lc_lineage_cut`. And the **trunk** walk is unchanged across the rung —
+/// which every single-index shape D-231 measured could not manage, because
+/// leading on `branch_id` evicts the trunk walk from `idx_lc_traversal_cover`
+/// altogether.
+///
+/// The fixture winds a real database back rather than building a v13 one:
+/// `DROP INDEX` plus a stamp is exactly what a v13 database is, because this
+/// rung changes nothing else.
+#[tokio::test]
+async fn a_v13_database_climbs_to_v14_and_the_lineage_read_stops_building_its_own_index() {
+    use macrame::graph::TraversalBuilder;
+
+    let harness = TestHarness::new();
+    let conn = connect(&harness).await;
+    macrame::schema::run_migrations(&conn).await.unwrap();
+
+    // A second lineage, so `build_sql` emits the resolved shape below and the
+    // plan is the one a forked database actually runs.
+    conn.execute(
+        "INSERT INTO branches (branch_id, parent_id, forked_at, created_at) \
+         VALUES ('b1', 'main', ?1, ?1)",
+        libsql::params!["2026-01-01T00:00:00.000000Z"],
+    )
+    .await
+    .unwrap();
+
+    let branched = TraversalBuilder::new("a")
+        .max_depth(3)
+        .on_branch("b1")
+        .build_sql();
+    let trunk = TraversalBuilder::new("a").max_depth(3).build_sql();
+
+    conn.execute("DROP INDEX idx_lc_lineage_cut", ())
+        .await
+        .unwrap();
+    conn.execute("PRAGMA user_version = 13", ()).await.unwrap();
+
+    let before = plan_string(&conn, &branched).await;
+    assert!(
+        before.contains("AUTOMATIC"),
+        "the fixture is not starting from the v13 plan — expected SQLite to be \
+         building the index itself, got: {before}"
+    );
+    assert!(
+        !before.contains("idx_lc_lineage_cut"),
+        "the index survived the drop: {before}"
+    );
+
+    macrame::schema::run_migrations(&conn).await.unwrap();
+    assert_eq!(user_version(&conn).await, SCHEMA_VERSION);
+
+    let after = plan_string(&conn, &branched).await;
+    assert!(
+        after.contains("COVERING INDEX idx_lc_lineage_cut"),
+        "the rung created the index and the branched read did not take it — an \
+         index nothing seeks on is D-089's failure, not a schema change: {after}"
+    );
+
+    // The half the plan's own rung could not have kept. Asserted after the
+    // rung, on the same connection, so it is a statement about the schema this
+    // release ships rather than about the one it started from.
+    let trunk_plan = plan_string(&conn, &trunk).await;
+    assert!(
+        trunk_plan.contains("COVERING INDEX idx_lc_traversal_cover"),
+        "the new index displaced the trunk walk from its own — which is what \
+         D-231 measured every `branch_id`-leading shape doing: {trunk_plan}"
+    );
+}
+
+/// A v14 stamp over a database that never ran the rung is refused at open.
+///
+/// The index is in `CREATE_INDICES`, and `verify` compares the declared index
+/// names against what the file holds — so this needs no new list to be added
+/// to, which is the difference between an index rung and the trigger rung
+/// below it. Pinned anyway: the guarantee is that a mis-stamped database is a
+/// sentence at open time rather than a branched read that is quietly three
+/// times slower, and nothing else in this file would notice that.
+#[tokio::test]
+async fn a_v14_stamp_over_a_v13_index_set_is_refused_at_open() {
+    let harness = TestHarness::new();
+    let conn = connect(&harness).await;
+    macrame::schema::run_migrations(&conn).await.unwrap();
+
+    conn.execute("DROP INDEX idx_lc_lineage_cut", ())
+        .await
+        .unwrap();
+    conn.execute("PRAGMA user_version = 14", ()).await.unwrap();
+
+    let err = macrame::schema::run_migrations(&conn)
+        .await
+        .expect_err("a v14 stamp over a v13 index set");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("idx_lc_lineage_cut"),
+        "the refusal does not name what is missing: {msg}"
+    );
 }
 
 // ---------------------------------------------------------------------------
