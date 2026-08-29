@@ -109,13 +109,28 @@ async fn the_ledger_tables_have_the_shape_the_contract_freezes() {
             ("valid_to".into(), "TEXT".into(), 1, 0),
             ("weight".into(), "REAL".into(), 1, 0),
             ("properties".into(), "TEXT".into(), 1, 0),
-            // v12 (§15.2, D-214). The diff this contract exists to permit:
-            // one appended entry, every earlier one byte-identical, the
-            // primary key untouched. Post-1.0 this is exactly what an
-            // `ALTER TABLE ADD COLUMN` may do and no more.
-            ("branch_id".into(), "TEXT".into(), 1, 0),
+            // v12 (§15.2, D-214) appended the column; **v15 (0.14.15, D-232)
+            // put it in the key**, and the fourth field going 0 -> 6 is the
+            // whole of that change.
+            //
+            // This is a primary-key change on a ledger table, which is the diff
+            // the contract forbids after 1.0. Taken here for the reason the
+            // v6 -> v7 rung states about its own rebuild: pre-1.0 it is a
+            // deliberate edit to this list, and the alternative is shipping 1.0
+            // with a key that refuses a legal write. `links` was the one ledger
+            // table whose key did not distinguish lineages while every reader
+            // above it did, so the choice was to widen it now or to carry the
+            // collision past the freeze.
+            //
+            // The change is additive **in what it admits**: every row the old
+            // key permitted the new key permits, at the same position, and the
+            // v14 -> v15 rung copies rather than resolves. That is what makes
+            // it migratable at all, and it is the property that will not be
+            // available for the next such change.
+            ("branch_id".into(), "TEXT".into(), 1, 6),
         ],
-        "links is a frozen ledger table (D-003: the 5-column bitemporal PK)"
+        "links is a frozen ledger table (D-003: the bitemporal PK, keyed by \
+         lineage since v15)"
     );
 
     // **This entry records a primary-key change, and that is the point of it

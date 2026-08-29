@@ -442,7 +442,7 @@ async fn plan_string(conn: &libsql::Connection, sql: &str) -> String {
 #[test]
 fn a_version_bump_must_bring_its_own_rung_test() {
     assert_eq!(
-        SCHEMA_VERSION, 14,
+        SCHEMA_VERSION, 15,
         "SCHEMA_VERSION moved. Add a test for the new rung — one that starts \
          from a database at the previous version and asserts what the rung is \
          *for*, not merely that `run` reached the top."
@@ -1382,6 +1382,251 @@ async fn a_v14_stamp_over_a_v13_index_set_is_refused_at_open() {
     assert!(
         msg.contains("idx_lc_lineage_cut"),
         "the refusal does not name what is missing: {msg}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// v14 → v15 — the ledger is keyed by lineage (0.14.15, D-232)
+// ---------------------------------------------------------------------------
+
+/// `links` **as v14 declared it**, pinned as text.
+///
+/// Pinned for `v11_schema`'s reason and for one more that is specific to this
+/// rung: the fixture cannot be built by omitting something. Every v15 object
+/// exists at v14 too — same tables, same triggers, same indices — and the only
+/// difference is a clause inside one `CREATE TABLE`. So the wind-back has to
+/// *rebuild the table backwards*, which means it needs the shape it is winding
+/// back to, written out.
+const LINKS_V14: &str = r#"
+CREATE TABLE links_v14 (
+    source_id   TEXT NOT NULL REFERENCES concepts(id),
+    target_id   TEXT NOT NULL REFERENCES concepts(id),
+    edge_type   TEXT NOT NULL,
+    valid_from  TEXT NOT NULL,
+    recorded_at TEXT NOT NULL,
+    valid_to    TEXT NOT NULL DEFAULT '9999-12-31T23:59:59.999999Z',
+    weight      REAL NOT NULL DEFAULT 1.0,
+    properties  TEXT NOT NULL DEFAULT '{}',
+    branch_id   TEXT NOT NULL DEFAULT 'main' REFERENCES branches(branch_id),
+    PRIMARY KEY (source_id, target_id, edge_type, valid_from, recorded_at),
+    CHECK (weight >= 0.0 AND weight < 9e999 AND typeof(weight) = 'real'),
+    CHECK (valid_from GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z' AND valid_to GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z' AND recorded_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z' AND 1)
+)
+"#;
+
+/// Rebuild `links` under the v14 key, rows and all, and put back what the drop
+/// took.
+///
+/// The rung's own recipe run in reverse, which is the only honest fixture here:
+/// a database that merely *claims* v14 would be one this rung repairs by
+/// accident.
+async fn wind_links_back_to_v14(conn: &libsql::Connection) {
+    conn.execute(LINKS_V14, ()).await.unwrap();
+    conn.execute(
+        "INSERT INTO links_v14 (source_id, target_id, edge_type, valid_from, \
+         recorded_at, valid_to, weight, properties, branch_id) \
+         SELECT source_id, target_id, edge_type, valid_from, recorded_at, \
+                valid_to, weight, properties, branch_id FROM links",
+        (),
+    )
+    .await
+    .unwrap();
+    conn.execute("DROP TABLE links", ()).await.unwrap();
+    conn.execute("ALTER TABLE links_v14 RENAME TO links", ())
+        .await
+        .unwrap();
+
+    for ddl in [
+        ddl::CREATE_LINKS_CURRENT_SYNC,
+        ddl::CREATE_LINKS_SINGLE_OPEN,
+        ddl::CREATE_LINKS_LOG_INSERT,
+        ddl::CREATE_LINKS_GUARD_DELETE,
+    ] {
+        conn.execute(ddl, ()).await.unwrap();
+    }
+    for sql in ddl::CREATE_INDICES {
+        if sql.contains("idx_links_recorded_at") || sql.contains("idx_links_target") {
+            conn.execute(sql, ()).await.unwrap();
+        }
+    }
+}
+
+/// One `SELECT COUNT(*)`-shaped read, since this test asks for three.
+async fn scalar(conn: &libsql::Connection, sql: &str) -> i64 {
+    conn.query(sql, ())
+        .await
+        .unwrap()
+        .next()
+        .await
+        .unwrap()
+        .unwrap()
+        .get(0)
+        .unwrap()
+}
+
+/// One batch, one edge key, two lineages — refused at v14, written at v15.
+///
+/// **This is what the rung is for**, and it is a row count rather than a plan
+/// because the rung changes what the ledger will accept, not how it is read.
+/// The `INSERT`s are issued directly and share a `recorded_at` on purpose: that
+/// is not a contrivance, it is precisely what `write_bulk_atomic` and
+/// `bulk_import` do — one stamp for the whole batch, by contract (D-014) —
+/// which is why §15.4's "unreachable through the crate" stopped being true at
+/// 0.14.8 without anything noticing.
+///
+/// Three further assertions, each covering a way a table rebuild goes wrong
+/// quietly:
+///
+/// * **Every row survives.** A rung that rebuilds the ledger and loses a row
+///   has violated Doctrine III whatever its key says.
+/// * **The four triggers come back.** `DROP TABLE` takes them, and a database
+///   missing `trg_links_current_sync` writes to `links` and never updates
+///   `links_current` — reads go stale with no error at all.
+/// * **The two indices come back.** They were not the v6 → v7 rung's problem
+///   (there was no index on `links` at v7) and they are this one's.
+#[tokio::test]
+async fn a_v14_database_climbs_to_v15_and_two_lineages_may_assert_one_edge_at_one_instant() {
+    const TS: &str = "2026-01-01T00:00:00.000000Z";
+    const FOREVER: &str = "9999-12-31T23:59:59.999999Z";
+
+    let harness = TestHarness::new();
+    let conn = connect(&harness).await;
+    macrame::schema::run_migrations(&conn).await.unwrap();
+
+    for id in ["a", "b"] {
+        conn.execute(
+            "INSERT INTO concepts (id, title, valid_from, recorded_at) \
+             VALUES (?1, 't', ?2, ?2)",
+            libsql::params![id, TS],
+        )
+        .await
+        .unwrap();
+    }
+    conn.execute(
+        "INSERT INTO branches (branch_id, parent_id, forked_at, created_at) \
+         VALUES ('b1', 'main', ?1, ?1)",
+        libsql::params![TS],
+    )
+    .await
+    .unwrap();
+
+    wind_links_back_to_v14(&conn).await;
+    conn.execute("PRAGMA user_version = 14", ()).await.unwrap();
+
+    let insert = |branch: &'static str| {
+        conn.execute(
+            "INSERT INTO links (source_id, target_id, edge_type, valid_from, \
+             valid_to, weight, properties, recorded_at, branch_id) \
+             VALUES ('a', 'b', 'LINKS', ?1, ?2, 1.0, '{}', ?1, ?3)",
+            libsql::params![TS, FOREVER, branch],
+        )
+    };
+
+    insert("main").await.unwrap();
+    let err = insert("b1")
+        .await
+        .expect_err("the fixture is not starting from the v14 key");
+    assert!(
+        err.to_string().contains("UNIQUE constraint failed: links."),
+        "the fixture failed for some other reason: {err}"
+    );
+
+    let before = scalar(&conn, "SELECT COUNT(*) FROM links").await;
+
+    macrame::schema::run_migrations(&conn).await.unwrap();
+    assert_eq!(user_version(&conn).await, SCHEMA_VERSION);
+
+    insert("b1")
+        .await
+        .expect("v15 still refuses a second lineage's belief about one edge");
+
+    let after = scalar(&conn, "SELECT COUNT(*) FROM links").await;
+    assert_eq!(
+        after,
+        before + 1,
+        "the rebuild did not carry every row across: {before} before, {after} \
+         after one insert"
+    );
+
+    for name in [
+        "trg_links_current_sync",
+        "trg_links_single_open",
+        "trg_links_log_insert",
+        "trg_links_guard_delete",
+    ] {
+        let found: i64 = conn
+            .query(
+                "SELECT COUNT(*) FROM sqlite_master \
+                 WHERE type = 'trigger' AND name = ?1",
+                libsql::params![name],
+            )
+            .await
+            .unwrap()
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get(0)
+            .unwrap();
+        assert_eq!(found, 1, "`DROP TABLE links` took {name} and left it off");
+    }
+
+    for name in ["idx_links_recorded_at", "idx_links_target"] {
+        let found: i64 = conn
+            .query(
+                "SELECT COUNT(*) FROM sqlite_master \
+                 WHERE type = 'index' AND name = ?1",
+                libsql::params![name],
+            )
+            .await
+            .unwrap()
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get(0)
+            .unwrap();
+        assert_eq!(
+            found, 1,
+            "the rebuild dropped {name} and did not put it back"
+        );
+    }
+
+    // The sync trigger is back *and wired*: the row just written reached the
+    // materialization on its own lineage. A trigger present but pointed at the
+    // old table would satisfy the name check above and fail this.
+    let current = scalar(
+        &conn,
+        "SELECT COUNT(*) FROM links_current WHERE branch_id = 'b1'",
+    )
+    .await;
+    assert_eq!(current, 1, "the restored sync trigger did not fire");
+}
+
+/// A v15 stamp over a v14 key is refused at open.
+///
+/// **The one guarantee this release could not get for free.** Every previous
+/// rung added an object with a name, and `verify` finds a missing name without
+/// being told to look. A primary key has no name — a v15 stamp over a v14
+/// `links` opens cleanly, reads correctly, and then refuses one legal batch in
+/// a hundred with raw engine text. So `verify` gained a check on the key
+/// itself, and this is what pins it.
+#[tokio::test]
+async fn a_v15_stamp_over_a_v14_links_key_is_refused_at_open() {
+    let harness = TestHarness::new();
+    let conn = connect(&harness).await;
+    macrame::schema::run_migrations(&conn).await.unwrap();
+
+    wind_links_back_to_v14(&conn).await;
+    conn.execute("PRAGMA user_version = 15", ()).await.unwrap();
+
+    let err = macrame::schema::run_migrations(&conn)
+        .await
+        .expect_err("a v15 stamp over a v14 key");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("keyed by lineage") && msg.contains("branch_id"),
+        "the refusal does not say what is wrong with the table: {msg}"
     );
 }
 

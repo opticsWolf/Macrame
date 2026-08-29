@@ -98,9 +98,23 @@ CREATE TABLE links (
     valid_to    TEXT NOT NULL DEFAULT '9999-12-31T23:59:59.999999Z',
     weight      REAL NOT NULL DEFAULT 1.0,
     properties  TEXT NOT NULL DEFAULT '{}',     -- JSON: provenance, confidence, external IDs
-    PRIMARY KEY (source_id, target_id, edge_type, valid_from, recorded_at)
+    branch_id   TEXT NOT NULL DEFAULT 'main' REFERENCES branches(branch_id),  -- v12, §4.8
+    PRIMARY KEY (source_id, target_id, edge_type, valid_from, recorded_at, branch_id)
 );
 
+-- `branch_id` is IN the key since v15 (0.14.15, D-232), and the six-column key
+-- is the same decision D-003 took with five: an assertion is a distinct row, and
+-- two lineages asserting one edge key at one instant are two assertions. v12
+-- added the column and left it out of the key on the argument that `recorded_at`
+-- already separated the pair -- true of two sequential writes, and false of the
+-- batch paths, which take one stamp for the whole batch by contract (D-014). The
+-- collision was live from 0.14.8 and surfaced as `UNIQUE constraint failed`.
+--
+-- It goes LAST, measured rather than reasoned (probe §5): the autoindex is the
+-- only index over four of these columns, so appending preserves the five-column
+-- covering seek that LINKS_ARCHIVABLE's supersession probe runs per candidate
+-- row, while a branch-leading key drops it to `idx_links_target (target_id=?)`.
+--
 -- The two archive indexes (0.12.6, D-151, v10 -> v11). Through 0.12.5 `links`
 -- carried the primary key and nothing else, which is fine for the write path
 -- and wrong for the archive path: the PK leads on source_id, and both archive
@@ -506,6 +520,20 @@ The column is `branch_id TEXT NOT NULL DEFAULT 'main' REFERENCES branches(branch
 and the default is what makes the rung an `ALTER TABLE` rather than a rewrite:
 SQLite records a constant default in the schema header and rewrites no row —
 83–139 µs over 20,000 rows, measured in `examples/branch_identity_probe.rs` §1.
+
+**Where the column sits in a key is a separate question from whether it is
+present, and v12 answered it three different ways.** `links_current` got it *in*
+the primary key at v12, because that table is one row per open belief and two
+lineages believing different things about one edge is two rows. `concepts` did
+not and never will — there the column is provenance, not identity
+([§4.8's own subsection below](#branch_id-on-concepts-is-provenance-never-identity)).
+`links` was left with the column outside the key on the argument that
+`recorded_at` already separated two lineages' assertions; that held for two
+sequential writes and not for a batch, and **v15 puts it in the key**
+([D-232](s13-decision-register.md#d-232), 0.14.15). That rung is a rebuild
+rather than an `ALTER` for SQLite's reason: there is no way to add a column to a
+primary key. 105.8 ms at 50,000 rows, and no trigger fires because the copy's
+target is not yet named `links`.
 
 ```sql
 CREATE TABLE IF NOT EXISTS branches (

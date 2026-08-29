@@ -569,6 +569,43 @@ CREATE TABLE IF NOT EXISTS concepts (
 "#
 );
 
+/// The ledger. Append-only, one row per assertion, and **keyed by lineage
+/// since v15** (0.14.15, §15.4, [D-232]).
+///
+/// # `branch_id` is in the key, and the release it took to get there
+///
+/// v12 put `branch_id` in the key of `links_current` and left it out of this
+/// one, on an argument the v12 rung records: "`links` accepts both rows because
+/// `recorded_at` is already in its key". That is true of two assertions made at
+/// two instants, which is what a probe testing it by hand produces — and it is
+/// the reason the gap read as latent for seven releases.
+///
+/// It was not latent. **The batch write paths take one stamp for the whole
+/// batch** ([D-014]), and `reject_overlaps_within` groups candidates by
+/// `(source, target, edge_type, branch_id)` — so a pair differing *only* in
+/// lineage is not an overlap, is passed straight through, and collides on the
+/// key with a bare `UNIQUE constraint failed: links.…`. Both batch surfaces
+/// reach it, and `examples/links_key_reach_probe.rs` is the reproduction.
+///
+/// # Why `branch_id` goes last
+///
+/// The same reason the v12 rung gives for `links_current`, and it is stronger
+/// here because this table's autoindex is the *only* index over four of its
+/// columns: the leading `(source_id, target_id, edge_type, valid_from,
+/// recorded_at)` prefix is what `temporal::archive`'s predicates and
+/// `integrity::shadow` seek on, and appending leaves every one of those plans
+/// untouched. A branch-leading key would have re-planned the archive sweep to
+/// buy nothing — the probe's §5 has the plans.
+///
+/// # What this does not change
+///
+/// Not Doctrine III, and not what a row means. The key admits a row the old key
+/// refused; it removes none, alters none, and merges none. Every database that
+/// climbed the v14 → v15 rung holds exactly the rows it held before, which is
+/// what makes the rung a copy rather than a decision.
+///
+/// [D-014]: ../../docs/architecture/s13-decision-register.md#d-014
+/// [D-232]: ../../docs/architecture/s13-decision-register.md#d-232
 pub const CREATE_LINKS_TABLE: &str = concat!(
     r#"
 CREATE TABLE IF NOT EXISTS links (
@@ -583,7 +620,7 @@ CREATE TABLE IF NOT EXISTS links (
     "#,
     branch_column!(),
     r#",
-    PRIMARY KEY (source_id, target_id, edge_type, valid_from, recorded_at),
+    PRIMARY KEY (source_id, target_id, edge_type, valid_from, recorded_at, branch_id),
     "#,
     weight_check!(),
     r#",
@@ -1220,6 +1257,36 @@ pub const CREATE_LINKS_LOG_INSERT: &str = r#"
     END;
 "#;
 
+/// The ledger's delete guard, named since v15 (0.14.15, [D-232]).
+///
+/// An anonymous entry in [`CREATE_TRIGGERS`] until a rung needed to put it
+/// back: the v14 → v15 rung rebuilds `links`, `DROP TABLE` takes its four
+/// triggers with it, and a rung cannot re-issue a body it has no name for.
+/// Promoted rather than copied, which is the rule
+/// [`CREATE_LINKS_CURRENT_SYNC`] states — a rung with its own copy of a trigger
+/// is a copy that drifts. The v12 rung promoted four bodies for exactly this
+/// reason; this is the fifth.
+///
+/// D-008 (revised): probe `main.sqlite_master` for the archive-session marker.
+/// SQLite forbids a trigger in `main` from referencing objects in another
+/// database, temp included, so the original `temp.sqlite_master` probe fails at
+/// `CREATE TRIGGER` time and is unimplementable.
+pub const CREATE_LINKS_GUARD_DELETE: &str = concat!(
+    r#"
+    CREATE TRIGGER IF NOT EXISTS trg_links_guard_delete
+    BEFORE DELETE ON links
+    WHEN NOT EXISTS (
+        SELECT 1 FROM sqlite_master
+        WHERE type = 'table' AND name = 'macrame_archive_session'
+    )
+    BEGIN
+        SELECT RAISE(ABORT, '"#,
+    abort_delete_guard!(),
+    r#"');
+    END;
+    "#
+);
+
 pub const CREATE_TRIGGERS: &[&str] = &[
     CREATE_LINKS_CURRENT_SYNC,
     CREATE_LINKS_SINGLE_OPEN,
@@ -1257,25 +1324,7 @@ pub const CREATE_TRIGGERS: &[&str] = &[
     CREATE_CONCEPTS_GUARD_BRANCH,
     CREATE_BRANCHES_GUARD_UPDATE,
     CREATE_BRANCHES_GUARD_DELETE,
-    // D-008 (revised): probe main.sqlite_master for the archive-session marker.
-    // SQLite forbids a trigger in `main` from referencing objects in another
-    // database, temp included, so the original temp.sqlite_master probe fails
-    // at CREATE TRIGGER time and is unimplementable.
-    concat!(
-        r#"
-    CREATE TRIGGER IF NOT EXISTS trg_links_guard_delete
-    BEFORE DELETE ON links
-    WHEN NOT EXISTS (
-        SELECT 1 FROM sqlite_master
-        WHERE type = 'table' AND name = 'macrame_archive_session'
-    )
-    BEGIN
-        SELECT RAISE(ABORT, '"#,
-        abort_delete_guard!(),
-        r#"');
-    END;
-    "#
-    ),
+    CREATE_LINKS_GUARD_DELETE,
     concat!(
         r#"
     CREATE TRIGGER IF NOT EXISTS trg_txlog_guard_delete

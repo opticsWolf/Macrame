@@ -3213,6 +3213,29 @@ without the remedy invites somebody to ask for the predicate.
 >   made pin its own pre-image as text and
 >   [D-119](architecture/s13-decision-register.md#d-119) had to suspend foreign
 >   keys for. Bundling it behind an index would have made one revert undo both.
+>
+>   **Widened at 0.14.15, schema v15**
+>   ([D-232](architecture/s13-decision-register.md#d-232)) — and *"unreachable
+>   through the crate"* was wrong, which is the more useful half of this bullet
+>   to carry forward. The argument behind it is about the clock: successive
+>   calls return strictly increasing values, so two writes cannot share a stamp.
+>   That is true of two **sequential** writes and describes nothing the crate
+>   does in a batch — `write_bulk_atomic` and `bulk_import` take **one stamp for
+>   the whole batch** by contract, because the rows were asserted by one act,
+>   and `reject_overlaps_within` groups by `(source, target, type, branch)`, so
+>   a trunk row and a branch row about one edge are not an overlap and reach the
+>   insert as a legal pair. It became reachable at **0.14.8**, when writes
+>   learned to name a lineage — this bullet said as much, four sub-clauses in,
+>   and nothing acted on it for seven releases because the test named here was
+>   asserting the collision *as a guarantee*.
+>
+>   Widened rather than declined: two lineages are allowed to disagree about an
+>   edge, so refusing the pair would let a storage key decide what a caller may
+>   assert in one transaction. `branch_id` goes last, on measured plans rather
+>   than on §15.3's reasoning; the rebuild is 105.8 ms at 50,000 rows; and
+>   `cold.links` moves in the same release, or `archive` becomes the one
+>   operation that still refuses what the ledger now accepts. The test is
+>   inverted, not deleted: `the_append_only_table_is_keyed_by_lineage`.
 
 > **Shipped in 0.14.6 on 2026-08-28 ([D-223](architecture/s13-decision-register.md#d-223)).**
 > The fork point becomes a visibility cutoff, and **option (4) below is the form
@@ -3325,6 +3348,11 @@ and the schema does not move.
 > `BranchId`, `Branch`, `Database::fork(name, from)` and `branches()` — the
 > lifecycle. The branch-scoped **view** is not in it, and neither is `diff()`,
 > the archive arm, or the v13 rung; those are the remaining items below.
+> **All four have since shipped**: the view at 0.14.8, `diff()` at 0.14.11, the
+> archive arm at 0.14.13 (schema v13), and the two items this section assigned
+> to "the v13 rung" as separate releases — the index at 0.14.14 (v14,
+> [D-231](architecture/s13-decision-register.md#d-231)) and the `links` key at
+> 0.14.15 (v15, [D-232](architecture/s13-decision-register.md#d-232)).
 >
 > * **One row, and nothing else.** A fork reads no ledger table and copies
 >   nothing. A thousand forks against a seeded ledger leave `links`,

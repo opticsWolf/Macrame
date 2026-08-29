@@ -13,7 +13,7 @@ use crate::schema::ddl::*;
 /// guarantee D-029 buys would be void on it while `user_version` insisted all
 /// was well. Reserving 1 as a value this build refuses by name is what makes
 /// "no legacy support" an enforced property instead of a README sentence.
-pub const SCHEMA_VERSION: u32 = 14;
+pub const SCHEMA_VERSION: u32 = 15;
 
 type StepFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
 
@@ -185,6 +185,18 @@ const STEPS: &[Step] = &[
         // v5 -> v6 and v10 -> v11 rungs stood on.
         suspends_foreign_keys: false,
         apply: |conn| Box::pin(add_lineage_cut_index(conn)),
+    },
+    Step {
+        from: 14,
+        to: 15,
+        name: "links-lineage-key",
+        // The second rung on this ladder to rebuild `links`, and it takes the
+        // v6 -> v7 rung's answer to the same question: nothing declares a
+        // foreign key *into* `links`, so the drop and rename need no
+        // suspension. Its own `REFERENCES concepts(id)` columns are satisfied
+        // by every row being copied, because they were satisfied before.
+        suspends_foreign_keys: false,
+        apply: |conn| Box::pin(add_links_lineage_key(conn)),
     },
     Step {
         from: 11,
@@ -850,6 +862,139 @@ async fn add_lineage_cut_index(conn: &libsql::Connection) -> Result<()> {
     create_indices(conn, &["idx_lc_lineage_cut"]).await
 }
 
+/// The v15 shape of `links`, pinned as text (0.14.15, [D-232]).
+///
+/// Pinned for the reason [`LINKS_V7`] states in full, and this is the second
+/// rung to need it. Note what the pinning buys *here specifically*: the two
+/// rungs that rebuild this table now sit on the same ladder, and they must
+/// produce different shapes — `LINKS_V7` has no `branch_id` at all, because at
+/// v7 there was none. A rung reading `ddl::CREATE_LINKS_TABLE` would make both
+/// of them produce today's, and a v6 database would arrive at v7 already
+/// carrying a v15 key.
+///
+/// The `REFERENCES concepts(id)` clauses are spelled out rather than dropped
+/// and re-added: `links` is being rebuilt, not altered, so the new table
+/// declares them from the start and the copy satisfies them row for row.
+const LINKS_V15: &str = r#"
+CREATE TABLE links_v15 (
+    source_id   TEXT NOT NULL REFERENCES concepts(id),
+    target_id   TEXT NOT NULL REFERENCES concepts(id),
+    edge_type   TEXT NOT NULL,
+    valid_from  TEXT NOT NULL,
+    recorded_at TEXT NOT NULL,
+    valid_to    TEXT NOT NULL DEFAULT '9999-12-31T23:59:59.999999Z',
+    weight      REAL NOT NULL DEFAULT 1.0,
+    properties  TEXT NOT NULL DEFAULT '{}',
+    branch_id   TEXT NOT NULL DEFAULT 'main' REFERENCES branches(branch_id),
+    PRIMARY KEY (source_id, target_id, edge_type, valid_from, recorded_at, branch_id),
+    CHECK (weight >= 0.0 AND weight < 9e999 AND typeof(weight) = 'real'),
+    -- (the timestamp CHECK, spelled out for the same pinning reason)
+    CHECK (valid_from GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z' AND valid_to GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z' AND recorded_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z' AND 1)
+)
+"#;
+
+/// The four triggers a v14 `links` carries, by name, dropped with the table.
+///
+/// Enumerated for [`CONCEPTS_TRIGGERS_V7`]'s reason: a rung is a statement
+/// about a fixed past, so a v16 trigger added to this table later cannot be
+/// swept into a rung that predates it. They are not `DROP`ped explicitly —
+/// `DROP TABLE` takes them — but the rung has to put exactly these back, and
+/// the list is what says which.
+const LINKS_TRIGGERS_V15: &[&str] = &[
+    "trg_links_current_sync",
+    "trg_links_single_open",
+    "trg_links_log_insert",
+    "trg_links_guard_delete",
+];
+
+/// v14 → v15: `links` is keyed by lineage (0.14.15, §15.4, [D-232]).
+///
+/// # What was actually broken
+///
+/// Two lineages asserting one edge key at one `recorded_at` collided on
+/// `PRIMARY KEY (source_id, target_id, edge_type, valid_from, recorded_at)`.
+/// §15.4 called this "unreachable through the crate until branch-scoped writes
+/// exist, which is 0.14.5", and left it to a later rung "to widen or to decline
+/// in writing". **It became reachable at 0.14.8 and nothing noticed**, because
+/// the reasoning that made it look unreachable is about the clock — successive
+/// calls return strictly increasing values, so two sequential assertions cannot
+/// share a stamp — and the batch paths do not make successive calls. They take
+/// **one stamp for the whole batch** ([D-014]), deliberately, because the rows
+/// were asserted by one act.
+///
+/// `reject_overlaps_within` then groups candidates by `(source, target,
+/// edge_type, branch_id)`, so a trunk row and a branch row about one edge are
+/// in different groups, are not an overlap, and are handed to the insert as a
+/// legal pair. `examples/links_key_reach_probe.rs` reproduces it on both batch
+/// surfaces and shows the caller receiving raw engine text.
+///
+/// Widening rather than refusing, and the choice is not close: the two
+/// assertions are *legitimate*. Two lineages are allowed to believe different
+/// things about one edge — that is what a lineage is — and rejecting the pair
+/// would let a storage key decide what a caller may assert in one transaction.
+///
+/// # Why this is its own release
+///
+/// §15.4 assigned it to the same rung as an index. It is not the same size: an
+/// index is one `CREATE INDEX` on a derivative table, and this is a rebuild of
+/// the ledger's largest table — the operation [`LINKS_V7`] exists because of
+/// and [D-119] had to suspend foreign keys for. Bundling the two would have
+/// made one revert undo both.
+///
+/// **Measured**, since the v6 → v7 rung's cost estimate is on record as
+/// unmeasured: create, copy, drop, rename runs in **2.7 ms at 1,000 rows,
+/// 14.4 ms at 10,000 and 122.9 ms at 50,000** — linear, and cheap because no
+/// trigger fires. The insert targets `links_v15`, and every trigger on this
+/// table names `links`.
+///
+/// # Order, and the two things that get taken with the table
+///
+/// `DROP TABLE links` before the rename, for [`add_weight_check`]'s reason: the
+/// drop takes the four triggers with it, so the rename does not reparse a
+/// schema whose trigger bodies name a table that no longer exists.
+///
+/// It takes **the two indices** as well, which the v6 → v7 rung did not have to
+/// think about — its docstring says in as many words that "no index is defined
+/// on `links`", and that stopped being true at v11. They are put back by name
+/// through [`create_indices`], which is also what makes this rung's failure
+/// mode a panic naming the index rather than a database stamped v15 that fails
+/// its own open-time verification.
+///
+/// [D-014]: ../../docs/architecture/s13-decision-register.md#d-014
+/// [D-119]: ../../docs/architecture/s13-decision-register.md#d-119
+/// [D-232]: ../../docs/architecture/s13-decision-register.md#d-232
+async fn add_links_lineage_key(conn: &libsql::Connection) -> Result<()> {
+    conn.execute(LINKS_V15, ()).await?;
+    conn.execute(
+        "INSERT INTO links_v15 (source_id, target_id, edge_type, valid_from, \
+         recorded_at, valid_to, weight, properties, branch_id) \
+         SELECT source_id, target_id, edge_type, valid_from, recorded_at, \
+                valid_to, weight, properties, branch_id FROM links",
+        (),
+    )
+    .await?;
+    conn.execute("DROP TABLE links", ()).await?;
+    conn.execute("ALTER TABLE links_v15 RENAME TO links", ())
+        .await?;
+
+    // The triggers the drop took. By const and not by copy — the bodies do not
+    // change at v15, and `CREATE_LINKS_CURRENT_SYNC` states the rule: a rung
+    // with its own copy of a trigger is a copy that drifts. `LINKS_TRIGGERS_V15`
+    // is what pins *which four*, which is the half a later rung will need.
+    for ddl in [
+        CREATE_LINKS_CURRENT_SYNC,
+        CREATE_LINKS_SINGLE_OPEN,
+        CREATE_LINKS_LOG_INSERT,
+        CREATE_LINKS_GUARD_DELETE,
+    ] {
+        conn.execute(ddl, ()).await?;
+    }
+    debug_assert_eq!(LINKS_TRIGGERS_V15.len(), 4);
+
+    // And the two indices, which `DROP TABLE` took with equally little noise.
+    create_indices(conn, &["idx_links_recorded_at", "idx_links_target"]).await
+}
+
 /// v5 → v6: index the single-open-interval probe (D-059).
 ///
 /// Index-only and on a derivative table, so D-036 permits it on the same two
@@ -1350,8 +1495,12 @@ async fn verify(conn: &libsql::Connection) -> Result<()> {
 
     let mut present: Vec<(String, String)> = Vec::new();
     let mut bodies: Vec<(String, String)> = Vec::new();
+    let mut links_sql = String::new();
     while let Some(row) = rows.next().await? {
         let (kind, name, sql): (String, String, String) = (row.get(0)?, row.get(1)?, row.get(2)?);
+        if kind == "table" && name.eq_ignore_ascii_case("links") {
+            links_sql = sql.clone();
+        }
         if kind == "trigger" {
             bodies.push((name.clone(), sql));
         }
@@ -1388,6 +1537,40 @@ async fn verify(conn: &libsql::Connection) -> Result<()> {
                  but is missing {}: {}",
                 missing.len(),
                 missing.join(", ")
+            ),
+        });
+    }
+
+    // `links` is checked by **key**, not only by name (0.14.15, D-232), and the
+    // reason is the one D-126 gives below for the delete guards: presence was
+    // never the property that mattered.
+    //
+    // A table's primary key has no name for the loop above to look for. So a
+    // database stamped v15 whose `links` still carries the v14 key — a stamp
+    // written by hand, a restore from a file that never climbed, a rung that
+    // silently no-opped — opens cleanly, reads correctly, and then refuses one
+    // legal batch write in a hundred with raw engine text. That is precisely
+    // the shape v15 exists to remove, and every other v15 object is present, so
+    // nothing else here would notice.
+    //
+    // The probe is the column name inside the `PRIMARY KEY` clause and not the
+    // table's whole text, for D-126's reason: a full-text comparison fails on
+    // whitespace and has to be re-pinned every time a comment moves, which
+    // makes it the kind of check people disable.
+    let keyed_by_lineage = links_sql
+        .split_once("PRIMARY KEY")
+        .and_then(|(_, rest)| rest.split_once(')'))
+        .is_some_and(|(key, _)| key.contains("branch_id"));
+    if !links_sql.is_empty() && !keyed_by_lineage {
+        return Err(DbError::Migration {
+            to: SCHEMA_VERSION,
+            reason: format!(
+                "schema verification failed: the database is stamped \
+                 v{SCHEMA_VERSION} but `links` is not keyed by lineage. Its \
+                 primary key must end in `branch_id` (v15); without it a batch \
+                 asserting one edge key on two lineages collides, because the \
+                 batch paths share one `recorded_at` by contract. Upgrading \
+                 through the ladder rebuilds the table."
             ),
         });
     }

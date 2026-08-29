@@ -317,10 +317,54 @@ pub async fn wind_back_to_v11(conn: &libsql::Connection) {
             .unwrap();
     }
 
-    for table in ["concepts", "links", "transaction_log"] {
+    for table in ["concepts", "transaction_log"] {
         conn.execute(&format!("ALTER TABLE {table} DROP COLUMN branch_id"), ())
             .await
             .unwrap_or_else(|e| panic!("DROP COLUMN on {table}: {e}"));
+    }
+
+    // `links` is not in that loop since v15, and the reason is the same one
+    // that made v15 a release: `branch_id` is now **in its primary key**, and
+    // SQLite refuses `DROP COLUMN` on a key member. So undoing v12 on this
+    // table means the same thing undoing it on `links_current` has always
+    // meant — rebuild from the pinned shape and carry the rows across.
+    //
+    // The rename comes first so the copy has a source, and the delete guard is
+    // dropped explicitly: `RENAME` rewrites trigger bodies to follow the table,
+    // so the guard would otherwise end up attached to the table about to be
+    // dropped. The other three `links` triggers are already gone — the loop
+    // above this one drops every trigger v12 touched, and all three are in it.
+    conn.execute("ALTER TABLE links RENAME TO links_wound_back", ())
+        .await
+        .unwrap();
+    conn.execute("DROP TRIGGER IF EXISTS trg_links_guard_delete", ())
+        .await
+        .unwrap();
+    conn.execute(&links_v11(), ()).await.unwrap();
+    conn.execute(
+        "INSERT INTO links (source_id, target_id, edge_type, valid_from, \
+         recorded_at, valid_to, weight, properties) \
+         SELECT source_id, target_id, edge_type, valid_from, recorded_at, \
+                valid_to, weight, properties FROM links_wound_back",
+        (),
+    )
+    .await
+    .unwrap();
+    conn.execute("DROP TABLE links_wound_back", ())
+        .await
+        .unwrap();
+    conn.execute(ddl::CREATE_LINKS_GUARD_DELETE, ())
+        .await
+        .unwrap();
+    // The drop took these two with it. v11 has both — they arrived at the
+    // v10 -> v11 rung — so a wind-back that stopped here would be describing
+    // v10. Pinned rather than taken from `ddl` for the reason the two
+    // `links_current` indices below are.
+    for index in [
+        "CREATE INDEX idx_links_recorded_at ON links (recorded_at);",
+        "CREATE INDEX idx_links_target ON links (target_id);",
+    ] {
+        conn.execute(index, ()).await.unwrap();
     }
 
     // `links_current` is the one v12 could not reach by `ALTER`, so undoing it

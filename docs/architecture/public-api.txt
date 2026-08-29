@@ -1078,6 +1078,7 @@ pub const macrame::schema::ddl::CREATE_CONCEPTS_TABLE: &str
 pub const macrame::schema::ddl::CREATE_INDICES: &[&str]
 pub const macrame::schema::ddl::CREATE_LINKS_CURRENT_SYNC: &str
 pub const macrame::schema::ddl::CREATE_LINKS_CURRENT_TABLE: &str
+pub const macrame::schema::ddl::CREATE_LINKS_GUARD_DELETE: &str
 pub const macrame::schema::ddl::CREATE_LINKS_LOG_INSERT: &str
 pub const macrame::schema::ddl::CREATE_LINKS_SINGLE_OPEN: &str
 pub const macrame::schema::ddl::CREATE_LINKS_TABLE: &str

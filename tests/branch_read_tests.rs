@@ -540,52 +540,83 @@ async fn the_subgraph_loader_reads_the_same_lineage() {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// A gap found while writing the fixtures above, pinned rather than remembered
+// A gap found while writing the fixtures above, closed at v15
 // ───────────────────────────────────────────────────────────────────────────
 
-/// `links` is keyed by `recorded_at`; `links_current` is keyed by lineage.
+/// `links` is keyed by lineage, and this is the test that used to say it was not.
+///
+/// # What it said, and the part of it that was wrong
 ///
 /// v12 widened the *materialization*'s primary key to
 /// `(source, target, type, valid_from, branch_id)` so two lineages' beliefs
-/// about one edge could coexist. The append-only table it is materialized from
-/// kept `(source, target, type, valid_from, recorded_at)` — no lineage — so two
-/// lineages asserting one edge key at the **same instant** collide, and collide
-/// as a bare `UNIQUE constraint failed` rather than as a named refusal.
+/// about one edge could coexist, and left the append-only table it is
+/// materialized from on `(source, target, type, valid_from, recorded_at)` —
+/// no lineage. Two lineages asserting one edge key at the same instant collided
+/// with a bare `UNIQUE constraint failed`.
 ///
-/// It is not reachable through the crate today: `recorded_at` is crate-stamped
-/// and the monotonicity guard keeps two writes from sharing a stamp, and there
-/// is no branch-scoped *write* at all. `fork()` at 0.14.7 does not change that
-/// — it registers a lineage and writes no ledger row, so every assertion still
-/// lands on the trunk and no two lineages can yet reach this key. It becomes
-/// reachable the moment a write takes a branch, which is the branch-scoped view
-/// — a bulk write that stamps one instant across a chunk is the obvious way in.
-/// Recorded here as a fixture constraint the tests above already have to work
-/// around, so that the v13 rung either widens it deliberately or declines to
-/// and says why.
+/// This test asserted that collision and called it unreachable, on the argument
+/// that `recorded_at` is crate-stamped and two writes cannot share a stamp. The
+/// argument holds for two *sequential* writes and it is not what the crate
+/// does: `write_bulk_atomic` and `bulk_import` take **one stamp for the whole
+/// batch** by contract (D-014), and `reject_overlaps_within` groups candidates
+/// by `(source, target, edge_type, branch_id)` — so a trunk row and a branch
+/// row about one edge are not an overlap, are passed through, and collide. It
+/// became reachable at 0.14.8 with branch-scoped writes, as this docstring
+/// predicted, and then went seven releases without anything noticing, because
+/// the test pinning it was pinning the failure as a *guarantee*.
+///
+/// It is inverted here rather than deleted, and that is the point: the shape
+/// this file was working around is now the shape it asserts.
+/// `examples/links_key_reach_probe.rs` is the reproduction, the v14 → v15 rung
+/// is the repair, and D-232 is the reasoning.
 #[tokio::test]
-async fn the_append_only_table_is_not_keyed_by_lineage() {
+async fn the_append_only_table_is_keyed_by_lineage() {
     let harness = TestHarness::new();
     let conn = connect(&harness).await;
     seed(&conn).await;
 
-    let err = conn
-        .execute(
-            "INSERT INTO links (source_id, target_id, edge_type, valid_from, valid_to, \
-             weight, properties, recorded_at, branch_id) \
-             VALUES ('a', 'b', 'LINKS', ?1, ?2, 1.0, '{}', ?1, 'b1')",
-            libsql::params![TS, SENTINEL],
-        )
-        .await
-        .expect_err("two lineages asserted one edge at one instant");
-    assert!(
-        err.to_string().contains("UNIQUE constraint failed: links."),
-        "if this is red the key was widened — update the tests above, which \
-         space their `recorded_at` apart only to avoid it: {err}"
+    // The same statement, at the same instant, on the second lineage. `?1` is
+    // both `valid_from` and `recorded_at`, so this shares a stamp with what
+    // `seed` wrote — which is exactly what a batch does.
+    conn.execute(
+        "INSERT INTO links (source_id, target_id, edge_type, valid_from, valid_to, \
+         weight, properties, recorded_at, branch_id) \
+         VALUES ('a', 'b', 'LINKS', ?1, ?2, 1.0, '{}', ?1, 'b1')",
+        libsql::params![TS, SENTINEL],
+    )
+    .await
+    .expect("two lineages asserting one edge at one instant were refused");
+
+    // Two beliefs, not one row overwritten — which is the property the key is
+    // for. The materialization has held both since v12; the ledger does now.
+    let ledger: i64 = scalar(
+        &conn,
+        "SELECT COUNT(*) FROM links WHERE source_id = 'a' AND target_id = 'b' \
+         AND edge_type = 'LINKS' AND valid_from = ?1",
+    )
+    .await;
+    assert_eq!(
+        ledger, 2,
+        "the second lineage's row did not land beside the first"
     );
 
-    // One instant apart is enough, which is what makes this a latent gap rather
-    // than a live defect.
+    // And the tests above no longer *need* to space their stamps apart, which
+    // is what the old message warned would change. They still do, because what
+    // they are about is resolution and not this key.
     edge(&conn, "a", "b", "b1", SENTINEL, 0.5, TS2).await;
+}
+
+/// One scalar read, since the test above asks for one.
+async fn scalar(conn: &libsql::Connection, sql: &str) -> i64 {
+    conn.query(sql, libsql::params![TS])
+        .await
+        .unwrap()
+        .next()
+        .await
+        .unwrap()
+        .unwrap()
+        .get(0)
+        .unwrap()
 }
 
 // ───────────────────────────────────────────────────────────────────────────

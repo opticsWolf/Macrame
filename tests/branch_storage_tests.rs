@@ -749,6 +749,185 @@ async fn an_archive_carries_the_lineage_across_the_boundary() {
     );
 }
 
+/// A cold file on the pre-v15 **key** is rebuilt by the next archive.
+///
+/// The column check the pre-v12 test performs cannot see this one. A cold file
+/// written by 0.14.8 through 0.14.14 has `branch_id` and a key that does not
+/// mention it, so `cold_has_branch` says yes and `upgrade_cold_lineage`'s first
+/// loop leaves it alone — while it still refuses exactly the pair v15 made
+/// legal in `links`. That would make `archive` the one operation that fails on
+/// rows the crate had just started accepting, which is why the key moves in the
+/// same release as the hot one (D-232).
+///
+/// The wind-back is a rebuild rather than a `DROP COLUMN`, for the reason the
+/// rung is: SQLite cannot take a column out of a key any more than it can put
+/// one in.
+#[tokio::test]
+async fn a_pre_v15_cold_key_is_rebuilt_by_the_archive_that_meets_it() {
+    let harness = TestHarness::new();
+    let cold = archived_pair(&harness).await;
+
+    {
+        let conn = connect(&harness).await;
+        attach_cold(&conn, &cold).await;
+        conn.execute("ALTER TABLE cold.links RENAME TO links_pre_v15", ())
+            .await
+            .unwrap();
+        conn.execute(
+            "CREATE TABLE cold.links (
+                source_id   TEXT NOT NULL,
+                target_id   TEXT NOT NULL,
+                edge_type   TEXT NOT NULL,
+                valid_from  TEXT NOT NULL,
+                recorded_at TEXT NOT NULL,
+                valid_to    TEXT NOT NULL,
+                weight      REAL NOT NULL,
+                properties  TEXT NOT NULL,
+                branch_id   TEXT NOT NULL DEFAULT 'main',
+                PRIMARY KEY (source_id, target_id, edge_type, valid_from, recorded_at)
+            )",
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO cold.links \
+             (source_id, target_id, edge_type, valid_from, recorded_at, \
+              valid_to, weight, properties, branch_id) \
+             SELECT source_id, target_id, edge_type, valid_from, recorded_at, \
+                    valid_to, weight, properties, branch_id FROM cold.links_pre_v15",
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute("DROP TABLE cold.links_pre_v15", ())
+            .await
+            .unwrap();
+        assert!(
+            !cold_links_keyed_by_lineage(&conn).await,
+            "the wind-back did not take"
+        );
+    }
+
+    // Another archive, with something for it to move.
+    let db = Database::open(&harness.db_path).await.unwrap();
+    db.upsert_concept(
+        ConceptUpsert::new("c", "C")
+            .valid_from(TS)
+            .valid_to(TS2)
+            .retired(true),
+    )
+    .await
+    .unwrap();
+    db.archive(CUTOFF).await.unwrap();
+    db.close().await.unwrap();
+
+    let conn = connect(&harness).await;
+    attach_cold(&conn, &cold).await;
+    assert!(
+        cold_links_keyed_by_lineage(&conn).await,
+        "the archive met a pre-v15 cold key and left it there, so the next \
+         cross-lineage row to cross the boundary will collide"
+    );
+    let kept: i64 = count(&conn, "SELECT COUNT(*) FROM cold.links", ()).await;
+    assert!(
+        kept > 0,
+        "the rebuild dropped the rows it was supposed to carry across"
+    );
+}
+
+/// Whether `cold.links` has `branch_id` in its primary key. Mirrors the
+/// crate-private function of the same name, because the property is about the
+/// cold *file* and this is the only side of the boundary a test can stand on.
+async fn cold_links_keyed_by_lineage(conn: &libsql::Connection) -> bool {
+    let mut rows = conn
+        .query("PRAGMA cold.table_info(links)", ())
+        .await
+        .unwrap();
+    while let Some(row) = rows.next().await.unwrap() {
+        let named = row.get::<String>(1).is_ok_and(|n| n == "branch_id");
+        if named && row.get::<i64>(5).is_ok_and(|pk| pk > 0) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Two lineages' beliefs about one edge, asserted at one instant, reach the
+/// cold file as two rows.
+///
+/// The end-to-end version of the release: the pair is written through
+/// `write_bulk_atomic`, which is where one stamp covers a whole batch and where
+/// the collision lived, and then archived — which is the operation that would
+/// have refused it if only the hot key had moved.
+#[tokio::test]
+async fn a_cross_lineage_pair_written_at_one_instant_crosses_the_boundary() {
+    let harness = TestHarness::new();
+
+    let db = Database::open(&harness.db_path).await.unwrap();
+    for id in ["a", "b"] {
+        db.upsert_concept(
+            ConceptUpsert::new(id, "T")
+                .valid_from(TS)
+                .valid_to(TS2)
+                .retired(true),
+        )
+        .await
+        .unwrap();
+    }
+    db.fork(
+        macrame::branch::BranchId::new("b1").unwrap(),
+        macrame::branch::BranchId::new(ddl::MAIN_BRANCH).unwrap(),
+    )
+    .await
+    .unwrap();
+
+    let written = db
+        .write_bulk_atomic(vec![
+            EdgeAssertion::new("a", "b", "KNOWS")
+                .valid_from(TS)
+                .valid_to(TS2),
+            EdgeAssertion::new("a", "b", "KNOWS")
+                .valid_from(TS)
+                .valid_to(TS2)
+                .on_branch(macrame::branch::BranchId::new("b1").unwrap()),
+        ])
+        .await
+        .expect("one batch, one edge key, two lineages");
+    assert_eq!(written, 2);
+
+    db.archive(CUTOFF).await.unwrap();
+    db.close().await.unwrap();
+
+    let mut cold = harness.db_path.clone();
+    let stem = harness.db_path.file_stem().unwrap().to_str().unwrap();
+    cold.set_file_name(format!("{stem}_archive.db"));
+
+    let conn = connect(&harness).await;
+    attach_cold(&conn, &cold).await;
+
+    let lineages: i64 = count(
+        &conn,
+        "SELECT COUNT(DISTINCT branch_id) FROM cold.links \
+         WHERE source_id = 'a' AND target_id = 'b' AND edge_type = 'KNOWS'",
+        (),
+    )
+    .await;
+    let hot: i64 = count(
+        &conn,
+        "SELECT COUNT(DISTINCT branch_id) FROM links \
+         WHERE source_id = 'a' AND target_id = 'b' AND edge_type = 'KNOWS'",
+        (),
+    )
+    .await;
+    assert_eq!(
+        lineages + hot,
+        2,
+        "the pair did not survive the boundary intact: {lineages} lineage(s) \
+         cold and {hot} hot, and there were two"
+    );
+}
+
 /// A cold file written before v12 is upgraded in place by the next archive,
 /// and its existing rows read as trunk.
 ///
@@ -764,7 +943,7 @@ async fn a_pre_v12_cold_file_is_upgraded_by_the_archive_that_meets_it() {
     {
         let conn = connect(&harness).await;
         attach_cold(&conn, &cold).await;
-        for table in ["links", "concepts", "transaction_log"] {
+        for table in ["concepts", "transaction_log"] {
             conn.execute(
                 &format!("ALTER TABLE cold.{table} DROP COLUMN branch_id"),
                 (),
@@ -772,6 +951,43 @@ async fn a_pre_v12_cold_file_is_upgraded_by_the_archive_that_meets_it() {
             .await
             .unwrap();
         }
+        // `cold.links` cannot be wound back by `DROP COLUMN` since v15 —
+        // `branch_id` is in its key — so it is rebuilt into the pre-v12 shape
+        // instead. Which makes this fixture a *stronger* pre-v12 file than the
+        // one it replaces: the old wind-back left a v15 key behind and only the
+        // column went away.
+        conn.execute("ALTER TABLE cold.links RENAME TO links_pre_v12", ())
+            .await
+            .unwrap();
+        conn.execute(
+            "CREATE TABLE cold.links (
+                source_id   TEXT NOT NULL,
+                target_id   TEXT NOT NULL,
+                edge_type   TEXT NOT NULL,
+                valid_from  TEXT NOT NULL,
+                recorded_at TEXT NOT NULL,
+                valid_to    TEXT NOT NULL,
+                weight      REAL NOT NULL,
+                properties  TEXT NOT NULL,
+                PRIMARY KEY (source_id, target_id, edge_type, valid_from, recorded_at)
+            )",
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO cold.links \
+             (source_id, target_id, edge_type, valid_from, recorded_at, \
+              valid_to, weight, properties) \
+             SELECT source_id, target_id, edge_type, valid_from, recorded_at, \
+                    valid_to, weight, properties FROM cold.links_pre_v12",
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute("DROP TABLE cold.links_pre_v12", ())
+            .await
+            .unwrap();
         assert!(
             !columns(&conn, "cold", "links")
                 .await

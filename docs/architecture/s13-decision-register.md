@@ -4116,3 +4116,116 @@ Two of the three `AUTOMATIC` indices become `COVERING INDEX idx_lc_lineage_cut (
 
 Rejected: *shipping the rung §15.4 describes* (it evicts the trunk walk from its covering index, which a pinned test refuses, and D-219's own numbers already showed it slowest — what changed is that the 13% is now a lost guarantee rather than a slower plan); *shipping D-219's folded shape* (measured here at no effect, because the reader it was measured against was replaced two releases before this rung came due — an index nothing seeks on is D-089's failure and this is what it looks like when it arrives through a plan document); *declining any index at all* (the two CTEs are five call sites' worth of named seeking queries and the branched read is 2.28× on a churned trunk without one); *creating the index inside `fork()` so unforked databases pay nothing* (recorded above — a schema that depends on history rather than on the stamp); *also widening `links`' primary key in this release* (§15.4 assigns both to "the v13 rung"; that one is a rebuild of the ledger's largest table and is its own release).
 
+<a id="d-232"></a>D-232 — `links` was not keyed by lineage, the plan called that unreachable on an argument about sequential writes, and the crate's batch paths are not sequential (0.14.15, W12.15, §15.4, schema v15). [D-003](s13-decision-register.md#d-003), [D-014](s13-decision-register.md#d-014), [D-032](s13-decision-register.md#d-032), [D-036](s13-decision-register.md#d-036), [D-042](s13-decision-register.md#d-042), [D-083](s13-decision-register.md#d-083), [D-119](s13-decision-register.md#d-119), [D-126](s13-decision-register.md#d-126), [D-214](s13-decision-register.md#d-214), [D-217](s13-decision-register.md#d-217), [D-231](s13-decision-register.md#d-231). Evidence: `examples/links_key_reach_probe.rs`, `src/schema/ddl.rs`, `src/schema/migrations.rs`, `src/temporal/archive.rs`, `tests/migration_tests.rs`, `tests/branch_read_tests.rs`, `tests/compat_contract_tests.rs`.
+
+**Decision.** `links`' primary key becomes `(source_id, target_id, edge_type,
+valid_from, recorded_at, branch_id)`. Schema **v15**, a rebuild of the ledger's
+largest table. `cold.links` takes the same key in the same release, and `verify`
+learns to check it.
+
+**What §15.4 said, and the half of it that was wrong.** The plan carried this as
+a latent gap: two lineages asserting one edge key at one `recorded_at` collide,
+but "unreachable through the crate until branch-scoped writes exist, which is
+0.14.5", and therefore the v13 rung's "to widen or to decline in writing". The
+unreachability argument is about the clock — *successive calls return strictly
+increasing values*, so two writes cannot share a stamp — and it is sound for two
+**sequential** writes. The crate does not only make sequential writes. Both bulk
+surfaces take **one stamp for the whole batch** ([D-014](#d-014)), deliberately,
+because the rows were asserted by one act; and `reject_overlaps_within` groups
+candidates by `(source, target, edge_type, branch_id)`, so a trunk row and a
+branch row about one edge are not an overlap and are handed to the insert as a
+legal pair. It became reachable at **0.14.8**, when writes learned to name a
+lineage, and went seven releases unnoticed because the test pinning it was
+pinning the collision as a *guarantee* —
+`the_append_only_table_is_not_keyed_by_lineage` asserted the `UNIQUE` failure and
+carried a note explaining why it could not happen.
+
+`examples/links_key_reach_probe.rs` is the reproduction. Against v14:
+`write_bulk_atomic` and `bulk_import` both fail, and the caller is handed
+`UNIQUE constraint failed: links.source_id, …, links.recorded_at` — raw engine
+text about a storage key, for a write that named two lineages and one edge.
+
+**Widening rather than refusing, and it is not close.** The two assertions are
+legitimate: two lineages are *allowed* to believe different things about one
+edge, which is what a lineage is for. Refusing the pair would let a storage key
+decide what a caller may assert in one transaction, and would need a typed error
+naming a constraint the data model does not have. The materialization has been
+able to hold both rows since v12; this is the ledger catching up to the
+projection derived from it.
+
+**`branch_id` goes last, and the plans say so rather than §15.3 saying so.** The
+autoindex is the only index over four of this table's columns, so its column
+order *is* the access path. Measured (probe §5):
+
+| read | v14 key | appended (v15) | branch-leading |
+|---|---|---|---|
+| archive sweep | `idx_links_recorded_at (recorded_at<?)` | same | same |
+| supersession probe | `COVERING INDEX sqlite_autoindex_links_1 (source_id=? … recorded_at>?)` | **same** | `INDEX idx_links_target (target_id=?)` |
+| abandonment | `SCAN links` | `SCAN … COVERING INDEX` | `SEARCH … (branch_id=?)` |
+
+Appending keeps the five-column covering seek that the archive sweep runs *per
+candidate row*; leading with `branch_id` loses it for one bound column. That is
+[D-042](#d-042)'s eviction for the third time in three releases, and it is the
+same trade [D-231](#d-231) refused on `links_current`: a branch-leading key buys
+the one read that already has an index and costs the one that does not.
+
+**The rebuild, measured** — the v6 → v7 rung's cost is on record as an unmeasured
+2× estimate, so this one is not. Create, copy, drop, rename runs in **3.6 ms at
+1,000 rows, 15.3 ms at 10,000 and 105.8 ms at 50,000**: linear, and cheap
+because no trigger fires — the insert targets `links_v15` and every trigger on
+this table names `links`. Peak disk is still ~2× `links`.
+
+**Two things `DROP TABLE` takes that the v7 rung did not have to think about.**
+Its docstring says in as many words that "no index is defined on `links`", which
+stopped being true at v11. The four triggers and the two indices are both put
+back, the indices by name through `create_indices` so a typo is a panic rather
+than a database stamped v15 that fails its own verification.
+
+**The cold ledger moves in the same release, because otherwise v15 writes rows
+it cannot archive.** `cold.links` carried the same lineage-blind key. Widening
+the hot one without it would have made `archive` the single operation that still
+refuses the pair — a maintenance failure, on rows the crate had just started
+accepting, that the caller has no way to act on. Existing cold files are carried
+across by `upgrade_cold_lineage`, which already brings a pre-v12 file forward
+inside the session's transaction; the new arm is a rebuild rather than an
+`ALTER`, for the same reason the hot rung is.
+
+**`verify` learns to check a key.** Every previous rung added an object with a
+**name**, and verification finds a missing name without being told to look. A
+primary key has none: a database stamped v15 over a v14 `links` opens cleanly,
+reads correctly, and then refuses one legal batch write with raw engine text,
+while every v15 object it declares is present. So `verify` now asserts that
+`links`' `PRIMARY KEY` clause mentions `branch_id` — by clause and not by whole
+text, which is [D-126](#d-126)'s rule for the delete guards applied to a table.
+
+**The compat contract records a primary-key change and that is what it is for.**
+`the_ledger_tables_have_the_shape_the_contract_freezes` moves `branch_id` from
+position 0 to 6. Post-1.0 that diff is forbidden ([D-036](#d-036)); pre-1.0 it is
+a deliberate edit to a pinned list, which is what
+[D-032](#d-032) reserves the pre-1.0 window for and what the v6 → v7 rung already
+spent it on once. The alternative was shipping 1.0 with a ledger key that refuses
+a legal write. The change is additive *in what it admits* — every row the old key
+permitted the new key permits, and the rung copies rather than resolves — which is
+the property that makes it migratable at all and the one that will not be
+available next time.
+
+**A fixture that had been describing a shape it did not build.** `wind_back_to_v11`
+undid v12 with `ALTER TABLE links DROP COLUMN branch_id`, which SQLite refuses on
+a key member, so seven migration tests went red at once. Winding this table back
+now means what winding `links_current` back has always meant — rebuild from the
+pinned v11 shape and carry the rows — and the same is true of the cold wind-back
+in `branch_storage_tests`, which was leaving a **v15 key behind a v11 column
+list** and is now a genuine pre-v12 file.
+
+Rejected: *refusing the batch instead* (it refuses a legal pair of assertions, and
+would need a typed error naming a constraint the model does not have); *leading
+the key with `branch_id`* (measured above — it costs the supersession probe its
+covering seek to buy a read that could take an index instead); *deriving
+`LINKS_V15` from `ddl::CREATE_LINKS_TABLE`* ([D-083](#d-083): two rungs now
+rebuild this table and they must produce **different** shapes, so a rung reading
+today's constant would take a v6 database straight to a v15 key and stamp it v7);
+*leaving `cold.links` for a later release* (it makes `archive` fail on rows this
+release just made writable); *adding an index on `(branch_id, …)` instead of
+moving the key* (an index does not change what a key admits, which is the whole
+defect); *bundling this with the v14 index rung as §15.4 assigns it* (one revert
+would undo both, and this is a table rebuild).

@@ -43,6 +43,14 @@ const COLD_SCHEMA: &[&str] = &[
     // it was created with; this constrains new cold files, and the loader guard
     // is what covers the old ones. That is the same division of labour §4.7
     // describes, and the reason the guard stays.
+    //
+    // **`branch_id` is in the key since v15** (0.14.15, D-232), and it had to
+    // move with the hot table rather than after it. The hot key admitted the
+    // pair, so archiving became the one operation that could still refuse it:
+    // two lineages' rows about one edge at one `recorded_at` are legal in
+    // `links` and would have collided on the way out, turning a write the crate
+    // now accepts into a maintenance failure the caller cannot act on.
+    // `upgrade_cold_lineage` carries existing cold files across.
     r#"CREATE TABLE IF NOT EXISTS cold.links (
         source_id   TEXT NOT NULL,
         target_id   TEXT NOT NULL,
@@ -53,7 +61,7 @@ const COLD_SCHEMA: &[&str] = &[
         weight      REAL NOT NULL CHECK (weight >= 0.0 AND weight < 9e999 AND typeof(weight) = 'real'),
         properties  TEXT NOT NULL,
         branch_id   TEXT NOT NULL DEFAULT 'main',
-        PRIMARY KEY (source_id, target_id, edge_type, valid_from, recorded_at)
+        PRIMARY KEY (source_id, target_id, edge_type, valid_from, recorded_at, branch_id)
     )"#,
     // Concepts, as of v9 (C2). Trigger-free and FK-free like `cold.links`, and
     // for the same reasons -- but note what it does NOT drop.
@@ -440,7 +448,72 @@ async fn upgrade_cold_lineage(tx: &libsql::Transaction) -> Result<()> {
             .await?;
         }
     }
+
+    // The column is not the whole of v15. A cold file written by 0.14.8 through
+    // 0.14.14 has `branch_id` and a key that does not mention it, so it passes
+    // the loop above and still refuses the pair the hot table now accepts —
+    // which would make `archive` the operation that fails on a database nothing
+    // else complains about.
+    //
+    // A rebuild rather than an `ALTER`, because SQLite has no way to add a
+    // column to a primary key; the same reason the hot rung is a rebuild. It is
+    // safe in this transaction for the reason above: probe §12–13 established
+    // that `ROLLBACK` takes cold DDL with it, and this adds `CREATE`, `INSERT
+    // … SELECT`, `DROP` and `RENAME` to the `ADD COLUMN` already covered.
+    // `cold.links` carries no trigger and no index, so nothing else has to be
+    // put back.
+    if !cold_links_keyed_by_lineage(tx).await? {
+        tx.execute(COLD_LINKS_V15, ()).await?;
+        tx.execute(
+            "INSERT INTO cold.links_v15 \
+             (source_id, target_id, edge_type, valid_from, recorded_at, \
+              valid_to, weight, properties, branch_id) \
+             SELECT source_id, target_id, edge_type, valid_from, recorded_at, \
+                    valid_to, weight, properties, branch_id FROM cold.links",
+            (),
+        )
+        .await?;
+        tx.execute("DROP TABLE cold.links", ()).await?;
+        tx.execute("ALTER TABLE cold.links_v15 RENAME TO links", ())
+            .await?;
+    }
+
     Ok(())
+}
+
+/// The v15 cold ledger, spelled out because the rebuild needs a second name.
+///
+/// Not derived from [`COLD_SCHEMA`] by string surgery: the two would then be
+/// one definition read two ways, and the failure mode of getting that wrong is
+/// a cold file silently rebuilt into a shape the schema pass does not declare.
+const COLD_LINKS_V15: &str = r#"CREATE TABLE cold.links_v15 (
+        source_id   TEXT NOT NULL,
+        target_id   TEXT NOT NULL,
+        edge_type   TEXT NOT NULL,
+        valid_from  TEXT NOT NULL,
+        recorded_at TEXT NOT NULL,
+        valid_to    TEXT NOT NULL,
+        weight      REAL NOT NULL CHECK (weight >= 0.0 AND weight < 9e999 AND typeof(weight) = 'real'),
+        properties  TEXT NOT NULL,
+        branch_id   TEXT NOT NULL DEFAULT 'main',
+        PRIMARY KEY (source_id, target_id, edge_type, valid_from, recorded_at, branch_id)
+    )"#;
+
+/// Whether `cold.links` has `branch_id` **in its primary key**.
+///
+/// `PRAGMA table_info`'s sixth column is the column's 1-based position in the
+/// key, or 0. Asked of the pragma rather than of the stored SQL for
+/// [`cold_has_branch`]'s reason — a cold file is a file this crate may not have
+/// written, and matching its text would be matching someone else's formatting.
+async fn cold_links_keyed_by_lineage(conn: &libsql::Connection) -> Result<bool> {
+    let mut rows = conn.query("PRAGMA cold.table_info(links)", ()).await?;
+    while let Some(row) = rows.next().await? {
+        let named = row.get::<String>(1).is_ok_and(|name| name == "branch_id");
+        if named && row.get::<i64>(5).is_ok_and(|pk| pk > 0) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Whether one cold table already carries `branch_id`.
