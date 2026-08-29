@@ -654,17 +654,17 @@ ORDER BY w.node_id;
         // order it is written.
         let mut prelude: Vec<String> = Vec::new();
         if shape == LineageShape::Resolved {
-            prelude.push(ancestry_cte(Self::BRANCH_SLOT));
+            prelude.push(ancestry_cte(Self::BRANCH_SLOT, ""));
         }
         prelude.extend(self.links_at_tx_cte(shape));
         if shape == LineageShape::Resolved {
             // The hybrid is for *current* belief only; see `resolved_source`
             // for why the folded path applies its cutoffs in place instead.
             if self.as_of_recorded.is_none() {
-                prelude.push(churned_cte().to_string());
-                prelude.push(links_cut_cte().to_string());
+                prelude.push(churned_cte(""));
+                prelude.push(links_cut_cte(""));
             }
-            prelude.push(visible_cte(self.resolved_source()));
+            prelude.push(visible_cte(self.resolved_source(), ""));
         }
         let prelude: String = prelude.iter().map(|cte| format!("{cte},\n")).collect();
 
@@ -1024,7 +1024,7 @@ mod tests {
             params[TraversalBuilder::BRANCH_SLOT - 1],
             libsql::Value::from("b9")
         );
-        assert!(ancestry_cte(TraversalBuilder::BRANCH_SLOT).contains("?5"));
+        assert!(ancestry_cte(TraversalBuilder::BRANCH_SLOT, "").contains("?5"));
         assert!(named.walk_cte(resolved).contains("recorded_at <= ?6"));
 
         // And an unnamed traversal that still has to resolve reads the trunk's

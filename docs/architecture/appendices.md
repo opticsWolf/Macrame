@@ -283,6 +283,27 @@ view.database();     // for archive / checkpoint / verify -- file, not lineage
 // In Python the view is a Python class and there is no `db.view(...)` -- the
 // Arc is what that method exists to clone, and Python has none (§14).
 
+// What one lineage believes that another does not (0.14.11, D-228). ONE
+// statement over TWO resolutions, not two reads: `read_conn()` is shared and
+// public, so two reads are two snapshots and can report a difference that
+// existed at no instant. Which is why the four CTE builders take a name tag.
+let rows: Vec<Divergence> = db.diff(&alt.id, &BranchId::main()).await?;
+let rows = view.diff(&BranchId::main()).await?;    // this lineage on the LEFT
+rows[0].source_id;  rows[0].target_id;  rows[0].edge_type;   // the edge key
+rows[0].valid_from; rows[0].valid_to;   rows[0].weight;      // what is compared
+rows[0].branch_id;                      // WHO WROTE THE ROW -- reported, never
+                                        //   predicated on. §15.4 said divergence
+//   "is exactly the set of rows carrying the branch's own id"; that holds for a
+//   fresh fork against an unchurned parent and nothing else. A branch that
+//   writes NOTHING diverges from a trunk that reweights after the fork, on a
+//   row the TRUNK wrote; two siblings diverge through a row their COMMON
+//   ANCESTOR wrote; and re-asserting an inherited edge at its existing value
+//   writes a row and concludes nothing.
+// No `ts`, and that is a decision: a shadow retirement IS a divergence about an
+// instant having passed, so any valid-time filter drops it from `a`'s side and
+// answers "no difference". `properties` is not compared -- nothing in the crate
+// reads edge properties back. `weight` is compared exactly.
+
 // What a lineage may not overlap is what that lineage CAN SEE: the guard runs
 // the read's own resolution restricted to the edge key, so a branch is refused
 // for overlapping an interval it inherited and the trunk is not refused for
@@ -518,7 +539,7 @@ New in 0.13.38 ([D-211](s13-decision-register.md#d-211)). [Appendix A](appendice
 
 *Frozen* means a change requires a **major version**.
 
-**1. The public Rust API, item for item and path for path.** [`docs/architecture/public-api.txt`](public-api.txt) is the surface — **1,520 items**. No item is removed, no path stops resolving, and no signature narrows. Each item is reachable at exactly one canonical path, plus flat aliases at the crate root and in `macrame::prelude` ([D-208](s13-decision-register.md#d-208)). Held by `scripts/check_public_api.py` in CI and by `tests/public_path_tests.rs` in `cargo test`. The cycle that produced this surface was reviewed against 0.13.0 item by item before it was frozen — [`api-review-0.14.0.md`](api-review-0.14.0.md), [D-212](s13-decision-register.md#d-212) — which is the last release where that review is cheap.
+**1. The public Rust API, item for item and path for path.** [`docs/architecture/public-api.txt`](public-api.txt) is the surface — **1,541 items**. No item is removed, no path stops resolving, and no signature narrows. Each item is reachable at exactly one canonical path, plus flat aliases at the crate root and in `macrame::prelude` ([D-208](s13-decision-register.md#d-208)). Held by `scripts/check_public_api.py` in CI and by `tests/public_path_tests.rs` in `cargo test`. The cycle that produced this surface was reviewed against 0.13.0 item by item before it was frozen — [`api-review-0.14.0.md`](api-review-0.14.0.md), [D-212](s13-decision-register.md#d-212) — which is the last release where that review is cheap.
 
 **2. The ledger tables** — `concepts`, `links`, `transaction_log`. Additive only: `ALTER TABLE ADD COLUMN` and new indexes. A changed primary key, a dropped column or altered bitemporal semantics is a major version with an explicit ETL path, because bitemporal data is the hardest data to migrate: a rebuild means replaying history and recomputing transaction-time boundaries, which is rewriting the past ([D-036](s13-decision-register.md#d-036), [Doctrine III](s0-s3-foundations.md#doctrine-iii)).
 

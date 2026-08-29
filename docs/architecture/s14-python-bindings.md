@@ -823,6 +823,38 @@ is checked per *feature*, and a feature that arrives on several surfaces at once
 gets checked on the surfaces that share an implementation. The surfaces that do
 not share it are where a convention silently holds four times out of five.
 
+<a id="diff-binding"></a>
+
+### 14.19 `diff`, and a convention held immediately after it was missed (0.14.11, W12.11, [D-228](s13-decision-register.md#d-228))
+
+§14.18 records the one lapse. This section is the release straight after it, and
+the shape of the surface is what §14.18's closing rule asked for: `diff` arrives
+on `Database` *and* on `BranchView` in the release that creates it, rather than
+on the handle now and the view whenever somebody next looks at the view.
+
+`Database.diff(a, b)` takes two `str` names and validates both, so an
+unregistered lineage raises `UnknownBranchError` naming it and a name the ledger
+cannot accept raises `InvalidBranchIdError` from the call that used it — the
+same boundary treatment `fork` gets, and the reason `BranchId` still has no
+Python class. `BranchView.diff(other)` is `db.diff(self.id, other)`: this
+lineage on the **left**, which is the one thing the delegation has to get right
+beyond passing a name, and a mutation that swaps it is caught.
+
+`Divergence` is a `frozen` class with `eq`, seven getters, and `valid_to`
+returning `None` for an open interval through the same sentinel rule every other
+row type here uses. `eq` is not decoration: it is what lets a Python test assert
+a whole diff without spelling seven getters, and it is how `view.diff("main") ==
+db.diff("alt", "main")` says the delegation is an identity rather than a
+paraphrase.
+
+**What the Python tests pin that the Rust ones cannot.** `valid_to is None` is
+the *whole* content of a shadow retirement's divergence, and in Python that is
+the difference between a `datetime` and `None` rather than between two strings —
+so the case reads, from the caller's side, as "the branch closed it and the trunk
+did not". The counterexample to §15.4's cheap rule is here for the same reason:
+a Python caller reaching for `[r for r in rows if r.branch_id == alt.id]` would
+lose exactly the row that says the trunk moved on without them.
+
 <!--nav-->
 ← [previous](s13-decision-register.md) · [index](README.md) · [next](appendices.md) →
 <!--/nav-->

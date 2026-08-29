@@ -21,6 +21,7 @@ import pytest
 import macrame
 
 T0 = "2020-01-01T00:00:00.000000Z"
+NOW = "2030-01-01T00:00:00.000000Z"
 
 
 @pytest.fixture
@@ -249,3 +250,118 @@ def test_the_branch_errors_are_catchable_as_a_group(db):
     assert issubclass(macrame.InvalidBranchIdError, macrame.ValidationError)
     assert not issubclass(macrame.InvalidBranchIdError, macrame.BranchError)
     assert issubclass(macrame.BranchError, macrame.MacrameError)
+
+
+# ───────────────────────────────────────────────────────────────────────────
+# What one lineage believes and another does not (0.14.11, W12.11, D-228)
+# ───────────────────────────────────────────────────────────────────────────
+
+
+def shown(rows):
+    """A divergence as the three things a caller reads it for."""
+    return [
+        (f"{r.source_id}->{r.target_id}", r.branch_id, r.valid_to is None) for r in rows
+    ]
+
+
+def test_a_fork_that_wrote_nothing_diverges_in_nothing(db):
+    """The O(1) fork, observed rather than argued from the schema.
+
+    Inheriting by resolution instead of by copying means a fresh branch is
+    *identical* to its parent, and this is where that stops being a claim
+    about `branches` having one row and becomes something a caller can check.
+    """
+    db.fork("alt")
+    assert db.diff("alt", "main") == []
+    assert db.diff("main", "alt") == []
+
+
+def test_what_the_branch_asserted_is_what_it_diverges_in(db):
+    """The case §15.4 had in mind, and the one where provenance agrees."""
+    db.fork("alt")
+    view = macrame.BranchView(db, "alt")
+    view.assert_edge(macrame.EdgeAssertion("c", "d", "LEADSTO", valid_from=T0))
+
+    assert shown(db.diff("alt", "main")) == [("c->d", "alt", True)]
+    assert db.diff("main", "alt") == [], "the trunk did not conclude it"
+
+
+def test_a_shadow_retirement_is_a_divergence_on_both_sides(db):
+    """And its whole content is `valid_to`, which is why there is no `ts`.
+
+    The branch retires an inherited edge by writing *its own* closed row at the
+    ancestor's key; the parent's row is never touched. So each side holds the
+    same edge over a different interval, and an as-of read on either side
+    reports a shorter list with nothing in it saying the other disagrees.
+    """
+    db.fork("alt")
+    macrame.BranchView(db, "alt").retire_edge("b", "c", "LEADSTO", T0, NOW)
+
+    assert shown(db.diff("alt", "main")) == [("b->c", "alt", False)]
+    assert shown(db.diff("main", "alt")) == [("b->c", "main", True)]
+
+
+def test_the_divergent_row_can_be_one_the_other_lineage_wrote(db):
+    """The counterexample to "exactly the rows carrying the branch's own id".
+
+    The branch writes nothing at all. The *trunk* reweights an edge after the
+    fork, so the branch keeps believing the pre-fork version — a row `main`
+    wrote — and `alt`'s divergence from `main` carries `main`. The rows a
+    lineage owns are not the rows on which it differs.
+    """
+    db.fork("alt")
+    db.assert_edge(macrame.EdgeAssertion("a", "b", "LEADSTO", valid_from=T0, weight=9.0))
+
+    (row,) = db.diff("alt", "main")
+    assert (row.source_id, row.target_id) == ("a", "b")
+    assert row.branch_id == "main", "the branch's divergence is the trunk's own row"
+    assert row.weight == 1.0
+
+    (back,) = db.diff("main", "alt")
+    assert back.weight == 9.0 and back.branch_id == "main"
+
+
+def test_re_asserting_what_was_already_believed_is_not_a_divergence(db):
+    """The other direction of the same mistake: row provenance over-reports.
+
+    The branch writes a row of its own, at the value it already inherited. It
+    concluded nothing, and a diff that counted rows would say it did.
+    """
+    db.fork("alt")
+    macrame.BranchView(db, "alt").assert_edge(
+        macrame.EdgeAssertion("a", "b", "LEADSTO", valid_from=T0)
+    )
+    assert db.diff("alt", "main") == []
+
+
+def test_a_lineage_does_not_diverge_from_itself(db):
+    db.fork("alt")
+    macrame.BranchView(db, "alt").assert_edge(
+        macrame.EdgeAssertion("c", "d", "LEADSTO", valid_from=T0)
+    )
+    assert db.diff("alt", "alt") == []
+    assert db.diff("main", "main") == []
+
+
+def test_a_divergence_is_comparable_and_its_repr_names_the_lineage(db):
+    db.fork("alt")
+    macrame.BranchView(db, "alt").assert_edge(
+        macrame.EdgeAssertion("c", "d", "LEADSTO", valid_from=T0)
+    )
+    (row,) = db.diff("alt", "main")
+    (again,) = db.diff("alt", "main")
+
+    assert row == again, "two reads of one unchanged ledger are one answer"
+    assert row.edge_type == "LEADSTO"
+    assert row.valid_from.year == 2020
+    assert "c->d" in repr(row) and "alt" in repr(row)
+
+
+def test_diff_refuses_a_lineage_that_does_not_exist(db):
+    db.fork("alt")
+    with pytest.raises(macrame.UnknownBranchError, match="ghost"):
+        db.diff("alt", "ghost")
+    with pytest.raises(macrame.UnknownBranchError, match="ghost"):
+        db.diff("ghost", "alt")
+    with pytest.raises(macrame.InvalidBranchIdError):
+        db.diff("alt", "alt ")

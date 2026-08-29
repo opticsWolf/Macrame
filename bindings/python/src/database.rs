@@ -1263,6 +1263,37 @@ impl PyDatabase {
         })
     }
 
+    /// What lineage `a` believes that lineage `b` does not (§15.4, W12.11).
+    ///
+    /// A belief-level difference, not a provenance filter: a row comes back
+    /// when `a` holds an edge at a key `b` does not hold at all, or holds the
+    /// same key over a different interval or at a different weight. Its
+    /// `branch_id` may therefore name a lineage that is *neither* argument —
+    /// two siblings disagree through rows their common ancestor wrote.
+    ///
+    /// **There is no `ts`.** A retirement is a divergence about an instant
+    /// having passed, and any instant filter drops it from `a`'s side, so a
+    /// diff taken as-of an instant would silently answer a different question.
+    /// Filter the result if that is what you want.
+    ///
+    /// Ordered by edge key. Both names are validated, so an unregistered
+    /// lineage raises `UnknownBranchError` naming it. Properties are not
+    /// compared, because no read in this library returns them.
+    fn diff(&self, py: Python<'_>, a: &str, b: &str) -> PyResult<Vec<branch::PyDivergence>> {
+        let a = branch::branch_id(a)?;
+        let b = branch::branch_id(b)?;
+        self.with_db(py, move |db| {
+            runtime()
+                .block_on(db.diff(&a, &b))
+                .map(|rows| {
+                    rows.into_iter()
+                        .map(|inner| branch::PyDivergence { inner })
+                        .collect()
+                })
+                .map_err(to_py)
+        })
+    }
+
     // -- vector surface (P4.4) ------------------------------------------------
 
     /// Create a model's embedding table and DiskANN index (§5.9, D-048).

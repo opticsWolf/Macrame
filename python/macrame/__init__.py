@@ -93,6 +93,7 @@ from ._macrame import (
     CurrentDriftError,
     Database,
     Branch,
+    Divergence,
     BranchError,
     BranchExistsError,
     BranchMismatchError,
@@ -169,6 +170,7 @@ __all__ = [
     "EdgeRef",
     # lineage (W12.7)
     "Branch",
+    "Divergence",
     # temporal (P4.3)
     "MaterializedState",
     "ArchiveReport",
@@ -418,6 +420,16 @@ class BranchView:
     def search_filtered(self, *args, **kwargs):
         """`Database.search_filtered` on this lineage."""
         return self._db.search_filtered(*args, branch=self._id, **kwargs)
+
+    def diff(self, other: str):
+        """What this lineage believes that `other` does not.
+
+        `Database.diff` with this view on the left. The direction matters and
+        is not symmetric: an edge only `other` holds is a divergence of
+        `other` from this one, and comes back from the call with the
+        arguments the other way round.
+        """
+        return self._db.diff(self._id, str(other))
 
 
 def _install_fork_guard() -> None:

@@ -31,6 +31,7 @@ impl macrame::branch::BranchView
 pub async fn macrame::branch::BranchView::assert_edge(&self, macrame::graph::EdgeAssertion) -> macrame::error::Result<()>
 pub async fn macrame::branch::BranchView::bulk_import(&self, alloc::vec::Vec<macrame::graph::EdgeAssertion>) -> macrame::error::BulkResult<usize>
 pub fn macrame::branch::BranchView::database(&self) -> &alloc::sync::Arc<macrame::connection::Database>
+pub async fn macrame::branch::BranchView::diff(&self, &macrame::branch::BranchId) -> macrame::error::Result<alloc::vec::Vec<macrame::branch::Divergence>>
 pub fn macrame::branch::BranchView::id(&self) -> &macrame::branch::BranchId
 pub async fn macrame::branch::BranchView::load_subgraph(&self, &str, u32, &str, usize) -> macrame::error::Result<macrame::graph::Subgraph>
 pub fn macrame::branch::BranchView::new(alloc::sync::Arc<macrame::connection::Database>, macrame::branch::BranchId) -> Self
@@ -43,6 +44,14 @@ pub async fn macrame::branch::BranchView::write_bulk_atomic(&self, alloc::vec::V
 pub async fn macrame::branch::BranchView::write_concepts(&self, alloc::vec::Vec<macrame::connection::ConceptUpsert>) -> macrame::error::BulkResult<usize>
 impl core::fmt::Debug for macrame::branch::BranchView
 pub fn macrame::branch::BranchView::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+#[non_exhaustive] pub struct macrame::branch::Divergence
+pub macrame::branch::Divergence::branch_id: alloc::string::String
+pub macrame::branch::Divergence::edge_type: alloc::string::String
+pub macrame::branch::Divergence::source_id: alloc::string::String
+pub macrame::branch::Divergence::target_id: alloc::string::String
+pub macrame::branch::Divergence::valid_from: alloc::string::String
+pub macrame::branch::Divergence::valid_to: alloc::string::String
+pub macrame::branch::Divergence::weight: f64
 pub const macrame::branch::MAX_BRANCH_ID: usize
 pub mod macrame::connection
 pub mod macrame::connection::chunk_rows
@@ -119,6 +128,7 @@ pub async fn macrame::connection::Database::checkpoint(&self) -> macrame::error:
 pub fn macrame::connection::Database::clock(&self) -> &alloc::sync::Arc<dyn macrame::util::Clock>
 pub async fn macrame::connection::Database::close(self) -> macrame::error::Result<()>
 pub async fn macrame::connection::Database::diagnostic_conn(&self) -> macrame::error::Result<libsql::connection::Connection>
+pub async fn macrame::connection::Database::diff(&self, &macrame::branch::BranchId, &macrame::branch::BranchId) -> macrame::error::Result<alloc::vec::Vec<macrame::branch::Divergence>>
 pub async fn macrame::connection::Database::fork(&self, macrame::branch::BranchId, macrame::branch::BranchId) -> macrame::error::Result<macrame::branch::Branch>
 pub fn macrame::connection::Database::metrics(&self) -> macrame::metrics::MetricsSnapshot
 pub async fn macrame::connection::Database::open(impl core::convert::AsRef<std::path::Path>) -> macrame::error::Result<Self>
@@ -798,6 +808,7 @@ pub async fn macrame::connection::Database::checkpoint(&self) -> macrame::error:
 pub fn macrame::connection::Database::clock(&self) -> &alloc::sync::Arc<dyn macrame::util::Clock>
 pub async fn macrame::connection::Database::close(self) -> macrame::error::Result<()>
 pub async fn macrame::connection::Database::diagnostic_conn(&self) -> macrame::error::Result<libsql::connection::Connection>
+pub async fn macrame::connection::Database::diff(&self, &macrame::branch::BranchId, &macrame::branch::BranchId) -> macrame::error::Result<alloc::vec::Vec<macrame::branch::Divergence>>
 pub async fn macrame::connection::Database::fork(&self, macrame::branch::BranchId, macrame::branch::BranchId) -> macrame::error::Result<macrame::branch::Branch>
 pub fn macrame::connection::Database::metrics(&self) -> macrame::metrics::MetricsSnapshot
 pub async fn macrame::connection::Database::open(impl core::convert::AsRef<std::path::Path>) -> macrame::error::Result<Self>
@@ -1389,6 +1400,7 @@ impl macrame::branch::BranchView
 pub async fn macrame::branch::BranchView::assert_edge(&self, macrame::graph::EdgeAssertion) -> macrame::error::Result<()>
 pub async fn macrame::branch::BranchView::bulk_import(&self, alloc::vec::Vec<macrame::graph::EdgeAssertion>) -> macrame::error::BulkResult<usize>
 pub fn macrame::branch::BranchView::database(&self) -> &alloc::sync::Arc<macrame::connection::Database>
+pub async fn macrame::branch::BranchView::diff(&self, &macrame::branch::BranchId) -> macrame::error::Result<alloc::vec::Vec<macrame::branch::Divergence>>
 pub fn macrame::branch::BranchView::id(&self) -> &macrame::branch::BranchId
 pub async fn macrame::branch::BranchView::load_subgraph(&self, &str, u32, &str, usize) -> macrame::error::Result<macrame::graph::Subgraph>
 pub fn macrame::branch::BranchView::new(alloc::sync::Arc<macrame::connection::Database>, macrame::branch::BranchId) -> Self
@@ -1467,6 +1479,7 @@ pub async fn macrame::connection::Database::checkpoint(&self) -> macrame::error:
 pub fn macrame::connection::Database::clock(&self) -> &alloc::sync::Arc<dyn macrame::util::Clock>
 pub async fn macrame::connection::Database::close(self) -> macrame::error::Result<()>
 pub async fn macrame::connection::Database::diagnostic_conn(&self) -> macrame::error::Result<libsql::connection::Connection>
+pub async fn macrame::connection::Database::diff(&self, &macrame::branch::BranchId, &macrame::branch::BranchId) -> macrame::error::Result<alloc::vec::Vec<macrame::branch::Divergence>>
 pub async fn macrame::connection::Database::fork(&self, macrame::branch::BranchId, macrame::branch::BranchId) -> macrame::error::Result<macrame::branch::Branch>
 pub fn macrame::connection::Database::metrics(&self) -> macrame::metrics::MetricsSnapshot
 pub async fn macrame::connection::Database::open(impl core::convert::AsRef<std::path::Path>) -> macrame::error::Result<Self>
@@ -1502,6 +1515,14 @@ pub async fn macrame::connection::Database::load_subgraph(&self, &str, u32, &str
 pub async fn macrame::connection::Database::load_subgraph_with(&self, &macrame::graph::TraversalBuilder, &str, usize) -> macrame::error::Result<macrame::graph::Subgraph>
 impl core::ops::drop::Drop for macrame::connection::Database
 pub fn macrame::connection::Database::drop(&mut self)
+#[non_exhaustive] pub struct macrame::Divergence
+pub macrame::Divergence::branch_id: alloc::string::String
+pub macrame::Divergence::edge_type: alloc::string::String
+pub macrame::Divergence::source_id: alloc::string::String
+pub macrame::Divergence::target_id: alloc::string::String
+pub macrame::Divergence::valid_from: alloc::string::String
+pub macrame::Divergence::valid_to: alloc::string::String
+pub macrame::Divergence::weight: f64
 pub struct macrame::Overlap
 pub macrame::Overlap::edge_type: alloc::string::String
 pub macrame::Overlap::existing_from: alloc::string::String

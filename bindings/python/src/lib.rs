@@ -121,6 +121,7 @@ fn _macrame(m: &Bound<'_, PyModule>) -> PyResult<()> {
     vector::register(m)?;
 
     m.add_class::<branch::PyBranch>()?;
+    m.add_class::<branch::PyDivergence>()?;
     m.add_class::<database::PyDatabase>()?;
     m.add_class::<database::PyCancelToken>()?;
 

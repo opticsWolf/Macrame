@@ -2044,6 +2044,35 @@ impl Database {
         crate::branch::list(self.read_conn()).await
     }
 
+    /// The beliefs `a` holds that `b` does not (§15.4, 0.14.11, D-228).
+    ///
+    /// One [`Divergence`](crate::branch::Divergence) per edge key the two
+    /// lineages disagree about, in key order: `b` holds no belief about it, or
+    /// holds one with a different interval or weight. Not symmetric —
+    /// `diff(b, a)` is the other half, and composing the two is *two* snapshots
+    /// even though each is one.
+    ///
+    /// Read through the read connection rather than the actor, like
+    /// [`Self::branches`], and taken at one snapshot rather than two: see
+    /// `graph::lineage::diff_sql` for why that decides the shape of the query.
+    ///
+    /// There is no instant parameter. A diff filtered to a valid-time instant
+    /// cannot report the one divergence that is *about* an instant having
+    /// passed — a branch that retired an edge its parent still holds open — so
+    /// this compares the whole of both views.
+    ///
+    /// # Errors
+    ///
+    /// [`DbError::UnknownBranch`], naming whichever of the two is not
+    /// registered, and `a` first when neither is.
+    pub async fn diff(
+        &self,
+        a: &crate::branch::BranchId,
+        b: &crate::branch::BranchId,
+    ) -> Result<Vec<crate::branch::Divergence>> {
+        crate::branch::diff(self.read_conn(), a, b).await
+    }
+
     /// Assert many edges in one transaction under one stamp (D-014).
     ///
     /// # This is the one write with no latency bound, and here is what it costs

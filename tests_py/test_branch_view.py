@@ -231,3 +231,21 @@ def test_the_view_is_a_wrapper_and_the_handle_is_the_same_object(db):
     assert a != c
     assert a.database is db, "no copy: the view holds the handle the caller passed"
     assert repr(a).startswith("BranchView(branch='alt'")
+
+
+def test_the_view_diffs_from_its_own_lineage(db):
+    """The sixth read on the view, and the only one whose direction matters.
+
+    ``view.diff(other)`` is ``db.diff(view.id, other)`` — this lineage on the
+    left. An edge only the *other* side holds comes back from the call with the
+    arguments the other way round, which is a fact about diffs and not about
+    the view, and the view does nothing to hide it.
+    """
+    alt = db.fork("alt")
+    view = macrame.BranchView(db, alt.id)
+    view.assert_edge(edge("a", "b"))
+
+    assert view.diff("main") == db.diff("alt", "main")
+    (row,) = view.diff("main")
+    assert (row.source_id, row.target_id, row.branch_id) == ("a", "b", "alt")
+    assert view.diff(alt.id) == []

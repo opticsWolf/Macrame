@@ -5,7 +5,9 @@
 //! feature never becomes a convention. This is the fourth holding — `branch=`
 //! on the traversal entry points at 0.14.4, the belief's lineage label on
 //! `MaterializedState.edges` at 0.14.5, nothing owed at 0.14.6 because it added
-//! no surface in either language, and `fork`/`branches` here.
+//! no surface in either language, and `fork`/`branches` here. `diff` at
+//! 0.14.11 is the sixth — 0.14.10 was the one *lapse*, and it was closed in the
+//! release that found it rather than left as a second one.
 //!
 //! # Why `BranchId` is not a Python class
 //!
@@ -93,6 +95,86 @@ impl PyBranch {
             ),
             None => format!("<macrame.Branch {} (trunk)>", self.inner.id),
         }
+    }
+}
+
+/// One row of `a`'s belief that `b` does not share (§15.4, W12.11).
+///
+/// `frozen` and `eq` for the same reason [`PyBranch`] is frozen: it is a
+/// snapshot of what two lineages believed at one instant, and the equality is
+/// what makes a diff assertable in a test without spelling seven getters.
+///
+/// **`branch_id` is which lineage *wrote* the row, and it is not the answer to
+/// "who diverged".** It is here because it is the only way to tell an
+/// assertion `a` made from an inherited row `a` still holds while `b` has moved
+/// on — and the second case is the one §15.4's cheap characterization was
+/// missing. A caller that wants "what did this branch do" filters on it; a
+/// caller that wants "where do these two disagree" already has that in the fact
+/// that the row came back at all.
+#[pyclass(
+    name = "Divergence",
+    module = "macrame",
+    frozen,
+    eq,
+    skip_from_py_object
+)]
+#[derive(Clone, PartialEq)]
+pub(crate) struct PyDivergence {
+    pub(crate) inner: macrame::Divergence,
+}
+
+#[pymethods]
+impl PyDivergence {
+    #[getter]
+    fn source_id(&self) -> &str {
+        &self.inner.source_id
+    }
+
+    #[getter]
+    fn target_id(&self) -> &str {
+        &self.inner.target_id
+    }
+
+    #[getter]
+    fn edge_type(&self) -> &str {
+        &self.inner.edge_type
+    }
+
+    #[getter]
+    fn valid_from<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        from_canonical(py, &self.inner.valid_from)
+    }
+
+    /// `None` for an open interval, per P3's sentinel rule.
+    ///
+    /// A closed one here is frequently the *whole* divergence: a branch that
+    /// shadow-retires an inherited edge differs from its parent in this field
+    /// and in nothing else.
+    #[getter]
+    fn valid_to<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        from_canonical(py, &self.inner.valid_to)
+    }
+
+    #[getter]
+    fn weight(&self) -> f64 {
+        self.inner.weight
+    }
+
+    /// The lineage whose row this is — not necessarily either side of the diff.
+    #[getter]
+    fn branch_id(&self) -> &str {
+        &self.inner.branch_id
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "<macrame.Divergence {}->{} type={:?} on {} w={}>",
+            self.inner.source_id,
+            self.inner.target_id,
+            self.inner.edge_type,
+            self.inner.branch_id,
+            self.inner.weight
+        )
     }
 }
 

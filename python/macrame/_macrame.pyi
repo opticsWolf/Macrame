@@ -453,6 +453,41 @@ class RehydrateReport:
 
     def __repr__(self) -> str: ...
 
+class Divergence:
+    """One row of a lineage's belief that another lineage does not share.
+
+    Returned by `Database.diff` and `BranchView.diff`. Frozen and comparable —
+    a snapshot of what two lineages believed at one instant.
+    """
+
+    @property
+    def source_id(self) -> str: ...
+    @property
+    def target_id(self) -> str: ...
+    @property
+    def edge_type(self) -> str: ...
+    @property
+    def valid_from(self) -> datetime:
+        """When the asserted edge starts being believed."""
+
+    @property
+    def valid_to(self) -> datetime | None:
+        """`None` for an open interval.
+
+        A closed one is often the whole divergence: a branch that shadow-retires
+        an inherited edge differs from its parent here and nowhere else.
+        """
+
+    @property
+    def weight(self) -> float: ...
+    @property
+    def branch_id(self) -> str:
+        """Which lineage *wrote* the row — not necessarily either side of the
+        diff. Two siblings disagree through rows their common ancestor wrote.
+        """
+
+    def __repr__(self) -> str: ...
+
 class Branch:
     """One lineage: its name, its parent, and where it was cut.
 
@@ -1025,6 +1060,24 @@ class Database:
         """Every lineage, trunk first then creation order.
 
         A database that has never forked returns exactly one `Branch`.
+        """
+
+    def diff(self, a: str, b: str) -> list[Divergence]:
+        """What lineage `a` believes that lineage `b` does not.
+
+        A belief-level difference, not a provenance filter. A row comes back
+        when `a` holds an edge at a key `b` does not hold at all, or holds the
+        same key over a different interval or at a different weight — so a
+        `Divergence.branch_id` may name a lineage that is neither argument.
+
+        **There is no timestamp parameter.** A retirement is a divergence about
+        an instant having passed, and any instant filter would drop it from
+        `a`'s side. Filter the result instead.
+
+        Ordered by edge key. Raises `UnknownBranchError` for a lineage that was
+        never registered, and `InvalidBranchIdError` for a name the ledger
+        cannot accept. Properties are not compared, because no read in this
+        library returns them.
         """
 
     def register_model(self, model: str, dim: int) -> None: ...

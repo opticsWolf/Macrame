@@ -205,15 +205,32 @@ pub(crate) async fn lineage_shape(
 /// `fork()` and branch-scoped writes guarantee and no CHECK does. The
 /// resolution still orders by `dist`, which is the definition; the equivalence
 /// is what says the fold cannot disagree with it.
-pub(crate) fn ancestry_cte(slot: usize) -> String {
+///
+/// # `tag`, and the one query that needs two of these (0.14.11, [D-228])
+///
+/// Every read before `diff` resolved **one** lineage, so the four CTEs could
+/// take their names as constants. A diff resolves two in one statement — it
+/// has to, because two statements compare two snapshots and can report a
+/// difference that never existed — and SQLite has one namespace per `WITH`
+/// list. So each name here takes a suffix, and every caller that resolves one
+/// lineage passes `""` and emits exactly the text it emitted before.
+///
+/// A suffix rather than a second copy of the hybrid, for the reason
+/// [D-227](../../docs/architecture/s13-decision-register.md#d-227) gave when it
+/// declined to hand-write the cutoff into `query_as_of_edges_on`: the two arms
+/// of [`links_cut_cte`] must partition, and that is a property of one
+/// comparison written once, not an argument to restate in a second place.
+///
+/// [D-228]: ../../docs/architecture/s13-decision-register.md#d-228
+pub(crate) fn ancestry_cte(slot: usize, tag: &str) -> String {
     format!(
-        r#"lineage(branch_id, dist, cutoff) AS (
+        r#"lineage{tag}(branch_id, dist, cutoff) AS (
     SELECT ?{slot}, 0, NULL
     UNION ALL
     SELECT b.parent_id, g.dist + 1,
            CASE WHEN g.cutoff IS NULL OR b.forked_at < g.cutoff
                 THEN b.forked_at ELSE g.cutoff END
-    FROM branches b JOIN lineage g ON b.branch_id = g.branch_id
+    FROM branches b JOIN lineage{tag} g ON b.branch_id = g.branch_id
     WHERE b.parent_id IS NOT NULL
 )"#
     )
@@ -238,14 +255,16 @@ pub(crate) fn ancestry_cte(slot: usize) -> String {
 /// The `cutoff IS NOT NULL` clause is what makes this empty for a read on the
 /// root — `main` has no ancestors and no cutoff, so a forked database still
 /// pays nothing here to read its own trunk.
-pub(crate) fn churned_cte() -> &'static str {
-    r#"churned(entity_id, branch_id, cutoff) AS (
+pub(crate) fn churned_cte(tag: &str) -> String {
+    format!(
+        r#"churned{tag}(entity_id, branch_id, cutoff) AS (
     SELECT lc.source_id || '|' || lc.target_id || '|' || lc.edge_type || '|' || lc.valid_from,
            lc.branch_id, g.cutoff
     FROM links_current lc
-    JOIN lineage g ON g.branch_id = lc.branch_id
+    JOIN lineage{tag} g ON g.branch_id = lc.branch_id
     WHERE g.cutoff IS NOT NULL AND lc.recorded_at > g.cutoff
 )"#
+    )
 }
 
 /// `links_current` as each lineage on the ancestry was entitled to see it.
@@ -271,12 +290,13 @@ pub(crate) fn churned_cte() -> &'static str {
 ///
 /// The column list matches `links_current`'s and `links_at_tx`'s exactly, which
 /// is what lets [`visible_cte`] reduce any of the three without knowing which.
-pub(crate) fn links_cut_cte() -> &'static str {
-    r#"links_cut(source_id, target_id, edge_type, valid_from, valid_to, weight, branch_id) AS (
+pub(crate) fn links_cut_cte(tag: &str) -> String {
+    format!(
+        r#"links_cut{tag}(source_id, target_id, edge_type, valid_from, valid_to, weight, branch_id) AS (
     SELECT lc.source_id, lc.target_id, lc.edge_type, lc.valid_from, lc.valid_to,
            lc.weight, lc.branch_id
     FROM links_current lc
-    JOIN lineage g ON g.branch_id = lc.branch_id
+    JOIN lineage{tag} g ON g.branch_id = lc.branch_id
     WHERE g.cutoff IS NULL OR lc.recorded_at <= g.cutoff
     UNION ALL
     SELECT json_extract(payload, '$.source_id'),
@@ -293,12 +313,13 @@ pub(crate) fn links_cut_cte() -> &'static str {
                    ORDER BY transaction_log.seq_id DESC
                ) AS rn
         FROM transaction_log
-        JOIN churned k ON k.entity_id = transaction_log.entity_id
+        JOIN churned{tag} k ON k.entity_id = transaction_log.entity_id
                       AND k.branch_id = transaction_log.branch_id
         WHERE transaction_log.table_name = 'links'
           AND transaction_log.recorded_at <= k.cutoff
     ) WHERE rn = 1
 )"#
+    )
 }
 
 /// The same resolution as [`links_cut_cte`] and [`visible_cte`], narrowed to a
@@ -439,6 +460,78 @@ pub(crate) fn retire_from_resolved() -> String {
     )
 }
 
+/// What one lineage believes and another does not, in **one** statement
+/// (0.14.11, §15.4, [D-228]).
+///
+/// # Why one statement rather than two reads and a difference in Rust
+///
+/// Not for the round trip. A diff is a *comparison*, and two statements
+/// against [`Database::read_conn`](crate::Database::read_conn) are two
+/// snapshots — a write landing between them can make the answer report a
+/// difference that never existed at any instant. The obvious repair, a read
+/// transaction, is not available: `read_conn()` is public and shared, so
+/// beginning one inside a library call would change what every other holder of
+/// that connection sees. One statement gets the single snapshot for free.
+///
+/// # Why the CTEs are tagged rather than copied
+///
+/// This resolves two lineages, so it needs two of each of the four CTEs, and
+/// SQLite has one namespace per `WITH` list. Hence the `tag` parameter on
+/// [`ancestry_cte`] and its three companions rather than a second spelling of
+/// the hybrid — which [D-227](../../docs/architecture/s13-decision-register.md#d-227)
+/// declined for `query_as_of_edges_on` and would be the same mistake here.
+/// Every single-lineage caller passes `""` and emits the text it always did.
+///
+/// # What it compares, and what it does not
+///
+/// A `LEFT JOIN` on the **edge key** — `(source, target, type, valid_from)` —
+/// and a row survives when `b` holds no belief about that key, or holds one
+/// whose interval or weight differs. So a retirement is reported: `a`'s row is
+/// the closed one, `b`'s is open, and they differ. That is the case a
+/// valid-time filter would have hidden, which is why there is no `ts` here at
+/// all — a diff filtered to an instant cannot see the one divergence that is
+/// *about* an instant having passed.
+///
+/// **`properties` is not compared**, and that is a limit rather than an
+/// oversight: no read surface in the crate returns edge properties —
+/// `EdgeAssertion::properties` writes them and nothing reads them back — so a
+/// diff reporting a change there would be the only reader resolving a column,
+/// and it would name a difference the caller has no way to look at. It is the
+/// first thing to widen if edge properties ever become readable.
+///
+/// Float equality on `weight` is deliberate. The question is whether `b` holds
+/// the *same belief*, and a belief is a stored value; an epsilon here would
+/// invent a tolerance the ledger does not have and would make `diff(a, b)`
+/// disagree with what a traversal on either lineage shows.
+///
+/// Slots: `?1` the lineage being asked about, `?2` the one it is compared to.
+///
+/// [D-228]: ../../docs/architecture/s13-decision-register.md#d-228
+pub(crate) fn diff_sql() -> String {
+    format!(
+        "WITH RECURSIVE {},\n{},\n{},\n{},\n{},\n{},\n{},\n{}\n\
+         SELECT a.source_id, a.target_id, a.edge_type, a.valid_from, \
+                a.valid_to, a.weight, a.branch_id \
+         FROM visible_a a \
+         LEFT JOIN visible_b b ON b.source_id  = a.source_id \
+                              AND b.target_id  = a.target_id \
+                              AND b.edge_type  = a.edge_type \
+                              AND b.valid_from = a.valid_from \
+         WHERE b.source_id IS NULL \
+            OR b.valid_to <> a.valid_to \
+            OR b.weight   <> a.weight \
+         ORDER BY a.source_id, a.target_id, a.edge_type, a.valid_from",
+        ancestry_cte(1, "_a"),
+        churned_cte("_a"),
+        links_cut_cte("_a"),
+        visible_cte("links_cut_a", "_a"),
+        ancestry_cte(2, "_b"),
+        churned_cte("_b"),
+        links_cut_cte("_b"),
+        visible_cte("links_cut_b", "_b"),
+    )
+}
+
 /// One row per edge key, from the nearest lineage that holds it.
 ///
 /// `source` is the relation to resolve — [`links_cut_cte`] under current
@@ -463,17 +556,18 @@ pub(crate) fn retire_from_resolved() -> String {
 /// source contributes at most one row per `(edge key, lineage)` and each
 /// lineage appears in `lineage` once. See [`ancestry_cte`] for why ordering by
 /// `recorded_at` instead would pick the same row.
-pub(crate) fn visible_cte(source: &str) -> String {
+pub(crate) fn visible_cte(source: &str, tag: &str) -> String {
     format!(
-        r#"visible(source_id, target_id, edge_type, valid_from, valid_to, weight) AS (
-    SELECT source_id, target_id, edge_type, valid_from, valid_to, weight FROM (
+        r#"visible{tag}(source_id, target_id, edge_type, valid_from, valid_to, weight, branch_id) AS (
+    SELECT source_id, target_id, edge_type, valid_from, valid_to, weight, branch_id FROM (
         SELECT l.source_id, l.target_id, l.edge_type, l.valid_from, l.valid_to, l.weight,
+               l.branch_id,
                ROW_NUMBER() OVER (
                    PARTITION BY l.source_id, l.target_id, l.edge_type, l.valid_from
                    ORDER BY g.dist
                ) AS rn
         FROM {source} l
-        JOIN lineage g ON g.branch_id = l.branch_id
+        JOIN lineage{tag} g ON g.branch_id = l.branch_id
     ) WHERE rn = 1
 )"#
     )

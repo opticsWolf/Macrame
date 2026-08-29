@@ -343,6 +343,16 @@ impl BranchView {
     }
 
     /// Assert an edge on this lineage.
+    /// What this lineage believes that `other` does not.
+    ///
+    /// [`Database::diff`](crate::Database::diff) with this view's lineage as
+    /// the first argument. The direction matters and is not symmetric: this
+    /// answers *what did I conclude that they do not know*, which is the
+    /// question the view's holder is in a position to ask.
+    pub async fn diff(&self, other: &BranchId) -> Result<Vec<Divergence>> {
+        diff(self.read_conn(), &self.branch, other).await
+    }
+
     pub async fn assert_edge(&self, edge: crate::graph::EdgeAssertion) -> Result<()> {
         self.db.assert_edge(self.claim_edge(edge)?).await
     }
@@ -563,6 +573,134 @@ pub(crate) async fn fork(
         forked_at: Some(stamp.to_string()),
         created_at: stamp.to_string(),
     })
+}
+
+/// One belief `a` holds that `b` does not (§15.4, 0.14.11, [D-228]).
+///
+/// Returned by [`Database::diff`](crate::Database::diff), one per edge key on
+/// which the two lineages disagree, ordered by that key. The fields describe
+/// **`a`'s** side; `b`'s side is `diff(b, a)`, which is the same question asked
+/// the other way round.
+///
+/// # `branch_id` is the interesting field
+///
+/// It is the lineage on `a`'s ancestry that actually holds this row, and it is
+/// what separates *what this exploration concluded* from *what it still holds
+/// while the trunk moved on*. When it equals `a`, the divergence is `a`'s own
+/// assertion. When it does not, `a` is retaining an ancestor's belief that `b`
+/// no longer shares — which happens whenever `b` churned the key after `a`
+/// forked, and is exactly the case that makes "the divergence is the set of
+/// rows carrying the branch's own id" false. See [D-228] for the two shapes
+/// that break it.
+///
+/// # No constructor, and no `Eq`
+///
+/// `#[non_exhaustive]` with nothing owed, for [`Branch`]'s reason: this type
+/// only ever travels outward and nothing public accepts one, so the attribute
+/// buys the additive field and takes nothing back.
+///
+/// `weight` is an `f64`, so `Eq`, `Ord` and `Hash` are not derivable. That is
+/// a real difference from [`EdgeBelief`](crate::temporal::EdgeBelief), which
+/// carries no weight and is compared as a canonical form by the snapshot
+/// suite. Ordering here comes from the query instead, on the edge key, so two
+/// diffs of the same pair are still directly comparable.
+///
+/// [D-228]: ../../docs/architecture/s13-decision-register.md#d-228
+#[derive(Debug, Clone, PartialEq, PartialOrd)]
+#[non_exhaustive]
+pub struct Divergence {
+    /// The edge's source concept.
+    pub source_id: String,
+    /// The edge's target concept.
+    pub target_id: String,
+    /// The edge's type.
+    pub edge_type: String,
+    /// When the asserted interval opens — part of the key, not of the belief.
+    pub valid_from: String,
+    /// When `a` believes the interval closes, or the open sentinel.
+    pub valid_to: String,
+    /// The weight `a` believes.
+    pub weight: f64,
+    /// The lineage on `a`'s ancestry holding this row. See the type docs.
+    pub branch_id: String,
+}
+
+/// The beliefs `a` holds that `b` does not (§15.4, 0.14.11, [D-228]).
+///
+/// # What the plan expected, and the two shapes that break it
+///
+/// §15.4 says divergence "is exactly the set of rows carrying the branch's own
+/// id", and that is true only when `b` is `a`'s parent **and has not churned
+/// since the fork**. Two counterexamples, both ordinary:
+///
+/// * `b` retires or reweights an inherited edge after `a` forked. `a` still
+///   sees the pre-fork version — that is the whole of
+///   [D-223](../../docs/architecture/s13-decision-register.md#d-223) — so `a`
+///   believes something `b` does not, and the row carries **`b`'s** id, or the
+///   trunk's, never `a`'s.
+/// * `a` and `b` are siblings and `b` shadow-retires an edge both inherited.
+///   `a` believes it and `b` does not, and the row belongs to their common
+///   ancestor.
+///
+/// A row-provenance answer misses both, and it also *adds* one it should not:
+/// `a` re-asserting an inherited edge at the value it already had writes a row
+/// on `a` and changes no belief. So the answer is a difference of the two
+/// resolved views, which is what the reader already computes for one lineage
+/// at a time, and the cheap characterisation is a special case rather than the
+/// definition.
+///
+/// # Cost, and the narrowing that is recorded rather than built
+///
+/// This is O(ledger): `a`'s visible set is the whole ledger from `a`'s point of
+/// view, so the join has to see all of it. The narrowing is real and known —
+/// keys that both lineages resolve to the *same* lineage are identical by
+/// construction and cannot differ, so only keys held on the symmetric
+/// difference of the two ancestries can — but it is not built here, per F-33:
+/// the shape is understood, the trigger is a branched workload large enough to
+/// notice, and there is no measurement yet that says it is worth the second
+/// query shape.
+///
+/// [D-228]: ../../docs/architecture/s13-decision-register.md#d-228
+pub(crate) async fn diff(
+    conn: &libsql::Connection,
+    a: &BranchId,
+    b: &BranchId,
+) -> Result<Vec<Divergence>> {
+    use crate::graph::lineage::{lineage_shape, LineageShape};
+
+    // Both names are checked before any work, and each refusal names its own
+    // lineage rather than the pair — a caller who mistyped one wants to know
+    // which one.
+    let shape = lineage_shape(conn, Some(a.as_str())).await?;
+    lineage_shape(conn, Some(b.as_str())).await?;
+    if shape == LineageShape::Trunk {
+        // `Trunk` is `branches` holding one row, and both names were just found
+        // in it, so `a` and `b` are the same lineage and their views are equal
+        // by construction. Exact rather than an optimisation, for the reason
+        // `lineage_shape` gives about its own sufficient condition — and it is
+        // reached only by `diff(main, main)` on a ledger that never forked.
+        return Ok(Vec::new());
+    }
+
+    let mut rows = conn
+        .query(
+            &crate::graph::lineage::diff_sql(),
+            libsql::params![a.as_str(), b.as_str()],
+        )
+        .await?;
+    let mut out = Vec::new();
+    while let Some(row) = rows.next().await? {
+        out.push(Divergence {
+            source_id: row.get(0)?,
+            target_id: row.get(1)?,
+            edge_type: row.get(2)?,
+            valid_from: row.get(3)?,
+            valid_to: row.get(4)?,
+            weight: row.get(5)?,
+            branch_id: row.get(6)?,
+        });
+    }
+    Ok(out)
 }
 
 /// Every lineage the ledger knows about, trunk first, then by creation.

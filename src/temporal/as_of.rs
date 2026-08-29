@@ -151,10 +151,10 @@ pub async fn query_as_of_edges_on(
                 format!(
                     "WITH RECURSIVE {},\n{},\n{},\n{}\n                     SELECT source_id, target_id, edge_type, valid_from, valid_to \
                      FROM visible WHERE valid_from <= ?1 AND ?1 < valid_to",
-                    ancestry_cte(2),
-                    churned_cte(),
-                    links_cut_cte(),
-                    visible_cte("links_cut"),
+                    ancestry_cte(2, ""),
+                    churned_cte(""),
+                    links_cut_cte(""),
+                    visible_cte("links_cut", ""),
                 ),
                 vec![
                     ts.into(),

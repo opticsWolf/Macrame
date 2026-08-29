@@ -3438,6 +3438,25 @@ and the schema does not move.
   exactly the set of rows carrying the branch's own id — **which 0.14.8 is what
   makes non-empty**. Before it, every row carried `'main'` and this query
   answered nothing.
+
+  **Shipped at 0.14.11, and the justification above is a special case**
+  ([D-228](architecture/s13-decision-register.md#d-228)). "The rows carrying the
+  branch's own id" is right when `b` is `a`'s parent *and has not churned since
+  the fork* — the state a fresh fork is in and nothing stays in. It
+  **under-reports**: a branch that writes nothing at all diverges from a trunk
+  that reweights an inherited edge after the fork, and the divergent row is one
+  the *trunk* wrote; two siblings disagree through a row their **common
+  ancestor** wrote, with neither argument's name on it. And it **over-reports**:
+  re-asserting an inherited edge at its existing value writes a row and
+  concludes nothing. What shipped is the definition the headline sentence
+  already asks for — `a` holds an edge key `b` does not, or holds it over a
+  different interval, or at a different weight — with `branch_id` *reported* on
+  each row rather than selecting them. Cheap in a different sense than the one
+  claimed: **one** statement resolving both lineages, because two reads against
+  a shared `read_conn()` are two snapshots and can report a difference that
+  existed at no instant, which is what makes the four shared CTE builders take a
+  name tag. And **no `ts` parameter**, because a shadow retirement is precisely
+  a divergence about an instant having passed.
 - **Abandonment.** A conversation tree discards most of what it grows, so
   `archive` gains a branch-aware arm: an abandoned branch's rows are a contiguous
   archivable set by construction, which is the cheapest archive predicate in the
@@ -3446,7 +3465,7 @@ and the schema does not move.
   enforcing it and the existing-rows default proving the migration is additive.
 - **The Python surface, in the same release.** W6's finding was that a binding
   gap opened in the release that created the feature never becomes a convention.
-  **Held five times so far:** `branch=` on the four traversal entry points at
+  **Held six times so far:** `branch=` on the four traversal entry points at
   0.14.4, the belief's lineage label on `MaterializedState.edges` at 0.14.5,
   `Database.fork` / `branches()` / `Branch` plus four error classes at 0.14.7,
   `branch=` on both assertion builders, `retire_edge(..., branch=…)` and
@@ -3542,8 +3561,16 @@ so it is visible from both places.
 3. Traversal cost against branch-chain depth is measured and recorded, and the
    strategy choice (§15.3) is a decision-register entry with the numbers in it.
 4. Cross-branch edges are refused with a named error, with a test.
-5. `diff(a, b)` returns exactly the assertions carrying `a`'s lineage and no
-   others, over a fixture where the two branches disagree about the same edge.
+5. ~~`diff(a, b)` returns exactly the assertions carrying `a`'s lineage and no
+   others~~, over a fixture where the two branches disagree about the same edge.
+   **Restated at 0.14.11, because the criterion as written pins the wrong
+   answer** ([D-228](architecture/s13-decision-register.md#d-228)): row
+   provenance both misses divergences (the trunk churns after the fork; two
+   siblings differ through their ancestor's row) and invents them (re-asserting
+   an inherited value). What is asserted instead is that `diff(a, b)` returns
+   exactly the edge keys `a` holds and `b` does not, or holds differently — over
+   fixtures that include a branch which wrote **nothing** and still diverges,
+   and a branch which wrote a row and does not.
 6. Schema v12 migrates a populated v11 database with every existing row on
    `main`, and the rung test passes.
 7. Python reaches the whole of it in the same release, including `diff`.
