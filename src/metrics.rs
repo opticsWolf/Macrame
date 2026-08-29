@@ -83,10 +83,24 @@ pub enum CommandKind {
     UpsertEmbeddingChunk,
     Archive,
     RebuildFts,
-    /// One step of a chunked shadow rebuild (T1.2). Its own kind rather than
-    /// folded into `RebuildCurrent`, because the two have opposite latency
-    /// profiles and the whole point of the chunked path is that its turns are
-    /// short — averaging them together would hide exactly the improvement.
+    /// The **fill** half of a chunked shadow rebuild — `Begin` and every
+    /// `Fill` chunk (T1.2).
+    ///
+    /// Its own kind rather than folded into `RebuildCurrent`, because the two
+    /// have opposite latency profiles and the whole point of the chunked path
+    /// is that its turns are short — averaging them together would hide
+    /// exactly the improvement.
+    ///
+    /// **Fill-only since 0.14.16** ([D-233]). Through 0.14.15 this kind also
+    /// carried the swap turn, which is over budget by construction, so its
+    /// `over_budget` count was `N(rebuilds) + regressions` and could not be
+    /// decomposed — the counter was a constant, not a signal. The swap is
+    /// [`CommandKind::ShadowSwap`] now, and what is left here is the half that
+    /// is *meant* to fit [`crate::CHUNK_BUDGET`]. A nonzero count on this kind
+    /// is therefore a clean canary: a fill chunk ran long, which is a
+    /// regression and nothing else.
+    ///
+    /// [D-233]: ../docs/architecture/s13-decision-register.md#d-233
     ShadowRebuild,
     /// Refreshing the query planner's statistics (0.12.4, D-149).
     ///
@@ -173,6 +187,32 @@ pub enum CommandKind {
     ///
     /// [D-152]: ../docs/architecture/s13-decision-register.md#d-152
     ArchiveBranch,
+    /// The **swap** turn of a chunked shadow rebuild (0.14.16, D-233).
+    ///
+    /// Split out of [`CommandKind::ShadowRebuild`], which covered both halves
+    /// from 0.6.0 to 0.14.15. This is the third instance of one shape —
+    /// [`CommandKind::Rehydrate`] out of `Archive` ([D-152]),
+    /// [`CommandKind::Optimize`] out of `Analyze` ([D-197]), this — so the
+    /// class is named where it can be seen: **one `CommandKind`, one
+    /// structural hold distribution.** A kind covering two is a defect on
+    /// arrival, to be split in review rather than found by probe.
+    ///
+    /// Here the bimodality is structural rather than workload-dependent, which
+    /// is what makes it the clearest instance of the three. Index names are
+    /// global and SQLite has no `ALTER INDEX … RENAME`, so the shadow cannot
+    /// carry `idx_lc_traversal_cover` while the live table still holds that
+    /// name — the swap is where all three indexes get built, under the write
+    /// lock. [D-082](../docs/architecture/s13-decision-register.md#d-082)
+    /// measured it at **46.8 ms**, 15.6× the budget, and it grows with the
+    /// table.
+    ///
+    /// **Exempt**, unlike its fill half — see
+    /// [`CommandKind::exempt_from_budget`], where the criterion is stated.
+    ///
+    /// At the end of the declaration order, per [`CommandKind::index`].
+    ///
+    /// [D-197]: ../docs/architecture/s13-decision-register.md#d-197
+    ShadowSwap,
 }
 
 impl CommandKind {
@@ -200,6 +240,7 @@ impl CommandKind {
         CommandKind::Optimize,
         CommandKind::Fork,
         CommandKind::ArchiveBranch,
+        CommandKind::ShadowSwap,
     ];
 
     pub const COUNT: usize = CommandKind::ALL.len();
@@ -251,6 +292,7 @@ impl CommandKind {
             CommandKind::Optimize => "optimize",
             CommandKind::Fork => "fork",
             CommandKind::ArchiveBranch => "archive_branch",
+            CommandKind::ShadowSwap => "shadow_swap",
         }
     }
 
@@ -268,11 +310,61 @@ impl CommandKind {
     /// with no code behind it promises a caller an exemption the violation
     /// counter is about to disagree with.
     ///
-    /// [`CommandKind::ShadowRebuild`] is deliberately **not** exempt. Its fill
-    /// chunks are meant to fit the budget and its swap turn is not going to —
-    /// the swap rebuilds three indexes under the lock, which is the residual
-    /// cost T1.2 could not remove. Both facts are worth seeing, and exempting
-    /// the kind would hide the first to excuse the second.
+    /// # The criterion, stated at last (0.14.16, W12.16, [D-233])
+    ///
+    /// The register applied one rule three times without naming it, and naming
+    /// it is what let the fourth case be decided rather than argued.
+    /// [`CommandKind::Archive`] ([D-012]), [`CommandKind::Rehydrate`] (W4.3)
+    /// and [`CommandKind::Checkpoint`] (W5.2) are all **expected-on-healthy**
+    /// overages: holds that structurally exceed the budget on every healthy
+    /// database that exercises them, and whose counting would make the
+    /// aggregate useless. [`CommandKind::Analyze`] and
+    /// [`CommandKind::Optimize`] are not, and the difference is the whole
+    /// point — their overage is *workload-dependent*, so a violation
+    /// discriminates between a call that did work and one that declined.
+    ///
+    /// > **Expected-on-healthy is exempt. Workload-dependent is not.**
+    ///
+    /// `over_budget` is incremented once per turn that exceeds, so it counts
+    /// **occurrences and not magnitude**. That is the fact the criterion turns
+    /// on: a kind whose every turn exceeds contributes a constant to
+    /// [`MetricsSnapshot::budget_violations`] and moves not at all when the
+    /// hold doubles. Growth is visible in this kind's histogram and
+    /// [`KindSnapshot::longest`], which no exemption touches.
+    ///
+    /// # The two halves of a shadow rebuild land on opposite sides of it
+    ///
+    /// [`CommandKind::ShadowSwap`] is exempt: ≥ 15.6× by construction ([D-082]
+    /// measured 46.8 ms against a 3 ms budget), with no healthy state in which
+    /// it fits, and routine — the crate's own end-to-end suite triggers one.
+    /// Counting it would put a permanent `N(rebuilds)` in the violation list
+    /// of every database that has ever repaired its projection, which is
+    /// [`CommandKind::Rehydrate`]'s argument exactly.
+    ///
+    /// [`CommandKind::ShadowRebuild`] — the fill half — is **not** exempt, and
+    /// that is the half [D-082] was protecting when it refused to exempt the
+    /// merged kind: *"exempting the kind would hide the first fact to excuse
+    /// the second."* The goal is reaffirmed and the mechanism superseded. The
+    /// split protects fill structurally, where non-exemption of the merged
+    /// kind only protected it in principle: a fill regression used to arrive
+    /// as `+1` on a counter that already read `N(rebuilds)`, and now it is the
+    /// only thing that can move `shadow_rebuild` off zero at all.
+    ///
+    /// `a_swap_over_budget_is_not_a_violation` is what keeps this honest, and
+    /// its fixture is the load-bearing part: it seeds enough of a graph to put
+    /// the swap **over** the budget, asserts that first, and only then asserts
+    /// the swap's own count is zero. The obvious form — run a rebuild, assert
+    /// the violation list is empty — is worthless twice over. On a small
+    /// fixture the swap finishes inside 3 ms and the assertion passes whether
+    /// the kind is exempt or not; on a real one the *fill* chunks exceed the
+    /// budget legitimately (3.14 ms at 200 keys in a debug build), so an empty
+    /// list is a property of small fixtures rather than of rebuilds. Together
+    /// with `a_long_fill_is_a_violation_and_a_long_swap_is_not` below, that
+    /// makes narrowing this exemption *and* widening it both red.
+    ///
+    /// [D-012]: ../docs/architecture/s13-decision-register.md#d-012
+    /// [D-082]: ../docs/architecture/s13-decision-register.md#d-082
+    /// [D-233]: ../docs/architecture/s13-decision-register.md#d-233
     ///
     /// # `Rehydrate` is exempt, and splitting it out is what made that a
     /// decision rather than an accident (0.12.9, W4.3, D-152)
@@ -348,6 +440,7 @@ impl CommandKind {
                 | CommandKind::Rehydrate
                 | CommandKind::ArchiveBranch
                 | CommandKind::Checkpoint
+                | CommandKind::ShadowSwap
         )
     }
 }
@@ -699,8 +792,13 @@ pub struct KindSnapshot {
     pub kind: CommandKind,
     /// Turns spent on this kind.
     pub turns: u64,
-    /// Turns that exceeded [`crate::CHUNK_BUDGET`]. Always 0 for the three
-    /// kinds [`CommandKind::exempt_from_budget`] names — see there for why.
+    /// Turns that exceeded [`crate::CHUNK_BUDGET`]. Always 0 for the kinds
+    /// [`CommandKind::exempt_from_budget`] names — see there for why, and for
+    /// the criterion that decides which those are.
+    ///
+    /// **Occurrences, not magnitude**: one per turn that exceeded, however far
+    /// it exceeded by. A kind whose hold has doubled reports the same count and
+    /// a different [`Self::longest`].
     pub over_budget: u64,
     pub mean: Duration,
     /// This kind's longest hold. Distinct from [`MetricsSnapshot::longest`],
@@ -859,6 +957,74 @@ mod tests {
         // The ceiling must survive being shifted up by the kind's width.
         assert_eq!(MICROS_CEILING.checked_shl(8), Some(MICROS_CEILING << 8));
         assert_eq!((MICROS_CEILING << 8) >> 8, MICROS_CEILING);
+    }
+
+    /// The two halves of a shadow rebuild land on opposite sides of the
+    /// budget, and a forged hold is the only way to assert it (0.14.16, D-233).
+    ///
+    /// The integration suite can run a real rebuild and check that the
+    /// violation list comes back empty; what it cannot do is make a *fill*
+    /// chunk run long on demand. So the canary lives here, where the hold is an
+    /// argument: the same over-budget duration recorded against each half must
+    /// produce a violation for one and not the other.
+    ///
+    /// Without this, widening the exemption to cover both halves would leave
+    /// every test in the crate green — `a_swap_over_budget_is_not_a_violation`
+    /// included, since it asserts a zero that a broader exemption also
+    /// produces. This is the assertion that says the zero means *healthy* and
+    /// not *unwatched*.
+    #[cfg(feature = "metrics")]
+    #[test]
+    fn a_long_fill_is_a_violation_and_a_long_swap_is_not() {
+        let m = ActorMetrics::new();
+        let over = crate::CHUNK_BUDGET + Duration::from_millis(44);
+
+        m.record_hold(CommandKind::ShadowRebuild, over);
+        m.record_hold(CommandKind::ShadowSwap, over);
+
+        let snap = m.snapshot();
+        let of = |kind: CommandKind| {
+            snap.kinds
+                .iter()
+                .find(|k| k.kind == kind)
+                .unwrap()
+                .over_budget
+        };
+
+        assert_eq!(
+            of(CommandKind::ShadowRebuild),
+            1,
+            "a fill chunk ran {over:?} against a {:?} budget and was not \
+             counted. The fill half is the canary D-082 refused to exempt and \
+             D-233 kept unexempted; if it stops counting, a regression on the \
+             one path the chunked rebuild exists to keep short is invisible.",
+            crate::CHUNK_BUDGET
+        );
+        assert_eq!(
+            of(CommandKind::ShadowSwap),
+            0,
+            "the swap was counted as a violation. It exceeds by construction \
+             on every healthy database, so counting it makes \
+             `budget_violations()` nonzero forever (D-233)."
+        );
+
+        // And the magnitude survives the exemption, which is the half of the
+        // argument that decided C over B: exempting removes the *occurrence*
+        // from the violation list and touches nothing a reader consults to see
+        // the hold grow.
+        let longest = snap
+            .kinds
+            .iter()
+            .find(|k| k.kind == CommandKind::ShadowSwap)
+            .unwrap()
+            .longest;
+        assert_eq!(
+            longest, over,
+            "the swap's hold stopped being recorded when it stopped being \
+             counted. `over_budget` counts occurrences; the histogram and \
+             `longest` are where growth is visible, and an exemption must not \
+             reach them."
+        );
     }
 
     #[cfg(feature = "metrics")]

@@ -686,6 +686,8 @@ Rejected: capping the batch (breaks [D-014](s13-decision-register.md#d-014) — 
 
 The hold falls 7.6× at the largest size and the advantage grows with the table, which is the shape the item needed. The result that was not expected is the last column: the chunked path is also **2.3× cheaper in total**, where [D-080](s13-decision-register.md#d-080)'s windowing cost more. The cause is the same fact that forces the index build into the swap — the shadow is filled while *unindexed*, so it pays one bulk index build at the end instead of maintaining three indexes per row, and that more than covers the extra turns and the second table. Note also what still does not hold: 46.8 ms is fifteen times [`CHUNK_BUDGET`](s5-modules.md#51-connectionrs--the-handle-the-pragmas-and-the-write-actor), so `ShadowRebuild` is deliberately **not** exempt from the violation count. Its fill chunks are meant to fit and its swap is not going to; exempting the kind would hide the first fact to excuse the second.
 
+> **Annotated 0.14.16 — the goal stands, the mechanism is superseded ([D-233](#d-233)).** The sentence above protects one fact: a fill regression must not be masked. It remains right, and the protection is now structural rather than argumentative — fill is its own kind, so nothing about the swap can reach it. What the paragraph could not consider, because its premise was one kind covering both halves, is that non-exemption of the *merged* kind protected fill only in principle. In practice `shadow_rebuild.over_budget` read `N(rebuilds) + regressions`, the two terms were not separable, and a regression arrived as `+1` on a counter that was never zero. The swap is `ShadowSwap` since 0.14.16 and is exempt; the fill half keeps this kind and keeps the non-exemption this paragraph argued for.
+
 **Both paths are kept, and they differ in contract, not only in speed.** `rebuild_current` is one act, audits itself, and can run inside a caller's existing transaction — which is what `archive()` needs, since a nested transaction would simply fail. `rebuild_current_chunked` does none of those and cannot be used there. It also does not audit: the whole argument is that expensive work happens off the lock, and `audit_current` is two `EXCEPT` passes over the projection, the exact cost [D-077](s13-decision-register.md#d-077) removed from the archive for the same reason. A caller who wants the check has `audit_current` on the read connection, where it costs nobody the write lock.
 
 **An archive during the build abandons the rebuild rather than swapping in a stale table.** The catch-up pass finds work by `recorded_at >= build_start`, which cannot see a *deletion* — a deleted row has no `recorded_at` left to be found by — so an interleaved [`archive`](s5-modules.md#57-temporalarchivers--cold-storage) would let the shadow resurrect archived history. The actor keeps an archive counter (in `ActorShared`, deliberately outside `ActorMetrics` because it is not a metric and must exist in every build, not only under the `metrics` feature); `Begin` reports it, `Swap` compares, and a mismatch drops the shadow and returns the new `DbError::RebuildInterrupted`. That variant is distinct from `RebuildFailed` and the distinction is the point: `RebuildFailed` means the repair ran and did not repair, which is a reason to distrust the ledger; this means the repair **did not run**, `links_current` is untouched, and the action is to retry. Verifying instead would have cost O(E log E) under the lock, which is what this exists to remove.
@@ -4229,3 +4231,147 @@ release just made writable); *adding an index on `(branch_id, …)` instead of
 moving the key* (an index does not change what a key admits, which is the whole
 defect); *bundling this with the v14 index rung as §15.4 assigns it* (one revert
 would undo both, and this is a table rebuild).
+
+---
+
+<a id="d-233"></a>D-233 — one `CommandKind` was covering two structural hold distributions, so its violation counter was a constant rather than a signal (0.14.16, W12.16, §17). [D-012](s13-decision-register.md#d-012), [D-030](s13-decision-register.md#d-030), [D-058](s13-decision-register.md#d-058), [D-082](s13-decision-register.md#d-082), [D-149](s13-decision-register.md#d-149), [D-152](s13-decision-register.md#d-152), [D-156](s13-decision-register.md#d-156), [D-166](s13-decision-register.md#d-166), [D-168](s13-decision-register.md#d-168), [D-197](s13-decision-register.md#d-197), [D-212](s13-decision-register.md#d-212), [§5.1](s5-modules.md#51-connectionrs--the-handle-the-pragmas-and-the-write-actor). Evidence: `src/metrics.rs`, `src/connection.rs`, `tests/actor_metrics_tests.rs`, `tests_py/test_end_to_end.py`, [D-082](#d-082)'s 46.8 ms measurement.
+
+**The finding.** A chunked rebuild is two workloads wearing one kind.
+`LowPriCommand::ShadowRebuild` runs `Begin` and the `Fill` chunks, which are
+meant to fit [`CHUNK_BUDGET`](s5-modules.md#51-connectionrs--the-handle-the-pragmas-and-the-write-actor)
+— 3 ms — plus one `Swap` turn that structurally cannot. Index names are global
+and SQLite has no `ALTER INDEX … RENAME`, so all three indexes are built in the
+swap, under the write lock; [D-082](#d-082) measured **46.8 ms**, 15.6× the
+budget, growing with the table. Both reported as `CommandKind::ShadowRebuild`,
+deliberately non-exempt. Four consequences:
+
+1. Every *successful* `rebuild_current_chunked()` adds at least 1 to
+   `shadow_rebuild.over_budget`. The counter cannot be zero on any database
+   that has ever rebuilt — a constant, not a signal.
+2. `budget_violations()`, documented as the one-line answer to *is the 3 ms
+   bound holding*, names `shadow_rebuild` on every healthy database with
+   rebuild history. The one-line answer is structurally false for this kind.
+3. A fill regression is invisible: it arrives as `+1` on a count that already
+   reads `N(rebuilds)`, and the merged histogram's tail is swap-dominated.
+4. The cost was already being paid inside the house. `tests_py/test_end_to_end.py`
+   filtered `shadow_rebuild` out of `violations()` to keep its own assertion
+   meaningful. That filter is the workaround an operator's dashboard would
+   need — and a dashboard has no way to know it needs one.
+
+This is [D-030](#d-030)'s defect shape in a counter: *an integrity check that
+cannot fail is worse than none, because it is trusted.* A counter that cannot be
+zero is its cousin. It trains discounting, and the discount bleeds into the kinds
+whose nonzero does mean something.
+
+**The criterion, applied three times and never named.** `Archive`
+([D-012](#d-012)), `Rehydrate` (W4.3, [D-152](#d-152)) and `Checkpoint` (W5.2,
+[D-156](#d-156)) are exempt; `Analyze` and `Optimize` ([D-197](#d-197)) are not.
+The rule under all five:
+
+> **Expected-on-healthy overages are exempt. Workload-dependent ones are not.**
+
+`Analyze` and `Optimize` exceed only sometimes, so a violation *discriminates* —
+it marks the call that did work. The swap exceeds on every rebuild, with no
+healthy state in which it fits. Split, and the criterion sees its operands
+cleanly for the first time: **fill (workload-dependent) not exempt; swap
+(expected-on-healthy) exempt.** This is the existing rule finally able to apply,
+not a new judgement.
+
+**Why exempting the swap loses nothing an instrument can read, which is what
+decided this against keeping it counted.** `over_budget` is incremented once per
+turn that exceeds — it counts **occurrences, not magnitude**. The swap therefore
+contributes exactly `+1` per rebuild whether it takes 46.8 ms or 500 ms; if it
+grows with the table, the count does not move. Growth lives in the kind's
+histogram and `longest`, which no exemption touches and which the split leaves
+identical. So the choice was between two surfaces that report the same
+magnitude, one of which additionally carries a constant and a carve-out that
+every reader must know to apply.
+
+| | counted (rejected) | exempt (taken) |
+|---|---|---|
+| occurrence count on a healthy DB | `N(rebuilds)`, permanently | absent |
+| magnitude / growth | histogram, `longest` | **identical** |
+| `budget_violations()` on a healthy DB | never empty | empty |
+| reader must carve out `shadow_swap` | yes | no |
+
+The honest residual, recorded rather than dismissed: if the swap ever grows
+pathological, a counted kind would put it in the list. That is the wrong
+instrument — a threshold on the kind's `longest` detects growth and a
+per-occurrence counter cannot, under either disposition. And the flip is cheap
+and loud: un-exempting is one function arm and one table row in a 1.x minor, and
+`a_swap_over_budget_is_not_a_violation` goes red the moment the exemption narrows
+**or** widens.
+
+**Taken in an acceptance release, which needs its own justification.** §15.4 does
+not list this, §17 does not mention it, and §18 promises the public API is stable
+for 1.x. `#[non_exhaustive]` with the append-at-end rule (W4.2) means appending a
+variant stays legal in any 1.x minor, so the stakes are *cheap now* versus *the
+same edit later, landing as a new row on a live dashboard* — not now-or-never.
+It is taken now on the one ground §0 recognises for unscoped work: the crate's own
+test suite carried a workaround for it, which is evidence of cost already paid
+rather than of cost anticipated. Recorded here and noted in §17 rather than
+carried silently — [D-212](#d-212)'s rule.
+
+**Mechanics.** `CommandKind` is `#[repr(u8)]` and `#[non_exhaustive]`, so
+`ShadowSwap` is appended at the end per [`CommandKind::index`]'s rule: `ALL` +1,
+`COUNT` 20 → 21, an `as_str()` arm, an `exempt_from_budget` arm. The per-kind
+arrays size from `ALL.len()` and follow. The only behavioural edit is the
+dispatch arm, which now matches on the step — `Swap` → `ShadowSwap`, `Begin` and
+`Fill` → `ShadowRebuild`. `#[non_exhaustive]` does not apply within the defining
+crate, so the compiler finds every match site; only rustdoc can drift, and
+`the_budget_exemptions_and_their_documented_table_agree` ties the exemption list
+to `CHUNK_BUDGET`'s table in both directions, so a missed row is a red test.
+
+**Three tests, and the quiet one is load-bearing.**
+`a_swap_is_counted_as_shadow_swap_and_not_as_shadow_rebuild` drives the steps
+individually and checks both counters after each — W4.3's structure, where the
+*and not* half is what fails in a world that counts the turn twice.
+`a_swap_over_budget_is_not_a_violation` runs a real rebuild on a fixture large
+enough to put the swap over the budget, asserts that it did, and only then
+asserts the swap's own count is zero.
+`a_long_fill_is_a_violation_and_a_long_swap_is_not` is the canary, and it lives
+in `metrics.rs`'s unit tests because the integration suite cannot make a fill
+chunk run long on demand — without it, widening the exemption to cover both
+halves would leave every other test green. It is what says the zero means
+*healthy* and not *unwatched*.
+
+**The third test was drafted wrong and the mutation pass is what said so, which
+is the part worth keeping.** It was first written the obvious way — run a
+chunked rebuild, assert `violations()` is empty — on a three-edge fixture.
+Removing `ShadowSwap` from the exemption list left it **green**: the swap
+finished inside 3 ms, so the zero came from a fast swap and not from the
+exemption. That is the same load-dependent gate the Python suite hit at 0.14.9,
+where an unconditioned zero passed until the suite grew by ten tests. Nor can it
+be fixed by growing the fixture, and that is the more useful half: measured in a
+debug build at 200 keys x 4 generations, the longest **fill** chunk is 3.14 ms —
+a legitimate violation, the counter doing its job — while the swap is 6.1 ms with
+none. *A rebuild leaves the violation list empty* is therefore a property of
+fixtures too small to test anything, not a property of rebuilds. What is
+load-independent is the swap exceeding and still not counting, so that is what
+ships, with the fixture's own adequacy asserted first so it cannot go vacuous
+again.
+
+**The class, named.** Three entries are now the same defect at different sites —
+[D-152](#d-152) (`Rehydrate` out of `Archive`), [D-197](#d-197) (`Optimize` out
+of `Analyze`), this one. So: **one `CommandKind`, one structural hold
+distribution.** A kind covering two is a defect on arrival, to be split in
+review rather than found by probe. That sentence is the only part of this entry
+that prevents a fourth instance.
+
+**Limits.** This does not make the swap fast: 46.8 ms of caller-felt latency
+under the write lock, unchanged, now attributed. It exempts nothing whose
+overage is workload-dependent — fill stays counted and the canary pins that. It
+does not rewrite [D-082](#d-082); the annotation there corrects visibly in place,
+per W4.1.
+
+Rejected: *leaving it and writing it down* (not free — it obligates a rustdoc
+caveat on `budget_violations()` contradicting that method's own documented
+claim, and freezes a permanently wrong instrument at the release where the
+version number stops being a promise; legitimate only as a named carry under
+[D-212](#d-212), never silently); *splitting and leaving the swap counted* (the
+table above — it adds a constant and a required carve-out and buys no visibility
+any instrument can read, since `over_budget` cannot see magnitude);
+*exempting the merged kind* ([D-082](#d-082) refused this and was right: it hides
+fill regressions to excuse the swap); *a threshold alarm on the swap instead of
+a kind* (the crate has no alarm surface, and inventing one to avoid an enum
+variant is a larger API than the variant).

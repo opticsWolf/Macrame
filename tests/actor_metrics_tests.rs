@@ -626,10 +626,207 @@ fn analyze_is_not_budget_exempt_and_that_is_deliberate() {
     );
 
     // The exemption list is a judgement per kind, so the sibling that shares
-    // the argument is pinned beside it rather than left to inference.
+    // the argument is pinned beside it rather than left to inference. Since
+    // 0.14.16 the shadow rebuild is two kinds and they land on opposite sides
+    // of the criterion, which makes this pair the clearest statement of it in
+    // the suite (D-233).
     assert!(
         !CommandKind::ShadowRebuild.exempt_from_budget(),
-        "`ShadowRebuild` was exempted; its fill chunks are meant to fit the \
-         budget, and exempting the kind hides that to excuse the swap turn"
+        "`ShadowRebuild` was exempted. It is the *fill* half — Begin and the \
+         Fill chunks — and those are meant to fit the budget, so their \
+         overage is workload-dependent and a violation discriminates. \
+         Exempting it deletes the only signal that a fill chunk regressed \
+         (D-082's goal, D-233's mechanism)."
     );
+
+    assert!(
+        CommandKind::ShadowSwap.exempt_from_budget(),
+        "`ShadowSwap` lost its exemption. It exceeds by construction — three \
+         index builds under the write lock, 46.8 ms against a 3 ms budget \
+         (D-082), with no healthy state in which it fits — so counting it \
+         puts a permanent `N(rebuilds)` in `budget_violations()` on every \
+         database that has ever repaired its projection. That is exactly the \
+         failure `Rehydrate`'s exemption exists to prevent (W4.3, D-233)."
+    );
+}
+
+/// The swap turn is attributed to `ShadowSwap`, and the fill half does not
+/// absorb it (0.14.16, W12.16, D-233).
+///
+/// Driven step by step rather than through `rebuild_current_chunked`, because
+/// the property is *per step* and the loop gives no seam — the same reason
+/// `an_archive_during_the_build_abandons_the_rebuild` drives it this way. Each
+/// step is checked against both counters, so an arm that returned the
+/// neighbouring variant fails here whichever direction it leans.
+///
+/// **The `and not` half is the load-bearing one.** Asserting only that
+/// `ShadowSwap` counted would pass in a world where the swap was counted twice,
+/// and asserting only after the fact would pass in a world where `Begin` were
+/// the thing being misattributed.
+#[tokio::test]
+async fn a_swap_is_counted_as_shadow_swap_and_not_as_shadow_rebuild() {
+    use macrame::integrity::{ShadowOutcome, ShadowStep};
+
+    let harness = TestHarness::new();
+    let db = harness.db_with_fake_clock().await;
+
+    db.upsert_concept(ConceptUpsert::new("a", "A").valid_from(T0))
+        .await
+        .unwrap();
+    db.upsert_concept(ConceptUpsert::new("b", "B").valid_from(T0))
+        .await
+        .unwrap();
+    db.assert_edge(
+        EdgeAssertion::new("a", "b", "KNOWS")
+            .valid_from(T0)
+            .valid_to(OPEN),
+    )
+    .await
+    .unwrap();
+
+    let fills = |snap: &_| turns_for(snap, CommandKind::ShadowRebuild);
+    let swaps = |snap: &_| turns_for(snap, CommandKind::ShadowSwap);
+
+    let ShadowOutcome::Started { build_start, epoch } =
+        db.shadow_step(ShadowStep::Begin).await.unwrap()
+    else {
+        panic!("Begin returned the wrong outcome")
+    };
+    let snap = db.metrics();
+    assert_eq!(fills(&snap), 1, "Begin is a fill-half turn");
+    assert_eq!(swaps(&snap), 0, "Begin was counted as a swap");
+
+    db.shadow_step(ShadowStep::Fill { after: None })
+        .await
+        .unwrap();
+    let snap = db.metrics();
+    assert_eq!(
+        fills(&snap),
+        2,
+        "the Fill chunk did not land on ShadowRebuild"
+    );
+    assert_eq!(swaps(&snap), 0, "a Fill chunk was counted as a swap");
+
+    db.shadow_step(ShadowStep::Swap { build_start, epoch })
+        .await
+        .unwrap();
+    let snap = db.metrics();
+    assert_eq!(
+        swaps(&snap),
+        1,
+        "the swap took an actor turn that was not attributed to ShadowSwap"
+    );
+    assert_eq!(
+        fills(&snap),
+        2,
+        "the ShadowRebuild counter moved on a swap. That is the 0.6.0-0.14.15 \
+         behaviour D-233 removed: one kind over two hold distributions, whose \
+         `over_budget` then read `N(rebuilds) + regressions` and could not be \
+         decomposed."
+    );
+
+    db.close().await.unwrap();
+}
+
+/// A swap that exceeds the budget is not a violation, on a fixture that makes it
+/// exceed (0.14.16, W12.16, D-233).
+///
+/// **This is the quiet half, and it is what makes the exemption self-policing.**
+/// It fails in both directions: narrow the exemption to re-count the swap and
+/// the count goes to 1; widen it to swallow the fill half and the canary in
+/// `metrics.rs` goes red instead. Un-exempting is one function arm and one table
+/// row, and between them these two tests make that flip loud.
+///
+/// # The fixture is load-bearing, and the first draft of this test was not
+///
+/// Asserting `violations().is_empty()` after a rebuild is the obvious form and
+/// it is worthless. On a three-edge fixture the swap finishes inside 3 ms, so
+/// the assertion passes whether the kind is exempt or not — verified by
+/// mutation: removing `ShadowSwap` from `exempt_from_budget` left that draft
+/// green. And the assertion cannot simply be moved to a larger fixture, because
+/// **fill chunks legitimately exceed the budget once the graph is real**:
+/// measured in a debug build at 200 keys × 4 generations, the longest fill is
+/// 3.14 ms — one violation — while the swap is 6.1 ms with none. That is the
+/// counter working exactly as intended, and it means "a rebuild leaves the
+/// violation list empty" is a property of small fixtures rather than of
+/// rebuilds.
+///
+/// So the fixture is sized to put the swap over the budget, that is asserted
+/// first, and only the swap's own count is claimed. A fixture that stops
+/// exceeding fails loudly and says to grow it, rather than passing on a
+/// technicality.
+#[tokio::test]
+async fn a_swap_over_budget_is_not_a_violation() {
+    const KEYS: usize = 400;
+    const GENERATIONS: usize = 4;
+
+    let harness = TestHarness::new();
+    let db = harness.db_with_fake_clock().await;
+
+    db.write_concepts(
+        (0..KEYS)
+            .map(|i| ConceptUpsert::new(format!("n{i}"), "n").valid_from(T0))
+            .collect(),
+    )
+    .await
+    .unwrap();
+    // Several generations at one edge key, so the projection has something to
+    // rank and the swap has three indexes' worth of rows to build over.
+    for generation in 0..GENERATIONS {
+        db.bulk_import(
+            (0..KEYS)
+                .map(|i| {
+                    EdgeAssertion::new(format!("n{i}"), format!("n{}", (i + 1) % KEYS), "KNOWS")
+                        .valid_from(T0)
+                        .valid_to(OPEN)
+                        .weight(generation as f64 + 1.0)
+                })
+                .collect(),
+        )
+        .await
+        .unwrap();
+    }
+
+    db.rebuild_current_chunked().await.unwrap();
+
+    let snap = db.metrics();
+    let swap = snap
+        .kinds
+        .iter()
+        .find(|k| k.kind == CommandKind::ShadowSwap)
+        .unwrap();
+
+    assert_eq!(swap.turns, 1, "a rebuild is exactly one swap turn");
+    assert!(
+        swap.longest > macrame::CHUNK_BUDGET,
+        "the swap took {:?}, which is inside the {:?} budget, so this test \
+         asserts nothing about the exemption. Grow KEYS or GENERATIONS until \
+         it exceeds — the number to beat is D-082's 46.8 ms at 10,000 keys, \
+         and 400 x 4 was ~6 ms in a debug build when this was written.",
+        swap.longest,
+        macrame::CHUNK_BUDGET
+    );
+    assert_eq!(
+        swap.over_budget,
+        0,
+        "the swap exceeded the budget by {:?} and was counted as a violation. \
+         It exceeds on every rebuild — three index builds under the write lock \
+         — so counting it puts a permanent entry in `budget_violations()` on \
+         any database that has ever repaired its projection, which is what \
+         D-233 removed and what `Rehydrate`'s exemption exists to prevent.",
+        swap.longest.saturating_sub(macrame::CHUNK_BUDGET)
+    );
+    assert!(
+        !snap
+            .budget_violations()
+            .iter()
+            .any(|k| k.kind == CommandKind::ShadowSwap),
+        "`budget_violations()` named the swap"
+    );
+
+    // The list is deliberately *not* asserted empty. At this fixture size the
+    // fill chunks may exceed the budget too, and when they do that is the
+    // counter reporting a real hold rather than a defect in this test — the
+    // fill half is not exempt precisely so it can say so.
+    db.close().await.unwrap();
 }

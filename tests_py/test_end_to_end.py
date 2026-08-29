@@ -204,21 +204,27 @@ def test_the_counters_saw_the_whole_session(kb):
 
     assert snapshot.turns == sum(k.turns for k in snapshot.kinds)
 
-    # `violations() == []` is what this asserted until 0.14.9, and it asserted
-    # the opposite of a decision the crate had already made and written down.
-    # `CommandKind::ShadowRebuild` is deliberately not budget-exempt because its
-    # *fill* chunks are meant to fit and its *swap* turn is not going to — the
-    # swap rebuilds three indexes under the lock, which is the residual cost
-    # T1.2 could not remove, and exempting the kind "would hide the first to
-    # excuse the second" (`src/metrics.rs`, `exempt_from_budget`).
+    # `violations() == []`, unconditioned, since 0.14.16 (D-233).
     #
-    # So a `shadow_rebuild` violation here is the counter working. The old
-    # assertion passed only because the swap happened to come in under 3 ms on
-    # a quiet machine; it began failing when the suite grew by ten tests, which
-    # is a load-dependent gate rather than a property. What is worth pinning is
-    # the half that *is* a property: no other kind may break the budget.
-    unexpected = [k.kind for k in snapshot.violations() if k.kind != "shadow_rebuild"]
-    assert unexpected == [], unexpected
+    # This assertion has been three things. It was an unconditioned zero, which
+    # passed only because the swap happened to come in under 3 ms on a quiet
+    # machine and began failing when the suite grew by ten tests. Then from
+    # 0.14.9 it carved out `shadow_rebuild`, which was honest about the decision
+    # the crate had made — the kind covered both the fill chunks (meant to fit)
+    # and the swap turn (three index builds under the lock, 46.8 ms, D-082) and
+    # was not exempt, so a violation was expected and meaningless.
+    #
+    # The carve-out is gone because the conflation is: the swap is
+    # `shadow_swap`, which is exempt on the criterion the exemptions have always
+    # used (expected-on-healthy overages are exempt; workload-dependent ones are
+    # not), and `shadow_rebuild` is the fill half alone, which is not exempt and
+    # whose violation is now a regression and nothing else.
+    #
+    # Keeping this unconditioned is the whole value of the release. A carve-out
+    # is a fact an operator's dashboard would also need and has no way to learn,
+    # so a counter requiring one is a constant rather than a signal.
+    violations = [(k.kind, k.over_budget) for k in snapshot.violations()]
+    assert violations == [], violations
 
 
 def test_a_reopened_ledger_answers_the_same_questions(db_path):

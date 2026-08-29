@@ -136,12 +136,48 @@ def test_a_rebuild_shows_up_as_its_own_kind(db):
     The two have opposite latency profiles, and the point of the chunked path is
     that its turns are short — averaging them together would hide exactly the
     improvement it was built for.
+
+    Since 0.14.16 the chunked path is *two* kinds and this asserts turns rather
+    than names (D-233). Every kind appears in `metrics().kinds` whether or not
+    it has run, so a membership check passed before either command was issued —
+    it was pinning the enum's spelling and nothing about attribution.
     """
     db.rebuild_current()
     db.rebuild_current_chunked()
-    kinds = {k.kind for k in db.metrics().kinds}
-    assert "rebuild_current" in kinds
-    assert "shadow_rebuild" in kinds
+
+    turns = {k.kind: k.turns for k in db.metrics().kinds}
+    assert turns["rebuild_current"] == 1
+    # Begin plus at least one Fill, and exactly one Swap — the swap is one turn
+    # per rebuild by construction, which is why it is a constant in the
+    # violation count when it is not exempt.
+    assert turns["shadow_rebuild"] >= 2, turns
+    assert turns["shadow_swap"] == 1, turns
+
+
+def test_the_swap_is_exempt_and_the_fill_half_is_not(db):
+    """The kind names cross as strings, so the split has to be visible here too.
+
+    `violations()` is the surface this release is about: it is documented as the
+    one-line answer to whether the 3 ms bound is holding, and until 0.14.16 a
+    chunked rebuild put a permanent entry in it. The swap exceeds by
+    construction — three index builds under the write lock — so counting it made
+    the answer false on every healthy database that had ever repaired its
+    projection.
+    """
+    db.rebuild_current_chunked()
+
+    by_kind = {k.kind: k for k in db.metrics().kinds}
+    assert by_kind["shadow_swap"].turns == 1
+    assert by_kind["shadow_swap"].over_budget == 0, "the swap lost its exemption"
+
+    # Not `violations() == []`. This fixture is small enough that the swap
+    # finishes inside the budget, so an empty list would pass with or without
+    # the exemption — and on a fixture large enough to make the swap exceed,
+    # the *fill* chunks exceed too, which is the counter working. The Rust
+    # suite's `a_swap_over_budget_is_not_a_violation` is where that is pinned
+    # against a fixture built for it; what crosses the boundary here is that
+    # the kind exists, is attributed, and reports the exemption.
+    assert "shadow_swap" not in {k.kind for k in db.metrics().violations()}
 
 
 def test_analyze_and_optimize_are_separate_kinds(db):

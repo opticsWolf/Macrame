@@ -497,6 +497,7 @@ pub macrame::metrics::CommandKind::RegisterModel
 pub macrame::metrics::CommandKind::Rehydrate
 pub macrame::metrics::CommandKind::RetireEdge
 pub macrame::metrics::CommandKind::ShadowRebuild
+pub macrame::metrics::CommandKind::ShadowSwap
 pub macrame::metrics::CommandKind::Shutdown
 pub macrame::metrics::CommandKind::UpsertConcept
 pub macrame::metrics::CommandKind::UpsertEmbeddingChunk
@@ -575,6 +576,7 @@ pub macrame::prelude::CommandKind::RegisterModel
 pub macrame::prelude::CommandKind::Rehydrate
 pub macrame::prelude::CommandKind::RetireEdge
 pub macrame::prelude::CommandKind::ShadowRebuild
+pub macrame::prelude::CommandKind::ShadowSwap
 pub macrame::prelude::CommandKind::Shutdown
 pub macrame::prelude::CommandKind::UpsertConcept
 pub macrame::prelude::CommandKind::UpsertEmbeddingChunk

@@ -3690,7 +3690,30 @@ so it is visible from both places.
    during the 0.14.0 cycle and tracked nowhere; the point of the table is that
    the next acceptance section has to look at it. Re-carrying is a legitimate
    outcome and a silent carry is not — D-212.
-10. D-213 … the register's own next number, whatever it turns out to be. **Not a
+11. **`CommandKind::ShadowRebuild` covered two structural hold distributions,
+    and the split ships here** ([D-233](architecture/s13-decision-register.md#d-233),
+    0.14.16). **Unscoped work, taken in an acceptance release, recorded rather
+    than smuggled** — §15.4 does not list it, this section did not ask for it,
+    and [D-212](architecture/s13-decision-register.md#d-212) is why it gets a
+    line instead of a quiet commit.
+
+    The ground for taking it is the one §0 recognises: the cost was already
+    being paid. `tests_py/test_end_to_end.py` carried a hard-coded carve-out
+    filtering `shadow_rebuild` out of `violations()`, because the kind covered
+    both the fill turns (meant to fit `CHUNK_BUDGET`) and the swap turn (three
+    index builds under the write lock, 46.8 ms against 3 ms) and was not exempt
+    — so **every successful chunked rebuild put a permanent entry in the
+    violation list**, and the carve-out is a fact an operator's dashboard would
+    also need and has no way to learn. The swap is now its own kind and exempt,
+    on the criterion the exemptions had always used and never stated;
+    the fill half stays counted, so a violation there is a regression. The
+    carve-out is deleted, which is the deliverable.
+
+    Not now-or-never, and the entry says so: `#[non_exhaustive]` keeps
+    appending a variant legal in any 1.x minor. Taken now because doing it later
+    lands the same edit as a new row on a live dashboard.
+
+12. D-213 … the register's own next number, whatever it turns out to be. **Not a
     number this plan chooses**: three acceptance lists in a row have named
     decision numbers that were already spent by the time the work landed
     ([D-188](architecture/s13-decision-register.md#d-188),

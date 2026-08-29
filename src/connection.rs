@@ -442,6 +442,7 @@ fn next_chunk_size(
 /// | `rebuild_current` | measured **24.6 / 104 / 318 ms** at 4K / 16K / 40K rows in `links` (was "~50 s per 10M edges", which nothing had measured) | D-023: the window between `DELETE` and `INSERT` is the whole of current belief; a reader landing in it sees a graph with no edges and no error |
 /// | [`Database::rehydrate`] | unmeasured; a function of how many rows the caller named | D-012 backwards: the same copy-then-delete atomicity, in the other direction. **A row here since 0.12.9 only because it was previously invisible** — rehydration reported as `archive` and inherited its exemption without anyone deciding on it (W4.3, D-152) |
 /// | [`Database::archive_branch`] | unmeasured; a function of how much one lineage wrote | D-012 again, and D-230's chain: the links, the log entries and the `branches` row leave together or the ledger disagrees with itself about what is currently believed. There is no smaller unit — half a forgotten lineage is a lineage whose reads are answered by its parent |
+/// | the swap turn of [`Database::rebuild_current_chunked`], counted as `shadow_swap` | measured **46.8 ms** at the largest fixture (D-082), and it grows with the table | Index names are global and SQLite has no `ALTER INDEX … RENAME`, so the shadow cannot carry `idx_lc_traversal_cover` while the live table still holds it — all three indexes are built here, under the lock. This is the residual T1.2 could not remove, and there is no smaller unit: half a swapped projection is not a projection. **Exempt since 0.14.16** (W12.16, D-233). The *fill* half keeps its own kind and is deliberately absent from this table, which is what makes a violation there a regression rather than a constant |
 /// | [`Database::checkpoint`] | a function of the WAL's size, which is a function of how long since the last checkpoint — not of anything the caller passes | It is not a transaction at all. `PRAGMA wal_checkpoint` copies frames back into the main file and there is no unit smaller than the frame it is already working in; the caller asked for exactly this, and the alternative to a long checkpoint is a WAL that keeps growing (0.12.13, W5.2, D-156) |
 ///
 /// The `archive` figure is end-to-end through this method, so it **includes**
@@ -3886,7 +3887,20 @@ impl LowPriCommand {
                     K::Analyze
                 }
             }
-            LowPriCommand::ShadowRebuild { .. } => K::ShadowRebuild,
+            // Two kinds out of one variant since 0.14.16 (W12.16, D-233),
+            // and for D-197's reason one line up: the command carries the step,
+            // so the counter has to carry it too, or the budget exemption for
+            // either half is decided about both. Here that is not hypothetical
+            // — the halves want opposite answers. The swap is over budget by
+            // construction and the fill chunks are meant to fit, so a merged
+            // kind's `over_budget` read `N(rebuilds) + regressions` and could
+            // not be decomposed.
+            LowPriCommand::ShadowRebuild { step, .. } => match step {
+                crate::integrity::ShadowStep::Swap { .. } => K::ShadowSwap,
+                crate::integrity::ShadowStep::Begin | crate::integrity::ShadowStep::Fill { .. } => {
+                    K::ShadowRebuild
+                }
+            },
         }
     }
 

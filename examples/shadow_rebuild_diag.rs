@@ -79,17 +79,49 @@ fn read(db: &Database, kind: CommandKind) -> Run {
     }
 }
 
+/// One chunked rebuild, across the two kinds it now reports as (D-233).
+///
+/// `turns` and `total_ms` sum, because the caller paid for both halves. `max_ms`
+/// does **not**: it is the longest *fill* chunk, which is the number this
+/// diagnostic exists to show — the whole claim of T1.2 is that the chunked path
+/// keeps its turns short, and folding the swap's 46.8 ms into that column
+/// reports the residual as though it were the improvement. The swap gets its own
+/// column instead, where its growth with table size is legible.
+fn read_rebuild(db: &Database) -> (Run, f64) {
+    let fill = read(db, CommandKind::ShadowRebuild);
+    let swap = read(db, CommandKind::ShadowSwap);
+    (
+        Run {
+            turns: fill.turns + swap.turns,
+            max_ms: fill.max_ms,
+            total_ms: fill.total_ms + swap.total_ms,
+        },
+        swap.max_ms,
+    )
+}
+
 #[tokio::main]
 async fn main() {
     println!("libSQL 0.9.30, best of 3 by `chunked max`.");
-    println!("`atomic` is rebuild_current; the rest is rebuild_current_chunked.\n");
+    println!("`atomic` is rebuild_current; the rest is rebuild_current_chunked.");
     println!(
-        "{:>8} {:>8} {:>11} {:>8} {:>13} {:>15} {:>9}",
-        "links", "current", "atomic ms", "turns", "chunked max ms", "chunked total ms", "hold cut"
+        "`fill max` is the longest fill chunk and `swap ms` the swap turn, \
+         which are two kinds since 0.14.16 (D-233).\n"
+    );
+    println!(
+        "{:>8} {:>8} {:>11} {:>8} {:>10} {:>10} {:>15} {:>9}",
+        "links",
+        "current",
+        "atomic ms",
+        "turns",
+        "fill max",
+        "swap ms",
+        "chunked total ms",
+        "hold cut"
     );
 
     for (keys, generations) in [(1_000usize, 4usize), (4_000, 4), (10_000, 4)] {
-        let mut best: Option<(f64, f64, u64, f64, i64, i64)> = None;
+        let mut best: Option<(f64, f64, u64, f64, i64, i64, f64)> = None;
 
         for _ in 0..3 {
             let dir = tempfile::TempDir::new().unwrap();
@@ -118,7 +150,7 @@ async fn main() {
             let atomic = read(&db, CommandKind::RebuildCurrent).max_ms;
 
             db.rebuild_current_chunked().await.unwrap();
-            let chunked = read(&db, CommandKind::ShadowRebuild);
+            let (chunked, swap_ms) = read_rebuild(&db);
 
             db.close().await.unwrap();
 
@@ -129,20 +161,22 @@ async fn main() {
                 chunked.total_ms,
                 n_links,
                 n_current,
+                swap_ms,
             );
             if best.as_ref().is_none_or(|b| candidate.1 < b.1) {
                 best = Some(candidate);
             }
         }
 
-        let (atomic, max, turns, total, n_links, n_current) = best.unwrap();
+        let (atomic, max, turns, total, n_links, n_current, swap_ms) = best.unwrap();
         println!(
-            "{:>8} {:>8} {:>11.1} {:>8} {:>13.1} {:>15.1} {:>8.1}x",
+            "{:>8} {:>8} {:>11.1} {:>8} {:>10.1} {:>10.1} {:>15.1} {:>8.1}x",
             n_links,
             n_current,
             atomic,
             turns,
             max,
+            swap_ms,
             total,
             atomic / max
         );
