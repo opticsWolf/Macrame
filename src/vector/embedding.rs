@@ -29,8 +29,8 @@ impl EmbeddingCodec {
             });
         }
         let mut vec = Vec::with_capacity(bytes.len() / 4);
-        for chunk in bytes.chunks_exact(4) {
-            let val = f32::from_le_bytes(chunk.try_into().unwrap());
+        for chunk in bytes.as_chunks::<4>().0 {
+            let val = f32::from_le_bytes(*chunk);
             vec.push(val);
         }
         Ok(vec)
