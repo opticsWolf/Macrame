@@ -426,9 +426,10 @@ fn decode_f32_le(bytes: &[u8]) -> PyResult<Vec<f32>> {
             bytes.len()
         )));
     }
-    Ok(bytes
-        .chunks_exact(4)
-        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+    let (chunks, _) = bytes.as_chunks::<4>();
+    Ok(chunks
+        .iter()
+        .map(|c| f32::from_le_bytes(*c))
         .collect())
 }
 
