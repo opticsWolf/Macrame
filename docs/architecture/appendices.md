@@ -199,7 +199,12 @@ let state = reconstruct(db.read_conn(), ts,
 state.seq_anchor;   // i64
 state.timestamp;    // String
 state.concepts;     // HashMap<String, NodeAttributes>
-state.edges;        // Vec<(source, target, edge_type, valid_from, valid_to)>
+state.edges;        // Vec<EdgeBelief> -- a struct, not a tuple, since 0.14.5
+                    // (D-222): the five fields above plus `branch_id`, because a
+                    // forked ledger holds two beliefs about one edge and a
+                    // 5-tuple silently kept whichever the fold emitted last.
+                    // #[non_exhaustive]; build with EdgeBelief::new(..) and
+                    // .on_branch(..). SNAP_FORMAT_VERSION went 3 -> 4 with it.
 state.predates_recorded_history;  // bool -- nothing had been recorded yet at `ts`
                                   // (0.8.0, D-121). An empty state is empty for two
                                   // different reasons and this says which.
@@ -218,6 +223,29 @@ check.truncated;                           // true when either list hit the cap
 // the fix is to delete the snapshot directory, which the caller can do without
 // this function, and rewriting the file would destroy the only evidence that
 // composition has a defect.
+
+// -- Lineage: branching (§15, D-213 … D-224) --
+// A branch is transaction time with a tree order, not a third axis (D-213).
+let alt: Branch = db.fork(BranchId::new("turn/17/alt/1")?,   // high-pri, ONE row
+                          BranchId::main()).await?;          //   in `branches`
+alt.id;         // BranchId          alt.forked_at;  // Option<String>, None on the trunk
+alt.parent;     // Option<BranchId>  alt.created_at; // String
+let all: Vec<Branch> = db.branches().await?;   // read side; trunk first, then creation
+
+// A fork is O(1) in rows written: no ledger table is read, copied or touched.
+// The branch inherits its parent's history by *resolution at read* -- the
+// ancestry chain, bounded by each fork point on the path down (D-220, D-223).
+let seen = TraversalBuilder::new(root)
+    .on_branch(alt.id.clone())                 // unset means the trunk, never a union
+    .execute_ids(db.read_conn(), ts).await?;
+let edges = query_as_of_edges_on(db.read_conn(), ts, Some(&alt.id)).await?;
+let g = db.load_subgraph_with(&builder.on_branch(alt.id), ts, budget).await?;
+// Refusals: UnknownBranch (unregistered, in `fork` and in every read that names
+// one), BranchExists (taken, `"main"` included), InvalidBranchId, and
+// ForkPrecedesParent -- the cross-row half no CHECK can see (D-224).
+//
+// Readable, NOT yet writable: `EdgeAssertion` carries no lineage, so a write
+// after a fork lands on the trunk. The branch-scoped view is what closes it.
 
 // -- Vectors: writes through the handle (D-048), reads direct --
 let model = ModelName::new("nomic_v1")?;
@@ -446,7 +474,7 @@ New in 0.13.38 ([D-211](s13-decision-register.md#d-211)). [Appendix A](appendice
 
 *Frozen* means a change requires a **major version**.
 
-**1. The public Rust API, item for item and path for path.** [`docs/architecture/public-api.txt`](public-api.txt) is the surface — **1,361 items**. No item is removed, no path stops resolving, and no signature narrows. Each item is reachable at exactly one canonical path, plus flat aliases at the crate root and in `macrame::prelude` ([D-208](s13-decision-register.md#d-208)). Held by `scripts/check_public_api.py` in CI and by `tests/public_path_tests.rs` in `cargo test`. The cycle that produced this surface was reviewed against 0.13.0 item by item before it was frozen — [`api-review-0.14.0.md`](api-review-0.14.0.md), [D-212](s13-decision-register.md#d-212) — which is the last release where that review is cheap.
+**1. The public Rust API, item for item and path for path.** [`docs/architecture/public-api.txt`](public-api.txt) is the surface — **1,448 items**. No item is removed, no path stops resolving, and no signature narrows. Each item is reachable at exactly one canonical path, plus flat aliases at the crate root and in `macrame::prelude` ([D-208](s13-decision-register.md#d-208)). Held by `scripts/check_public_api.py` in CI and by `tests/public_path_tests.rs` in `cargo test`. The cycle that produced this surface was reviewed against 0.13.0 item by item before it was frozen — [`api-review-0.14.0.md`](api-review-0.14.0.md), [D-212](s13-decision-register.md#d-212) — which is the last release where that review is cheap.
 
 **2. The ledger tables** — `concepts`, `links`, `transaction_log`. Additive only: `ALTER TABLE ADD COLUMN` and new indexes. A changed primary key, a dropped column or altered bitemporal semantics is a major version with an explicit ETL path, because bitemporal data is the hardest data to migrate: a rebuild means replaying history and recomputing transaction-time boundaries, which is rewriting the past ([D-036](s13-decision-register.md#d-036), [Doctrine III](s0-s3-foundations.md#doctrine-iii)).
 

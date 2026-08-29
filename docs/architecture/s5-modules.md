@@ -565,7 +565,7 @@ v12 keyed `links_current` `(source_id, target_id, edge_type, valid_from, branch_
 
 **Two shapes, and one probe of `branches` to pick between them.** `LineageShape::Trunk` emits the pre-0.14.4 SQL; `Resolved` emits the ancestry join. The condition is *one row in `branches`*, and it is exact rather than a heuristic: `branch_id` is `NOT NULL DEFAULT 'main' REFERENCES branches(branch_id)` with a real key on every ledger table ([D-214](s13-decision-register.md#d-214)), so a one-row register is a database in which every ledger row reads `'main'` — not by convention, but because nothing else could have been stored. Then the ancestry of `main` is `{main}`, every partition holds one member, and the two forms return the same rows by construction. Necessary rather than merely nice: probe §6 measures the resolved form at **3.02×** the plain one on a single-lineage database, which is every database this crate has written and stays the common case after `fork()`. This is the same pattern `temporal::replay::cold_lineage` uses at the archive boundary ([D-216](s13-decision-register.md#d-216)).
 
-**Two refusals rather than two plausible answers.** A traversal naming a lineage that is not registered raises `NotFound` naming it, rather than answering for the trunk — the [D-069](s13-decision-register.md#d-069) shape, and the answer a caller is *least* able to detect, because on a database that has never forked the trunk's view is what they expected anyway. And a traversal naming no lineage resolves `main` rather than scanning every lineage: "no branch" has always meant the trunk, and the extra edges a union would return look entirely ordinary.
+**Two refusals rather than two plausible answers.** A traversal naming a lineage that is not registered raises `UnknownBranch` naming it (`NotFound` until 0.14.7, whose `Display` says *node* — the wrong noun, and no better variant existed until `fork()` needed one, [D-224](s13-decision-register.md#d-224)), rather than answering for the trunk — the [D-069](s13-decision-register.md#d-069) shape, and the answer a caller is *least* able to detect, because on a database that has never forked the trunk's view is what they expected anyway. And a traversal naming no lineage resolves `main` rather than scanning every lineage: "no branch" has always meant the trunk, and the extra edges a union would return look entirely ordinary.
 
 **The fork point is a cutoff, and the projection cannot serve it (0.14.6, [D-223](s13-decision-register.md#d-223)).** `lineage` carries a third column: the reader has none, and stepping to a parent takes the *stepping* branch's `forked_at`, clamped by a running minimum so inheritance narrows at every hop. What that bound cannot be applied to is `links_current`. The projection holds one belief per key per lineage and `trg_links_current_sync` carries `recorded_at` forward on conflict, so it answers *current as of now* and **structurally cannot answer *current as of t***: once an ancestor churns an edge, the version the branch inherited is not in the table, and a `recorded_at <= cutoff` predicate over it *removes* the edge rather than restoring it — with the subtree below it. Probe §3 measures four churn kinds and neither the pre-0.14.6 read nor the naive filter is right on all four; both lose a retired edge's whole subtree, which is the failure no result announces.
 
@@ -578,6 +578,67 @@ So the current-belief read is a **hybrid**, `links_cut`: the projection arm for 
 **Where it degrades, and it is not where the first argument for it said.** `LINKS_ARCHIVABLE` and `LOG_ARCHIVABLE` both have superseded arms, so a pre-fork assertion that a post-fork correction supersedes *is* archivable — "an open row is never archived" is not the safety here. What holds is narrower: the projection arm never degrades, because `archive()` re-derives `links_current` from surviving `links` rather than deleting from it; the fold arm degrades exactly where main's own historical reads already do, on churned keys whose pre-fork log entry has gone cold. That is [§3.2](s0-s3-foundations.md)'s carried `AtTime` degradation reached from the branch side, and a cold arm belongs with that fix rather than with this one. Deliberately not guarded by `check_recorded_reach`: its bit is `hot_log_is_intact`, which any archive at all flips.
 
 The three execution paths — `execute_ids`, `execute` and `Database::load_subgraph_with` — each ask `lineage_shape` and pass the answer down. `TraversalBuilder::build_sql` is a pure function and cannot; it emits the shape its own configuration implies and says so in its rustdoc, because it exists to explain the query rather than to run it. `temporal::as_of::query_as_of_edges` had the same gap and is fixed additively — it delegates to `query_as_of_edges_on(.., None)`, so its signature is unchanged and the two cannot drift.
+
+#### branch.rs — the lineage's name and its one write (0.14.7, [D-224](s13-decision-register.md#d-224))
+
+The write half, and the smallest module this wave has added: a validated name, a
+row shape, and **one `INSERT`**. `Database::fork(name, from)` reads no ledger
+table, copies nothing, and returns the `Branch` it wrote; `Database::branches()`
+lists them trunk-first then in creation order. A branch inherits its parent's
+history by *resolution at read* — `graph/lineage.rs` above — so a thousand forks
+against a seeded ledger leave `links`, `links_current`, `concepts` and
+`transaction_log` byte-identical, which is asserted as a count in both languages
+rather than reasoned about.
+
+**Why the read shipped three releases first.** A write that creates something
+unreadable is the worse order. Had `fork()` landed at 0.14.2, every branch made
+between then and 0.14.6 would have been readable only through a query that
+silently absorbed its parent's later writes, and
+[D-223](s13-decision-register.md#d-223) would have been a semantic break on
+stored data rather than a correction to a path nothing could reach. That is
+[D-160](s13-decision-register.md#d-160) → [D-174](s13-decision-register.md#d-174)
+applied a third time.
+
+**The cross-row invariant, and the one this module could not enforce.** `branches`
+carries two `CHECK`s and both are within one row. Ordering a fork point against
+the *parent's* row is not, so it lives here — and the rule the schema comment
+promised since v12, `forked_at >= parent.created_at`, turned out to be
+uncheckable rather than merely unenforced: the trunk's `created_at` is stamped
+from the wall clock during migration, before the injected clock exists, so the
+comparison is between two clocks and refuses every fork in the crate. What ships
+is `forked_at >= parent.forked_at` — same clock by construction, and its
+guarantee is that **fork points are non-decreasing down a root path**, which is
+what `ancestry_cte`'s running minimum already assumed. §4's `branches` note
+carries the full argument; the clamp stays either way, because raw SQL can still
+write a row.
+
+**Existence and fork point are read as two subqueries in one round trip**, because
+the trunk's `forked_at` is legitimately `NULL` and one nullable column cannot
+tell *no such branch* from *the root*. The pair of checks and the `INSERT` are
+one actor turn, which is the reason `fork` is a `HighPriCommand` rather than a
+write through the handle: the duplicate check is only sound if nothing can
+register a colliding name between it and the insert. High priority for
+`RegisterModel`'s reason rather than for its size — everything the caller does
+next is work on this branch. `branches()` goes to the read connection.
+
+**`BranchId` is not [`ModelName`](#59-vector--embeddings-the-model-registry-and-search),
+and the difference is the justification rather than the rule.** `ModelName`
+validates because a model name is *spliced into a table identifier* and SQLite
+cannot bind an identifier ([D-037](s13-decision-register.md#d-037)). A
+`branch_id` is a bound value at every call site, so there is no splice to protect
+and `[a-z][a-z0-9_]*` would reject both shapes §15.5's use case generates — a
+hyphenated UUID and a path-like `turn/17/alt/3`. The rule here is non-empty,
+≤ 128 bytes, no control characters, no leading or trailing whitespace, and it
+exists because `branches` is append-only under two unconditional guards: a name
+is written once and can **never** be corrected, so a trailing space is not a typo
+but a second lineage that prints as the first. Refused rather than trimmed, at
+[D-034](s13-decision-register.md#d-034)'s boundary.
+
+**Readable, not yet writable.** `EdgeAssertion` carries no lineage, so every write
+in this release lands on the trunk and a fork is a *view* of its parent's history
+as of an instant. The gap is invisible from the signatures — `fork` returns a
+`Branch`, writes take none, nothing refuses anything — so it is stated in the
+rustdoc. The branch-scoped view is what closes it.
 
 ### 5.3 graph/vector_filter.rs — strategies and the byte-budget cost model
 

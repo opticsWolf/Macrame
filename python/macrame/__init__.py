@@ -92,8 +92,12 @@ from ._macrame import (
     ConceptUpsert,
     CurrentDriftError,
     Database,
+    Branch,
+    BranchError,
+    BranchExistsError,
     DiagnosticConnError,
     DimMismatchError,
+    ForkPrecedesParentError,
     EdgeAssertion,
     EdgeRef,
     EngineError,
@@ -101,6 +105,7 @@ from ._macrame import (
     IntegrityError,
     Interval,
     InvalidEdgeTypeError,
+    InvalidBranchIdError,
     InvalidIdError,
     InvalidModelNameError,
     InvalidTimestampError,
@@ -128,6 +133,7 @@ from ._macrame import (
     Subgraph,
     SubgraphTooLargeError,
     TemporalError,
+    UnknownBranchError,
     VectorHit,
     CostEstimate,
     ValidationError,
@@ -159,6 +165,8 @@ __all__ = [
     "NodeAttributes",
     "NodeData",
     "EdgeRef",
+    # lineage (W12.7)
+    "Branch",
     # temporal (P4.3)
     "MaterializedState",
     "ArchiveReport",
@@ -213,6 +221,7 @@ __all__ = [
     "InvalidIdError",
     "InvalidTimestampError",
     "InvalidModelNameError",
+    "InvalidBranchIdError",
     "AttributeModeUnstatedError",
     "HalfLifeWithoutInstantError",
     # vector
@@ -227,6 +236,11 @@ __all__ = [
     "ArchiveWindowError",
     "RecordedInstantUnreachableError",
     "FutureRecordedAtError",
+    # branch
+    "BranchError",
+    "UnknownBranchError",
+    "BranchExistsError",
+    "ForkPrecedesParentError",
     # writer
     "WriterUnavailableError",
     "WriterDroppedResponderError",
@@ -241,7 +255,11 @@ __all__ = [
 
 
 def _install_fork_guard() -> None:
-    """Make ``fork()`` fail loudly instead of hanging.
+    """Make ``os.fork()`` fail loudly instead of hanging.
+
+    **Not** ``Database.fork``, which cuts a lineage and has nothing to do with
+    processes. The collision is unfortunate and both names are the right ones
+    for their domains; this guard is about the POSIX one.
 
     The extension keeps one process-wide tokio runtime. A ``fork()`` child
     inherits that runtime as a struct whose worker threads did *not* come with

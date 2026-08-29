@@ -147,6 +147,18 @@ pub enum CommandKind {
     ///
     /// [D-168]: ../docs/architecture/s13-decision-register.md#d-168
     Optimize,
+    /// Registering a lineage (0.14.7, §15.4).
+    ///
+    /// Its own kind rather than folded into `AssertEdge`, though both are one
+    /// small transaction: a fork writes to `branches` and nothing else, so its
+    /// hold is the floor an actor turn can have, and averaging it into a
+    /// command that touches four tables would flatter that command's numbers.
+    ///
+    /// Last in declaration order because that order is a persisted contract and
+    /// **new variants go at the end** — see [`CommandKind::index`]. Grouping it
+    /// next to `RegisterModel`, which is where it belongs by kind, would have
+    /// renumbered nine counters and relabelled the Python histogram's axes.
+    Fork,
 }
 
 impl CommandKind {
@@ -172,6 +184,7 @@ impl CommandKind {
         CommandKind::Rehydrate,
         CommandKind::Checkpoint,
         CommandKind::Optimize,
+        CommandKind::Fork,
     ];
 
     pub const COUNT: usize = CommandKind::ALL.len();
@@ -221,6 +234,7 @@ impl CommandKind {
             CommandKind::Rehydrate => "rehydrate",
             CommandKind::Checkpoint => "checkpoint",
             CommandKind::Optimize => "optimize",
+            CommandKind::Fork => "fork",
         }
     }
 

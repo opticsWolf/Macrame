@@ -10,11 +10,18 @@
 //! # Why these are not in `branch_storage_tests`
 //!
 //! That file says of itself that nothing in it goes through the public API,
-//! because at v12 no public API could produce or observe a second lineage. The
-//! first half of that is still true — `fork()` is 0.14.5 and every fixture here
-//! still reaches the second lineage by raw SQL — and the second half stopped
-//! being true at this release. `TraversalBuilder::on_branch` is a public read
-//! that names a lineage, so its behaviour belongs with the reads.
+//! because at v12 no public API could produce or observe a second lineage.
+//! Neither half is true any more, and they stopped being true one release
+//! apart: `TraversalBuilder::on_branch` made the *observing* half public at
+//! 0.14.4, and `Database::fork` made the *producing* half public at 0.14.7.
+//!
+//! The fixtures here still cut their second lineage by raw SQL, and that is now
+//! a choice rather than a necessity. These cases pin the reader against
+//! `branches` rows, including shapes `fork()` refuses to write — a fork point
+//! chosen in the past, a chain assembled in one statement — so building them
+//! through the writer would narrow what the reader is tested on to what the
+//! writer currently emits. `tests/branch_lifecycle_tests.rs` is where `fork()`
+//! is exercised as itself, and it asserts on the same reader.
 //!
 //! # The shape under test, and the one it must not become
 //!
@@ -321,7 +328,9 @@ async fn a_traversal_naming_an_unregistered_lineage_is_refused() {
         .await
         .expect_err("a traversal named a lineage that does not exist");
     match err {
-        DbError::NotFound(what) => assert_eq!(what, "ghost", "the refusal must name it"),
+        DbError::UnknownBranch(what) => {
+            assert_eq!(what, "ghost", "the refusal must name it")
+        }
         other => panic!("wrong error for an unregistered lineage: {other:?}"),
     }
 
@@ -336,7 +345,7 @@ async fn a_traversal_naming_an_unregistered_lineage_is_refused() {
         .await
         .expect_err("the fast shape skipped the check as well as the resolution");
     assert!(
-        matches!(err, DbError::NotFound(ref w) if w == "ghost"),
+        matches!(err, DbError::UnknownBranch(ref w) if w == "ghost"),
         "{err:?}"
     );
 }
@@ -480,7 +489,7 @@ async fn the_subgraph_loader_reads_the_same_lineage() {
         .await
         .expect_err("the loader answered for a lineage that does not exist");
     assert!(
-        matches!(err, DbError::NotFound(ref w) if w == "ghost"),
+        matches!(err, DbError::UnknownBranch(ref w) if w == "ghost"),
         "{err:?}"
     );
 
@@ -501,12 +510,15 @@ async fn the_subgraph_loader_reads_the_same_lineage() {
 /// as a bare `UNIQUE constraint failed` rather than as a named refusal.
 ///
 /// It is not reachable through the crate today: `recorded_at` is crate-stamped
-/// and the monotonicity guard keeps two writes from sharing a stamp, and until
-/// `fork()` lands at 0.14.5 there is no branch-scoped write at all. It becomes
-/// reachable the moment there is — a bulk write that stamps one instant across
-/// a chunk is the obvious way in. Recorded here as a fixture constraint the
-/// tests above already have to work around, so that the v13 rung either widens
-/// it deliberately or declines to and says why.
+/// and the monotonicity guard keeps two writes from sharing a stamp, and there
+/// is no branch-scoped *write* at all. `fork()` at 0.14.7 does not change that
+/// — it registers a lineage and writes no ledger row, so every assertion still
+/// lands on the trunk and no two lineages can yet reach this key. It becomes
+/// reachable the moment a write takes a branch, which is the branch-scoped view
+/// — a bulk write that stamps one instant across a chunk is the obvious way in.
+/// Recorded here as a fixture constraint the tests above already have to work
+/// around, so that the v13 rung either widens it deliberately or declines to
+/// and says why.
 #[tokio::test]
 async fn the_append_only_table_is_not_keyed_by_lineage() {
     let harness = TestHarness::new();
@@ -594,7 +606,7 @@ async fn the_edge_query_reads_one_lineage_at_a_time() {
         .await
         .expect_err("the reader answered for a lineage that does not exist");
     assert!(
-        matches!(err, DbError::NotFound(ref w) if w == "ghost"),
+        matches!(err, DbError::UnknownBranch(ref w) if w == "ghost"),
         "{err:?}"
     );
 }

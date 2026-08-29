@@ -3299,10 +3299,55 @@ and the schema does not move.
 
 ### 15.4 What ships, and what deliberately does not
 
+> **Half shipped in 0.14.7 on 2026-08-29 ([D-224](architecture/s13-decision-register.md#d-224)).**
+> `BranchId`, `Branch`, `Database::fork(name, from)` and `branches()` — the
+> lifecycle. The branch-scoped **view** is not in it, and neither is `diff()`,
+> the archive arm, or the v13 rung; those are the remaining items below.
+>
+> * **One row, and nothing else.** A fork reads no ledger table and copies
+>   nothing. A thousand forks against a seeded ledger leave `links`,
+>   `links_current`, `concepts` and `transaction_log` byte-identical, asserted as
+>   a count in Rust and again in Python — §17 acceptance 1, and the property that
+>   selected this whole design over §15.3's option (3).
+> * **`fork()` returns a `Branch`, where this section writes `-> BranchId`.**
+>   Deviation, and the reason is that the name is the one value the caller
+>   already has: they passed it in. What they cannot derive without a second
+>   query is the **fork point**, which is the cutoff every subsequent read on
+>   that lineage is bounded by (D-223). Returning the row makes the handle
+>   usable; returning the name makes it decorative.
+> * **The invariant this document's schema comment promised is uncheckable.**
+>   `ddl` has said since v12 that `fork()` would enforce
+>   `forked_at >= parent.created_at`. The trunk's `created_at` is stamped from
+>   the wall clock during migration, before the injected clock is resolved and
+>   unable to move after it — so that comparison is between two clocks and
+>   refuses every fork on every fixture in the crate. The shipped rule is
+>   `forked_at >= parent.forked_at`: same clock by construction, and it
+>   guarantees fork points are **non-decreasing down a root path**, which is
+>   exactly what D-223's ancestry clamp already assumed. Found by building what
+>   the comment described, which is how D-223's false comment was found one
+>   release earlier.
+> * **Readable, not yet writable, and the gap is invisible from the
+>   signatures.** `EdgeAssertion` carries no lineage, so a caller who forks and
+>   then calls `assert_edge` gets a successful write **on the trunk**. A fork is
+>   therefore a *view* of its parent's history as of an instant — half of what
+>   the first bullet below promises, and the half that had to be measured first.
+>   Said in the rustdoc rather than left to be discovered.
+> * **An unregistered lineage is `UnknownBranch` everywhere**, where 0.14.4 had
+>   to reach for `NotFound` — *"node {0} not found"*, the wrong noun. A break for
+>   anyone matching that variant on a branched read, and recorded as one.
+> * **The Python surface in the same release**, which is W6's convention holding
+>   a third time. `BranchId` is deliberately not a Python class: the Rust type
+>   earns its keep by making the validated form unforgeable, and Python has no
+>   equivalent to enforce, so the argument is a `str` validated at the boundary.
+
 **In:**
 
-- `Database::fork(name, from) -> BranchId`, `branches()`, and a branch-scoped
-  read view. **The read half landed early, at 0.14.4 and 0.14.6**
+- `Database::fork(name, from)`, `branches()`, and a branch-scoped read view.
+  **The lifecycle shipped at 0.14.7 and returns a `Branch` rather than the
+  `BranchId` written here** ([D-224](architecture/s13-decision-register.md#d-224)
+  — the name is what the caller passed in; the fork point is what they cannot
+  derive). What remains of this bullet is the **view**. **The read half landed
+  earlier still, at 0.14.4 and 0.14.6**
   ([D-220](architecture/s13-decision-register.md#d-220),
   [D-223](architecture/s13-decision-register.md#d-223)) — 0.14.4 resolved which
   lineage holds an edge, 0.14.6 bounded that resolution by the fork point, and
@@ -3334,12 +3379,21 @@ and the schema does not move.
   enforcing it and the existing-rows default proving the migration is additive.
 - **The Python surface, in the same release.** W6's finding was that a binding
   gap opened in the release that created the feature never becomes a convention.
-  **Held twice so far:** `branch=` on the four traversal entry points at 0.14.4,
-  and the belief's lineage label on `MaterializedState.edges` at 0.14.5. 0.14.6
-  adds no surface in either language and is not a third holding or a lapse: the
-  cutoff changes what the existing `branch=` *means*, so a binding written for
-  0.14.4 gets the repair by reading through it. The convention is about gaps
+  **Held three times so far:** `branch=` on the four traversal entry points at
+  0.14.4, the belief's lineage label on `MaterializedState.edges` at 0.14.5, and
+  `Database.fork` / `branches()` / `Branch` plus four error classes at 0.14.7.
+  0.14.6 adds no surface in either language and is neither a holding nor a lapse:
+  the cutoff changes what the existing `branch=` *means*, so a binding written
+  for 0.14.4 gets the repair by reading through it. The convention is about gaps
   between languages, and a semantics-only release opens none.
+
+  **One asymmetry, deliberate:** `BranchId` has no Python class
+  ([D-224](architecture/s13-decision-register.md#d-224)). The Rust type earns its
+  keep by making the validated form unforgeable through the type system — a
+  `&str` cannot reach `branch::fork` — and Python has no equivalent to enforce,
+  so a `BranchId` class would be a name in `dir(macrame)` whose only purpose is
+  to be constructed and immediately passed. The validation runs at the boundary
+  and raises `InvalidBranchIdError`, which is where the guarantee actually is.
 
 **Out, and stated as a decision rather than an omission:**
 

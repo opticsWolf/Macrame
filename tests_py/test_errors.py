@@ -97,6 +97,24 @@ EXPECTED: dict[str, tuple[str, str, dict]] = {
         {"value": "not-a-time", "reason": "sample-reason"},
     ),
     "InvalidModelName": ("InvalidModelNameError", "ValidationError", {"model": "Bad-Model"}),
+    # A trailing space, which is the pair of names the type exists for: it is
+    # invisible in every terminal and is a second lineage in an append-only
+    # table. Under `ValidationError` and not `BranchError` on purpose — the
+    # hierarchy groups by what went wrong, not by which feature was called.
+    "InvalidBranchId": ("InvalidBranchIdError", "ValidationError", {"branch": "release "}),
+    # -- branch (W12.7) --
+    "UnknownBranch": ("UnknownBranchError", "BranchError", {"branch": "ghost"}),
+    "BranchExists": ("BranchExistsError", "BranchError", {"branch": "main"}),
+    "ForkPrecedesParent": (
+        "ForkPrecedesParentError",
+        "BranchError",
+        {
+            "branch": "behind",
+            "parent": "ahead",
+            "forked_at": "2026-01-01T00:00:00.000000Z",
+            "parent_forked_at": "2999-01-01T00:00:00.000000Z",
+        },
+    ),
     # Both axes on the sample, so the pair is checked rather than one of them
     # (0.13.10, D-183). `as_of` was the old single field and named a keyword
     # that stopped existing in 0.13.2.

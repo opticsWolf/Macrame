@@ -544,6 +544,36 @@ which the schema described a semantics the reader did not have; the note that
 called this column *"what §15.3's visibility cutoffs are computed over"* was a
 statement about the plan, not about the crate, until that release.
 
+**And the *writer's* invariant on it is not the one this table's comment promised
+for five releases** ([D-224](s13-decision-register.md#d-224)). The DDL note said
+`fork()` would enforce `forked_at >= parent.created_at` — the cross-row half no
+`CHECK` can see, since a `CHECK` sees one row. That rule is **uncheckable**, and
+not merely unenforced: `seed_root_branch` stamps the trunk's `created_at` from
+`SystemTime::now()` inside `migrations::run`, which runs before the injected
+clock is resolved and cannot be moved after it, because the clock's floor reads
+`MAX(recorded_at)` over `concepts` and `links` — tables the migration must create
+first. So the trunk's `created_at` is a wall-clock instant on a database whose
+every other timestamp comes from the injected clock, and the comparison is
+between two clocks rather than two instants. Implemented literally it refuses
+every fork on every fixture in the crate.
+
+What `fork()` enforces instead is **`forked_at >= parent.forked_at`**, comparing
+two values that are on the same clock by construction because both were stamped
+by `fork()`. Its guarantee is narrower and is the one the reader actually needs:
+fork points are **non-decreasing down a root path**, which is exactly what
+[D-223](s13-decision-register.md#d-223)'s ancestry clamp assumes when it takes a
+running minimum. The trunk is exempt for the reason the `CHECK` above already
+states — a root has no fork point, so nothing constrains a fork from it — and the
+reader's clamp stays regardless, because `branches` is reachable by raw SQL and
+the append-only guards refuse `UPDATE`, not `INSERT`.
+
+**The two `CHECK`s above are what a single row can be held to, and that is the
+line.** `(parent_id IS NULL) = (forked_at IS NULL)` and `forked_at <= created_at`
+are both within one row. Ordering against the *parent's* row is not, so it lives
+in `branch::fork` and is refused as
+[`ForkPrecedesParent`](s6-s10-flows-to-dependencies.md#7-errors) rather than as a
+constraint failure — named, with all four values in the message.
+
 #### `branch_id` on `concepts` is provenance, never identity
 
 This is the whole of the design and the sentence everything downstream depends

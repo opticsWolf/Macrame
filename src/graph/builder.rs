@@ -695,8 +695,9 @@ WITH RECURSIVE {prelude}walk(node_id, depth) AS (
     /// [`DbError::RecordedInstantUnreachable`](crate::DbError::RecordedInstantUnreachable)
     /// when [`Self::as_of_recorded`] is below what the hot log still covers.
     ///
-    /// [`DbError::NotFound`](crate::DbError::NotFound), naming the branch, when
-    /// [`Self::on_branch`] names a lineage that is not registered (0.14.4).
+    /// [`DbError::UnknownBranch`](crate::DbError::UnknownBranch), naming the
+    /// branch, when [`Self::on_branch`] names a lineage that is not registered
+    /// (0.14.4; `NotFound` until 0.14.7).
     pub async fn execute_ids(
         &self,
         conn: &libsql::Connection,

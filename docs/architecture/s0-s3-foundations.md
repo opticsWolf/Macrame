@@ -93,6 +93,8 @@ macrame/
 │   ├── lib.rs                  # public re-exports, prelude
 │   ├── error.rs                # DbError (thiserror) — §7
 │   ├── connection.rs           # Database handle, pragmas, Write Actor, priority channels, clock injection
+│   ├── branch.rs               # §15.4 — BranchId (validated, append-only key),
+│   │                           #   Branch, fork/list; one row per fork (D-224)
 │   ├── schema/
 │   │   ├── mod.rs
 │   │   ├── ddl.rs              # all DDL as reviewed const strings

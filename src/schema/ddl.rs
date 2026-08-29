@@ -348,10 +348,22 @@ pub const CREATE_CONCEPTS_GUARD_DELETE: &str = concat!(
 /// about a period, it believes them from a moment onward.
 ///
 /// The ordering `CHECK` is row-local on purpose. `forked_at <= created_at` is
-/// checkable from the row itself; "the fork point is at or after the parent's
-/// creation" is not, and a `CHECK` cannot see another row. The cross-row half
-/// is `fork()`'s to enforce at D-034's boundary, and saying so here is cheaper
-/// than a constraint that looks complete and is not.
+/// checkable from the row itself; an ordering against the *parent's* row is
+/// not, and a `CHECK` cannot see another row. The cross-row half is `fork()`'s
+/// to enforce at D-034's boundary, and saying so here is cheaper than a
+/// constraint that looks complete and is not.
+///
+/// **Which cross-row ordering, corrected in 0.14.7.** This said "the fork point
+/// is at or after the parent's *creation*" from v12 until `fork()` existed to
+/// enforce it, and that turned out to be uncheckable rather than merely
+/// unenforced: [`seed_root_branch`](crate::schema) stamps the trunk's
+/// `created_at` from `SystemTime::now()` during migration — before the
+/// database's injected clock is resolved, and it cannot simply run after,
+/// because the clock's floor is read from tables the migration creates. So
+/// `created_at` is not on the ledger's timeline and comparing a `forked_at` to
+/// it is comparing two clocks. What [`Database::fork`](crate::Database::fork) enforces instead is
+/// `forked_at >= parent.forked_at`, both issued by the same clock, which makes
+/// fork points non-decreasing down any root path.
 pub const CREATE_BRANCHES_TABLE: &str = concat!(
     r#"
 CREATE TABLE IF NOT EXISTS branches (

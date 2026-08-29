@@ -62,7 +62,18 @@
 //! ├── VectorError       ── dimensions, unregistered models
 //! ├── TemporalError     ── replay, snapshots, payload versions, archive
 //! ├── WriterError       ── the write actor
+//! ├── BranchError       ── lineage lifecycle: unknown, taken, out of order
 //! └── BudgetError       ── subgraph size
+//! ```
+//!
+//! `InvalidBranchIdError` is deliberately **not** under `BranchError`. The
+//! hierarchy groups by what went wrong and not by which feature the call
+//! belonged to, and a name the ledger cannot accept is the same kind of thing
+//! as an invalid model name or a malformed timestamp — a caller catching
+//! `ValidationError` around a batch of user input wants it, and a caller
+//! catching `BranchError` around a fork is asking about lineage state.
+//!
+//! ```text
 //! ```
 
 use pyo3::prelude::*;
@@ -124,6 +135,13 @@ create_exception!(
     WriterError,
     MacrameError,
     "The single write actor is not able to serve this handle."
+);
+create_exception!(
+    macrame,
+    BranchError,
+    MacrameError,
+    "A lineage could not be created or resolved. Grouping only; see the \
+     subclasses."
 );
 create_exception!(
     macrame,
@@ -280,6 +298,50 @@ create_exception!(
     InvalidModelNameError,
     ValidationError,
     "An embedding model name that cannot be a SQL identifier. Attribute: `model`."
+);
+create_exception!(
+    macrame,
+    InvalidBranchIdError,
+    ValidationError,
+    "A branch name the ledger cannot accept. Attribute: `branch`.\n\n\
+     Not the model-name rule: a branch id is always a bound value and never a \
+     spliced identifier, so hyphens, dots, slashes, spaces and capitals are all \
+     fine — a UUID or a `turn/17/alt/3` is a valid name. What is refused is \
+     empty, over 128 characters, containing a control character, or carrying \
+     leading or trailing whitespace. That last pair is the reason the type \
+     exists: `branches` is append-only, so a name with a trailing space is not \
+     a typo you can fix, it is a second lineage that prints as the first."
+);
+create_exception!(
+    macrame,
+    UnknownBranchError,
+    BranchError,
+    "A branch that is not registered. Attribute: `branch`.\n\n\
+     Raised by `fork()` for an unknown parent, and by any read that names a \
+     lineage the ledger has never heard of. Refused rather than answered for \
+     the trunk, which would be a right-looking answer to a question nobody \
+     asked — and the one a caller is least able to notice, because on a ledger \
+     that has never forked the trunk's view is what they expected anyway."
+);
+create_exception!(
+    macrame,
+    BranchExistsError,
+    BranchError,
+    "A fork asked for a name that is taken. Attribute: `branch`.\n\n\
+     Includes `\"main\"`, which every database has from its first migration. \
+     Refused rather than returning the existing branch, which would hand back a \
+     lineage with a different parent and fork point than the one asked for."
+);
+create_exception!(
+    macrame,
+    ForkPrecedesParentError,
+    BranchError,
+    "A fork point earlier than its parent's own. Attributes: `branch`, \
+     `parent`, `forked_at`, `parent_forked_at`.\n\n\
+     Such a branch would inherit nothing whatever from the parent it names — \
+     every row that parent wrote falls past the child's cutoff — so its parent \
+     link and its visible history would say different things. Reachable when \
+     the clock has moved backwards between opens."
 );
 create_exception!(
     macrame,
@@ -561,6 +623,30 @@ fn build(py: Python<'_>, err: DbError) -> PyErr {
             raise::<InvalidModelNameError, _>(py, m, |e| e.setattr("model", model))
         }
 
+        DbError::InvalidBranchId(branch) => {
+            raise::<InvalidBranchIdError, _>(py, m, |e| e.setattr("branch", branch))
+        }
+
+        DbError::UnknownBranch(branch) => {
+            raise::<UnknownBranchError, _>(py, m, |e| e.setattr("branch", branch))
+        }
+
+        DbError::BranchExists(branch) => {
+            raise::<BranchExistsError, _>(py, m, |e| e.setattr("branch", branch))
+        }
+
+        DbError::ForkPrecedesParent {
+            branch,
+            parent,
+            forked_at,
+            parent_forked_at,
+        } => raise::<ForkPrecedesParentError, _>(py, m, |e| {
+            e.setattr("branch", branch)?;
+            e.setattr("parent", parent)?;
+            e.setattr("forked_at", forked_at)?;
+            e.setattr("parent_forked_at", parent_forked_at)
+        }),
+
         DbError::ModelNotRegistered { model, table } => {
             raise::<ModelNotRegisteredError, _>(py, m, |e| {
                 e.setattr("model", model)?;
@@ -791,6 +877,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
         InvalidIdError,
         InvalidTimestampError,
         InvalidModelNameError,
+        InvalidBranchIdError,
         AttributeModeUnstatedError,
         HalfLifeWithoutInstantError,
         // vector
@@ -804,6 +891,11 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
         ArchiveViolationError,
         ArchiveWindowError,
         RecordedInstantUnreachableError,
+        // branch
+        BranchError,
+        UnknownBranchError,
+        BranchExistsError,
+        ForkPrecedesParentError,
         // writer
         WriterUnavailableError,
         WriterDroppedResponderError,

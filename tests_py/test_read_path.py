@@ -447,12 +447,14 @@ def test_a_subgraph_outlives_the_handle_that_loaded_it(db_path):
 # Lineage (0.14.4, D-220)
 # ───────────────────────────────────────────────────────────────────────────
 #
-# What is reachable from Python at this release is the *parameter*, not the
-# resolution: there is no `fork()` yet and no raw-SQL escape hatch here, so a
-# second lineage cannot be built from this side. `tests/branch_read_tests.rs`
-# holds the resolution itself. What these pin is the half that would rot
-# silently — the keyword existing on every traversal entry point, meaning the
-# trunk when unset, and refusing a lineage that is not there.
+# Until 0.14.7 what was reachable from Python was the *parameter* and not the
+# resolution: there was no `fork()` and no raw-SQL escape hatch here, so a
+# second lineage could not be built from this side at all. `db.fork()` closes
+# that, and `test_branches.py` is where a real fork is read from Python.
+# `tests/branch_read_tests.rs` still holds the resolution itself. What these
+# pin is the half that would rot silently — the keyword existing on every
+# traversal entry point, meaning the trunk when unset, and refusing a lineage
+# that is not there.
 #
 # The binding ships in the same release as the feature deliberately (§15.4, W6):
 # a binding gap opened in the release that created a feature never becomes a
@@ -475,8 +477,15 @@ def test_every_traversal_entry_point_takes_a_branch(db):
 
 
 def test_an_unregistered_lineage_is_refused_rather_than_defaulted(db):
-    """The trunk's view is the answer a caller is least able to detect."""
-    with pytest.raises(macrame.NotFoundError, match="ghost"):
+    """The trunk's view is the answer a caller is least able to detect.
+
+    ``UnknownBranchError`` since 0.14.7 and ``NotFoundError`` before it: there
+    was no branch-shaped variant until ``fork()`` needed one, so the refusal
+    arrived under a class whose message says *node*, sending a caller to check
+    their concept ids. Both are ``MacrameError``; only this one says what is
+    actually missing.
+    """
+    with pytest.raises(macrame.UnknownBranchError, match="ghost"):
         db.traverse_ids("a", branch="ghost")
-    with pytest.raises(macrame.NotFoundError, match="ghost"):
+    with pytest.raises(macrame.UnknownBranchError, match="ghost"):
         db.load_subgraph("a", 2, ROOMY, min_weight=0.0, branch="ghost")

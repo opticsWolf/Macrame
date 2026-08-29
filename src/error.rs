@@ -168,6 +168,53 @@ pub enum DbError {
     #[error("embedding model {model} is not registered (no {table} table)")]
     ModelNotRegistered { model: String, table: String },
 
+    /// `branches` is append-only under two unconditional triggers, so a name is
+    /// written once and can never be corrected. The rule is deliberately not
+    /// [`Self::InvalidModelName`]'s — a `branch_id` is always a bound value and
+    /// never a spliced identifier, so what is refused here is the pair of names
+    /// that read as one another rather than the ones that would break SQL.
+    #[error(
+        "invalid branch id {0:?}: expected 1-128 characters, \
+         no control characters, no leading or trailing whitespace"
+    )]
+    InvalidBranchId(String),
+
+    /// Named rather than left to the foreign key, because the caller asked
+    /// about a branch and a constraint violation would answer about a column.
+    #[error("branch {0} is not registered")]
+    UnknownBranch(String),
+
+    /// Refused rather than ignored, which is the interesting half: an
+    /// `INSERT OR IGNORE` would return a handle to a lineage with a *different*
+    /// parent and fork point than the caller asked for, which is D-069's
+    /// right-looking answer to a question nobody asked.
+    #[error("branch {0} already exists")]
+    BranchExists(String),
+
+    /// The cross-row half of the fork-point invariant, which no `CHECK` can see
+    /// (§15.2): fork points must not decrease down a root path.
+    ///
+    /// A branch cut *before* its parent was is a branch that inherits nothing
+    /// whatever from the parent it names — every row that parent wrote falls
+    /// past the child's cutoff — so its `parent_id` and its visible history say
+    /// different things, silently.
+    ///
+    /// Compared against the parent's `forked_at` and not its `created_at`,
+    /// which the schema comment originally called for: `created_at` on the
+    /// trunk is stamped from `SystemTime::now()` during migration, before the
+    /// database's clock exists, so it is not on the same timeline as anything
+    /// else. See [`Database::fork`](crate::Database::fork).
+    #[error(
+        "branch {branch} would fork from {parent} at {forked_at}, \
+         before {parent} itself was cut at {parent_forked_at}"
+    )]
+    ForkPrecedesParent {
+        branch: String,
+        parent: String,
+        forked_at: String,
+        parent_forked_at: String,
+    },
+
     #[error("subgraph exceeds budget ({n} > {budget})")]
     SubgraphTooLarge { n: usize, budget: usize },
 

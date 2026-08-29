@@ -86,7 +86,7 @@ pub async fn query_as_of_edges(
 ///
 /// # Errors
 ///
-/// [`DbError::NotFound`](crate::DbError::NotFound), naming the branch, when it
+/// [`DbError::UnknownBranch`](crate::DbError::UnknownBranch), naming it, when it
 /// is not registered — refused rather than answered for the trunk, for the
 /// reason `graph::lineage::lineage_shape` gives.
 pub async fn query_as_of_edges_on(

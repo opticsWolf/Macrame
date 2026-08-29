@@ -118,6 +118,13 @@ pub(crate) enum LineageShape {
 /// on a database that has never forked the trunk's view is what they expected
 /// to see anyway.
 ///
+/// The refusal is [`DbError::UnknownBranch`] from 0.14.7 and was
+/// [`DbError::NotFound`] before it, whose `Display` reads *"node {0} not
+/// found"* — the wrong noun, pointing a caller at their concept ids. There was
+/// no better variant until `fork()` needed one, and shipping the right variant
+/// while leaving this on the old one would have been two spellings of one
+/// fact.
+///
 /// [D-069]: ../../docs/architecture/s13-decision-register.md
 pub(crate) async fn lineage_shape(
     conn: &libsql::Connection,
@@ -141,7 +148,7 @@ pub(crate) async fn lineage_shape(
         None => return Ok(LineageShape::Trunk),
     };
     if found == 0 {
-        return Err(DbError::NotFound(named.to_string()));
+        return Err(DbError::UnknownBranch(named.to_string()));
     }
     Ok(if total <= 1 {
         LineageShape::Trunk

@@ -39,8 +39,9 @@ const BASELINE: &str = include_str!("../docs/architecture/public-api.txt");
 
 /// Every public module, and adding one is a decision made here.
 ///
-/// The crate root and ten top-level modules, plus the three inner modules that
-/// are the canonical home of what they hold rather than a second path to it:
+/// The crate root and eleven top-level modules, plus the three inner modules
+/// that are the canonical home of what they hold rather than a second path to
+/// it:
 ///
 /// - `connection::chunk_rows` — `chunk_rows::EDGES` and `chunk_rows::CONCEPTS`
 ///   are only readable qualified. Flattened they are `connection::EDGES`, which
@@ -55,8 +56,20 @@ const BASELINE: &str = include_str!("../docs/architecture/public-api.txt");
 /// because it is a module; the tests below pin that it carries no others, and
 /// `macrame` is the crate root, which the listing reports as a module like any
 /// other.
+///
+/// `macrame::branch` is the eleventh and arrived at 0.14.7
+/// ([D-224](../../docs/architecture/s13-decision-register.md#d-224)). It is a
+/// top-level module for `vector`'s reason rather than the three above: it holds
+/// a domain — a lineage's name, its row, and its lifecycle — and its three
+/// public items are re-exported at the crate root, so the module is the
+/// canonical path and the root is the convenience one, which is the arrangement
+/// the two tests below pin. **This test caught it, one bless too late**: the
+/// listing is what `declared_modules` reads, so a new `pub mod` is invisible
+/// here until `check_public_api.py --bless` writes it down — the gate fires on
+/// the commit that records the surface, not on the one that changes it.
 const PUBLIC_MODULES: &[&str] = &[
     "macrame",
+    "macrame::branch",
     "macrame::connection",
     "macrame::connection::chunk_rows",
     "macrame::error",

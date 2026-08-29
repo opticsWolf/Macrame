@@ -424,6 +424,43 @@ class RehydrateReport:
 
     def __repr__(self) -> str: ...
 
+class Branch:
+    """One lineage: its name, its parent, and where it was cut.
+
+    Returned by `Database.fork` and `Database.branches`. A snapshot of a row in
+    an append-only table, so it is frozen — changing it would change nothing.
+    """
+
+    @property
+    def id(self) -> str:
+        """The lineage's own name."""
+
+    @property
+    def parent(self) -> str | None:
+        """The lineage this one was cut from, or `None` for the trunk."""
+
+    @property
+    def forked_at(self) -> datetime | None:
+        """When this lineage stopped inheriting its parent's later writes.
+
+        `None` for the trunk. This is the visibility cutoff a branched read is
+        bounded by: the branch sees its parent's history up to and including
+        this instant, and nothing the parent records after it.
+        """
+
+    @property
+    def created_at(self) -> datetime:
+        """When the row was written.
+
+        Equal to `forked_at` for every branch this release can create. **Not
+        comparable with a `recorded_at`** — the trunk's is stamped during
+        migration, before the database's clock is resolved.
+        """
+
+    @property
+    def is_main(self) -> bool:
+        """Whether this names the trunk."""
+
 class ChainCheck:
     """Whether snapshot composition agrees with a fold from genesis (D-092).
 
@@ -921,6 +958,34 @@ class Database:
 
 
     # -- vector ----------------------------------------------------------------
+    def fork(self, name: str, frm: str = "main") -> Branch:
+        """Cut a new lineage from an existing one, and return it.
+
+        O(1) in rows written: one row in `branches`, and nothing else. A branch
+        inherits its parent's history by resolution at read rather than by
+        owning a copy, so forking a thousand times leaves every ledger table
+        byte-identical.
+
+        The fork point is *now*. The branch sees its parent's history up to this
+        instant and nothing the parent records after it, which is what `branch=`
+        on the traversal entry points reads.
+
+        The lineage is readable and **not yet writable**: no write takes a
+        branch, so `assert_edge` after a `fork` lands on the trunk.
+
+        Raises `UnknownBranchError` for an unregistered parent,
+        `BranchExistsError` for a taken name (including `"main"`),
+        `InvalidBranchIdError` for a name the ledger cannot accept, and
+        `ForkPrecedesParentError` when the clock would place the fork point
+        before the parent's own.
+        """
+
+    def branches(self) -> list[Branch]:
+        """Every lineage, trunk first then creation order.
+
+        A database that has never forked returns exactly one `Branch`.
+        """
+
     def register_model(self, model: str, dim: int) -> None: ...
     def registered_models(self) -> list[str]:
         """Every model registered in this database, in name order.
@@ -1099,6 +1164,34 @@ class VectorError(MacrameError): ...
 class TemporalError(MacrameError): ...
 class WriterError(MacrameError): ...
 class BudgetError(MacrameError): ...
+class BranchError(MacrameError): ...
+
+class UnknownBranchError(BranchError):
+    """A branch that is not registered.
+
+    Raised by `fork()` for an unknown parent, and by any read naming a lineage
+    the ledger has never heard of — refused rather than answered for the trunk,
+    which is the answer a caller is least able to notice.
+    """
+
+    branch: str
+
+class BranchExistsError(BranchError):
+    """A fork asked for a name that is taken, `"main"` included."""
+
+    branch: str
+
+class ForkPrecedesParentError(BranchError):
+    """A fork point earlier than its parent's own.
+
+    Such a branch would inherit nothing whatever from the parent it names, so
+    its parent link and its visible history would say different things.
+    """
+
+    branch: str
+    parent: str
+    forked_at: str
+    parent_forked_at: str
 
 class EngineError(MacrameError):
     """An error from libSQL itself, carried across without interpretation."""
@@ -1133,6 +1226,19 @@ class InvalidIdError(ValidationError):
 
 class InvalidModelNameError(ValidationError):
     model: str
+
+class InvalidBranchIdError(ValidationError):
+    """A branch name the ledger cannot accept.
+
+    Wider than the model-name rule, and for a reason: a branch id is always a
+    bound value, never a spliced identifier, so hyphens, dots, slashes, spaces
+    and capitals are all fine. Refused are empty, over 128 characters, control
+    characters, and leading or trailing whitespace — that last pair because
+    `branches` is append-only, so a name with a trailing space is not a typo
+    anyone can fix, it is a second lineage that prints as the first.
+    """
+
+    branch: str
 
 class InvalidTimestampError(ValidationError):
     value: str

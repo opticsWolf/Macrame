@@ -8,6 +8,25 @@
 #     cargo +nightly public-api --all-features --omit blanket-impls,auto-trait-impls,auto-derived-impls
 #
 pub mod macrame
+pub mod macrame::branch
+#[non_exhaustive] pub struct macrame::branch::Branch
+pub macrame::branch::Branch::created_at: alloc::string::String
+pub macrame::branch::Branch::forked_at: core::option::Option<alloc::string::String>
+pub macrame::branch::Branch::id: macrame::branch::BranchId
+pub macrame::branch::Branch::parent: core::option::Option<macrame::branch::BranchId>
+pub struct macrame::branch::BranchId(_)
+impl macrame::branch::BranchId
+pub fn macrame::branch::BranchId::as_str(&self) -> &str
+pub fn macrame::branch::BranchId::is_main(&self) -> bool
+pub fn macrame::branch::BranchId::main() -> Self
+pub fn macrame::branch::BranchId::new(impl core::convert::AsRef<str>) -> macrame::error::Result<Self>
+impl core::convert::AsRef<str> for macrame::branch::BranchId
+pub fn macrame::branch::BranchId::as_ref(&self) -> &str
+impl core::convert::From<macrame::branch::BranchId> for alloc::string::String
+pub fn alloc::string::String::from(macrame::branch::BranchId) -> Self
+impl core::fmt::Display for macrame::branch::BranchId
+pub fn macrame::branch::BranchId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub const macrame::branch::MAX_BRANCH_ID: usize
 pub mod macrame::connection
 pub mod macrame::connection::chunk_rows
 pub const macrame::connection::chunk_rows::ANNOTATIONS: usize
@@ -74,12 +93,14 @@ pub async fn macrame::connection::Database::archive(&self, &str) -> macrame::err
 pub fn macrame::connection::Database::archive_path(&self) -> &std::path::Path
 pub async fn macrame::connection::Database::archive_windowed(&self, &str, core::time::Duration) -> macrame::error::Result<alloc::vec::Vec<macrame::temporal::ArchiveReport>>
 pub async fn macrame::connection::Database::assert_edge(&self, macrame::graph::EdgeAssertion) -> macrame::error::Result<()>
+pub async fn macrame::connection::Database::branches(&self) -> macrame::error::Result<alloc::vec::Vec<macrame::branch::Branch>>
 pub async fn macrame::connection::Database::bulk_import(&self, alloc::vec::Vec<macrame::graph::EdgeAssertion>) -> macrame::error::BulkResult<usize>
 pub async fn macrame::connection::Database::bulk_import_with(&self, alloc::vec::Vec<macrame::graph::EdgeAssertion>, macrame::connection::BulkControl) -> macrame::error::BulkResult<usize>
 pub async fn macrame::connection::Database::checkpoint(&self) -> macrame::error::Result<macrame::connection::CheckpointReport>
 pub fn macrame::connection::Database::clock(&self) -> &alloc::sync::Arc<dyn macrame::util::Clock>
 pub async fn macrame::connection::Database::close(self) -> macrame::error::Result<()>
 pub async fn macrame::connection::Database::diagnostic_conn(&self) -> macrame::error::Result<libsql::connection::Connection>
+pub async fn macrame::connection::Database::fork(&self, macrame::branch::BranchId, macrame::branch::BranchId) -> macrame::error::Result<macrame::branch::Branch>
 pub fn macrame::connection::Database::metrics(&self) -> macrame::metrics::MetricsSnapshot
 pub async fn macrame::connection::Database::open(impl core::convert::AsRef<std::path::Path>) -> macrame::error::Result<Self>
 pub async fn macrame::connection::Database::open_tuned(impl core::convert::AsRef<std::path::Path>, macrame::connection::Tuning) -> macrame::error::Result<Self>
@@ -144,6 +165,7 @@ pub macrame::error::DbError::ArchiveWindow::reason: alloc::string::String
 pub macrame::error::DbError::ArchiveWindow::window: core::time::Duration
 pub macrame::error::DbError::AttributeModeUnstated
 pub macrame::error::DbError::AttributeModeUnstated::instants: macrame::error::StatedInstants
+pub macrame::error::DbError::BranchExists(alloc::string::String)
 pub macrame::error::DbError::BulkCancelled
 pub macrame::error::DbError::CurrentDrift
 pub macrame::error::DbError::CurrentDrift::n: usize
@@ -155,10 +177,16 @@ pub macrame::error::DbError::DimMismatch::expected: usize
 pub macrame::error::DbError::DimMismatch::got: usize
 pub macrame::error::DbError::DimMismatch::model: alloc::string::String
 pub macrame::error::DbError::Engine(libsql::errors::Error)
+pub macrame::error::DbError::ForkPrecedesParent
+pub macrame::error::DbError::ForkPrecedesParent::branch: alloc::string::String
+pub macrame::error::DbError::ForkPrecedesParent::forked_at: alloc::string::String
+pub macrame::error::DbError::ForkPrecedesParent::parent: alloc::string::String
+pub macrame::error::DbError::ForkPrecedesParent::parent_forked_at: alloc::string::String
 pub macrame::error::DbError::FutureRecordedAt
 pub macrame::error::DbError::FutureRecordedAt::limit: alloc::string::String
 pub macrame::error::DbError::FutureRecordedAt::stamp: alloc::string::String
 pub macrame::error::DbError::HalfLifeWithoutInstant
+pub macrame::error::DbError::InvalidBranchId(alloc::string::String)
 pub macrame::error::DbError::InvalidEdgeType(alloc::string::String)
 pub macrame::error::DbError::InvalidId
 pub macrame::error::DbError::InvalidId::id: alloc::string::String
@@ -208,6 +236,7 @@ pub macrame::error::DbError::SnapshotIncompatible::reason: alloc::string::String
 pub macrame::error::DbError::SubgraphTooLarge
 pub macrame::error::DbError::SubgraphTooLarge::budget: usize
 pub macrame::error::DbError::SubgraphTooLarge::n: usize
+pub macrame::error::DbError::UnknownBranch(alloc::string::String)
 pub macrame::error::DbError::WriterDroppedResponder
 pub macrame::error::DbError::WriterStopped(alloc::string::String)
 pub macrame::error::DbError::WriterUnavailable
@@ -414,6 +443,7 @@ pub macrame::metrics::CommandKind::Archive
 pub macrame::metrics::CommandKind::AssertEdge
 pub macrame::metrics::CommandKind::BulkImportChunk
 pub macrame::metrics::CommandKind::Checkpoint
+pub macrame::metrics::CommandKind::Fork
 pub macrame::metrics::CommandKind::Optimize
 pub macrame::metrics::CommandKind::RebuildCurrent
 pub macrame::metrics::CommandKind::RebuildFts
@@ -490,6 +520,7 @@ pub macrame::prelude::CommandKind::Archive
 pub macrame::prelude::CommandKind::AssertEdge
 pub macrame::prelude::CommandKind::BulkImportChunk
 pub macrame::prelude::CommandKind::Checkpoint
+pub macrame::prelude::CommandKind::Fork
 pub macrame::prelude::CommandKind::Optimize
 pub macrame::prelude::CommandKind::RebuildCurrent
 pub macrame::prelude::CommandKind::RebuildFts
@@ -521,6 +552,7 @@ pub macrame::prelude::DbError::ArchiveWindow::reason: alloc::string::String
 pub macrame::prelude::DbError::ArchiveWindow::window: core::time::Duration
 pub macrame::prelude::DbError::AttributeModeUnstated
 pub macrame::prelude::DbError::AttributeModeUnstated::instants: macrame::error::StatedInstants
+pub macrame::prelude::DbError::BranchExists(alloc::string::String)
 pub macrame::prelude::DbError::BulkCancelled
 pub macrame::prelude::DbError::CurrentDrift
 pub macrame::prelude::DbError::CurrentDrift::n: usize
@@ -532,10 +564,16 @@ pub macrame::prelude::DbError::DimMismatch::expected: usize
 pub macrame::prelude::DbError::DimMismatch::got: usize
 pub macrame::prelude::DbError::DimMismatch::model: alloc::string::String
 pub macrame::prelude::DbError::Engine(libsql::errors::Error)
+pub macrame::prelude::DbError::ForkPrecedesParent
+pub macrame::prelude::DbError::ForkPrecedesParent::branch: alloc::string::String
+pub macrame::prelude::DbError::ForkPrecedesParent::forked_at: alloc::string::String
+pub macrame::prelude::DbError::ForkPrecedesParent::parent: alloc::string::String
+pub macrame::prelude::DbError::ForkPrecedesParent::parent_forked_at: alloc::string::String
 pub macrame::prelude::DbError::FutureRecordedAt
 pub macrame::prelude::DbError::FutureRecordedAt::limit: alloc::string::String
 pub macrame::prelude::DbError::FutureRecordedAt::stamp: alloc::string::String
 pub macrame::prelude::DbError::HalfLifeWithoutInstant
+pub macrame::prelude::DbError::InvalidBranchId(alloc::string::String)
 pub macrame::prelude::DbError::InvalidEdgeType(alloc::string::String)
 pub macrame::prelude::DbError::InvalidId
 pub macrame::prelude::DbError::InvalidId::id: alloc::string::String
@@ -585,6 +623,7 @@ pub macrame::prelude::DbError::SnapshotIncompatible::reason: alloc::string::Stri
 pub macrame::prelude::DbError::SubgraphTooLarge
 pub macrame::prelude::DbError::SubgraphTooLarge::budget: usize
 pub macrame::prelude::DbError::SubgraphTooLarge::n: usize
+pub macrame::prelude::DbError::UnknownBranch(alloc::string::String)
 pub macrame::prelude::DbError::WriterDroppedResponder
 pub macrame::prelude::DbError::WriterStopped(alloc::string::String)
 pub macrame::prelude::DbError::WriterUnavailable
@@ -624,6 +663,23 @@ pub macrame::prelude::ArchiveReport::concepts_archived: usize
 pub macrame::prelude::ArchiveReport::horizon: core::option::Option<i64>
 pub macrame::prelude::ArchiveReport::links_archived: usize
 pub macrame::prelude::ArchiveReport::log_entries_archived: usize
+#[non_exhaustive] pub struct macrame::prelude::Branch
+pub macrame::prelude::Branch::created_at: alloc::string::String
+pub macrame::prelude::Branch::forked_at: core::option::Option<alloc::string::String>
+pub macrame::prelude::Branch::id: macrame::branch::BranchId
+pub macrame::prelude::Branch::parent: core::option::Option<macrame::branch::BranchId>
+pub struct macrame::prelude::BranchId(_)
+impl macrame::branch::BranchId
+pub fn macrame::branch::BranchId::as_str(&self) -> &str
+pub fn macrame::branch::BranchId::is_main(&self) -> bool
+pub fn macrame::branch::BranchId::main() -> Self
+pub fn macrame::branch::BranchId::new(impl core::convert::AsRef<str>) -> macrame::error::Result<Self>
+impl core::convert::AsRef<str> for macrame::branch::BranchId
+pub fn macrame::branch::BranchId::as_ref(&self) -> &str
+impl core::convert::From<macrame::branch::BranchId> for alloc::string::String
+pub fn alloc::string::String::from(macrame::branch::BranchId) -> Self
+impl core::fmt::Display for macrame::branch::BranchId
+pub fn macrame::branch::BranchId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct macrame::prelude::BulkControl
 impl macrame::connection::BulkControl
 pub fn macrame::connection::BulkControl::cancel_with(self, macrame::connection::CancelToken) -> Self
@@ -695,12 +751,14 @@ pub async fn macrame::connection::Database::archive(&self, &str) -> macrame::err
 pub fn macrame::connection::Database::archive_path(&self) -> &std::path::Path
 pub async fn macrame::connection::Database::archive_windowed(&self, &str, core::time::Duration) -> macrame::error::Result<alloc::vec::Vec<macrame::temporal::ArchiveReport>>
 pub async fn macrame::connection::Database::assert_edge(&self, macrame::graph::EdgeAssertion) -> macrame::error::Result<()>
+pub async fn macrame::connection::Database::branches(&self) -> macrame::error::Result<alloc::vec::Vec<macrame::branch::Branch>>
 pub async fn macrame::connection::Database::bulk_import(&self, alloc::vec::Vec<macrame::graph::EdgeAssertion>) -> macrame::error::BulkResult<usize>
 pub async fn macrame::connection::Database::bulk_import_with(&self, alloc::vec::Vec<macrame::graph::EdgeAssertion>, macrame::connection::BulkControl) -> macrame::error::BulkResult<usize>
 pub async fn macrame::connection::Database::checkpoint(&self) -> macrame::error::Result<macrame::connection::CheckpointReport>
 pub fn macrame::connection::Database::clock(&self) -> &alloc::sync::Arc<dyn macrame::util::Clock>
 pub async fn macrame::connection::Database::close(self) -> macrame::error::Result<()>
 pub async fn macrame::connection::Database::diagnostic_conn(&self) -> macrame::error::Result<libsql::connection::Connection>
+pub async fn macrame::connection::Database::fork(&self, macrame::branch::BranchId, macrame::branch::BranchId) -> macrame::error::Result<macrame::branch::Branch>
 pub fn macrame::connection::Database::metrics(&self) -> macrame::metrics::MetricsSnapshot
 pub async fn macrame::connection::Database::open(impl core::convert::AsRef<std::path::Path>) -> macrame::error::Result<Self>
 pub async fn macrame::connection::Database::open_tuned(impl core::convert::AsRef<std::path::Path>, macrame::connection::Tuning) -> macrame::error::Result<Self>
@@ -903,6 +961,7 @@ pub const macrame::prelude::BULK_ATOMIC_WARN_HOLD: core::time::Duration
 pub const macrame::prelude::CHUNK_BUDGET: core::time::Duration
 pub const macrame::prelude::DEFAULT_FUTURE_STAMP_TOLERANCE: core::time::Duration
 pub const macrame::prelude::MAX_ARCHIVE_SESSIONS: usize
+pub const macrame::prelude::MAX_BRANCH_ID: usize
 pub const macrame::prelude::RRF_K: usize
 pub trait macrame::prelude::Clock: core::marker::Send + core::marker::Sync
 pub fn macrame::prelude::Clock::now(&self) -> alloc::string::String
@@ -1154,6 +1213,7 @@ pub macrame::DbError::ArchiveWindow::reason: alloc::string::String
 pub macrame::DbError::ArchiveWindow::window: core::time::Duration
 pub macrame::DbError::AttributeModeUnstated
 pub macrame::DbError::AttributeModeUnstated::instants: macrame::error::StatedInstants
+pub macrame::DbError::BranchExists(alloc::string::String)
 pub macrame::DbError::BulkCancelled
 pub macrame::DbError::CurrentDrift
 pub macrame::DbError::CurrentDrift::n: usize
@@ -1165,10 +1225,16 @@ pub macrame::DbError::DimMismatch::expected: usize
 pub macrame::DbError::DimMismatch::got: usize
 pub macrame::DbError::DimMismatch::model: alloc::string::String
 pub macrame::DbError::Engine(libsql::errors::Error)
+pub macrame::DbError::ForkPrecedesParent
+pub macrame::DbError::ForkPrecedesParent::branch: alloc::string::String
+pub macrame::DbError::ForkPrecedesParent::forked_at: alloc::string::String
+pub macrame::DbError::ForkPrecedesParent::parent: alloc::string::String
+pub macrame::DbError::ForkPrecedesParent::parent_forked_at: alloc::string::String
 pub macrame::DbError::FutureRecordedAt
 pub macrame::DbError::FutureRecordedAt::limit: alloc::string::String
 pub macrame::DbError::FutureRecordedAt::stamp: alloc::string::String
 pub macrame::DbError::HalfLifeWithoutInstant
+pub macrame::DbError::InvalidBranchId(alloc::string::String)
 pub macrame::DbError::InvalidEdgeType(alloc::string::String)
 pub macrame::DbError::InvalidId
 pub macrame::DbError::InvalidId::id: alloc::string::String
@@ -1218,6 +1284,7 @@ pub macrame::DbError::SnapshotIncompatible::reason: alloc::string::String
 pub macrame::DbError::SubgraphTooLarge
 pub macrame::DbError::SubgraphTooLarge::budget: usize
 pub macrame::DbError::SubgraphTooLarge::n: usize
+pub macrame::DbError::UnknownBranch(alloc::string::String)
 pub macrame::DbError::WriterDroppedResponder
 pub macrame::DbError::WriterStopped(alloc::string::String)
 pub macrame::DbError::WriterUnavailable
@@ -1249,6 +1316,23 @@ pub macrame::Annotation::label: alloc::string::String
 pub macrame::Annotation::value: alloc::string::String
 impl macrame::connection::Annotation
 pub fn macrame::connection::Annotation::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
+#[non_exhaustive] pub struct macrame::Branch
+pub macrame::Branch::created_at: alloc::string::String
+pub macrame::Branch::forked_at: core::option::Option<alloc::string::String>
+pub macrame::Branch::id: macrame::branch::BranchId
+pub macrame::Branch::parent: core::option::Option<macrame::branch::BranchId>
+pub struct macrame::BranchId(_)
+impl macrame::branch::BranchId
+pub fn macrame::branch::BranchId::as_str(&self) -> &str
+pub fn macrame::branch::BranchId::is_main(&self) -> bool
+pub fn macrame::branch::BranchId::main() -> Self
+pub fn macrame::branch::BranchId::new(impl core::convert::AsRef<str>) -> macrame::error::Result<Self>
+impl core::convert::AsRef<str> for macrame::branch::BranchId
+pub fn macrame::branch::BranchId::as_ref(&self) -> &str
+impl core::convert::From<macrame::branch::BranchId> for alloc::string::String
+pub fn alloc::string::String::from(macrame::branch::BranchId) -> Self
+impl core::fmt::Display for macrame::branch::BranchId
+pub fn macrame::branch::BranchId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct macrame::BulkControl
 impl macrame::connection::BulkControl
 pub fn macrame::connection::BulkControl::cancel_with(self, macrame::connection::CancelToken) -> Self
@@ -1306,12 +1390,14 @@ pub async fn macrame::connection::Database::archive(&self, &str) -> macrame::err
 pub fn macrame::connection::Database::archive_path(&self) -> &std::path::Path
 pub async fn macrame::connection::Database::archive_windowed(&self, &str, core::time::Duration) -> macrame::error::Result<alloc::vec::Vec<macrame::temporal::ArchiveReport>>
 pub async fn macrame::connection::Database::assert_edge(&self, macrame::graph::EdgeAssertion) -> macrame::error::Result<()>
+pub async fn macrame::connection::Database::branches(&self) -> macrame::error::Result<alloc::vec::Vec<macrame::branch::Branch>>
 pub async fn macrame::connection::Database::bulk_import(&self, alloc::vec::Vec<macrame::graph::EdgeAssertion>) -> macrame::error::BulkResult<usize>
 pub async fn macrame::connection::Database::bulk_import_with(&self, alloc::vec::Vec<macrame::graph::EdgeAssertion>, macrame::connection::BulkControl) -> macrame::error::BulkResult<usize>
 pub async fn macrame::connection::Database::checkpoint(&self) -> macrame::error::Result<macrame::connection::CheckpointReport>
 pub fn macrame::connection::Database::clock(&self) -> &alloc::sync::Arc<dyn macrame::util::Clock>
 pub async fn macrame::connection::Database::close(self) -> macrame::error::Result<()>
 pub async fn macrame::connection::Database::diagnostic_conn(&self) -> macrame::error::Result<libsql::connection::Connection>
+pub async fn macrame::connection::Database::fork(&self, macrame::branch::BranchId, macrame::branch::BranchId) -> macrame::error::Result<macrame::branch::Branch>
 pub fn macrame::connection::Database::metrics(&self) -> macrame::metrics::MetricsSnapshot
 pub async fn macrame::connection::Database::open(impl core::convert::AsRef<std::path::Path>) -> macrame::error::Result<Self>
 pub async fn macrame::connection::Database::open_tuned(impl core::convert::AsRef<std::path::Path>, macrame::connection::Tuning) -> macrame::error::Result<Self>
@@ -1366,5 +1452,6 @@ impl core::fmt::Debug for macrame::connection::Tuning
 pub fn macrame::connection::Tuning::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub const macrame::CHUNK_BUDGET: core::time::Duration
 pub const macrame::DEFAULT_FUTURE_STAMP_TOLERANCE: core::time::Duration
+pub const macrame::MAX_BRANCH_ID: usize
 pub type macrame::BulkResult<T> = core::result::Result<T, macrame::error::BulkInterrupted>
 pub type macrame::Result<T> = core::result::Result<T, macrame::error::DbError>

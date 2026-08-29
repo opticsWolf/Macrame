@@ -47,6 +47,7 @@ use pyo3::types::{PyDict, PyType};
 
 use macrame::prelude::*;
 
+use crate::branch;
 use crate::errors::{closed_error, to_py, to_py_bulk};
 use crate::graph;
 use crate::observe;
@@ -797,7 +798,7 @@ impl PyDatabase {
     /// D-220): the edges on the path from it to the root, one per edge key,
     /// from the nearest branch holding it — so a branch that corrected or
     /// retired an inherited edge is seen to have done so. Unset is the trunk.
-    /// A lineage that is not registered raises `NotFoundError` naming it,
+    /// A lineage that is not registered raises `UnknownBranchError` naming it,
     /// rather than quietly answering for the trunk. Until `fork()` lands there
     /// is no way to create a second lineage from Python, which is why this
     /// parameter arrives with the read rather than after the write.
@@ -861,7 +862,7 @@ impl PyDatabase {
     /// D-220): the edges on the path from it to the root, one per edge key,
     /// from the nearest branch holding it — so a branch that corrected or
     /// retired an inherited edge is seen to have done so. Unset is the trunk.
-    /// A lineage that is not registered raises `NotFoundError` naming it,
+    /// A lineage that is not registered raises `UnknownBranchError` naming it,
     /// rather than quietly answering for the trunk. Until `fork()` lands there
     /// is no way to create a second lineage from Python, which is why this
     /// parameter arrives with the read rather than after the write.
@@ -1151,6 +1152,72 @@ impl PyDatabase {
                 .map_err(to_py)
         })?;
         Ok(temporal::PyChainCheck { inner })
+    }
+
+    // -- lineage surface (W12.7) ---------------------------------------------
+
+    /// Cut a new lineage from an existing one, and return it.
+    ///
+    /// A fork is **O(1) in rows written**: one row in `branches`, and nothing
+    /// else. A branch inherits its parent's history by resolution at read
+    /// rather than by owning a copy of it, so forking a thousand times leaves
+    /// every ledger table byte-identical.
+    ///
+    /// The fork point is *now*. The new lineage sees its parent's history up to
+    /// this instant and nothing the parent records after it, which is what
+    /// `branch=` on the traversal entry points reads.
+    ///
+    /// ```python
+    /// alt = db.fork("turn/17/alt/1", "main")
+    /// seen = db.walk("socrates", branch=alt.id)
+    /// ```
+    ///
+    /// # What this lineage can and cannot do yet
+    ///
+    /// It can be **read**: every traversal entry point takes `branch=`. It
+    /// cannot yet be **written** — no write takes a lineage, so `assert_edge`
+    /// after a `fork` lands on the trunk and says nothing about it. A fork is
+    /// currently a *view* of its parent's history as of an instant. Said here
+    /// because the gap is invisible from the signatures.
+    ///
+    /// # Raises
+    ///
+    /// - `UnknownBranchError` when `frm` is not registered.
+    /// - `BranchExistsError` when `name` is taken, including `"main"`.
+    /// - `InvalidBranchIdError` when `name` is not an acceptable name — which
+    ///   is a wider rule than model names: what it refuses is empty, over 128
+    ///   characters, control characters, and leading or trailing whitespace.
+    /// - `ForkPrecedesParentError` when the clock would place the fork point
+    ///   before the parent's own.
+    #[pyo3(signature = (name, frm = "main"))]
+    fn fork(&self, py: Python<'_>, name: &str, frm: &str) -> PyResult<branch::PyBranch> {
+        let name = branch::branch_id(name)?;
+        let parent = branch::branch_id(frm)?;
+        let inner = self.with_db(py, move |db| {
+            runtime().block_on(db.fork(name, parent)).map_err(to_py)
+        })?;
+        Ok(branch::PyBranch { inner })
+    }
+
+    /// Every lineage the ledger knows about, trunk first then creation order.
+    ///
+    /// A database that has never forked returns exactly one `Branch`: the
+    /// trunk, whose `parent` and `forked_at` are both `None`.
+    ///
+    /// Read rather than queued behind the write actor, so listing branches does
+    /// not wait on a bulk import. `branches` is append-only, so the only way
+    /// this can be stale is by missing a branch created after it was taken.
+    fn branches(&self, py: Python<'_>) -> PyResult<Vec<branch::PyBranch>> {
+        self.with_db(py, move |db| {
+            runtime()
+                .block_on(db.branches())
+                .map(|all| {
+                    all.into_iter()
+                        .map(|inner| branch::PyBranch { inner })
+                        .collect()
+                })
+                .map_err(to_py)
+        })
     }
 
     // -- vector surface (P4.4) ------------------------------------------------

@@ -694,6 +694,25 @@ pub(crate) enum HighPriCommand {
     Checkpoint {
         responder: oneshot::Sender<Result<CheckpointReport>>,
     },
+    /// Register a lineage (0.14.7, §15.4).
+    ///
+    /// High priority, and not because it is urgent: it is one insert into a
+    /// table with no secondary indices, so it is the cheapest turn the actor
+    /// takes. What makes it high priority is that everything the caller does
+    /// next is a write *on* this branch, and queueing a fork behind a bulk
+    /// import would stall the work it exists to enable — `RegisterModel`'s
+    /// argument, for the same reason.
+    ///
+    /// It goes through the actor rather than the read connection for the
+    /// ordinary reason every write does, plus one specific to it: the duplicate
+    /// and parent checks are only sound if nothing can register a colliding
+    /// name between the check and the insert, and the actor is what makes the
+    /// pair one turn.
+    Fork {
+        name: crate::branch::BranchId,
+        parent: crate::branch::BranchId,
+        responder: oneshot::Sender<Result<crate::branch::Branch>>,
+    },
     Shutdown {
         responder: oneshot::Sender<Result<()>>,
     },
@@ -1796,6 +1815,106 @@ impl Database {
         let concept = concept.normalized()?;
         self.high(|responder| HighPriCommand::UpsertConcept { concept, responder })
             .await
+    }
+
+    /// Cut a new lineage from an existing one (§15.2, §15.4).
+    ///
+    /// # A fork is O(1) in rows written
+    ///
+    /// One row in `branches`, and nothing else. No ledger table is read, copied
+    /// or touched: a branch inherits its parent's history by *resolution at
+    /// read* rather than by owning a copy of it, which is what
+    /// [`TraversalBuilder::on_branch`](crate::graph::TraversalBuilder::on_branch)
+    /// resolves and 0.14.6 bounds by the fork point. The cost of that choice is
+    /// on the read side and is measured — [D-220] for the resolution, [D-223]
+    /// for the cutoff — and the cost of the alternative would be here, as an
+    /// O(rows) fork and storage multiplied by branch count (§15.3, option 3).
+    ///
+    /// # The fork point is *now*, and that is a bound on this release rather
+    /// than on the design
+    ///
+    /// `forked_at` is stamped from the same clock as every other write, so the
+    /// new lineage sees its parent's history up to this instant. Forking from a
+    /// *past* instant is a coherent thing to want and the schema has always
+    /// allowed it — `branches` carries `forked_at` and `created_at` as separate
+    /// columns under `CHECK (forked_at <= created_at)` — but it is not in this
+    /// release and is additive when it is.
+    ///
+    /// # What this lineage can and cannot do yet
+    ///
+    /// It can be **read**: every traversal entry point takes a branch, and on a
+    /// forked ledger the read resolves along the ancestry and stops at the fork
+    /// point. It cannot yet be **written**: [`EdgeAssertion`] carries no
+    /// lineage, so every write in this release lands on the trunk. A fork is
+    /// therefore currently a *view* of its parent's history as of an instant,
+    /// which is a coherent and useful thing on its own — and half of what §15.4
+    /// promises. The write half is the branch-scoped view, next.
+    ///
+    /// This is said here rather than left to be discovered because the gap is
+    /// invisible from the signature: `fork` returns a `Branch`, writes accept no
+    /// branch, and nothing refuses anything — a caller who forks and then calls
+    /// `assert_edge` gets a successful write on the trunk.
+    ///
+    /// # Errors
+    ///
+    /// - [`DbError::UnknownBranch`] when `from` is not registered. Named rather
+    ///   than left to the foreign key, because the caller asked about a branch.
+    /// - [`DbError::BranchExists`] when `name` is taken — including `"main"`,
+    ///   which every database has from its first migration.
+    /// - [`DbError::ForkPrecedesParent`] when the clock would place this fork
+    ///   point before the parent's *own* — not before the parent's
+    ///   `created_at`, which is what the schema comment promised until 0.14.7
+    ///   and is not checkable: the trunk's `created_at` is stamped during
+    ///   migration from the wall clock, before an injected clock exists, so
+    ///   that rule refuses every fork on every `FakeClock` database (D-224).
+    ///   Reachable with [`FakeClock`](crate::util::FakeClock), and the one
+    ///   refusal here that no `CHECK` could have made — it is cross-row, and a
+    ///   `CHECK` sees one row.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use macrame::prelude::*;
+    /// # async fn f(db: &Database) -> Result<()> {
+    /// let alt = db.fork(BranchId::new("turn/17/alt/1")?, BranchId::main()).await?;
+    /// let seen = TraversalBuilder::new("socrates")
+    ///     .on_branch(alt.id.clone())
+    ///     .execute_ids(db.read_conn(), "2026-08-29T00:00:00.000000Z")
+    ///     .await?;
+    /// # let _ = seen;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// [D-220]: ../../docs/architecture/s13-decision-register.md#d-220
+    /// [D-223]: ../../docs/architecture/s13-decision-register.md#d-223
+    pub async fn fork(
+        &self,
+        name: crate::branch::BranchId,
+        from: crate::branch::BranchId,
+    ) -> Result<crate::branch::Branch> {
+        self.high(|responder| HighPriCommand::Fork {
+            name,
+            parent: from,
+            responder,
+        })
+        .await
+    }
+
+    /// Every lineage the ledger knows about, trunk first (§15.4).
+    ///
+    /// Read through [`Self::read_conn`] rather than the write actor, which is
+    /// the difference between this and [`Self::fork`] and is deliberate:
+    /// `branches` is append-only, so the only way this listing can be stale is
+    /// by missing a branch created after it was taken, and a caller who wanted
+    /// to know about that branch would have had to create it. Queueing a read
+    /// behind the write actor would make listing branches wait on a bulk import
+    /// for no answer it could change.
+    ///
+    /// A database that has never forked returns exactly one row: the trunk,
+    /// with no parent and no fork point.
+    pub async fn branches(&self) -> Result<Vec<crate::branch::Branch>> {
+        crate::branch::list(self.read_conn()).await
     }
 
     /// Assert many edges in one transaction under one stamp (D-014).
@@ -3261,6 +3380,7 @@ impl HighPriCommand {
             HighPriCommand::WriteBulkAtomic { .. } => K::WriteBulkAtomic,
             HighPriCommand::RebuildCurrent { .. } => K::RebuildCurrent,
             HighPriCommand::RegisterModel { .. } => K::RegisterModel,
+            HighPriCommand::Fork { .. } => K::Fork,
             HighPriCommand::Checkpoint { .. } => K::Checkpoint,
             HighPriCommand::Shutdown { .. } => K::Shutdown,
         }
@@ -3372,6 +3492,20 @@ impl HighPriCommand {
                     responder,
                     crate::vector::register_model(conn, &model, dim).await,
                 );
+            }
+            HighPriCommand::Fork {
+                name,
+                parent,
+                responder,
+            } => {
+                // The same clock as every other write, and the same instant in
+                // both columns: `forked_at` is a transaction-time point in the
+                // parent's history, and the point this release can fork from is
+                // now. See `branch::Branch::created_at` for why they are two
+                // columns anyway.
+                let stamp = clock.now();
+                let res = crate::branch::fork(conn, &name, &parent, &stamp).await;
+                turn.answer(responder, res);
             }
         }
         LoopCtl::Continue

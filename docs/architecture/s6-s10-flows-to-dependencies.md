@@ -96,6 +96,29 @@ pub enum DbError {
     #[error("embedding model {model} is not registered (no {table} table)")]
     ModelNotRegistered { model: String, table: String },
 
+    #[error(
+        "invalid branch id {0:?}: expected 1-128 characters, \
+         no control characters, no leading or trailing whitespace"
+    )]
+    InvalidBranchId(String),
+
+    #[error("branch {0} is not registered")]
+    UnknownBranch(String),
+
+    #[error("branch {0} already exists")]
+    BranchExists(String),
+
+    #[error(
+        "branch {branch} would fork from {parent} at {forked_at}, \
+         before {parent} itself was cut at {parent_forked_at}"
+    )]
+    ForkPrecedesParent {
+        branch: String,
+        parent: String,
+        forked_at: String,
+        parent_forked_at: String,
+    },
+
     #[error("subgraph exceeds budget ({n} > {budget})")]
     SubgraphTooLarge { n: usize, budget: usize },
 

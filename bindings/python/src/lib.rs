@@ -14,6 +14,7 @@
 //! - [`vector`] — embeddings, search, and the filter planner (P4.4)
 //! - [`testing`] — underscore-prefixed hooks the Python suite drives
 
+mod branch;
 mod database;
 mod errors;
 mod graph;
@@ -119,6 +120,7 @@ fn _macrame(m: &Bound<'_, PyModule>) -> PyResult<()> {
     observe::register(m)?;
     vector::register(m)?;
 
+    m.add_class::<branch::PyBranch>()?;
     m.add_class::<database::PyDatabase>()?;
     m.add_class::<database::PyCancelToken>()?;
 

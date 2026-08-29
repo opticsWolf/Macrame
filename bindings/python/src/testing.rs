@@ -44,6 +44,10 @@ pub(crate) const DB_ERROR_VARIANTS: &[&str] = &[
     "NotFound",
     "DimMismatch",
     "InvalidModelName",
+    "InvalidBranchId",
+    "UnknownBranch",
+    "BranchExists",
+    "ForkPrecedesParent",
     "ModelNotRegistered",
     "SubgraphTooLarge",
     "NegativeEdgeWeight",
@@ -112,6 +116,17 @@ fn sample(name: &str) -> Option<DbError> {
             model: "nomic_v1".into(),
         },
         "InvalidModelName" => DbError::InvalidModelName("Bad-Model".into()),
+        // A trailing space, which is the pair of names this type exists for:
+        // invisible in every terminal, and a second lineage in the ledger.
+        "InvalidBranchId" => DbError::InvalidBranchId("release ".into()),
+        "UnknownBranch" => DbError::UnknownBranch("ghost".into()),
+        "BranchExists" => DbError::BranchExists("main".into()),
+        "ForkPrecedesParent" => DbError::ForkPrecedesParent {
+            branch: "behind".into(),
+            parent: "ahead".into(),
+            forked_at: "2026-01-01T00:00:00.000000Z".into(),
+            parent_forked_at: "2999-01-01T00:00:00.000000Z".into(),
+        },
         "ModelNotRegistered" => DbError::ModelNotRegistered {
             model: "nomic_v1".into(),
             table: "embeddings_nomic_v1".into(),
