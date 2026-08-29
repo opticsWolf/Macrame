@@ -365,3 +365,101 @@ def test_diff_refuses_a_lineage_that_does_not_exist(db):
         db.diff("ghost", "alt")
     with pytest.raises(macrame.InvalidBranchIdError):
         db.diff("alt", "alt ")
+
+
+# ───────────────────────────────────────────────────────────────────────────
+# Abandonment (0.14.13, D-230)
+# ───────────────────────────────────────────────────────────────────────────
+#
+# ``archive`` is indexed by time, so it cannot reclaim an abandoned branch
+# without taking the trunk's history of the same age with it.
+# ``archive_branch`` is indexed by lineage instead, and moves everything the
+# lineage holds — edges, concepts, log entries and the ``branches`` row — in one
+# transaction. The last of those is why the name becomes *unknown* afterwards
+# rather than merely empty, and that refusal is the half these cases exist to
+# pin: it is the difference between being told the branch is gone and being
+# handed its parent's view as though it were the branch's.
+
+
+def test_forgetting_a_branch_leaves_the_trunk_whole(db):
+    """Its rows go; the ledger it forked from does not notice."""
+    db.fork("alt")
+    db.assert_edge(
+        macrame.EdgeAssertion("c", "d", "LEADSTO", valid_from=T0, branch="alt")
+    )
+
+    assert sorted(db.traverse_ids("a", max_depth=5, branch="alt")) == ["a", "b", "c", "d"]
+
+    report = db.archive_branch("alt")
+    assert report.links_archived == 1
+
+    assert sorted(db.traverse_ids("a", max_depth=5)) == ["a", "b", "c"]
+    assert [b.id for b in db.branches()] == ["main"]
+    for table in ("links", "links_current", "transaction_log"):
+        assert (
+            db.diagnostic_query(
+                f"SELECT COUNT(*) FROM {table} WHERE branch_id = 'alt'"
+            )[0][0]
+            == 0
+        ), f"{table} still holds rows for a lineage the ledger has forgotten"
+
+
+def test_a_read_naming_a_forgotten_branch_is_refused(db):
+    """Not an empty answer, and not the parent's answer: a refusal.
+
+    An arm that took the rows and left the ``branches`` row would leave this
+    read succeeding and returning the trunk's view. Nothing in the result would
+    say that everything the branch believed had been deleted.
+    """
+    db.fork("alt")
+    db.archive_branch("alt")
+
+    with pytest.raises(macrame.UnknownBranchError) as excinfo:
+        db.traverse_ids("a", max_depth=5, branch="alt")
+    assert excinfo.value.branch == "alt"
+
+
+def test_the_trunk_is_not_archivable(db):
+    with pytest.raises(macrame.BranchNotArchivableError) as excinfo:
+        db.archive_branch("main")
+    assert excinfo.value.branch == "main"
+    assert "trunk" in excinfo.value.reason
+    assert sorted(db.traverse_ids("a", max_depth=5)) == ["a", "b", "c"]
+
+
+def test_a_branch_with_descendants_is_not_archivable(db):
+    """A child reads through its parent, so the parent is not abandoned."""
+    db.fork("alt")
+    db.fork("alt_child", frm="alt")
+
+    with pytest.raises(macrame.BranchNotArchivableError) as excinfo:
+        db.archive_branch("alt")
+    assert "descendants" in excinfo.value.reason
+    assert sorted(db.traverse_ids("a", max_depth=5, branch="alt_child")) == ["a", "b", "c"]
+
+
+def test_a_branch_another_lineage_depends_on_is_not_archivable(db):
+    """The plan's "contiguous archivable set by construction", refuted.
+
+    A concept is keyed by identity across the whole ledger, so a concept minted
+    on a branch can be named by a trunk edge — and then the branch's rows are
+    not a self-contained set. Refused rather than repaired: leaving the concept
+    hot makes the post-condition conditional, and taking it cold breaks a
+    foreign key the trunk depends on.
+    """
+    db.fork("alt")
+    db.write_concepts(
+        [macrame.ConceptUpsert("z", "Z", valid_from=T0, branch="alt")]
+    )
+    db.assert_edge(macrame.EdgeAssertion("c", "z", "LEADSTO", valid_from=T0))
+
+    with pytest.raises(macrame.BranchNotArchivableError) as excinfo:
+        db.archive_branch("alt")
+    assert "z" in excinfo.value.reason
+    assert sorted(db.traverse_ids("a", max_depth=5)) == ["a", "b", "c", "z"]
+
+
+def test_an_unregistered_name_reads_as_unknown_here_too(db):
+    """A typo is a typo on every surface, not a refusal type of its own."""
+    with pytest.raises(macrame.UnknownBranchError):
+        db.archive_branch("ghost")

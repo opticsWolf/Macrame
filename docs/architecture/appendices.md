@@ -401,6 +401,19 @@ let report = db.archive(cutoff).await?;                // ArchiveReport { links_
 // re-derived from a ledger that was wrongly pruned, so Doctrine VI's check has
 // nothing outside the file to compare against.
 
+// The abandonment arm (0.14.13, D-230): indexed by LINEAGE where the call above
+// is indexed by time. Its links, concepts, log entries AND its `branches` row
+// move in one transaction, and afterwards the name is unknown -- a read naming
+// it raises UnknownBranch rather than being handed its parent's view, which is
+// the whole point rather than a side effect. Refused for the trunk, for a branch
+// with descendants, and for one whose concepts another lineage's hot edge names
+// (BranchNotArchivable with a reason); UnknownBranch for a name never
+// registered. The road map's "contiguous archivable set by construction" is
+// false in both senses -- a concept is keyed by identity ledger-wide, and a
+// branch's log rows are scattered rather than a prefix -- which is why the third
+// refusal exists and why the `branches` row has to move with everything else.
+let report: ArchiveReport = db.archive_branch(BranchId::new("abandoned")?).await?;
+
 // Windowed: many bounded sessions instead of one unbounded hold (0.6.0, D-080).
 // A window that never advances, or one implying more than MAX_ARCHIVE_SESSIONS
 // (4,096), is refused rather than clamped -- rounding it up would archive over
@@ -460,7 +473,7 @@ A third, cosmetic one: `macrame::prelude` re-exports `AttributeMode`, `EdgeAsser
 
 ## Appendix B — Glossary
 
-Archive scope (0.5.1, **widened 0.9.0**) — the set of tables targeted by the archive path: links (closed intervals), transaction_log (superseded rows) and, since 0.9.0, **concepts** ([D-130](s13-decision-register.md#d-130)). ~~Concepts are never physically archived ([D-022](s13-decision-register.md#d-022)); they are managed by retired (soft-delete) and valid_to (temporal expiry).~~ **Corrected 2026-08-07:** a concept whose retirement and valid_to both precede the cutoff, and which no surviving hot link names, moves to `cold.concepts` column for column ([D-128](s13-decision-register.md#d-128)); its analytics_annotations and embeddings_* rows are deleted rather than moved, and `rehydrate` brings it back. retired and valid_to remain how a concept's *lifecycle* is expressed — they are now also two of the four clauses that decide when it may leave the hot table. As of 0.5.3, the archive session also deletes the links_current rows projecting the intervals it removed, because links_current must remain equal to the latest-belief projection of what is left in links ([Doctrine VI](s0-s3-foundations.md#doctrine-vi)) or audit_current() reports drift the moment an archive runs. Those rows are closed intervals that ended before the cutoff and can never be active in a traversal.
+Archive scope (0.5.1, **widened 0.9.0**, **and again 0.14.13**) — **there are two arms as of 0.14.13** ([D-230](s13-decision-register.md#d-230)): the time-indexed one described here, and `archive_branch(name)`, which is indexed by *lineage* and moves everything one branch holds — its links, its concepts, its log entries and its `branches` row — in one transaction, after which the name is unknown rather than empty. The set of tables targeted by the time-indexed path: links (closed intervals), transaction_log (superseded rows) and, since 0.9.0, **concepts** ([D-130](s13-decision-register.md#d-130)). ~~Concepts are never physically archived ([D-022](s13-decision-register.md#d-022)); they are managed by retired (soft-delete) and valid_to (temporal expiry).~~ **Corrected 2026-08-07:** a concept whose retirement and valid_to both precede the cutoff, and which no surviving hot link names, moves to `cold.concepts` column for column ([D-128](s13-decision-register.md#d-128)); its analytics_annotations and embeddings_* rows are deleted rather than moved, and `rehydrate` brings it back. retired and valid_to remain how a concept's *lifecycle* is expressed — they are now also two of the four clauses that decide when it may leave the hot table. As of 0.5.3, the archive session also deletes the links_current rows projecting the intervals it removed, because links_current must remain equal to the latest-belief projection of what is left in links ([Doctrine VI](s0-s3-foundations.md#doctrine-vi)) or audit_current() reports drift the moment an archive runs. Those rows are closed intervals that ended before the cutoff and can never be active in a traversal.
 
 Archive session (0.5.3) — the window in which physical deletion from links and transaction_log is legal. It is exactly the single BEGIN IMMEDIATE … COMMIT archive transaction ([D-012](s13-decision-register.md#d-012)), delimited by the creation and dropping of the macrame_archive_session marker table in main ([D-008](s13-decision-register.md#d-008) revised). ATTACH of the cold database is issued outside the transaction and DETACH unconditionally on the way out, including on error: ATTACH is not transactional and survives ROLLBACK, so a leaked handle would make every later archive or pre-horizon reconstruct fail with "database cold is already in use".
 
@@ -546,7 +559,7 @@ New in 0.13.38 ([D-211](s13-decision-register.md#d-211)). [Appendix A](appendice
 
 *Frozen* means a change requires a **major version**.
 
-**1. The public Rust API, item for item and path for path.** [`docs/architecture/public-api.txt`](public-api.txt) is the surface — **1,541 items**. No item is removed, no path stops resolving, and no signature narrows. Each item is reachable at exactly one canonical path, plus flat aliases at the crate root and in `macrame::prelude` ([D-208](s13-decision-register.md#d-208)). Held by `scripts/check_public_api.py` in CI and by `tests/public_path_tests.rs` in `cargo test`. The cycle that produced this surface was reviewed against 0.13.0 item by item before it was frozen — [`api-review-0.14.0.md`](api-review-0.14.0.md), [D-212](s13-decision-register.md#d-212) — which is the last release where that review is cheap.
+**1. The public Rust API, item for item and path for path.** [`docs/architecture/public-api.txt`](public-api.txt) is the surface — **1,555 items**. No item is removed, no path stops resolving, and no signature narrows. Each item is reachable at exactly one canonical path, plus flat aliases at the crate root and in `macrame::prelude` ([D-208](s13-decision-register.md#d-208)). Held by `scripts/check_public_api.py` in CI and by `tests/public_path_tests.rs` in `cargo test`. The cycle that produced this surface was reviewed against 0.13.0 item by item before it was frozen — [`api-review-0.14.0.md`](api-review-0.14.0.md), [D-212](s13-decision-register.md#d-212) — which is the last release where that review is cheap.
 
 **2. The ledger tables** — `concepts`, `links`, `transaction_log`. Additive only: `ALTER TABLE ADD COLUMN` and new indexes. A changed primary key, a dropped column or altered bitemporal semantics is a major version with an explicit ETL path, because bitemporal data is the hardest data to migrate: a rebuild means replaying history and recomputing transaction-time boundaries, which is rewriting the past ([D-036](s13-decision-register.md#d-036), [Doctrine III](s0-s3-foundations.md#doctrine-iii)).
 
@@ -568,7 +581,7 @@ Minor-version changes, and several of them are expected rather than merely permi
 
 **3. The derivative tables** — `links_current`, the per-model `embeddings_*` tables, and `concepts_fts`. **No schema-stability guarantee at all.** A minor version needing a different materialization drops the table, recreates it from the DDL and re-derives it inside the same migration step ([D-036](s13-decision-register.md#d-036), [Doctrine VI](s0-s3-foundations.md#doctrine-vi), [Doctrine VII](s0-s3-foundations.md#doctrine-vii)).
 
-**4. The schema version and its migration rungs.** **v12** today. Rungs are forward-only and run at `open()`; adding one is a minor version, and refusing to open a database from a *newer* build is the behaviour, not a bug.
+**4. The schema version and its migration rungs.** **v13** today. Rungs are forward-only and run at `open()`; adding one is a minor version, and refusing to open a database from a *newer* build is the behaviour, not a bug.
 
 **5. The snapshot container format.** **v4** today. A snapshot is a cache of a fold the ledger can always reproduce, so the format is versioned and an unrecognised version is **refused rather than parsed** ([D-043](s13-decision-register.md#d-043)); a build that cannot read an old snapshot folds from the log instead. Losing every snapshot costs time and no information.
 

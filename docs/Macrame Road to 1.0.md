@@ -3473,6 +3473,24 @@ and the schema does not move.
   to `audit_current`, which compares the projection with the ledger and has
   nothing to compare the ledger against. An arm that archives a *whole lineage's*
   rows could not have been reviewed on top of that.
+
+  **Delivered in 0.14.13 as `archive_branch(name)`, and this bullet's own
+  justification is the thing it refuted**
+  ([D-230](architecture/s13-decision-register.md#d-230)). *Contiguous by
+  construction* is false in both senses. `concepts` is keyed by identity across
+  the whole ledger, so a trunk or sibling edge may name a concept minted on the
+  branch — measured by probe, both succeed — and the branch's rows are therefore
+  not closed under `concepts(id)`; and its `transaction_log` rows are scattered
+  through the sequence rather than forming a prefix. The predicate really is the
+  cheapest in the crate, and that was never the hard part. What the refutations
+  bought is the shape: one refusal (a lineage other lineages still depend on is
+  not abandoned) and one chain with no branch points — links go, so the log must
+  go, so the **`branches` row** must go, because `hot_log_reach`'s soundness
+  rests on *the newest row per entity is never archivable*. Moving the lineage
+  record is what makes a fold that omits the branch correct rather than silently
+  short, and it needed **schema v13** to gate `trg_branches_frozen_delete`,
+  whose docstring had said no session could ever legally remove a lineage
+  record.
 - **Schema rung to v12**, with `a_version_bump_must_bring_its_own_rung_test`
   enforcing it and the existing-rows default proving the migration is additive.
 - **The Python surface, in the same release.** W6's finding was that a binding
@@ -3573,8 +3591,17 @@ so it is visible from both places.
 
 1. A fork is O(1) in rows written, demonstrated by a test that forks 1,000 times
    and asserts the row count in every ledger table is unchanged.
-2. A branch reads its parent's history and its own, and the trunk is byte-identical
-   before and after a child branch is written to and abandoned.
+2. A branch reads its parent's history and its own, and ~~the trunk is
+   byte-identical~~ **the trunk's ledger is unchanged** before and after a child
+   branch is written to and abandoned. Restated in 0.14.13, when `archive_branch`
+   made abandonment a real operation and the original wording turned out to
+   promise the wrong thing: the arm deletes rows, so the *file* is not
+   byte-identical and could not be — a criterion no implementation of this
+   feature can meet is a criterion about `VACUUM`, not about branching. What is
+   asserted, and tested, is the property that was meant: every row the trunk
+   wrote is still there, `audit_current` reports no drift, and what the trunk can
+   reach is what it could reach before
+   ([D-230](architecture/s13-decision-register.md#d-230)).
 3. Traversal cost against branch-chain depth is measured and recorded, and the
    strategy choice (§15.3) is a decision-register entry with the numbers in it.
 4. Cross-branch edges are refused with a named error, with a test.

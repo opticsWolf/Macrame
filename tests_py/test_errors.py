@@ -105,6 +105,17 @@ EXPECTED: dict[str, tuple[str, str, dict]] = {
     # -- branch (W12.7) --
     "UnknownBranch": ("UnknownBranchError", "BranchError", {"branch": "ghost"}),
     "BranchExists": ("BranchExistsError", "BranchError", {"branch": "main"}),
+    "BranchNotArchivable": (
+        "BranchNotArchivableError",
+        "BranchError",
+        {
+            "branch": "abandoned",
+            "reason": (
+                "concept c1 was minted here and a hot edge on another "
+                "lineage names it"
+            ),
+        },
+    ),
     "ForkPrecedesParent": (
         "ForkPrecedesParentError",
         "BranchError",

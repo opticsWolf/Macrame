@@ -441,6 +441,7 @@ fn next_chunk_size(
 /// | [`Database::archive`] | measured **26.8 ms** for 2,000 archivable edges; see [`Database::archive_windowed`] | D-012: copy-then-delete must be atomic, or a crash between the phases duplicates or loses rows |
 /// | `rebuild_current` | measured **24.6 / 104 / 318 ms** at 4K / 16K / 40K rows in `links` (was "~50 s per 10M edges", which nothing had measured) | D-023: the window between `DELETE` and `INSERT` is the whole of current belief; a reader landing in it sees a graph with no edges and no error |
 /// | [`Database::rehydrate`] | unmeasured; a function of how many rows the caller named | D-012 backwards: the same copy-then-delete atomicity, in the other direction. **A row here since 0.12.9 only because it was previously invisible** — rehydration reported as `archive` and inherited its exemption without anyone deciding on it (W4.3, D-152) |
+/// | [`Database::archive_branch`] | unmeasured; a function of how much one lineage wrote | D-012 again, and D-230's chain: the links, the log entries and the `branches` row leave together or the ledger disagrees with itself about what is currently believed. There is no smaller unit — half a forgotten lineage is a lineage whose reads are answered by its parent |
 /// | [`Database::checkpoint`] | a function of the WAL's size, which is a function of how long since the last checkpoint — not of anything the caller passes | It is not a transaction at all. `PRAGMA wal_checkpoint` copies frames back into the main file and there is no unit smaller than the frame it is already working in; the caller asked for exactly this, and the alternative to a long checkpoint is a WAL that keeps growing (0.12.13, W5.2, D-156) |
 ///
 /// The `archive` figure is end-to-end through this method, so it **includes**
@@ -826,6 +827,18 @@ pub(crate) enum LowPriCommand {
     },
     Archive {
         cutoff: String,
+        archive_path: PathBuf,
+        responder: oneshot::Sender<Result<ArchiveReport>>,
+    },
+    /// Forget one lineage, moving its whole ledger to the cold file (0.14.13,
+    /// §15.4, D-230).
+    ///
+    /// Low priority for `Archive`'s reason and one of its own: it is bulk
+    /// physical movement holding the write lock for its whole transaction, and
+    /// it is the least urgent write in the crate — the rows it moves belong to
+    /// a lineage nobody is reading.
+    ArchiveBranch {
+        branch: String,
         archive_path: PathBuf,
         responder: oneshot::Sender<Result<ArchiveReport>>,
     },
@@ -2674,6 +2687,49 @@ impl Database {
         .await
     }
 
+    /// Forget one lineage: move its whole ledger to the cold database and
+    /// remove the lineage record (0.14.13, §15.4, D-230).
+    ///
+    /// The abandonment arm. A conversation tree discards most of what it grows,
+    /// and [`Self::archive`] cannot reclaim it: that arm is indexed by *time*,
+    /// so archiving an abandoned branch's recent history means archiving the
+    /// trunk's recent history with it.
+    ///
+    /// **Everything the lineage holds moves in one transaction** — its `links`,
+    /// its `concepts`, its `transaction_log` entries and its `branches` row —
+    /// and afterwards the name is unknown: every read and write naming it
+    /// raises [`DbError::UnknownBranch`]. That is the design's whole shape, and
+    /// `temporal::archive::archive_branch` records why it has no smaller
+    /// version.
+    ///
+    /// # It refuses more than it accepts, on purpose
+    ///
+    /// - The trunk, and a name that is not registered
+    ///   ([`DbError::UnknownBranch`]).
+    /// - A branch with **descendants**: they read through it, so archiving it
+    ///   would delete rows they still believe.
+    /// - A branch whose **concepts another lineage's hot link names**. The road
+    ///   map assumed an abandoned branch's rows were "a contiguous archivable
+    ///   set by construction"; a concept is keyed by identity across the whole
+    ///   ledger (D-214), so they are not, and this refusal is what makes them
+    ///   contiguous in the cases it accepts.
+    ///
+    /// All but the first return [`DbError::BranchNotArchivable`] with a reason.
+    ///
+    /// The lineage record lands in `cold.branches` with an `archived_at`, so a
+    /// cold row's `branch_id` still resolves to something — in the cold file,
+    /// which is now the only place it does.
+    pub async fn archive_branch(&self, branch: crate::branch::BranchId) -> Result<ArchiveReport> {
+        let branch = branch.as_str().to_string();
+        let archive_path = self.archive_path.clone();
+        self.low(|responder| LowPriCommand::ArchiveBranch {
+            branch,
+            archive_path,
+            responder,
+        })
+        .await
+    }
+
     /// Move the named concepts back from the cold database into the hot tables
     /// (§2.3, C3).
     ///
@@ -3814,6 +3870,11 @@ impl LowPriCommand {
             // What kept it folded was that a `CommandKind` variant was a
             // breaking addition; `#[non_exhaustive]` (W4.2) removed that.
             LowPriCommand::Rehydrate { .. } => K::Rehydrate,
+            // Its own counter from the day it shipped, which is the whole point
+            // of the paragraph above: `Rehydrate` spent four releases folded
+            // into `Archive` for a reason that was never good, and the cost of
+            // unfolding it was a rung's worth of care about declaration order.
+            LowPriCommand::ArchiveBranch { .. } => K::ArchiveBranch,
             LowPriCommand::RebuildFts { .. } => K::RebuildFts,
             // Two kinds out of one variant since 0.13.24 (W10.5, D-197). The
             // command carries the flag; the counter has to carry it too, or the
@@ -3885,6 +3946,31 @@ impl LowPriCommand {
                 // Before the answer, so a shadow rebuild that reads the epoch on
                 // its next turn cannot miss an archive that has already deleted
                 // rows out from under it (T1.2).
+                if res.is_ok() {
+                    turn.archive_committed();
+                }
+                turn.answer(responder, res);
+            }
+            LowPriCommand::ArchiveBranch {
+                branch,
+                archive_path,
+                responder,
+            } => {
+                // The wall clock, recorded in `cold.branches.archived_at`: when
+                // the ledger stopped knowing about the lineage. Not a ledger
+                // fact and not on either of Doctrine II's timelines — nothing
+                // was asserted or retired here.
+                let archived_at = clock.now();
+                let res = crate::temporal::archive::archive_branch(
+                    conn,
+                    &branch,
+                    &archived_at,
+                    &archive_path,
+                )
+                .await;
+                // `Archive`'s reason exactly: a shadow rebuild reading the epoch
+                // on its next turn must not miss a session that has already
+                // deleted rows out from under it (T1.2).
                 if res.is_ok() {
                     turn.archive_committed();
                 }

@@ -855,6 +855,37 @@ did not". The counterexample to §15.4's cheap rule is here for the same reason:
 a Python caller reaching for `[r for r in rows if r.branch_id == alt.id]` would
 lose exactly the row that says the trunk moved on without them.
 
+### 14.20 `archive_branch`, and the refusal that is the feature (0.14.13, W12.13, [D-230](s13-decision-register.md#d-230))
+
+`Database.archive_branch(name)` takes a `str`, validates it the way every other
+branch-taking method does, and returns the same `ArchiveReport` `archive()`
+does. No new class: the report's four fields describe this session exactly as
+they describe a time-indexed one, and a `BranchArchiveReport` differing only in
+its name would be a second type for one operation's sake.
+
+**The half worth pinning from Python is the refusal, not the move.** Rust can
+count rows in `links` and `branches` directly; a Python caller cannot, and does
+not want to. What a Python caller sees is that `db.traverse_ids("a",
+branch="alt")` **raises** `UnknownBranchError` after the archive rather than
+returning the trunk's list. That distinction is the whole design — an arm that
+left the lineage registered would return `["a", "b", "c"]` here, correctly for
+the parent and silently wrong for the caller — and it is one of the two Python
+cases a mutation kills.
+
+`BranchNotArchivableError` carries `branch` **and** `reason`, and subclasses
+`BranchError` so the group catch in §14.11 still holds. Three conditions share
+the type because they share one answer: the lineage stays, and something about
+the ledger has to change first. A name that was never registered is
+`UnknownBranchError` instead — the same class `fork`, `traverse` and `diff`
+raise — because a typo is a typo on every surface and giving it a fourth class
+here would make the caller's `except` clause depend on which method they called.
+
+**Nothing arrives on `BranchView`.** §14.19's rule is that a lineage-shaped
+surface lands on the handle and the view together, and this one deliberately
+does not: a view holds a lineage it can read through, and `view.archive()` would
+be a handle that dissolves the thing it is a handle *to*. The rule is about
+surfaces a view can still be used after.
+
 <!--nav-->
 ← [previous](s13-decision-register.md) · [index](README.md) · [next](appendices.md) →
 <!--/nav-->

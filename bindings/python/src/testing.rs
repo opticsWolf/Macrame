@@ -47,6 +47,7 @@ pub(crate) const DB_ERROR_VARIANTS: &[&str] = &[
     "InvalidBranchId",
     "UnknownBranch",
     "BranchExists",
+    "BranchNotArchivable",
     "ForkPrecedesParent",
     "CrossLineage",
     "BranchMismatch",
@@ -123,6 +124,12 @@ fn sample(name: &str) -> Option<DbError> {
         "InvalidBranchId" => DbError::InvalidBranchId("release ".into()),
         "UnknownBranch" => DbError::UnknownBranch("ghost".into()),
         "BranchExists" => DbError::BranchExists("main".into()),
+        // The refusal the road map's "contiguous archivable set by construction"
+        // turned into: a concept minted on the branch that a trunk edge names.
+        "BranchNotArchivable" => DbError::BranchNotArchivable {
+            branch: "abandoned".into(),
+            reason: "concept c1 was minted here and a hot edge on another lineage names it".into(),
+        },
         "ForkPrecedesParent" => DbError::ForkPrecedesParent {
             branch: "behind".into(),
             parent: "ahead".into(),

@@ -325,6 +325,21 @@ create_exception!(
 );
 create_exception!(
     macrame,
+    BranchNotArchivableError,
+    BranchError,
+    "A lineage `archive_branch()` will not forget. Attributes: `branch`, `reason`.\n\n\
+     Three conditions share one type because they share one answer — the lineage \
+     stays, and something about the ledger has to change first. `reason` says \
+     which: the trunk, a lineage with descendants that read through it, or a \
+     lineage whose concepts a hot edge on another lineage still names. That last \
+     one is why the type exists: a concept is keyed by identity across the whole \
+     ledger, so a branch's rows are not a self-contained set the way the road map \
+     assumed, and a branch other lineages depend on is not abandoned.\n\n\
+     A name that is not registered raises `UnknownBranchError` instead, so a typo \
+     reads the same here as it does everywhere else."
+);
+create_exception!(
+    macrame,
     BranchExistsError,
     BranchError,
     "A fork asked for a name that is taken. Attribute: `branch`.\n\n\
@@ -660,6 +675,13 @@ fn build(py: Python<'_>, err: DbError) -> PyErr {
             raise::<BranchExistsError, _>(py, m, |e| e.setattr("branch", branch))
         }
 
+        DbError::BranchNotArchivable { branch, reason } => {
+            raise::<BranchNotArchivableError, _>(py, m, |e| {
+                e.setattr("branch", branch)?;
+                e.setattr("reason", reason)
+            })
+        }
+
         DbError::ForkPrecedesParent {
             branch,
             parent,
@@ -935,6 +957,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
         BranchError,
         UnknownBranchError,
         BranchExistsError,
+        BranchNotArchivableError,
         ForkPrecedesParentError,
         CrossLineageError,
         BranchMismatchError,

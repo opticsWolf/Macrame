@@ -108,6 +108,12 @@ pub enum DbError {
     #[error("branch {0} already exists")]
     BranchExists(String),
 
+    // Three conditions, one answer: the lineage stays. An unregistered name is
+    // `UnknownBranch` above instead, so a typo reads the same on every surface
+    // (0.14.13, D-230).
+    #[error("branch {branch} cannot be archived: {reason}")]
+    BranchNotArchivable { branch: String, reason: String },
+
     #[error(
         "branch {branch} would fork from {parent} at {forked_at}, \
          before {parent} itself was cut at {parent_forked_at}"

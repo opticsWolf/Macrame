@@ -401,14 +401,15 @@ pub const SEED_MAIN_BRANCH: &str = concat!(
     "', NULL, NULL, ?1)"
 );
 
-/// `branches` is append-only, and both guards say the same thing (§15.2).
+/// `branches` is append-only outside an archive session (§15.2, §15.4).
 ///
-/// Not a delete guard in [`CREATE_CONCEPTS_GUARD_DELETE`]'s shape, and the
-/// difference is the point: those three are *gated* on the archive session
-/// because there is a legal way to remove those rows. There is no session in
-/// which removing a lineage record is legal — branches are never archived —
-/// so the guard is unconditional and `verify`'s marker check deliberately does
-/// not cover it.
+/// The two guards no longer say the same thing, and 0.14.13 is where they
+/// parted. This one stays **unconditional**: no session of any kind may edit a
+/// lineage record in place. [`CREATE_BRANCHES_GUARD_DELETE`] is now gated on
+/// the archive-session marker like its three siblings, because
+/// [`crate::Database::archive_branch`] made removing a lineage record a legal
+/// operation — see that guard for what changed and why the change needed a
+/// rung of its own.
 ///
 /// # Why `UPDATE` is refused whole-row
 ///
@@ -437,11 +438,54 @@ pub const CREATE_BRANCHES_GUARD_UPDATE: &str = concat!(
     "#
 );
 
-/// The delete half of the same rule. See [`CREATE_BRANCHES_GUARD_UPDATE`].
+/// The delete half of the rule, **marker-gated since v13** (0.14.13, §15.4,
+/// [D-230](../../docs/architecture/s13-decision-register.md#d-230)).
+///
+/// # What changed
+///
+/// Through v12 this guard was unconditional, and its own docstring said why:
+/// *"there is no session in which removing a lineage record is legal — branches
+/// are never archived"*. [`crate::Database::archive_branch`] makes that false.
+/// The sentence was a true description of the operations that existed, written
+/// as though it were a property of the table, which is the shape D-035 asks to
+/// be stated rather than assumed.
+///
+/// **The lineage row must move, and that is forced rather than chosen.** An
+/// abandonment arm that took the branch's `links` and left its `branches` row
+/// would leave `hot_log_reach` unsound: that probe's argument rests on *the
+/// newest row per entity is never archivable*, which holds for a predicate
+/// needing a later row to exist and fails for one that takes a whole lineage.
+/// Moving the `branches` row is what makes a hot fold that omits the lineage
+/// **correct rather than silently short** — every read and write naming the
+/// name now raises [`crate::DbError::UnknownBranch`], which is a refusal, not a
+/// wrong answer.
+///
+/// # Why it needed a rung
+///
+/// [`CREATE_CONCEPTS_GUARD_DELETE`]'s reason, measured once already (D-126):
+/// `CREATE TRIGGER IF NOT EXISTS` on an existing name keeps the **old body**,
+/// so re-issuing the baseline against a v12 database leaves the unconditional
+/// guard exactly where it is and `archive_branch` fails on every ledger that
+/// was not created by this build. The v12 → v13 rung drops and recreates, and
+/// `verify` now carries this name in `DELETE_GUARDS`, so a database whose
+/// guard predates the change is refused at open with a sentence rather than at
+/// archive time with a trigger abort.
+///
+/// The update guard is deliberately **not** gated — see
+/// [`CREATE_BRANCHES_GUARD_UPDATE`]. Archival is a move; there is still no
+/// session in which editing a lineage's parent or fork point is legal, and
+/// gating both would have suspended a rule the operation does not need
+/// suspended.
 pub const CREATE_BRANCHES_GUARD_DELETE: &str = concat!(
     r#"
     CREATE TRIGGER IF NOT EXISTS trg_branches_frozen_delete
     BEFORE DELETE ON branches
+    WHEN NOT EXISTS (
+        SELECT 1 FROM sqlite_master
+        WHERE type = 'table' AND name = '"#,
+    "macrame_archive_session",
+    r#"'
+    )
     BEGIN
         SELECT RAISE(ABORT, '"#,
     abort_branches_frozen!(),

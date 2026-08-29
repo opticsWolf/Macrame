@@ -2,7 +2,7 @@ use std::path::Path;
 
 use libsql::TransactionBehavior;
 
-use crate::error::{Result, WriteOp};
+use crate::error::{DbError, Result, WriteOp};
 use crate::schema::ddl::ARCHIVE_SESSION_MARKER;
 
 /// Outcome of one archive session.
@@ -113,6 +113,31 @@ const COLD_SCHEMA: &[&str] = &[
     )"#,
     "CREATE INDEX IF NOT EXISTS cold.idx_cold_txlog_entity ON transaction_log (entity_id)",
     "CREATE INDEX IF NOT EXISTS cold.idx_cold_txlog_time ON transaction_log (recorded_at)",
+    // Lineages, as of 0.14.13 (§15.4, D-230). The one cold table that is not a
+    // mirror of a hot one: `branches` carries no `archived_at` and this needs
+    // one, because the hot row's `created_at` says when the lineage began and
+    // nothing on it can say when the ledger stopped knowing about it.
+    //
+    // **This is the table `upgrade_cold_lineage` predicted.** Its note says a
+    // cold row records *that* it belonged to a lineage without recording what
+    // that lineage was, and that "the abandonment arm makes forgetting a branch
+    // an ordinary operation, and a cold row stamped with a name nothing
+    // resolves is the shape that falls out of it". This is what resolves the
+    // name: the cold file carries the lineage record itself, so
+    // `cold.links.branch_id` names a row in the same file rather than a string
+    // whose meaning was left behind in the hot database.
+    //
+    // FK-free like the rest of the cold schema, `parent_id` included — the
+    // parent is normally still hot, which is the whole point of the operation,
+    // so a self-referencing key here would refuse every row this table exists
+    // to hold.
+    r#"CREATE TABLE IF NOT EXISTS cold.branches (
+        branch_id   TEXT NOT NULL PRIMARY KEY,
+        parent_id   TEXT,
+        forked_at   TEXT,
+        created_at  TEXT NOT NULL,
+        archived_at TEXT NOT NULL
+    )"#,
     r#"CREATE TABLE IF NOT EXISTS cold.archive_horizon (
         archived_at TEXT NOT NULL,
         cutoff      TEXT NOT NULL,
@@ -477,7 +502,7 @@ async fn archive_session(
         &tx,
         conn,
         &format!("DELETE FROM links WHERE {LINKS_ARCHIVABLE}"),
-        cutoff,
+        libsql::named_params! {":cutoff": cutoff},
         "links",
     )
     .await?;
@@ -534,7 +559,7 @@ async fn archive_session(
         &tx,
         conn,
         &format!("DELETE FROM transaction_log WHERE {LOG_ARCHIVABLE}"),
-        cutoff,
+        libsql::named_params! {":cutoff": cutoff},
         "transaction_log",
     )
     .await?;
@@ -652,7 +677,7 @@ async fn archive_concepts(
         tx,
         conn,
         &format!("DELETE FROM concepts WHERE {CONCEPTS_ARCHIVABLE}"),
-        cutoff,
+        libsql::named_params! {":cutoff": cutoff},
         "concepts",
     )
     .await? as usize;
@@ -660,6 +685,400 @@ async fn archive_concepts(
     debug_assert_eq!(
         moved, deleted,
         "the predicate selected a different set for the copy than for the delete"
+    );
+
+    Ok(deleted)
+}
+
+/// Move one lineage's whole ledger to the cold file and forget the lineage
+/// (0.14.13, §15.4, [D-230]).
+///
+/// The abandonment arm §15.4 asks for. A conversation tree discards most of what
+/// it grows, and until now the only way to reclaim an abandoned branch's space
+/// was [`archive`], which is indexed by *time* and therefore takes the trunk's
+/// old history along with it — or leaves the branch's recent history behind,
+/// which is the usual case and the reason the arm exists.
+///
+/// # It is all-or-nothing, and that was forced rather than chosen
+///
+/// The road map's justification was that "an abandoned branch's rows are a
+/// contiguous archivable set by construction, which is the cheapest archive
+/// predicate in the crate". `branch_id = :branch` really is the cheapest
+/// predicate in the crate. **Contiguous by construction is false in both of its
+/// senses**, and each refutation moved this design:
+///
+/// 1. *Not closed under `concepts(id)`.* `concepts` is keyed by identity
+///    globally ([D-214]), so a concept minted on a branch may be named by a
+///    trunk edge or a sibling's edge — measured by probe, both succeed. The set
+///    is therefore not FK-closed, and the refusal below is the direct
+///    expression of that: a lineage another lineage's hot edges still depend on
+///    is not abandoned, whatever its author believes.
+/// 2. *Not a prefix of the log.* A branch's `transaction_log` rows are
+///    scattered through the sequence, exactly as `LOG_ARCHIVABLE`'s are, which
+///    is what [`crate::temporal::replay`]'s reach test was rewritten for in
+///    0.5.5.
+///
+/// What follows is a chain with no branch points. The links must go — that is
+/// the operation. If the links go and the log stays, `reconstruct(now)` folds
+/// the log, yields the branch's open edges, and disagrees with `links_current`
+/// about present belief; so the log must go too. But `hot_log_reach`'s
+/// soundness rests on **the newest row per entity is never archivable**, which
+/// is true of a predicate needing a later row to exist and false of one that
+/// takes a whole lineage; so the `branches` row must go as well, which is what
+/// makes a hot fold that omits the lineage *correct rather than silently
+/// short*. Every read and write naming the name then raises
+/// [`DbError::UnknownBranch`] — a refusal, which a caller can act on, in place
+/// of an answer that is quietly missing rows.
+///
+/// The `branches` row moving is why v13 exists: `trg_branches_frozen_delete`
+/// was unconditional, on a docstring that said no session could ever legally
+/// remove a lineage record. See
+/// [`crate::schema::ddl::CREATE_BRANCHES_GUARD_DELETE`].
+///
+/// # What it refuses
+///
+/// * **The trunk.** Every lineage's `parent_id` chain ends there and every
+///   default `branch_id` names it; there is no ledger left after it goes.
+/// * **A name that is not registered** — [`DbError::UnknownBranch`], the same
+///   answer every other branch-taking surface gives, rather than a silent
+///   success archiving nothing.
+/// * **A branch with descendants.** A child reads through its parent, so
+///   archiving the parent would delete rows the child still believes — the same
+///   loss [D-229] repaired in the time-indexed predicates, arrived at from the
+///   other direction.
+/// * **A branch whose concepts another lineage's hot link names.** This is
+///   refutation 1 above, and the refusal is what makes the post-condition
+///   uniform: after this returns `Ok`, nothing hot names the lineage and
+///   nothing hot names anything it minted.
+///
+/// All four are checked **inside the session transaction**, before the marker
+/// is created, so a concurrent fork cannot slip a descendant in between the
+/// check and the delete.
+///
+/// # No `archive_horizon` row, deliberately
+///
+/// That table records a **cutoff** and the horizon it produced. This session
+/// has no cutoff — its boundary is a lineage, not an instant — and writing
+/// `archived_at` into the `cutoff` column would be the Wave 4.5 defect the
+/// column's own comment describes, committed a second time on purpose. What
+/// there is to record is recorded better: `cold.branches` carries the lineage
+/// and when it was forgotten, and the horizon itself is still readable from the
+/// hot log, which is where `archive_hint` reads it from anyway.
+///
+/// [D-230]: ../../docs/architecture/s13-decision-register.md#d-230
+/// [D-229]: ../../docs/architecture/s13-decision-register.md#d-229
+/// [D-214]: ../../docs/architecture/s13-decision-register.md#d-214
+pub async fn archive_branch(
+    conn: &libsql::Connection,
+    branch: &str,
+    archived_at: &str,
+    archive_path: &Path,
+) -> Result<ArchiveReport> {
+    crate::temporal::replay::detach_stale_cold(conn).await;
+
+    conn.execute(
+        "ATTACH DATABASE ?1 AS cold",
+        libsql::params![archive_path.to_string_lossy().as_ref()],
+    )
+    .await?;
+
+    let result = archive_branch_session(conn, branch, archived_at).await;
+
+    // Unconditional, for [`archive`]'s reason: a live `cold` handle makes every
+    // later archive and cold reconstruct fail with "database cold is already in
+    // use", and the refusals above are the *expected* way out of this function.
+    if let Err(e) = conn.execute("DETACH DATABASE cold", ()).await {
+        tracing::warn!("archive_branch: failed to DETACH cold database: {e}");
+    }
+
+    result
+}
+
+fn not_archivable(branch: &str, reason: impl Into<String>) -> DbError {
+    DbError::BranchNotArchivable {
+        branch: branch.to_string(),
+        reason: reason.into(),
+    }
+}
+
+/// Whether `sql` — a `SELECT 1 … WHERE … = :branch` — matches anything.
+async fn any_row(tx: &libsql::Transaction, sql: &str, branch: &str) -> Result<bool> {
+    Ok(tx
+        .query(sql, libsql::named_params! {":branch": branch})
+        .await?
+        .next()
+        .await?
+        .is_some())
+}
+
+/// The four refusals, in the order that makes the message most specific.
+///
+/// Order is not cosmetic. The trunk check comes first because `main` is
+/// registered and childless on a ledger that has never forked, so every later
+/// check would pass it. Registration comes next, because "not registered" is a
+/// better answer than "has no descendants" for a typo. Descendants before
+/// concepts because it is the cheaper query and the commoner mistake.
+async fn refuse_unarchivable_branch(tx: &libsql::Transaction, branch: &str) -> Result<()> {
+    if branch == crate::schema::ddl::MAIN_BRANCH {
+        return Err(not_archivable(
+            branch,
+            "it is the trunk: every lineage's parent chain ends there and every \
+             default branch_id names it, so there is no ledger left after it goes",
+        ));
+    }
+
+    if !any_row(
+        tx,
+        "SELECT 1 FROM branches WHERE branch_id = :branch",
+        branch,
+    )
+    .await?
+    {
+        return Err(DbError::UnknownBranch(branch.to_string()));
+    }
+
+    if any_row(
+        tx,
+        "SELECT 1 FROM branches WHERE parent_id = :branch",
+        branch,
+    )
+    .await?
+    {
+        return Err(not_archivable(
+            branch,
+            "it has descendants, which read through it: archiving it would delete \
+             rows they still believe. Archive the descendants first",
+        ));
+    }
+
+    // The refutation of "contiguous by construction", as a query. A concept is
+    // keyed by identity across the whole ledger (D-214), so an edge on any
+    // lineage may name one minted here.
+    let mut rows = tx
+        .query(
+            "SELECT c.id FROM concepts c
+             WHERE c.branch_id = :branch
+               AND EXISTS (
+                   SELECT 1 FROM links l
+                   WHERE l.branch_id <> :branch
+                     AND (l.source_id = c.id OR l.target_id = c.id)
+               )
+             LIMIT 1",
+            libsql::named_params! {":branch": branch},
+        )
+        .await?;
+    if let Some(row) = rows.next().await? {
+        let id: String = row.get(0)?;
+        return Err(not_archivable(
+            branch,
+            format!(
+                "concept {id} was minted here and a hot edge on another lineage \
+                 names it. A lineage other lineages still depend on is not \
+                 abandoned; retire those edges first"
+            ),
+        ));
+    }
+
+    Ok(())
+}
+
+/// `conn` is passed alongside `tx` for [`delete_guarded`]'s sake, exactly as in
+/// [`archive_session`]. Both name the same connection.
+async fn archive_branch_session(
+    conn: &libsql::Connection,
+    branch: &str,
+    archived_at: &str,
+) -> Result<ArchiveReport> {
+    for ddl in COLD_SCHEMA {
+        conn.execute(ddl, ()).await?;
+    }
+
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .await?;
+
+    upgrade_cold_lineage(&tx).await?;
+
+    // Before the marker: a refusal must not be able to leave the guards
+    // disarmed, and these are reads, which need no session.
+    refuse_unarchivable_branch(&tx, branch).await?;
+
+    // --- archive session opens: the delete guards are now satisfied ---
+    tx.execute(&format!("CREATE TABLE {ARCHIVE_SESSION_MARKER} (x)"), ())
+        .await?;
+
+    let links_archived = tx
+        .execute(
+            "INSERT OR IGNORE INTO cold.links
+                 (source_id, target_id, edge_type, valid_from, recorded_at,
+                  valid_to, weight, properties, branch_id)
+             SELECT source_id, target_id, edge_type, valid_from, recorded_at,
+                    valid_to, weight, properties, branch_id
+             FROM links WHERE branch_id = :branch",
+            libsql::named_params! {":branch": branch},
+        )
+        .await? as usize;
+
+    let links_deleted = delete_guarded(
+        &tx,
+        conn,
+        "DELETE FROM links WHERE branch_id = :branch",
+        libsql::named_params! {":branch": branch},
+        "links",
+    )
+    .await?;
+
+    // Doctrine VI, and [`archive_session`]'s reasoning verbatim: `links_current`
+    // is a function of `links`, so it is re-derived rather than described, and
+    // only when `links` actually changed. It must also happen **before** the
+    // `branches` row goes: `links_current.branch_id` carries the same foreign
+    // key its three siblings do, so the projection has to have stopped naming
+    // the lineage before the lineage can leave.
+    if links_deleted > 0 {
+        crate::integrity::rebuild::rebuild_within(&tx, crate::integrity::rebuild::Verify::No)
+            .await?;
+    }
+
+    // Concepts after links, for [D-128]'s reason turned around: there it was
+    // that a concept is archivable only once nothing hot names it, so the edges
+    // must go first. Here the same ordering is a foreign key — `links.source_id`
+    // and `links.target_id` reference `concepts(id)`, and this lineage's own
+    // edges are the ones that would refuse the delete.
+    //
+    // [D-128]: ../../docs/architecture/s13-decision-register.md#d-128
+    let concepts_archived = archive_branch_concepts(&tx, conn, branch).await?;
+
+    let log_entries_archived = tx
+        .execute(
+            "INSERT OR IGNORE INTO cold.transaction_log
+                 (seq_id, table_name, entity_id, operation, payload, recorded_at, branch_id)
+             SELECT seq_id, table_name, entity_id, operation, payload, recorded_at, branch_id
+             FROM transaction_log WHERE branch_id = :branch",
+            libsql::named_params! {":branch": branch},
+        )
+        .await? as usize;
+
+    delete_guarded(
+        &tx,
+        conn,
+        "DELETE FROM transaction_log WHERE branch_id = :branch",
+        libsql::named_params! {":branch": branch},
+        "transaction_log",
+    )
+    .await?;
+
+    // Last, because the other three tables' `branch_id` all reference it. The
+    // `archived_at` is the session's wall clock, not a ledger fact: nothing was
+    // asserted or retired here, and Doctrine III would refuse it if it were.
+    tx.execute(
+        "INSERT OR IGNORE INTO cold.branches
+             (branch_id, parent_id, forked_at, created_at, archived_at)
+         SELECT branch_id, parent_id, forked_at, created_at, ?2
+         FROM branches WHERE branch_id = ?1",
+        libsql::params![branch, archived_at],
+    )
+    .await?;
+
+    delete_guarded(
+        &tx,
+        conn,
+        "DELETE FROM branches WHERE branch_id = :branch",
+        libsql::named_params! {":branch": branch},
+        "branches",
+    )
+    .await?;
+
+    let horizon: Option<i64> = tx
+        .query("SELECT MIN(seq_id) FROM transaction_log", ())
+        .await?
+        .next()
+        .await?
+        .and_then(|row| row.get(0).ok());
+
+    // --- archive session closes: the guards re-arm before COMMIT ---
+    tx.execute(&format!("DROP TABLE {ARCHIVE_SESSION_MARKER}"), ())
+        .await?;
+
+    tx.commit().await?;
+
+    Ok(ArchiveReport {
+        links_archived,
+        concepts_archived,
+        log_entries_archived,
+        horizon,
+    })
+}
+
+/// [`archive_concepts`] with the lineage predicate in place of the cutoff.
+///
+/// A separate function rather than a parameter on that one, because the two
+/// share their *shape* and not their argument: `CONCEPTS_ARCHIVABLE` is a
+/// standing predicate about retirement and reference counts, and this is a
+/// lineage. The partition it encodes is the same and is the reason both exist —
+/// **entity data crosses, derivative data does not** — and the derived rows are
+/// deleted here for the same two reasons: Doctrine VII makes them recomputable,
+/// and `concepts`' inbound foreign keys would refuse the delete otherwise.
+///
+/// No guard on "is anything still referencing this concept": the caller has
+/// already refused the branch if another lineage's hot link names one of its
+/// concepts, and this lineage's own links went cold a few statements ago.
+async fn archive_branch_concepts(
+    tx: &libsql::Transaction,
+    conn: &libsql::Connection,
+    branch: &str,
+) -> Result<usize> {
+    let moved = tx
+        .execute(
+            "INSERT OR IGNORE INTO cold.concepts
+                 (rowid_pk, id, title, content, embedding_model,
+                  valid_from, valid_to, recorded_at, retired, branch_id)
+             SELECT rowid_pk, id, title, content, embedding_model,
+                    valid_from, valid_to, recorded_at, retired, branch_id
+             FROM concepts WHERE branch_id = :branch",
+            libsql::named_params! {":branch": branch},
+        )
+        .await? as usize;
+
+    if moved == 0 {
+        return Ok(0);
+    }
+
+    let mut derived: Vec<String> = vec!["analytics_annotations".to_string()];
+    let mut rows = tx
+        .query(
+            "SELECT name FROM sqlite_master WHERE type = 'table' \
+             AND name LIKE 'embeddings\\_%' ESCAPE '\\'",
+            (),
+        )
+        .await?;
+    while let Some(row) = rows.next().await? {
+        derived.push(row.get::<String>(0)?);
+    }
+    drop(rows);
+
+    for table in &derived {
+        tx.execute(
+            &format!(
+                "DELETE FROM {table} WHERE concept_id IN \
+                 (SELECT id FROM concepts WHERE branch_id = :branch)"
+            ),
+            libsql::named_params! {":branch": branch},
+        )
+        .await?;
+    }
+
+    let deleted = delete_guarded(
+        tx,
+        conn,
+        "DELETE FROM concepts WHERE branch_id = :branch",
+        libsql::named_params! {":branch": branch},
+        "concepts",
+    )
+    .await? as usize;
+
+    debug_assert_eq!(
+        moved, deleted,
+        "the lineage selected a different set for the copy than for the delete"
     );
 
     Ok(deleted)
@@ -883,13 +1302,10 @@ async fn delete_guarded(
     tx: &libsql::Transaction,
     conn: &libsql::Connection,
     sql: &str,
-    cutoff: &str,
+    params: impl libsql::params::IntoParams,
     table: &str,
 ) -> Result<u64> {
-    match tx
-        .execute(sql, libsql::named_params! {":cutoff": cutoff})
-        .await
-    {
+    match tx.execute(sql, params).await {
         Ok(n) => Ok(n),
         Err(e) => Err(crate::error::classify(conn, e, WriteOp::Delete { table }).await),
     }

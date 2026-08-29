@@ -441,10 +441,135 @@ async fn plan_string(conn: &libsql::Connection, sql: &str) -> String {
 #[test]
 fn a_version_bump_must_bring_its_own_rung_test() {
     assert_eq!(
-        SCHEMA_VERSION, 12,
+        SCHEMA_VERSION, 13,
         "SCHEMA_VERSION moved. Add a test for the new rung — one that starts \
          from a database at the previous version and asserts what the rung is \
          *for*, not merely that `run` reached the top."
+    );
+}
+
+/// The v12 body of the `branches` delete guard: unconditional, with no marker
+/// probe. Pinned as text for `CONCEPTS_GUARD_DELETE_V8`'s reason — an old
+/// schema described by hand is a second description that drifts, and this one
+/// is three lines and will never change again.
+const V12_BRANCHES_GUARD_DELETE: &str = "
+    CREATE TRIGGER trg_branches_frozen_delete
+    BEFORE DELETE ON branches
+    BEGIN
+        SELECT RAISE(ABORT, 'macrame: branch records are append-only');
+    END;
+";
+
+/// Register `name` as a child of the trunk, by raw insert.
+async fn register_branch(conn: &libsql::Connection, name: &str) {
+    conn.execute(
+        "INSERT INTO branches (branch_id, parent_id, forked_at, created_at) \
+         VALUES (?1, 'main', ?2, ?2)",
+        libsql::params![name, TS],
+    )
+    .await
+    .unwrap();
+}
+
+/// Delete a lineage record inside a declared archive session, and say whether
+/// the guard allowed it.
+async fn delete_in_session(conn: &libsql::Connection, name: &str) -> bool {
+    conn.execute("CREATE TABLE macrame_archive_session (x)", ())
+        .await
+        .unwrap();
+    let outcome = conn
+        .execute(
+            "DELETE FROM branches WHERE branch_id = ?1",
+            libsql::params![name],
+        )
+        .await;
+    conn.execute("DROP TABLE macrame_archive_session", ())
+        .await
+        .unwrap();
+    outcome.is_ok()
+}
+
+/// v12 → v13: the `branches` delete guard becomes marker-gated (0.14.13,
+/// §15.4, D-230).
+///
+/// What the rung is *for*, not that `run` reached the top: a v12 guard refuses
+/// the delete `archive_branch` has to perform, and after the rung the same
+/// delete inside the same session succeeds. Both halves are measured, because
+/// the failure this rung exists to prevent is the one `CREATE TRIGGER IF NOT
+/// EXISTS` produces — the baseline re-issued, the old body kept, and nothing
+/// anywhere saying so (D-126).
+///
+/// The last assertion is the one that keeps the rung honest. Gating a guard and
+/// removing it look identical from inside a session; they differ only outside
+/// one, which is where `branches` is append-only and must stay so.
+#[tokio::test]
+async fn a_v12_database_climbs_to_v13_and_its_branches_guard_learns_the_marker() {
+    let harness = TestHarness::new();
+    let conn = connect(&harness).await;
+
+    macrame::schema::run_migrations(&conn).await.unwrap();
+
+    // Wind the guard back to its v12 shape and the stamp with it.
+    conn.execute("DROP TRIGGER trg_branches_frozen_delete", ())
+        .await
+        .unwrap();
+    conn.execute(V12_BRANCHES_GUARD_DELETE, ()).await.unwrap();
+    conn.execute("PRAGMA user_version = 12", ()).await.unwrap();
+
+    register_branch(&conn, "before").await;
+    assert!(
+        !delete_in_session(&conn, "before").await,
+        "the v12 guard is unconditional: it refuses inside a declared archive \
+         session exactly as it does outside one. That is the state every \
+         database written before 0.14.13 is in, and the reason this rung is not \
+         a re-issue of the baseline"
+    );
+
+    macrame::schema::run_migrations(&conn).await.unwrap();
+    assert_eq!(user_version(&conn).await, SCHEMA_VERSION);
+
+    assert!(
+        delete_in_session(&conn, "before").await,
+        "after the rung the same delete inside the same session must succeed — \
+         this is the capability `archive_branch` is built on"
+    );
+
+    register_branch(&conn, "after").await;
+    let outside = conn
+        .execute("DELETE FROM branches WHERE branch_id = 'after'", ())
+        .await;
+    assert!(
+        outside.is_err(),
+        "the rung gates the guard; it must not remove it. `branches` is still \
+         append-only to every writer that has not declared a session"
+    );
+}
+
+/// A v12 guard body under a v13 stamp is refused at open, by name.
+///
+/// The other half of D-126's repair, which is why this is a separate case: the
+/// rung replaces the body, and `verify` is what makes a database that somehow
+/// skipped it say so. Without the name in `DELETE_GUARDS` this file opens
+/// cleanly and fails at the first abandonment with a trigger abort, which names
+/// a trigger rather than the problem.
+#[tokio::test]
+async fn a_v13_stamp_over_a_v12_branches_guard_is_refused_at_open() {
+    let harness = TestHarness::new();
+    let conn = connect(&harness).await;
+
+    macrame::schema::run_migrations(&conn).await.unwrap();
+
+    conn.execute("DROP TRIGGER trg_branches_frozen_delete", ())
+        .await
+        .unwrap();
+    conn.execute(V12_BRANCHES_GUARD_DELETE, ()).await.unwrap();
+    // The stamp is left at the top: this is the database that claims to have
+    // climbed the ladder and did not.
+
+    let reason = refusal_reason(macrame::schema::run_migrations(&conn).await.unwrap_err());
+    assert!(
+        reason.contains("trg_branches_frozen_delete"),
+        "the refusal must name the guard whose body is stale: {reason}"
     );
 }
 

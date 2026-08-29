@@ -13,7 +13,7 @@ use crate::schema::ddl::*;
 /// guarantee D-029 buys would be void on it while `user_version` insisted all
 /// was well. Reserving 1 as a value this build refuses by name is what makes
 /// "no legacy support" an enforced property instead of a README sentence.
-pub const SCHEMA_VERSION: u32 = 12;
+pub const SCHEMA_VERSION: u32 = 13;
 
 type StepFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
 
@@ -164,6 +164,17 @@ const STEPS: &[Step] = &[
         // involved here at all.
         suspends_foreign_keys: false,
         apply: |conn| Box::pin(gate_concepts_guard_on_marker(conn)),
+    },
+    Step {
+        from: 12,
+        to: 13,
+        name: "branches-archive-gate",
+        // One `DROP TRIGGER` and one `CREATE TRIGGER`. No row moves, no table is
+        // rebuilt, and the trigger names no table but the one it is on — so the
+        // foreign keys that forced the flag on the v7 -> v8 and v11 -> v12 rungs
+        // are not involved.
+        suspends_foreign_keys: false,
+        apply: |conn| Box::pin(gate_branches_delete_guard(conn)),
     },
     Step {
         from: 11,
@@ -773,6 +784,27 @@ async fn add_analytics_annotations(conn: &libsql::Connection) -> Result<()> {
 /// [`ddl::CREATE_INDICES`](crate::schema::ddl::CREATE_INDICES) records the
 /// measured before/after plans for and what
 /// `tests/index_plan_tests.rs` holds registry entries against.
+/// v12 → v13: the `branches` delete guard becomes marker-gated (0.14.13,
+/// §15.4, [D-230](../../docs/architecture/s13-decision-register.md#d-230)).
+///
+/// The cheapest kind of rung and the most necessary: `CREATE TRIGGER IF NOT
+/// EXISTS` on an existing name keeps the **old body**, so nothing short of an
+/// explicit drop replaces the unconditional v12 guard. Without this rung every
+/// database not created by this build would refuse
+/// [`crate::Database::archive_branch`] with a trigger abort, and `verify` —
+/// which now carries `trg_branches_frozen_delete` in [`DELETE_GUARDS`] — is
+/// what turns that into a sentence at open time instead.
+///
+/// See [`CREATE_BRANCHES_GUARD_DELETE`] for why the guard changed at all. Only
+/// the delete half moves; `trg_branches_frozen_update` is left exactly as it
+/// was, because archival is a move and not an edit.
+async fn gate_branches_delete_guard(conn: &libsql::Connection) -> Result<()> {
+    conn.execute("DROP TRIGGER IF EXISTS trg_branches_frozen_delete", ())
+        .await?;
+    conn.execute(CREATE_BRANCHES_GUARD_DELETE, ()).await?;
+    Ok(())
+}
+
 async fn add_links_archive_indices(conn: &libsql::Connection) -> Result<()> {
     for index_ddl in CREATE_INDICES {
         conn.execute(index_ddl, ()).await?;
@@ -1368,6 +1400,12 @@ const DELETE_GUARDS: &[&str] = &[
     "trg_concepts_guard_delete",
     "trg_links_guard_delete",
     "trg_txlog_guard_delete",
+    // v13 (0.14.13, §15.4, D-230). The list was three names and one sentence —
+    // *branches are never archived* — for eight releases; `archive_branch` is
+    // what made the fourth name belong here, and carrying it is what makes a
+    // v12 database's stale unconditional guard a refusal at open rather than a
+    // trigger abort in the middle of the first abandonment.
+    "trg_branches_frozen_delete",
 ];
 
 /// The object names the DDL creates, recovered from the DDL itself.

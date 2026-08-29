@@ -191,6 +191,21 @@ pub enum DbError {
     #[error("branch {0} already exists")]
     BranchExists(String),
 
+    /// [`crate::Database::archive_branch`] refused (0.14.13, §15.4, D-230).
+    ///
+    /// Four conditions share one variant because they share one answer: the
+    /// lineage stays, and the caller has to change something about the ledger
+    /// before asking again. The `reason` says which — the trunk, a lineage with
+    /// descendants, or a lineage whose concepts another lineage's hot edges
+    /// still name.
+    ///
+    /// The fourth condition, a name that is not registered, is deliberately
+    /// **not** here: it is [`Self::UnknownBranch`], the same answer every other
+    /// branch-taking surface gives, because a typo should read the same way
+    /// wherever it is made.
+    #[error("branch {branch} cannot be archived: {reason}")]
+    BranchNotArchivable { branch: String, reason: String },
+
     /// The cross-row half of the fork-point invariant, which no `CHECK` can see
     /// (§15.2): fork points must not decrease down a root path.
     ///

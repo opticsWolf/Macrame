@@ -982,6 +982,24 @@ class Database:
         non-positive, non-finite — is **refused, not clamped**.
         """
 
+    def archive_branch(self, branch: str) -> ArchiveReport:
+        """Forget a lineage: move its whole ledger to cold storage (0.14.13).
+
+        Indexed by lineage where `archive` is indexed by time. Its edges, its
+        concepts, its log entries and its `branches` row move in one
+        transaction, and afterwards the name is unknown — every read and write
+        naming it raises `UnknownBranchError` rather than quietly answering with
+        the parent's view.
+
+        Raises `BranchNotArchivableError` for the trunk, for a branch with
+        descendants, and for a branch whose concepts a hot edge on another
+        lineage still names; `UnknownBranchError` for a name that was never
+        registered.
+
+        A write, so it queues through the actor and waits out any transaction in
+        flight — a channel wait `busy_timeout` does not bound.
+        """
+
     def rehydrate(self, ids: list[str]) -> RehydrateReport:
         """Bring named concepts back out of cold storage (0.9.0, D-131).
 
@@ -1274,6 +1292,18 @@ class BranchExistsError(BranchError):
     """A fork asked for a name that is taken, `"main"` included."""
 
     branch: str
+
+class BranchNotArchivableError(BranchError):
+    """A lineage `archive_branch()` will not forget.
+
+    Three conditions, one answer: the lineage stays. `reason` says which — the
+    trunk, a lineage with descendants that read through it, or a lineage whose
+    concepts a hot edge on another lineage still names. An unregistered name is
+    `UnknownBranchError` instead, so a typo reads the same here as elsewhere.
+    """
+
+    branch: str
+    reason: str
 
 class ForkPrecedesParentError(BranchError):
     """A fork point earlier than its parent's own.

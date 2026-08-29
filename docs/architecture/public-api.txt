@@ -118,6 +118,7 @@ pub struct macrame::connection::Database
 impl macrame::connection::Database
 pub async fn macrame::connection::Database::analyze(&self) -> macrame::error::Result<()>
 pub async fn macrame::connection::Database::archive(&self, &str) -> macrame::error::Result<macrame::temporal::ArchiveReport>
+pub async fn macrame::connection::Database::archive_branch(&self, macrame::branch::BranchId) -> macrame::error::Result<macrame::temporal::ArchiveReport>
 pub fn macrame::connection::Database::archive_path(&self) -> &std::path::Path
 pub async fn macrame::connection::Database::archive_windowed(&self, &str, core::time::Duration) -> macrame::error::Result<alloc::vec::Vec<macrame::temporal::ArchiveReport>>
 pub async fn macrame::connection::Database::assert_edge(&self, macrame::graph::EdgeAssertion) -> macrame::error::Result<()>
@@ -200,6 +201,9 @@ pub macrame::error::DbError::BranchExists(alloc::string::String)
 pub macrame::error::DbError::BranchMismatch
 pub macrame::error::DbError::BranchMismatch::named: alloc::string::String
 pub macrame::error::DbError::BranchMismatch::view: alloc::string::String
+pub macrame::error::DbError::BranchNotArchivable
+pub macrame::error::DbError::BranchNotArchivable::branch: alloc::string::String
+pub macrame::error::DbError::BranchNotArchivable::reason: alloc::string::String
 pub macrame::error::DbError::BulkCancelled
 pub macrame::error::DbError::CrossLineage
 pub macrame::error::DbError::CrossLineage::attempted: alloc::string::String
@@ -481,6 +485,7 @@ pub mod macrame::metrics
 #[non_exhaustive] #[repr(u8)] pub enum macrame::metrics::CommandKind
 pub macrame::metrics::CommandKind::Analyze
 pub macrame::metrics::CommandKind::Archive
+pub macrame::metrics::CommandKind::ArchiveBranch
 pub macrame::metrics::CommandKind::AssertEdge
 pub macrame::metrics::CommandKind::BulkImportChunk
 pub macrame::metrics::CommandKind::Checkpoint
@@ -558,6 +563,7 @@ pub fn macrame::graph::CandidateCount::lower_bound(self) -> usize
 #[non_exhaustive] #[repr(u8)] pub enum macrame::prelude::CommandKind
 pub macrame::prelude::CommandKind::Analyze
 pub macrame::prelude::CommandKind::Archive
+pub macrame::prelude::CommandKind::ArchiveBranch
 pub macrame::prelude::CommandKind::AssertEdge
 pub macrame::prelude::CommandKind::BulkImportChunk
 pub macrame::prelude::CommandKind::Checkpoint
@@ -597,6 +603,9 @@ pub macrame::prelude::DbError::BranchExists(alloc::string::String)
 pub macrame::prelude::DbError::BranchMismatch
 pub macrame::prelude::DbError::BranchMismatch::named: alloc::string::String
 pub macrame::prelude::DbError::BranchMismatch::view: alloc::string::String
+pub macrame::prelude::DbError::BranchNotArchivable
+pub macrame::prelude::DbError::BranchNotArchivable::branch: alloc::string::String
+pub macrame::prelude::DbError::BranchNotArchivable::reason: alloc::string::String
 pub macrame::prelude::DbError::BulkCancelled
 pub macrame::prelude::DbError::CrossLineage
 pub macrame::prelude::DbError::CrossLineage::attempted: alloc::string::String
@@ -798,6 +807,7 @@ pub struct macrame::prelude::Database
 impl macrame::connection::Database
 pub async fn macrame::connection::Database::analyze(&self) -> macrame::error::Result<()>
 pub async fn macrame::connection::Database::archive(&self, &str) -> macrame::error::Result<macrame::temporal::ArchiveReport>
+pub async fn macrame::connection::Database::archive_branch(&self, macrame::branch::BranchId) -> macrame::error::Result<macrame::temporal::ArchiveReport>
 pub fn macrame::connection::Database::archive_path(&self) -> &std::path::Path
 pub async fn macrame::connection::Database::archive_windowed(&self, &str, core::time::Duration) -> macrame::error::Result<alloc::vec::Vec<macrame::temporal::ArchiveReport>>
 pub async fn macrame::connection::Database::assert_edge(&self, macrame::graph::EdgeAssertion) -> macrame::error::Result<()>
@@ -1272,6 +1282,9 @@ pub macrame::DbError::BranchExists(alloc::string::String)
 pub macrame::DbError::BranchMismatch
 pub macrame::DbError::BranchMismatch::named: alloc::string::String
 pub macrame::DbError::BranchMismatch::view: alloc::string::String
+pub macrame::DbError::BranchNotArchivable
+pub macrame::DbError::BranchNotArchivable::branch: alloc::string::String
+pub macrame::DbError::BranchNotArchivable::reason: alloc::string::String
 pub macrame::DbError::BulkCancelled
 pub macrame::DbError::CrossLineage
 pub macrame::DbError::CrossLineage::attempted: alloc::string::String
@@ -1469,6 +1482,7 @@ pub struct macrame::Database
 impl macrame::connection::Database
 pub async fn macrame::connection::Database::analyze(&self) -> macrame::error::Result<()>
 pub async fn macrame::connection::Database::archive(&self, &str) -> macrame::error::Result<macrame::temporal::ArchiveReport>
+pub async fn macrame::connection::Database::archive_branch(&self, macrame::branch::BranchId) -> macrame::error::Result<macrame::temporal::ArchiveReport>
 pub fn macrame::connection::Database::archive_path(&self) -> &std::path::Path
 pub async fn macrame::connection::Database::archive_windowed(&self, &str, core::time::Duration) -> macrame::error::Result<alloc::vec::Vec<macrame::temporal::ArchiveReport>>
 pub async fn macrame::connection::Database::assert_edge(&self, macrame::graph::EdgeAssertion) -> macrame::error::Result<()>

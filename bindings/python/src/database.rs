@@ -1111,6 +1111,36 @@ impl PyDatabase {
         Ok(temporal::PyArchiveReport { inner })
     }
 
+    /// Forget a lineage, moving its whole ledger to cold storage (0.14.13,
+    /// §15.4, D-230).
+    ///
+    /// The abandonment arm. `archive()` is indexed by time, so reclaiming an
+    /// abandoned branch's recent history through it means archiving the trunk's
+    /// recent history too. This is indexed by lineage instead.
+    ///
+    /// **Everything the lineage holds moves in one transaction** — its edges,
+    /// its concepts, its log entries and its `branches` row — and afterwards the
+    /// name is unknown: every read and write naming it raises
+    /// `UnknownBranchError`. That refusal is the point rather than a side
+    /// effect. An arm that took the rows and left the lineage registered would
+    /// answer those reads with the parent's view, silently, and nothing would
+    /// say that everything the branch believed had been deleted.
+    ///
+    /// Refused for the trunk, for a branch with descendants, and for a branch
+    /// whose concepts a hot edge on another lineage still names —
+    /// `BranchNotArchivableError` with a `reason`. An unregistered name raises
+    /// `UnknownBranchError`.
+    ///
+    /// A write, so it queues through the actor and waits out any transaction in
+    /// flight — a channel wait `busy_timeout` does not bound.
+    fn archive_branch(&self, py: Python<'_>, branch: &str) -> PyResult<temporal::PyArchiveReport> {
+        let branch = branch::branch_id(branch)?;
+        let inner = self.with_db(py, move |db| {
+            runtime().block_on(db.archive_branch(branch)).map_err(to_py)
+        })?;
+        Ok(temporal::PyArchiveReport { inner })
+    }
+
     /// Bring named concepts back out of cold storage (0.9.0, C3, D-131).
     ///
     /// The counterpart of `archive`, and a **physical move back**: it mints no

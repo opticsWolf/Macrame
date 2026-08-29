@@ -159,6 +159,20 @@ pub enum CommandKind {
     /// next to `RegisterModel`, which is where it belongs by kind, would have
     /// renumbered nine counters and relabelled the Python histogram's axes.
     Fork,
+    /// Forgetting a lineage (0.14.13, §15.4, D-230).
+    ///
+    /// Its own kind rather than folded into [`CommandKind::Archive`], on
+    /// [D-152]'s finding rather than on a fresh argument: the budget really is
+    /// shared and the attribution is not, and an operator reading a long
+    /// `archive` hold could not tell whether the database had archived a
+    /// backlog of closed intervals or dropped an abandoned branch. The two also
+    /// have unrelated cost curves — one is a function of how long it has been
+    /// since the last run, the other of how much was written on one branch.
+    ///
+    /// At the end of the declaration order, per [`CommandKind::index`].
+    ///
+    /// [D-152]: ../docs/architecture/s13-decision-register.md#d-152
+    ArchiveBranch,
 }
 
 impl CommandKind {
@@ -185,6 +199,7 @@ impl CommandKind {
         CommandKind::Checkpoint,
         CommandKind::Optimize,
         CommandKind::Fork,
+        CommandKind::ArchiveBranch,
     ];
 
     pub const COUNT: usize = CommandKind::ALL.len();
@@ -235,6 +250,7 @@ impl CommandKind {
             CommandKind::Checkpoint => "checkpoint",
             CommandKind::Optimize => "optimize",
             CommandKind::Fork => "fork",
+            CommandKind::ArchiveBranch => "archive_branch",
         }
     }
 
@@ -330,6 +346,7 @@ impl CommandKind {
                 | CommandKind::Archive
                 | CommandKind::RebuildCurrent
                 | CommandKind::Rehydrate
+                | CommandKind::ArchiveBranch
                 | CommandKind::Checkpoint
         )
     }
