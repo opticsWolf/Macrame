@@ -48,6 +48,7 @@ pub(crate) const DB_ERROR_VARIANTS: &[&str] = &[
     "UnknownBranch",
     "BranchExists",
     "ForkPrecedesParent",
+    "CrossLineage",
     "ModelNotRegistered",
     "SubgraphTooLarge",
     "NegativeEdgeWeight",
@@ -126,6 +127,11 @@ fn sample(name: &str) -> Option<DbError> {
             parent: "ahead".into(),
             forked_at: "2026-01-01T00:00:00.000000Z".into(),
             parent_forked_at: "2999-01-01T00:00:00.000000Z".into(),
+        },
+        "CrossLineage" => DbError::CrossLineage {
+            id: "socrates".into(),
+            held_by: "main".into(),
+            attempted: "alt".into(),
         },
         "ModelNotRegistered" => DbError::ModelNotRegistered {
             model: "nomic_v1".into(),

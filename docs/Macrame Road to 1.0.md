@@ -3331,7 +3331,45 @@ and the schema does not move.
 >   then calls `assert_edge` gets a successful write **on the trunk**. A fork is
 >   therefore a *view* of its parent's history as of an instant — half of what
 >   the first bullet below promises, and the half that had to be measured first.
->   Said in the rustdoc rather than left to be discovered.
+>   Said in the rustdoc rather than left to be discovered. **Closed at 0.14.8**
+>   ([D-225](architecture/s13-decision-register.md#d-225)); the finding below is
+>   what closing it turned up.
+>
+> **0.14.8 (W12.8) — the write path carries lineage, and the guard it has to go
+> through was asking a question that stops meaning anything the moment a second
+> lineage can write:**
+>
+> * **The overlap guard was exact only because there was one lineage.**
+>   `reject_overlapping_interval` (D-060, defect AA) reads `links_current` for
+>   the edge key with **no lineage predicate at all**. That was right for as long
+>   as every row in the table was `main`'s, and it is wrong in *both directions
+>   at once* thereafter: a branch is refused for overlapping the parent belief it
+>   forked in order to supersede, and the trunk is refused for overlapping a
+>   **branch's** belief it cannot see. Neither direction approximates the other.
+> * **`AND branch_id = ?` is not the repair, and that is the part worth writing
+>   down.** It fixes the trunk exactly and inverts the branch — a branch checked
+>   against only its own rows may assert `[10,20)` over an inherited `[5,15)`,
+>   which is defect AA reintroduced across lineages *by the fix for it*. The same
+>   shape D-223 found one release earlier, where the obvious `recorded_at <=
+>   cutoff` made an inherited edge vanish. Twice now the instinct to add a
+>   `WHERE` clause to a lineage-blind statement has produced a new wrongness
+>   rather than the absence of the old one. What ships is the read's own
+>   resolution narrowed to one edge key: **what a lineage may not overlap is what
+>   that lineage can see.**
+> * **The trigger's parked question, answered — and the answer is *no*.**
+>   `trg_links_single_open` has said since v12 that whether an *inherited* open
+>   interval should also close is "§15.4's write-path question". It should not,
+>   and it cannot: closing the ancestor's row is the parent corruption Doctrine
+>   III forbids, and `links` is append-only. A branch writes its **own** row at
+>   the ancestor's key and the read prefers it by `dist` — shadow retirement,
+>   which `visible_cte`'s rustdoc has described as a write since 0.14.4.
+> * **A guard that had existed for three releases with nothing able to fire it.**
+>   `trg_concepts_cross_lineage` landed in v12 and `AbortKind::CrossLineage`
+>   recognised it, but `classify` had **no arm** for that kind and fell through
+>   to the opaque `Engine` variant every other guard exists to avoid. Unreachable
+>   until a write could name a lineage. D-224's finding on a third kind of
+>   artefact: machinery written for an unbuilt caller is exercised by nothing, so
+>   a gap in it is invisible in a green suite.
 > * **An unregistered lineage is `UnknownBranch` everywhere**, where 0.14.4 had
 >   to reach for `NotFound` — *"node {0} not found"*, the wrong noun. A break for
 >   anyone matching that variant on a branched read, and recorded as one.
@@ -3346,7 +3384,14 @@ and the schema does not move.
   **The lifecycle shipped at 0.14.7 and returns a `Branch` rather than the
   `BranchId` written here** ([D-224](architecture/s13-decision-register.md#d-224)
   — the name is what the caller passed in; the fork point is what they cannot
-  derive). What remains of this bullet is the **view**. **The read half landed
+  derive). **The write half shipped at 0.14.8**
+  ([D-225](architecture/s13-decision-register.md#d-225)) — `on_branch` on both
+  assertion builders, `retire_edge_on`, `branch_id` bound by every write
+  statement, and an overlap guard that asks what the *writing* lineage can see —
+  so §17's second acceptance criterion is assertable in both languages. What
+  remains of this bullet is the **view**, and it is now purely ergonomic: every
+  operation it would wrap exists and takes a lineage, so the type saves a caller
+  from threading a `BranchId` through and buys no capability. **The read half landed
   earlier still, at 0.14.4 and 0.14.6**
   ([D-220](architecture/s13-decision-register.md#d-220),
   [D-223](architecture/s13-decision-register.md#d-223)) — 0.14.4 resolved which
@@ -3370,7 +3415,9 @@ and the schema does not move.
 - **`diff(a, b)`** — what branch A asserts that B does not. For the motivating
   use case this is the payload: *what did this exploration conclude that the
   trunk does not know*. It is also cheap in this design, because divergence is
-  exactly the set of rows carrying the branch's own id.
+  exactly the set of rows carrying the branch's own id — **which 0.14.8 is what
+  makes non-empty**. Before it, every row carried `'main'` and this query
+  answered nothing.
 - **Abandonment.** A conversation tree discards most of what it grows, so
   `archive` gains a branch-aware arm: an abandoned branch's rows are a contiguous
   archivable set by construction, which is the cheapest archive predicate in the
@@ -3379,9 +3426,14 @@ and the schema does not move.
   enforcing it and the existing-rows default proving the migration is additive.
 - **The Python surface, in the same release.** W6's finding was that a binding
   gap opened in the release that created the feature never becomes a convention.
-  **Held three times so far:** `branch=` on the four traversal entry points at
-  0.14.4, the belief's lineage label on `MaterializedState.edges` at 0.14.5, and
-  `Database.fork` / `branches()` / `Branch` plus four error classes at 0.14.7.
+  **Held four times so far:** `branch=` on the four traversal entry points at
+  0.14.4, the belief's lineage label on `MaterializedState.edges` at 0.14.5,
+  `Database.fork` / `branches()` / `Branch` plus four error classes at 0.14.7,
+  and `branch=` on both assertion builders, `retire_edge(..., branch=…)` and
+  `CrossLineageError` at 0.14.8 — where the asymmetry is the other way round:
+  Rust splits `retire_edge` / `retire_edge_on` because a sixth positional
+  argument would make every existing call site read as though it had made a
+  lineage decision, and Python has keyword defaults, so one method takes both.
   0.14.6 adds no surface in either language and is neither a holding nor a lapse:
   the cutoff changes what the existing `branch=` *means*, so a binding written
   for 0.14.4 gets the repair by reading through it. The convention is about gaps

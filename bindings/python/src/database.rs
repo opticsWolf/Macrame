@@ -580,7 +580,17 @@ impl PyDatabase {
     /// a retirement. Refused here rather than passed down, because the ledger
     /// would otherwise answer with a single-open violation about a row the
     /// caller did not think they were writing.
-    #[pyo3(signature = (source, target, edge_type, valid_from, valid_to))]
+    /// # `branch=` here, two methods in Rust
+    ///
+    /// The Rust surface splits this into `retire_edge` and `retire_edge_on`,
+    /// because a sixth positional `Option<BranchId>` would make every existing
+    /// call site read as though it had made a lineage decision it never made.
+    /// Python has keyword arguments with defaults, so the split buys nothing
+    /// here and would cost a second name to keep in step. Retiring on a branch
+    /// is **shadow retirement**: the branch writes its own row at the
+    /// ancestor's key and the ancestor's row is untouched.
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (source, target, edge_type, valid_from, valid_to, *, branch = None))]
     fn retire_edge(
         &self,
         py: Python<'_>,
@@ -589,6 +599,7 @@ impl PyDatabase {
         edge_type: String,
         valid_from: &Bound<'_, PyAny>,
         valid_to: &Bound<'_, PyAny>,
+        branch: Option<String>,
     ) -> PyResult<()> {
         if valid_to.is_none() {
             return Err(pyo3::exceptions::PyValueError::new_err(
@@ -599,9 +610,20 @@ impl PyDatabase {
         }
         let from = to_canonical(Some(valid_from))?;
         let to = to_canonical(Some(valid_to))?;
+        let branch = branch
+            .map(|name| crate::branch::branch_id(&name))
+            .transpose()?;
         self.with_db(py, move |db| {
             runtime()
-                .block_on(db.retire_edge(source, target, edge_type, &from, &to))
+                .block_on(async {
+                    match branch {
+                        Some(b) => {
+                            db.retire_edge_on(source, target, edge_type, &from, &to, b)
+                                .await
+                        }
+                        None => db.retire_edge(source, target, edge_type, &from, &to).await,
+                    }
+                })
                 .map_err(to_py)
         })
     }

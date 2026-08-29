@@ -8,10 +8,10 @@ branch reads its parent's history and stops at the fork point, and that the
 three refusals arrive as their own classes rather than as a bare
 ``MacrameError``.
 
-**The half that is deliberately absent.** No write here names a branch, because
-none can: ``EdgeAssertion`` carries no lineage, so every write in this release
-lands on the trunk and a fork is a *view* of its parent's history as of an
-instant. That is a boundary, not a gap in the coverage.
+**The half that lives next door.** No write here names a branch. Through
+0.14.7 that was because none could; since 0.14.8 it is because
+``test_branch_writes.py`` is where writing on a lineage is pinned, and this file
+is about the lifecycle — what a fork costs, what it reads, and how it refuses.
 """
 
 from __future__ import annotations

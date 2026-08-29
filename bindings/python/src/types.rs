@@ -108,10 +108,11 @@ impl PyConceptUpsert {
     /// a semantic the library does not have — and valid time is a claim about
     /// the world, not about when the row was written, which is `recorded_at`
     /// and is the clock's business.
+    #[allow(clippy::too_many_arguments)]
     #[new]
     #[pyo3(signature = (
         id, title, *, valid_from, content = String::new(),
-        embedding_model = None, valid_to = None, retired = false
+        embedding_model = None, valid_to = None, retired = false, branch = None
     ))]
     fn new(
         id: String,
@@ -121,6 +122,7 @@ impl PyConceptUpsert {
         embedding_model: Option<String>,
         valid_to: Option<&Bound<'_, PyAny>>,
         retired: bool,
+        branch: Option<String>,
     ) -> PyResult<Self> {
         let mut c = ConceptUpsert::new(id, title)
             .content(content)
@@ -130,9 +132,23 @@ impl PyConceptUpsert {
         if let Some(model) = embedding_model {
             c = c.embedding_model(model);
         }
+        if let Some(name) = branch {
+            c = c.on_branch(crate::branch::branch_id(&name)?);
+        }
         Ok(Self {
             inner: c.normalized().map_err(to_py)?,
         })
+    }
+
+    /// The lineage this concept is minted on, or `None` for the trunk.
+    ///
+    /// A branch **inherits** its parent's concepts and may not restate them —
+    /// `concepts` is keyed by identity, so two lineages disagreeing about one
+    /// concept is two rows with one id. Restating one raises
+    /// `CrossLineageError`. What this is for is a concept the branch *mints*.
+    #[getter]
+    fn branch(&self) -> Option<&str> {
+        self.inner.branch.as_ref().map(|b| b.as_str())
     }
 
     #[getter]
@@ -192,10 +208,11 @@ impl PyEdgeAssertion {
     /// what happens to a `Decimal`, what happens to a `datetime` — for data it
     /// never reads. `json.dumps(...)` at the call site is one line and leaves
     /// those choices with the caller, who is the only one who can make them.
+    #[allow(clippy::too_many_arguments)]
     #[new]
     #[pyo3(signature = (
         source, target, edge_type, *, valid_from, valid_to = None,
-        weight = 1.0, properties = "{}".to_string()
+        weight = 1.0, properties = "{}".to_string(), branch = None
     ))]
     fn new(
         source: String,
@@ -205,15 +222,30 @@ impl PyEdgeAssertion {
         valid_to: Option<&Bound<'_, PyAny>>,
         weight: f64,
         properties: String,
+        branch: Option<String>,
     ) -> PyResult<Self> {
-        let e = EdgeAssertion::new(source, target, edge_type)
+        let mut e = EdgeAssertion::new(source, target, edge_type)
             .valid_from(to_canonical(Some(valid_from))?)
             .valid_to(to_canonical(valid_to)?)
             .weight(weight)
             .properties(properties);
+        if let Some(name) = branch {
+            e = e.on_branch(crate::branch::branch_id(&name)?);
+        }
         Ok(Self {
             inner: e.normalized().map_err(to_py)?,
         })
+    }
+
+    /// The lineage this edge is asserted on, or `None` for the trunk (0.14.8).
+    ///
+    /// The same name the read side takes — `branch=` on the four traversal
+    /// entry points — because it is the same question asked of the other half.
+    /// A write on a branch adds a row *beside* the ancestor's rather than over
+    /// it, so the parent's history is unchanged by anything a branch does.
+    #[getter]
+    fn branch(&self) -> Option<&str> {
+        self.inner.branch.as_ref().map(|b| b.as_str())
     }
 
     #[getter]
@@ -320,6 +352,7 @@ pub(crate) struct PyInterval {
 
 #[pymethods]
 impl PyInterval {
+    #[allow(clippy::too_many_arguments)]
     #[new]
     #[pyo3(signature = (valid_from, valid_to = None))]
     fn new(valid_from: &Bound<'_, PyAny>, valid_to: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {

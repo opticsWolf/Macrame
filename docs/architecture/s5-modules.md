@@ -557,6 +557,8 @@ The fold partitions on `(entity_id, branch_id)`. `table_name` is not in it becau
 ~~**Cycle-detection performance note (0.5.1).** `INSTR(w.path, CAST(l.target_id AS BLOB))` is O(path length) per hop… If a use case ever requires depth ≥ 20, benchmark this against a visited-set CTE (`json_each` over a JSON array of visited ids) and document the crossover.~~ **Obsolete as of 0.6.0 ([D-076](s13-decision-register.md#d-076)): there is no path column and no cycle check.** The note is struck rather than deleted because it is a good example of the trap it fell into — it costed the cycle check carefully, per hop, and concluded the design was "correct and fast for the target workload". It was correct. The cost it was measuring was not the one that mattered, and depth was not the variable: at depth 6 on a 328-edge *graph* the query took 403 ms, while the `INSTR` it warns about at depth 50 would still have been ~1,300 bytes of memchr. Depth bounded the path length; branching factor multiplied the number of paths, and nothing here was watching that.
 
 
+<a id="lineage-resolution"></a>
+
 #### graph/lineage.rs — which lineage a read returns, and as of when (0.14.4, [D-220](s13-decision-register.md#d-220); 0.14.6, [D-223](s13-decision-register.md#d-223))
 
 v12 keyed `links_current` `(source_id, target_id, edge_type, valid_from, branch_id)`, so a branch correcting or retiring an edge it inherited writes its **own** row beside the ancestor's rather than over it — the only form of either that Doctrine III permits across lineages, since closing the ancestor's row is the parent corruption branching exists to prevent. This module is which of those rows a given lineage sees.
@@ -634,11 +636,80 @@ is written once and can **never** be corrected, so a trailing space is not a typ
 but a second lineage that prints as the first. Refused rather than trimmed, at
 [D-034](s13-decision-register.md#d-034)'s boundary.
 
-**Readable, not yet writable.** `EdgeAssertion` carries no lineage, so every write
-in this release lands on the trunk and a fork is a *view* of its parent's history
-as of an instant. The gap is invisible from the signatures — `fork` returns a
-`Branch`, writes take none, nothing refuses anything — so it is stated in the
-rustdoc. The branch-scoped view is what closes it.
+**Readable, and — since 0.14.8 — writable.** Through 0.14.7 `EdgeAssertion`
+carried no lineage, so every write landed on the trunk and a fork was a *view* of
+its parent's history as of an instant. The gap was invisible from the signatures
+— `fork` returned a `Branch`, writes took none, nothing refused anything — so it
+was stated in the rustdoc rather than left to be discovered. The subsection below
+is that paragraph deleted.
+
+#### The write path carries lineage (0.14.8, [D-225](s13-decision-register.md#d-225))
+
+`EdgeAssertion::on_branch` and `ConceptUpsert::on_branch` name a lineage,
+`Database::retire_edge_on` shadows an inherited edge, and `INSERT_LINK` and
+`UPSERT_CONCEPT` bind `branch_id` — nine parameters each, where the ninth is the
+one whose omission is *silent*, because the column defaults to `'main'`. §17's
+second acceptance criterion, *a branch reads its parent's history **and its
+own***, is assertable from this release in both languages.
+
+**The finding is in the guard, and its repair is not a predicate.**
+`reject_overlapping_interval` ([D-060](s13-decision-register.md#d-060), defect
+AA) read `links_current` for the edge key with **no lineage predicate at all**,
+which was exact for as long as every row in the table was `main`'s. The moment a
+second lineage can write it is wrong in *both directions at once*: a branch is
+refused for overlapping the parent belief it forked in order to supersede, and
+the trunk is refused for overlapping a **branch's** belief it cannot see.
+`AND branch_id = ?` fixes the trunk's direction and inverts the branch's — a
+branch checked against only its own rows may assert `[10,20)` over an inherited
+`[5,15)`, which is defect AA reintroduced across lineages *by the fix for it*.
+That is the shape [D-223](s13-decision-register.md#d-223) found one release
+earlier, where the obvious `WHERE recorded_at <= cutoff` made an inherited edge
+vanish instead of appearing stale.
+
+What ships is `lineage::key_visibility_cte` — the ancestry walk, the fork-point
+cutoffs, the log-fold arm and the nearest-lineage `ROW_NUMBER()` of
+[`visible_cte`](#lineage-resolution)
+above, restricted to a single edge key. The rule it enforces is the read's own
+definition applied to the write: **what a lineage may not overlap is what that
+lineage can see**, and the trunk's case falls out of it rather than being
+special-cased. `overlap_candidates_resolved` is the assertion arm
+(`WHERE valid_from <> ?4`) and `retire_from_resolved` the retirement arm
+(`WHERE valid_from = ?4`); both push `(source_id, target_id, edge_type)` into the
+base scan, where `idx_lc_open_interval` leads with exactly those three columns,
+so each is a seek. Calling the traversal's own CTEs instead would be O(rows) per
+row on a branched bulk write; the cost of the second spelling is a fold written
+twice, and what keeps it honest is that a divergence cannot be quiet — the write
+would disagree with the read about what a branch can see, which is one named test.
+
+**Retirement across a lineage boundary is a write, not an update.** Closing the
+ancestor's row is the parent corruption [Doctrine
+III](s0-s3-foundations.md#doctrine-iii) forbids, and `links` is append-only, so a
+branch retires an inherited edge by writing its **own** row at the ancestor's key
+with a closed interval; the read prefers it by `dist`. That answers the question
+`CREATE_LINKS_SINGLE_OPEN` parked in v12 — the half a trigger able to see one row
+genuinely could not answer went to the Rust layer, where the ancestry is
+reachable.
+
+**Every write asks `lineage_shape` before it takes the lock**, including trunk
+writes. `check_lineages` calls the function the *read* path calls, for the reason
+it calls it, so an unregistered branch is `UnknownBranch` naming the branch rather
+than an unqualified foreign-key failure out of a rolled-back transaction — and on
+a forked ledger the *trunk's* guard is the one that is wrong in the other
+direction, so `None` resolves to `'main'` and is checked like any other name. The
+shape is global, so a batch naming one lineage costs one round trip on a table
+with no secondary indices, and a database that has never forked answers `Trunk`
+and runs the pre-0.14.8 statements byte for byte.
+
+**`DbError::CrossLineage` closes a guard three releases older than its caller.**
+`trg_concepts_cross_lineage` has been in the schema since v12 and `AbortKind`
+has recognised it since, but `classify` had **no arm** for that kind and fell
+through to `DbError::Engine` — the opaque variant every other guard exists to
+avoid. Nothing could reach it until a write could name a lineage, which is
+[D-224](s13-decision-register.md#d-224)'s finding on a third kind of artefact:
+machinery written for an unbuilt caller is exercised by nothing, so a gap in it
+is invisible in a green suite. `concepts` is keyed by identity, so a branch
+**inherits** its parent's concepts and may mint its own; what it may not do is
+restate an inherited one.
 
 ### 5.3 graph/vector_filter.rs — strategies and the byte-budget cost model
 

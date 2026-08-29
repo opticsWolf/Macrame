@@ -119,6 +119,15 @@ pub enum DbError {
         parent_forked_at: String,
     },
 
+    #[error(
+        "concept {id} belongs to lineage {held_by} and {attempted} may not          restate it; a branch inherits concepts"
+    )]
+    CrossLineage {
+        id: String,
+        held_by: String,
+        attempted: String,
+    },
+
     #[error("subgraph exceeds budget ({n} > {budget})")]
     SubgraphTooLarge { n: usize, budget: usize },
 

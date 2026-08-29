@@ -345,6 +345,18 @@ create_exception!(
 );
 create_exception!(
     macrame,
+    CrossLineageError,
+    BranchError,
+    "A branch tried to restate a concept another lineage holds. Attributes: \
+     `id`, `held_by`, `attempted`.\n\n\
+     A branch **inherits** its parent's concepts and does not restate them: \
+     `concepts` is keyed by identity, so two lineages disagreeing about one \
+     concept is two rows with one id. Mint a concept the branch owns, or \
+     express the disagreement as edges, which are the thing a lineage may \
+     hold two beliefs about."
+);
+create_exception!(
+    macrame,
     AttributeModeUnstatedError,
     ValidationError,
     "A traversal asked about the past without saying which text it wanted. \
@@ -647,6 +659,16 @@ fn build(py: Python<'_>, err: DbError) -> PyErr {
             e.setattr("parent_forked_at", parent_forked_at)
         }),
 
+        DbError::CrossLineage {
+            id,
+            held_by,
+            attempted,
+        } => raise::<CrossLineageError, _>(py, m, |e| {
+            e.setattr("id", id)?;
+            e.setattr("held_by", held_by)?;
+            e.setattr("attempted", attempted)
+        }),
+
         DbError::ModelNotRegistered { model, table } => {
             raise::<ModelNotRegisteredError, _>(py, m, |e| {
                 e.setattr("model", model)?;
@@ -896,6 +918,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
         UnknownBranchError,
         BranchExistsError,
         ForkPrecedesParentError,
+        CrossLineageError,
         // writer
         WriterUnavailableError,
         WriterDroppedResponderError,

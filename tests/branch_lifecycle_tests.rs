@@ -32,11 +32,14 @@
 //!
 //! # Why a branch is written to nowhere in this file
 //!
-//! Because it cannot be. `EdgeAssertion` carries no lineage, so every write in
-//! this release lands on the trunk and a fork is a *view* of its parent's
-//! history as of an instant. Acceptance 2's "and its own" half is the
-//! branch-scoped view, and is not this release. Stated here so the absence
-//! reads as a boundary rather than as a gap in the coverage.
+//! Through 0.14.7 it was because it could not be: `EdgeAssertion` carried no
+//! lineage, so every write landed on the trunk. 0.14.8 changed that, and this
+//! file deliberately did **not** grow to cover it —
+//! `tests/branch_write_tests.rs` is where a lineage is written to, and the
+//! division is the one the two halves already have. What is pinned here is the
+//! *lifecycle*: that a fork costs one row, that the two halves compose, and
+//! that the three refusals are named. Acceptance 2's "and its own" half is
+//! asserted in that file, against forks this one proves cost nothing.
 
 #[path = "common/harness.rs"]
 mod harness;

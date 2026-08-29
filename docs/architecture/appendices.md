@@ -244,8 +244,31 @@ let g = db.load_subgraph_with(&builder.on_branch(alt.id), ts, budget).await?;
 // one), BranchExists (taken, `"main"` included), InvalidBranchId, and
 // ForkPrecedesParent -- the cross-row half no CHECK can see (D-224).
 //
-// Readable, NOT yet writable: `EdgeAssertion` carries no lineage, so a write
-// after a fork lands on the trunk. The branch-scoped view is what closes it.
+// Writable since 0.14.8 (D-225). A lineage is named on the assertion, never
+// on the method -- `on_branch` is a builder step, so an unqualified write means
+// the trunk exactly as it always did.
+db.assert_edge(EdgeAssertion::new(source, target, "CITES")
+                   .valid_from(vf)
+                   .on_branch(alt.id.clone())).await?;
+db.upsert_concept(ConceptUpsert::new(id, title)
+                      .on_branch(alt.id.clone())).await?;   // MINTS; may not
+                                                            //   restate an
+                                                            //   inherited id
+// Retirement across a lineage boundary writes the branch's OWN closed row at
+// the ancestor's key; the parent's row is never touched (Doctrine III).
+db.retire_edge_on(source, target, "CITES", vf, vt, alt.id.clone()).await?;
+// The `_on` suffix rather than a sixth argument, after `query_as_of_edges_on`:
+// a positional `Option<BranchId>` would make every existing call site read as
+// though it had made a lineage decision. Python has keyword defaults, so there
+// it is one method taking `branch=` (§14).
+//
+// What a lineage may not overlap is what that lineage CAN SEE: the guard runs
+// the read's own resolution restricted to the edge key, so a branch is refused
+// for overlapping an interval it inherited and the trunk is not refused for
+// overlapping one only a branch believes. Refusals add CrossLineage (a branch
+// restating an inherited concept -- `concepts` is keyed by identity), and every
+// write checks its lineage before the lock, so an unregistered name is
+// UnknownBranch rather than a foreign-key failure.
 
 // -- Vectors: writes through the handle (D-048), reads direct --
 let model = ModelName::new("nomic_v1")?;
@@ -474,7 +497,7 @@ New in 0.13.38 ([D-211](s13-decision-register.md#d-211)). [Appendix A](appendice
 
 *Frozen* means a change requires a **major version**.
 
-**1. The public Rust API, item for item and path for path.** [`docs/architecture/public-api.txt`](public-api.txt) is the surface — **1,448 items**. No item is removed, no path stops resolving, and no signature narrows. Each item is reachable at exactly one canonical path, plus flat aliases at the crate root and in `macrame::prelude` ([D-208](s13-decision-register.md#d-208)). Held by `scripts/check_public_api.py` in CI and by `tests/public_path_tests.rs` in `cargo test`. The cycle that produced this surface was reviewed against 0.13.0 item by item before it was frozen — [`api-review-0.14.0.md`](api-review-0.14.0.md), [D-212](s13-decision-register.md#d-212) — which is the last release where that review is cheap.
+**1. The public Rust API, item for item and path for path.** [`docs/architecture/public-api.txt`](public-api.txt) is the surface — **1,474 items**. No item is removed, no path stops resolving, and no signature narrows. Each item is reachable at exactly one canonical path, plus flat aliases at the crate root and in `macrame::prelude` ([D-208](s13-decision-register.md#d-208)). Held by `scripts/check_public_api.py` in CI and by `tests/public_path_tests.rs` in `cargo test`. The cycle that produced this surface was reviewed against 0.13.0 item by item before it was frozen — [`api-review-0.14.0.md`](api-review-0.14.0.md), [D-212](s13-decision-register.md#d-212) — which is the last release where that review is cheap.
 
 **2. The ledger tables** — `concepts`, `links`, `transaction_log`. Additive only: `ALTER TABLE ADD COLUMN` and new indexes. A changed primary key, a dropped column or altered bitemporal semantics is a major version with an explicit ETL path, because bitemporal data is the hardest data to migrate: a rebuild means replaying history and recomputing transaction-time boundaries, which is rewriting the past ([D-036](s13-decision-register.md#d-036), [Doctrine III](s0-s3-foundations.md#doctrine-iii)).
 

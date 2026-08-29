@@ -301,6 +301,144 @@ pub(crate) fn links_cut_cte() -> &'static str {
 )"#
 }
 
+/// The same resolution as [`links_cut_cte`] and [`visible_cte`], narrowed to a
+/// single edge key, for the **write** path (0.14.8, §15.4, D-225).
+///
+/// # Why the write path needs a resolution at all
+///
+/// [`crate::connection`]'s overlap guard reads `links_current` for the edge key
+/// being asserted and refuses an assertion whose valid-time interval overlaps
+/// one already recorded (defect AA, D-060). Until 0.14.8 every row in the table
+/// was `main`'s, so reading the key with no lineage predicate was exact. The
+/// moment a second lineage can write, the same statement is wrong in **both
+/// directions at once**: a branch would be refused for overlapping its parent's
+/// belief that it is entitled to supersede, and the trunk would be refused for
+/// overlapping a branch's belief it cannot even see. An unfiltered read is not
+/// a conservative approximation of a filtered one here; it is a different
+/// question.
+///
+/// Adding `AND branch_id = ?` would fix the trunk direction and leave the
+/// branch one wrong the other way — a branch would then be checked against
+/// *only its own* rows and could assert `[10,20)` over an inherited `[5,15)`,
+/// putting two overlapping intervals into its own view. That is defect AA
+/// reintroduced across lineages, and it is the shape
+/// `trg_links_single_open`'s v12 comment left open as "§15.4's write-path
+/// question": the trigger sees one row and cannot answer it. This is the
+/// answer. **What a lineage may not overlap is what that lineage can see**,
+/// which is the read's definition and now the write's.
+///
+/// # Restricted to one key rather than reusing the read's CTEs
+///
+/// [`churned_cte`] and [`links_cut_cte`] are written for a traversal and scan
+/// `links_current` whole. Calling them per assertion would make a branched
+/// bulk write O(rows) per row. These push the `(source, target, edge_type)`
+/// predicate down into the base scan instead, where `idx_lc_open_interval`
+/// leads with exactly those three columns, so each arm is a seek. The cost of
+/// the duplication is a second spelling of the fold, and what keeps it honest
+/// is that a mismatch cannot be quiet: the arms would disagree with the read
+/// about what a branch can see, and `branch_write_tests` asserts the two agree
+/// on the same fixture.
+///
+/// Both tails are `rn = 1` over `PARTITION BY valid_from ORDER BY dist` — the
+/// nearest lineage holding that key — which is [`visible_cte`] with the edge
+/// triple already fixed and therefore out of the partition.
+///
+/// Slots: `?1` source, `?2` target, `?3` edge type, `?4` the `valid_from` the
+/// tail selects on, `?5` the writing lineage.
+fn key_visibility_cte() -> &'static str {
+    r#"WITH RECURSIVE
+lineage(branch_id, dist, cutoff) AS (
+    SELECT ?5, 0, NULL
+    UNION ALL
+    SELECT b.parent_id, g.dist + 1,
+           CASE WHEN g.cutoff IS NULL OR b.forked_at < g.cutoff
+                THEN b.forked_at ELSE g.cutoff END
+    FROM branches b JOIN lineage g ON b.branch_id = g.branch_id
+    WHERE b.parent_id IS NOT NULL
+),
+key_rows(valid_from, valid_to, weight, properties, recorded_at, branch_id, dist, cutoff) AS (
+    SELECT lc.valid_from, lc.valid_to, lc.weight, lc.properties,
+           lc.recorded_at, lc.branch_id, g.dist, g.cutoff
+    FROM links_current lc
+    JOIN lineage g ON g.branch_id = lc.branch_id
+    WHERE lc.source_id = ?1 AND lc.target_id = ?2 AND lc.edge_type = ?3
+),
+churned_key(entity_id, branch_id, cutoff, dist) AS (
+    SELECT ?1 || '|' || ?2 || '|' || ?3 || '|' || valid_from, branch_id, cutoff, dist
+    FROM key_rows
+    WHERE cutoff IS NOT NULL AND recorded_at > cutoff
+),
+visible_key(valid_from, valid_to, weight, properties, dist) AS (
+    SELECT valid_from, valid_to, weight, properties, dist FROM key_rows
+    WHERE cutoff IS NULL OR recorded_at <= cutoff
+    UNION ALL
+    SELECT json_extract(payload, '$.valid_from'),
+           json_extract(payload, '$.valid_to'),
+           json_extract(payload, '$.weight'),
+           json_extract(payload, '$.properties'),
+           dist
+    FROM (
+        SELECT transaction_log.payload, k.dist,
+               ROW_NUMBER() OVER (
+                   PARTITION BY transaction_log.entity_id, transaction_log.branch_id
+                   ORDER BY transaction_log.seq_id DESC
+               ) AS rn
+        FROM transaction_log
+        JOIN churned_key k ON k.entity_id = transaction_log.entity_id
+                          AND k.branch_id = transaction_log.branch_id
+        WHERE transaction_log.table_name = 'links'
+          AND transaction_log.recorded_at <= k.cutoff
+    ) WHERE rn = 1
+),
+resolved_key(valid_from, valid_to, weight, properties) AS (
+    SELECT valid_from, valid_to, weight, properties FROM (
+        SELECT valid_from, valid_to, weight, properties,
+               ROW_NUMBER() OVER (PARTITION BY valid_from ORDER BY dist) AS rn
+        FROM visible_key
+    ) WHERE rn = 1
+)
+"#
+}
+
+/// Overlap candidates as the writing lineage can see them. See
+/// [`key_visibility_cte`].
+///
+/// `valid_from <> ?4` excludes the row being re-asserted, exactly as the trunk
+/// statement does: re-assertion at the same `valid_from` is Doctrine III's
+/// ordinary case and is settled by the primary key and the single-open trigger,
+/// not by the overlap guard.
+pub(crate) fn overlap_candidates_resolved() -> String {
+    format!(
+        "{}SELECT valid_from, valid_to FROM resolved_key WHERE valid_from <> ?4",
+        key_visibility_cte()
+    )
+}
+
+/// The row a branch is retiring, which may belong to an ancestor.
+///
+/// Retirement on a branch is **shadow retirement**: the branch writes its own
+/// row at the ancestor's key carrying a closed interval, the read prefers it by
+/// `dist`, and the ancestor's row is untouched. [`visible_cte`]'s rustdoc has
+/// described this write since 0.14.4; this is it. Closing the ancestor's own
+/// row is the parent corruption
+/// [Doctrine III](../../docs/architecture/s0-s3-foundations.md#doctrine-iii)
+/// forbids, and it is not merely avoided by policy — `links` is append-only and
+/// there is no statement in the crate that could do it.
+///
+/// `?6` is the new `valid_to`, `?7` the stamp. `weight` and `properties` are
+/// carried from the visible row rather than restated, which is what makes this
+/// a retirement rather than a new assertion that happens to be closed.
+pub(crate) fn retire_from_resolved() -> String {
+    format!(
+        "{}INSERT INTO links \
+             (source_id, target_id, edge_type, valid_from, valid_to, weight, \
+              properties, recorded_at, branch_id) \
+         SELECT ?1, ?2, ?3, ?4, ?6, weight, properties, ?7, ?5 \
+         FROM resolved_key WHERE valid_from = ?4",
+        key_visibility_cte()
+    )
+}
+
 /// One row per edge key, from the nearest lineage that holds it.
 ///
 /// `source` is the relation to resolve — [`links_cut_cte`] under current

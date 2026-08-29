@@ -95,6 +95,7 @@ from ._macrame import (
     Branch,
     BranchError,
     BranchExistsError,
+    CrossLineageError,
     DiagnosticConnError,
     DimMismatchError,
     ForkPrecedesParentError,
@@ -241,6 +242,7 @@ __all__ = [
     "UnknownBranchError",
     "BranchExistsError",
     "ForkPrecedesParentError",
+    "CrossLineageError",
     # writer
     "WriterUnavailableError",
     "WriterDroppedResponderError",

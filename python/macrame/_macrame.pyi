@@ -166,7 +166,15 @@ class ConceptUpsert:
         embedding_model: str | None = None,
         valid_to: Timestamp | None = None,
         retired: bool = False,
+        branch: str | None = None,
     ) -> None: ...
+    @property
+    def branch(self) -> str | None:
+        """The lineage this concept is minted on, or None for the trunk.
+
+        A branch inherits its parent's concepts and may not restate them —
+        doing so raises `CrossLineageError`.
+        """
     @property
     def id(self) -> str: ...
     @property
@@ -202,7 +210,15 @@ class EdgeAssertion:
         valid_to: Timestamp | None = None,
         weight: float = 1.0,
         properties: str = ...,
+        branch: str | None = None,
     ) -> None: ...
+    @property
+    def branch(self) -> str | None:
+        """The lineage this edge is asserted on, or None for the trunk.
+
+        A write on a branch adds a row beside the ancestor's rather than over
+        it, so the parent's history is unchanged by anything a branch does.
+        """
     @property
     def source(self) -> str: ...
     @property
@@ -759,7 +775,17 @@ class Database:
         edge_type: str,
         valid_from: Timestamp,
         valid_to: Timestamp,
-    ) -> None: ...
+        *,
+        branch: str | None = None,
+    ) -> None:
+        """Close an open interval by asserting its replacement (Doctrine III).
+
+        With `branch=`, this is **shadow retirement**: the branch writes its
+        own row at the ancestor's key and the ancestor's row is untouched, so
+        the edge leaves this lineage's view and stays in its parent's. Rust
+        splits this into `retire_edge` and `retire_edge_on` because it has no
+        keyword defaults; here one method takes both.
+        """
     def upsert_concept(self, concept: ConceptUpsert) -> None: ...
     def write_bulk_atomic(self, edges: Sequence[EdgeAssertion]) -> int:
         """Assert many edges in **one transaction under one stamp** (D-014).
@@ -1192,6 +1218,18 @@ class ForkPrecedesParentError(BranchError):
     parent: str
     forked_at: str
     parent_forked_at: str
+
+class CrossLineageError(BranchError):
+    """A branch tried to restate a concept another lineage holds.
+
+    `concepts` is keyed by identity, so two lineages disagreeing about one
+    concept is two rows with one id. A branch **inherits** its parent's
+    concepts; what it may do is mint one of its own.
+    """
+
+    id: str
+    held_by: str
+    attempted: str
 
 class EngineError(MacrameError):
     """An error from libSQL itself, carried across without interpretation."""

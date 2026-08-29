@@ -1027,9 +1027,24 @@ pub const CREATE_LINKS_CURRENT_SYNC: &str = r#"
 /// The `branch_id` clause is row-level and deliberately not ancestry-aware. A
 /// branch that inherits an open interval from its parent and asserts its own is
 /// not violating this rule — it is superseding a belief, which is the thing a
-/// branch is for. Whether the *inherited* interval should also close is §15.4's
-/// write-path question and is not answered by a trigger that can only see one
-/// row.
+/// branch is for.
+///
+/// # The question this comment parked, answered at 0.14.8 (D-225)
+///
+/// *Whether the inherited interval should also close.* It should not, and
+/// cannot: closing the ancestor's row is the parent corruption Doctrine III
+/// forbids, and `links` is append-only so no statement in the crate could do
+/// it. What a branch writes instead is its **own** row at the ancestor's key,
+/// which the read prefers by `dist` — shadow retirement.
+///
+/// The half a trigger genuinely cannot answer went to the Rust layer, where
+/// the ancestry is reachable: `lineage::overlap_candidates_resolved` refuses an
+/// assertion whose interval overlaps **what the writing lineage can see**,
+/// which is the read's definition applied to the write. That is a guard against
+/// callers going through the actor and not against raw SQL, which is the same
+/// honest cost `reject_overlapping_interval` has carried since D-060 — a
+/// trigger able to make it would need a recursive ancestry walk on every
+/// insert, on the path D-059 exists to keep fast.
 pub const CREATE_LINKS_SINGLE_OPEN: &str = concat!(
     r#"
     CREATE TRIGGER IF NOT EXISTS trg_links_single_open

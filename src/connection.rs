@@ -4,6 +4,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::error::{classify, BulkInterrupted, BulkResult, DbError, Result, WriteOp};
 use crate::graph::edge::EdgeAssertion;
+use crate::graph::lineage::LineageShape;
 use crate::integrity::{rebuild_current, RebuildReport};
 use crate::schema::migrations;
 use crate::temporal::archive::{archive, rehydrate, ArchiveReport, RehydrateReport};
@@ -560,7 +561,13 @@ pub fn estimated_bulk_hold(edges: &[EdgeAssertion]) -> std::time::Duration {
 pub const MAX_ARCHIVE_SESSIONS: usize = 4_096;
 
 /// A concept assertion: the payload of an upsert.
+///
+/// `#[non_exhaustive]` since 0.14.8 for
+/// [`EdgeAssertion`]'s reason: `branch` is the
+/// first field added since it was written, and one break is better than a
+/// recurring one.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct ConceptUpsert {
     pub id: String,
     pub title: String,
@@ -569,6 +576,22 @@ pub struct ConceptUpsert {
     pub valid_from: String,
     pub valid_to: String,
     pub retired: bool,
+    /// The lineage this concept is minted on, or `None` for the trunk (§15.2,
+    /// D-225).
+    ///
+    /// **The rule here is narrower than the edge's, and it is the schema's
+    /// rather than this crate's.** `concepts` is a current-state projection
+    /// keyed by identity — `id` is `NOT NULL UNIQUE` — so two lineages holding
+    /// different beliefs about one concept is two rows with one `id`, which the
+    /// unique index refuses on its own. `trg_concepts_cross_lineage` turns that
+    /// refusal into [`DbError::CrossLineage`] so it says which rule was broken.
+    ///
+    /// So a branch **inherits** its parent's concepts and cannot restate them;
+    /// what this field is for is a concept the branch *mints*, which is the
+    /// case the trunk has no row for. A branch that needs to disagree with its
+    /// parent about a concept's content is asking for the overlay design, which
+    /// is deferred with its reopen trigger named (D-214).
+    pub branch: Option<crate::branch::BranchId>,
 }
 
 impl ConceptUpsert {
@@ -581,6 +604,7 @@ impl ConceptUpsert {
             valid_from: String::new(),
             valid_to: timestamp::OPEN_SENTINEL.to_string(),
             retired: false,
+            branch: None,
         }
     }
 
@@ -602,6 +626,23 @@ impl ConceptUpsert {
     pub fn valid_to(mut self, ts: impl Into<String>) -> Self {
         self.valid_to = ts.into();
         self
+    }
+
+    /// Mint this concept on `branch` rather than on the trunk (0.14.8).
+    ///
+    /// See [`branch`](Self::branch) for why a branch may mint a concept and may
+    /// not restate one it inherited.
+    pub fn on_branch(mut self, branch: crate::branch::BranchId) -> Self {
+        self.branch = Some(branch);
+        self
+    }
+
+    /// The lineage this upsert names, spelled out. See
+    /// [`EdgeAssertion::branch_name`](crate::graph::EdgeAssertion).
+    pub(crate) fn branch_name(&self) -> &str {
+        self.branch
+            .as_ref()
+            .map_or(crate::schema::ddl::MAIN_BRANCH, |b| b.as_str())
     }
 
     pub fn retired(mut self, retired: bool) -> Self {
@@ -661,6 +702,8 @@ pub(crate) enum HighPriCommand {
         edge_type: String,
         valid_from: String,
         valid_to: String,
+        /// The lineage doing the retiring, or `None` for the trunk (0.14.8).
+        branch: Option<crate::branch::BranchId>,
         responder: oneshot::Sender<Result<()>>,
     },
     UpsertConcept {
@@ -1792,6 +1835,68 @@ impl Database {
             edge_type,
             valid_from,
             valid_to,
+            branch: None,
+            responder,
+        })
+        .await
+    }
+
+    /// Retire an edge **on a lineage**, which is a different write (0.14.8).
+    ///
+    /// The `_on` suffix is the crate's established spelling for the
+    /// branch-taking variant of a call whose trunk form predates branching —
+    /// [`query_as_of_edges_on`](crate::temporal::query_as_of_edges_on) is the
+    /// other one. A sixth positional `Option<BranchId>` on
+    /// [`Self::retire_edge`] would have made every existing call site read as
+    /// though it had made a lineage decision it never made.
+    ///
+    /// # This closes a row; it does not close *the* row
+    ///
+    /// Retiring an edge the branch **inherited** writes the branch's own row at
+    /// the ancestor's key, carrying the closed interval and this lineage's id.
+    /// The ancestor's row is untouched, and the read prefers the nearer one, so
+    /// the edge is gone from this lineage's view and unchanged in its parent's.
+    /// That is **shadow retirement**, and it is the only retirement across
+    /// lineages that does not commit the parent corruption
+    /// [Doctrine III](../../docs/architecture/s0-s3-foundations.md#doctrine-iii)
+    /// forbids — which is not a rule this method obeys but a shape the ledger
+    /// cannot express: `links` is append-only and no statement in this crate
+    /// closes a row in place.
+    ///
+    /// `weight` and `properties` are carried over from the visible row rather
+    /// than restated, which is what makes this a retirement rather than a new
+    /// assertion that happens to be closed.
+    ///
+    /// # Errors
+    ///
+    /// - [`DbError::UnknownBranch`] when `branch` is not registered.
+    /// - [`DbError::NotFound`] when this lineage can see no open row at that
+    ///   `valid_from`. On a branch that includes *never inherited it* and
+    ///   *inherited it and already shadowed it*, which are one answer here
+    ///   because they are one answer to the question asked: there is nothing
+    ///   at that key to retire.
+    pub async fn retire_edge_on(
+        &self,
+        source: impl Into<String>,
+        target: impl Into<String>,
+        edge_type: impl Into<String>,
+        valid_from: &str,
+        valid_to: &str,
+        branch: crate::branch::BranchId,
+    ) -> Result<()> {
+        let edge_type = edge_type.into();
+        crate::graph::edge::validate_edge_type(&edge_type)?;
+        let valid_from = timestamp::normalize(valid_from)?;
+        let valid_to = timestamp::normalize(valid_to)?;
+        let (source, target) = (source.into(), target.into());
+
+        self.high(|responder| HighPriCommand::RetireEdge {
+            source,
+            target,
+            edge_type,
+            valid_from,
+            valid_to,
+            branch: Some(branch),
             responder,
         })
         .await
@@ -1840,20 +1945,21 @@ impl Database {
     /// columns under `CHECK (forked_at <= created_at)` — but it is not in this
     /// release and is additive when it is.
     ///
-    /// # What this lineage can and cannot do yet
+    /// # What this lineage can do
     ///
     /// It can be **read**: every traversal entry point takes a branch, and on a
     /// forked ledger the read resolves along the ancestry and stops at the fork
-    /// point. It cannot yet be **written**: [`EdgeAssertion`] carries no
-    /// lineage, so every write in this release lands on the trunk. A fork is
-    /// therefore currently a *view* of its parent's history as of an instant,
-    /// which is a coherent and useful thing on its own — and half of what §15.4
-    /// promises. The write half is the branch-scoped view, next.
+    /// point. Since 0.14.8 it can also be **written** — [`EdgeAssertion`] and
+    /// [`ConceptUpsert`] carry a lineage, and [`Self::retire_edge_on`] shadows
+    /// an inherited edge (D-225). Through 0.14.7 they did not, and a caller who
+    /// forked and then called `assert_edge` got a successful write **on the
+    /// trunk**; that is fixed rather than documented now.
     ///
-    /// This is said here rather than left to be discovered because the gap is
-    /// invisible from the signature: `fork` returns a `Branch`, writes accept no
-    /// branch, and nothing refuses anything — a caller who forks and then calls
-    /// `assert_edge` gets a successful write on the trunk.
+    /// What a branch still may not do is **restate an inherited concept**.
+    /// `concepts` is keyed by identity, so that is refused as
+    /// [`DbError::CrossLineage`] — see [`ConceptUpsert::branch`]. Edges are the
+    /// thing a lineage may hold its own belief about, and superseding one is a
+    /// row written *beside* the ancestor's rather than over it.
     ///
     /// # Errors
     ///
@@ -3329,15 +3435,38 @@ impl<'a> Turn<'a> {
 }
 
 const INSERT_LINK: &str = "INSERT INTO links \
-     (source_id, target_id, edge_type, valid_from, valid_to, weight, properties, recorded_at) \
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)";
+     (source_id, target_id, edge_type, valid_from, valid_to, weight, properties, \
+      recorded_at, branch_id) \
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)";
+
+/// The parameter row for [`INSERT_LINK`], in one place since 0.14.8.
+///
+/// The single-edge path and the chunk path spelled these out separately, which
+/// was survivable at eight and is not at nine: `branch_id` is the one parameter
+/// whose omission is *silent* — the column defaults to `'main'`, so a path that
+/// forgot it would write to the trunk and pass every test that did not fork.
+/// [`concept_params`] has existed for this reason since D-056.
+fn edge_params<'a>(edge: &'a EdgeAssertion, stamp: &'a str) -> [libsql::Value; 9] {
+    [
+        edge.source.as_str().into(),
+        edge.target.as_str().into(),
+        edge.edge_type.as_str().into(),
+        edge.valid_from.as_str().into(),
+        edge.valid_to.as_str().into(),
+        edge.weight.into(),
+        edge.properties.as_str().into(),
+        stamp.into(),
+        edge.branch_name().into(),
+    ]
+}
 
 /// Shared by the single-concept write and the chunked one, so the two paths
 /// cannot drift into upserting different column sets — and so the chunk has a
 /// statement text it can prepare once (D-056).
 const UPSERT_CONCEPT: &str = "INSERT INTO concepts \
-     (id, title, content, embedding_model, valid_from, valid_to, recorded_at, retired) \
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
+     (id, title, content, embedding_model, valid_from, valid_to, recorded_at, retired, \
+      branch_id) \
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
      ON CONFLICT(id) DO UPDATE SET \
          title = excluded.title, \
          content = excluded.content, \
@@ -3346,9 +3475,15 @@ const UPSERT_CONCEPT: &str = "INSERT INTO concepts \
          valid_to = excluded.valid_to, \
          recorded_at = excluded.recorded_at, \
          retired = excluded.retired";
+// `branch_id` is deliberately **not** in that `DO UPDATE` list. The column is
+// provenance and minting happened once (D-214), and
+// `trg_concepts_branch_immutable` would abort an update that moved it — so
+// listing it would turn every re-upsert of an inherited concept into a guard
+// abort instead of the no-op it is. The insert arm carries it; the update arm
+// leaves the row where it was minted.
 
 /// The parameter row for [`UPSERT_CONCEPT`], in one place for the same reason.
-fn concept_params<'a>(concept: &'a ConceptUpsert, stamp: &'a str) -> [libsql::Value; 8] {
+fn concept_params<'a>(concept: &'a ConceptUpsert, stamp: &'a str) -> [libsql::Value; 9] {
     [
         concept.id.as_str().into(),
         concept.title.as_str().into(),
@@ -3361,7 +3496,98 @@ fn concept_params<'a>(concept: &'a ConceptUpsert, stamp: &'a str) -> [libsql::Va
         concept.valid_to.as_str().into(),
         stamp.into(),
         (concept.retired as i64).into(),
+        concept.branch_name().into(),
     ]
+}
+
+/// Check every lineage a write names, and decide which shape its guard takes.
+///
+/// **One function, two answers, one query per distinct lineage** — and it is
+/// [`lineage_shape`](crate::graph::lineage::lineage_shape), the same function
+/// the read path calls, for the same reason it calls it. A write naming a
+/// branch that is not in `branches` has asked about something that does not
+/// exist, and answering it by writing to the trunk is [D-069]'s failure in its
+/// most expensive form: not a right-looking answer to a question that was not
+/// asked, but a *durable* one.
+///
+/// Relying on the foreign key instead would refuse the write — `branch_id`
+/// `REFERENCES branches(branch_id)` and the key is enforced — but it would
+/// refuse it as an unqualified "FOREIGN KEY constraint failed" from inside a
+/// rolled-back transaction, naming neither the column nor the branch. The same
+/// argument [`classify`](crate::error::classify) makes for annotations and
+/// edges, one table further along.
+///
+/// # The shape is global, so the last answer is every answer
+///
+/// [`LineageShape`] is decided by how many rows `branches` holds, which does not
+/// vary by which branch was asked about. The loop exists for the **existence**
+/// check; that it also returns a shape is why there is no second query. A batch
+/// naming one lineage — every batch this crate has written so far — costs
+/// exactly one round trip on a table with no secondary indices.
+///
+/// # Why a trunk write pays for it too
+///
+/// `None` resolves to `'main'` here rather than skipping the query, and that is
+/// not tidiness. Once a second lineage can write, the *trunk's* overlap guard
+/// is wrong in the other direction — it would be refused for overlapping a
+/// branch's belief it cannot see — so the shape decision is one every write
+/// needs, not one that branched writes need. On a database that has never
+/// forked the answer is [`LineageShape::Trunk`] and the guard is the statement
+/// it has always been.
+///
+/// [D-069]: ../../docs/architecture/s13-decision-register.md
+async fn check_lineages(conn: &libsql::Connection, names: &[&str]) -> Result<LineageShape> {
+    let mut shape = LineageShape::Trunk;
+    for name in names {
+        shape = crate::graph::lineage::lineage_shape(conn, Some(name)).await?;
+    }
+    Ok(shape)
+}
+
+/// The distinct lineages a batch names, in first-seen order.
+///
+/// A `Vec` and a linear scan rather than a set: batches name one lineage in
+/// every case this crate has, the bound is the number of *branches* and not the
+/// number of rows, and a `BTreeSet` would allocate per batch to deduplicate a
+/// list of length one.
+fn distinct_branches(edges: &[EdgeAssertion]) -> Vec<&str> {
+    let mut out: Vec<&str> = Vec::with_capacity(1);
+    for edge in edges {
+        let name = edge.branch_name();
+        if !out.contains(&name) {
+            out.push(name);
+        }
+    }
+    if out.is_empty() {
+        out.push(crate::schema::ddl::MAIN_BRANCH);
+    }
+    out
+}
+
+/// The overlap guard's prepared statement, and which question it asks.
+///
+/// The two statements take different parameter counts and mean different things
+/// by the rows they return, so pairing them with the shape here is what stops
+/// [`check_prepared`] from having to be told twice.
+struct OverlapGuard {
+    stmt: libsql::Statement,
+    shape: LineageShape,
+}
+
+impl OverlapGuard {
+    /// Prepare once per turn or per chunk, never per row (D-056, §8.8).
+    async fn prepare(conn: &libsql::Connection, shape: LineageShape) -> Result<Self> {
+        let sql = match shape {
+            LineageShape::Trunk => std::borrow::Cow::Borrowed(OVERLAP_CANDIDATES),
+            LineageShape::Resolved => {
+                std::borrow::Cow::Owned(crate::graph::lineage::overlap_candidates_resolved())
+            }
+        };
+        Ok(Self {
+            stmt: conn.prepare(&sql).await?,
+            shape,
+        })
+    }
 }
 
 impl HighPriCommand {
@@ -3412,26 +3638,21 @@ impl HighPriCommand {
             }
             HighPriCommand::AssertEdge { edge, responder } => {
                 let stamp = clock.now();
-                if let Err(e) = reject_overlapping_interval(conn, &edge).await {
+                // Before the guard, because a write naming an unregistered
+                // lineage should be refused by name rather than by whatever the
+                // guard happens to find when it looks in the wrong place.
+                let shape = match check_lineages(conn, &[edge.branch_name()]).await {
+                    Ok(shape) => shape,
+                    Err(e) => {
+                        turn.answer(responder, Err(e));
+                        return LoopCtl::Continue;
+                    }
+                };
+                if let Err(e) = reject_overlapping_interval(conn, &edge, shape).await {
                     turn.answer(responder, Err(e));
                     return LoopCtl::Continue;
                 }
-                let res = match conn
-                    .execute(
-                        INSERT_LINK,
-                        libsql::params![
-                            edge.source.as_str(),
-                            edge.target.as_str(),
-                            edge.edge_type.as_str(),
-                            edge.valid_from.as_str(),
-                            edge.valid_to.as_str(),
-                            edge.weight,
-                            edge.properties.as_str(),
-                            stamp.as_str()
-                        ],
-                    )
-                    .await
-                {
+                let res = match conn.execute(INSERT_LINK, edge_params(&edge, &stamp)).await {
                     Ok(_) => Ok(()),
                     Err(e) => Err(classify(
                         conn,
@@ -3452,24 +3673,38 @@ impl HighPriCommand {
                 edge_type,
                 valid_from,
                 valid_to,
+                branch,
                 responder,
             } => {
                 let stamp = clock.now();
-                let res = retire_edge(
-                    conn,
-                    &source,
-                    &target,
-                    &edge_type,
-                    &valid_from,
-                    &valid_to,
-                    &stamp,
-                )
-                .await;
+                let name = branch
+                    .as_ref()
+                    .map_or(crate::schema::ddl::MAIN_BRANCH, |b| b.as_str());
+                let res = match check_lineages(conn, &[name]).await {
+                    Ok(shape) => {
+                        retire_edge(
+                            conn,
+                            &source,
+                            &target,
+                            &edge_type,
+                            &valid_from,
+                            &valid_to,
+                            &stamp,
+                            name,
+                            shape,
+                        )
+                        .await
+                    }
+                    Err(e) => Err(e),
+                };
                 turn.answer(responder, res);
             }
             HighPriCommand::UpsertConcept { concept, responder } => {
                 let stamp = clock.now();
-                let res = upsert_concept(conn, &concept, &stamp).await;
+                let res = match check_lineages(conn, &[concept.branch_name()]).await {
+                    Ok(_) => upsert_concept(conn, &concept, &stamp).await,
+                    Err(e) => Err(e),
+                };
                 turn.answer(responder, res);
             }
             HighPriCommand::WriteBulkAtomic { edges, responder } => {
@@ -3680,6 +3915,11 @@ impl LowPriCommand {
 /// original assertion survives intact and `reconstruct` at an earlier instant
 /// still sees the interval open — which is the entire point of a bitemporal
 /// ledger.
+// The first of these in the crate proper (0.14.8). All nine are the edge key,
+// two stamps and the lineage — a struct to carry them would exist for one call
+// site and would put a name between the caller and parameters it already spells
+// out positionally at the only place it calls this.
+#[allow(clippy::too_many_arguments)]
 async fn retire_edge(
     conn: &libsql::Connection,
     source: &str,
@@ -3688,18 +3928,39 @@ async fn retire_edge(
     valid_from: &str,
     valid_to: &str,
     stamp: &str,
+    branch: &str,
+    shape: LineageShape,
 ) -> Result<()> {
-    let affected = conn
-        .execute(
-            "INSERT INTO links \
-                 (source_id, target_id, edge_type, valid_from, valid_to, weight, properties, recorded_at) \
-             SELECT source_id, target_id, edge_type, valid_from, ?5, weight, properties, ?6 \
-             FROM links_current \
-             WHERE source_id = ?1 AND target_id = ?2 AND edge_type = ?3 AND valid_from = ?4",
-            libsql::params![source, target, edge_type, valid_from, valid_to, stamp],
-        )
-        .await
-        .map_err(DbError::Engine)?;
+    let affected = match shape {
+        // One lineage exists, so `links_current` *is* the visible set and the
+        // statement is the one this path has always issued. Kept rather than
+        // folded into the resolved form for [`LineageShape`]'s reason: the
+        // resolved form is opaque to the planner and costs 3.0x where there is
+        // nothing to resolve (D-220).
+        LineageShape::Trunk => conn
+            .execute(
+                "INSERT INTO links \
+                     (source_id, target_id, edge_type, valid_from, valid_to, weight, properties, recorded_at) \
+                 SELECT source_id, target_id, edge_type, valid_from, ?5, weight, properties, ?6 \
+                 FROM links_current \
+                 WHERE source_id = ?1 AND target_id = ?2 AND edge_type = ?3 AND valid_from = ?4",
+                libsql::params![source, target, edge_type, valid_from, valid_to, stamp],
+            )
+            .await
+            .map_err(DbError::Engine)?,
+        // Shadow retirement: the row being closed may belong to an ancestor,
+        // and the row written carries *this* lineage's id. See
+        // `lineage::retire_from_resolved`.
+        LineageShape::Resolved => conn
+            .execute(
+                &crate::graph::lineage::retire_from_resolved(),
+                libsql::params![
+                    source, target, edge_type, valid_from, branch, valid_to, stamp
+                ],
+            )
+            .await
+            .map_err(DbError::Engine)?,
+    };
 
     if affected == 0 {
         return Err(DbError::NotFound(format!(
@@ -3726,6 +3987,7 @@ async fn upsert_concept(
             WriteOp::Concept {
                 id: &concept.id,
                 recorded_at: stamp,
+                branch: concept.branch_name(),
             },
         )
         .await),
@@ -3818,9 +4080,10 @@ fn defer_to_single_open(proposed: &Interval, existing: &Interval) -> bool {
 async fn reject_overlapping_interval(
     conn: &libsql::Connection,
     edge: &EdgeAssertion,
+    shape: LineageShape,
 ) -> Result<()> {
-    let stmt = conn.prepare(OVERLAP_CANDIDATES).await?;
-    check_prepared(&stmt, edge).await
+    let guard = OverlapGuard::prepare(conn, shape).await?;
+    check_prepared(&guard, edge).await
 }
 
 /// The guard's body, against a statement the caller has already prepared.
@@ -3836,18 +4099,39 @@ async fn reject_overlapping_interval(
 ///
 /// `reset()` between rows is not optional: libsql binds and steps without
 /// resetting, so a reused statement must be returned to its initial state.
-async fn check_prepared(stmt: &libsql::Statement, edge: &EdgeAssertion) -> Result<()> {
+async fn check_prepared(guard: &OverlapGuard, edge: &EdgeAssertion) -> Result<()> {
     let proposed = Interval::new(edge.valid_from.clone(), edge.valid_to.clone());
 
-    stmt.reset();
-    let mut rows = stmt
-        .query(libsql::params![
-            edge.source.as_str(),
-            edge.target.as_str(),
-            edge.edge_type.as_str(),
-            edge.valid_from.as_str()
-        ])
-        .await?;
+    guard.stmt.reset();
+    // The resolved form takes a fifth parameter, the writing lineage, and
+    // returns what that lineage can see; the trunk form takes four and returns
+    // the table. Binding five to the trunk statement would be an error from
+    // libsql rather than a wrong answer, which is the failure mode to prefer.
+    let mut rows = match guard.shape {
+        LineageShape::Trunk => {
+            guard
+                .stmt
+                .query(libsql::params![
+                    edge.source.as_str(),
+                    edge.target.as_str(),
+                    edge.edge_type.as_str(),
+                    edge.valid_from.as_str()
+                ])
+                .await?
+        }
+        LineageShape::Resolved => {
+            guard
+                .stmt
+                .query(libsql::params![
+                    edge.source.as_str(),
+                    edge.target.as_str(),
+                    edge.edge_type.as_str(),
+                    edge.valid_from.as_str(),
+                    edge.branch_name()
+                ])
+                .await?
+        }
+    };
 
     while let Some(row) = rows.next().await? {
         let existing = Interval::new(row.get::<String>(0)?, row.get::<String>(1)?);
@@ -3923,16 +4207,29 @@ fn reject_overlaps_within(edges: &[EdgeAssertion]) -> Result<()> {
     order.sort_unstable_by(|&i, &j| {
         let a = &edges[i as usize];
         let b = &edges[j as usize];
-        (&a.source, &a.target, &a.edge_type, &a.valid_from).cmp(&(
-            &b.source,
-            &b.target,
-            &b.edge_type,
-            &b.valid_from,
-        ))
+        (
+            &a.source,
+            &a.target,
+            &a.edge_type,
+            a.branch_name(),
+            &a.valid_from,
+        )
+            .cmp(&(
+                &b.source,
+                &b.target,
+                &b.edge_type,
+                b.branch_name(),
+                &b.valid_from,
+            ))
     });
 
-    fn key(e: &EdgeAssertion) -> (&str, &str, &str) {
-        (e.source.as_str(), e.target.as_str(), e.edge_type.as_str())
+    fn key(e: &EdgeAssertion) -> (&str, &str, &str, &str) {
+        (
+            e.source.as_str(),
+            e.target.as_str(),
+            e.edge_type.as_str(),
+            e.branch_name(),
+        )
     }
     let at = |k: usize| &edges[order[k] as usize];
 
@@ -4042,8 +4339,11 @@ async fn write_edges_atomic(
     }
 
     // Before the transaction opens: a batch that contradicts itself is refused
-    // without taking the write lock at all (D-060).
+    // without taking the write lock at all (D-060), and a batch naming a
+    // lineage that does not exist is refused before it can take the lock at all
+    // (0.14.8).
     reject_overlaps_within(edges)?;
+    let shape = check_lineages(conn, &distinct_branches(edges)).await?;
 
     let tx = conn
         .transaction_with_behavior(libsql::TransactionBehavior::Immediate)
@@ -4053,7 +4353,7 @@ async fn write_edges_atomic(
     // between the check and the insert.
     // One preparation for the whole chunk, not one per row — see
     // `check_prepared`, and D-056 for the same lesson learned on `INSERT_LINK`.
-    let guard = tx.prepare(OVERLAP_CANDIDATES).await?;
+    let guard = OverlapGuard::prepare(&tx, shape).await?;
     for edge in edges {
         if let Err(e) = check_prepared(&guard, edge).await {
             // Released before the rollback: a live statement on the connection
@@ -4069,18 +4369,7 @@ async fn write_edges_atomic(
 
     for edge in edges {
         stmt.reset();
-        let res = stmt
-            .execute(libsql::params![
-                edge.source.as_str(),
-                edge.target.as_str(),
-                edge.edge_type.as_str(),
-                edge.valid_from.as_str(),
-                edge.valid_to.as_str(),
-                edge.weight,
-                edge.properties.as_str(),
-                stamp
-            ])
-            .await;
+        let res = stmt.execute(edge_params(edge, stamp)).await;
 
         if let Err(e) = res {
             let typed = classify(
@@ -4193,6 +4482,18 @@ async fn write_concepts_atomic(
         return Ok(0);
     }
 
+    // Named lineages, before the write lock — `check_lineages`' reason, and the
+    // shape it also returns is unused here because `concepts` is keyed by
+    // identity and has no resolution to do (see `ConceptUpsert::branch`).
+    let mut named: Vec<&str> = Vec::with_capacity(1);
+    for concept in concepts {
+        let name = concept.branch_name();
+        if !named.contains(&name) {
+            named.push(name);
+        }
+    }
+    check_lineages(conn, &named).await?;
+
     let tx = conn
         .transaction_with_behavior(libsql::TransactionBehavior::Immediate)
         .await?;
@@ -4214,6 +4515,7 @@ async fn write_concepts_atomic(
                 WriteOp::Concept {
                     id: &concept.id,
                     recorded_at: stamp,
+                    branch: concept.branch_name(),
                 },
             )
             .await;

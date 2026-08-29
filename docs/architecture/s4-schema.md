@@ -473,7 +473,7 @@ Everything above is a constraint the *engine* keeps: a `CHECK`, a key, a trigger
 
 | # | Invariant | Refused by | Permitted by | Decision |
 |---|---|---|---|---|
-| 1 | No two valid-time intervals overlap for one `(source_id, target_id, edge_type)` | the write actor, `OverlappingInterval` | the schema — `trg_links_single_open` fires only on the open sentinel, so two *closed* overlapping intervals satisfy every constraint here | [D-060](s13-decision-register.md#d-060) |
+| 1 | No two valid-time intervals overlap for one `(source_id, target_id, edge_type)` **as one lineage sees it** — restated in 0.14.8, because the unqualified form stops being the invariant the moment a second lineage can write | the write actor, `OverlappingInterval`, against the read's own resolution narrowed to the edge key | the schema — `trg_links_single_open` fires only on the open sentinel, so two *closed* overlapping intervals satisfy every constraint here, and no trigger can walk an ancestry | [D-060](s13-decision-register.md#d-060), [D-225](s13-decision-register.md#d-225) |
 | 2 | All writes are serialised through one connection | the handle — every write method crosses a channel, and `read_conn()` carries `PRAGMA query_only = ON` | `Database::raw()`, and the free `register_model` / `upsert_embedding`, which take a bare connection | [D-068](s13-decision-register.md#d-068) |
 | 3 | ~~Edge weights are **non-negative**~~ — **closed in v7**, see below | the schema, `CHECK (weight >= 0.0 AND weight < 9e999 AND typeof(weight) = 'real')` | `links_current` and pre-v7 cold files, which carry no such `CHECK` — so the loader guard stays | [D-039](s13-decision-register.md#d-039), [D-083](s13-decision-register.md#d-083) |
 | 4 | The archive-session marker is **absent** outside an archive session — **detected at open since 0.10.0**, see below | `Database::open`, `ArchiveSessionLeaked` — `verify()` refuses a committed `macrame_archive_session` | the schema, which cannot express "this table must not exist"; and any raw writer, which is row 2's permission used to switch off rows 1–3's enforcement | [D-008](s13-decision-register.md#d-008), [D-135](s13-decision-register.md#d-135) |
@@ -636,3 +636,34 @@ a column every trigger leaves reading `'main'` partitions on a constant.
 `DROP` then `CREATE`, never a re-issue: `CREATE TRIGGER IF NOT EXISTS` against an
 existing name keeps the **old body**, which is the lesson
 [D-129](s13-decision-register.md#d-129) already records.
+
+#### The question `trg_links_single_open` parked, answered from the write path (0.14.8, [D-225](s13-decision-register.md#d-225))
+
+v12 added `branch_id` to the single-open trigger's `EXISTS` and said the clause
+was "row-level and deliberately not ancestry-aware": a branch that inherits an
+open interval from its parent and asserts its own is superseding a belief, which
+is the thing a branch is for. What it left open was **whether the inherited
+interval should also close**, parked as §15.4's write-path question and as
+something "not answered by a trigger that can only see one row".
+
+It should not, and it cannot. Closing the ancestor's row is the parent corruption
+[Doctrine III](s0-s3-foundations.md#doctrine-iii) forbids, and `links` is
+append-only, so no statement in this crate could do it even if the rule wanted it.
+A branch retires an inherited edge by writing its **own** row at the ancestor's
+key with a closed interval, which the read prefers by `dist` — shadow retirement,
+which [§5.2](s5-modules.md#lineage-resolution)'s
+`visible_cte` has described as a write since 0.14.4 and which
+`Database::retire_edge_on` now performs.
+
+The half a trigger genuinely could not answer went to the Rust layer, where the
+ancestry is reachable. `reject_overlapping_interval` had read `links_current` for
+the edge key with **no lineage predicate at all** — exact while every row was
+`main`'s, and wrong in *both directions at once* thereafter — and now runs the
+read's own resolution restricted to the one key: **what a lineage may not overlap
+is what that lineage can see**. That keeps invariant 1 above where
+[D-060](s13-decision-register.md#d-060) put it, in the actor rather than in the
+schema, for the reason it put it there: a trigger able to make the refusal would
+need a recursive ancestry walk on **every insert**, on the path
+[D-059](s13-decision-register.md#d-059) exists to keep fast, to constrain callers
+who were going through the actor anyway. The storage layer permits what the API
+refuses, one lineage deep as well as none.

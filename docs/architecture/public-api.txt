@@ -70,7 +70,8 @@ pub macrame::connection::CheckpointReport::checkpointed_frames: u64
 pub macrame::connection::CheckpointReport::log_frames: u64
 impl macrame::connection::CheckpointReport
 pub fn macrame::connection::CheckpointReport::is_complete(&self) -> bool
-pub struct macrame::connection::ConceptUpsert
+#[non_exhaustive] pub struct macrame::connection::ConceptUpsert
+pub macrame::connection::ConceptUpsert::branch: core::option::Option<macrame::branch::BranchId>
 pub macrame::connection::ConceptUpsert::content: alloc::string::String
 pub macrame::connection::ConceptUpsert::embedding_model: core::option::Option<alloc::string::String>
 pub macrame::connection::ConceptUpsert::id: alloc::string::String
@@ -83,6 +84,7 @@ pub fn macrame::connection::ConceptUpsert::content(self, impl core::convert::Int
 pub fn macrame::connection::ConceptUpsert::embedding_model(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn macrame::connection::ConceptUpsert::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn macrame::connection::ConceptUpsert::normalized(self) -> macrame::error::Result<Self>
+pub fn macrame::connection::ConceptUpsert::on_branch(self, macrame::branch::BranchId) -> Self
 pub fn macrame::connection::ConceptUpsert::retired(self, bool) -> Self
 pub fn macrame::connection::ConceptUpsert::valid_from(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn macrame::connection::ConceptUpsert::valid_to(self, impl core::convert::Into<alloc::string::String>) -> Self
@@ -116,6 +118,7 @@ pub async fn macrame::connection::Database::reconstruct(&self, &str) -> macrame:
 pub async fn macrame::connection::Database::register_model(&self, &macrame::vector::ModelName, usize) -> macrame::error::Result<()>
 pub async fn macrame::connection::Database::rehydrate(&self, &[&str]) -> macrame::error::Result<macrame::temporal::RehydrateReport>
 pub async fn macrame::connection::Database::retire_edge(&self, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, &str, &str) -> macrame::error::Result<()>
+pub async fn macrame::connection::Database::retire_edge_on(&self, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, &str, &str, macrame::branch::BranchId) -> macrame::error::Result<()>
 pub fn macrame::connection::Database::schema_version(&self) -> u32
 pub async fn macrame::connection::Database::shadow_step(&self, macrame::integrity::ShadowStep) -> macrame::error::Result<macrame::integrity::ShadowOutcome>
 pub fn macrame::connection::Database::snapshots_dir(&self) -> &std::path::Path
@@ -167,6 +170,10 @@ pub macrame::error::DbError::AttributeModeUnstated
 pub macrame::error::DbError::AttributeModeUnstated::instants: macrame::error::StatedInstants
 pub macrame::error::DbError::BranchExists(alloc::string::String)
 pub macrame::error::DbError::BulkCancelled
+pub macrame::error::DbError::CrossLineage
+pub macrame::error::DbError::CrossLineage::attempted: alloc::string::String
+pub macrame::error::DbError::CrossLineage::held_by: alloc::string::String
+pub macrame::error::DbError::CrossLineage::id: alloc::string::String
 pub macrame::error::DbError::CurrentDrift
 pub macrame::error::DbError::CurrentDrift::n: usize
 pub macrame::error::DbError::DiagnosticConn
@@ -258,6 +265,7 @@ pub fn macrame::error::StatedInstants::fmt(&self, &mut core::fmt::Formatter<'_>)
 pub macrame::error::WriteOp::Annotation
 pub macrame::error::WriteOp::Annotation::concept_id: &'a str
 pub macrame::error::WriteOp::Concept
+pub macrame::error::WriteOp::Concept::branch: &'a str
 pub macrame::error::WriteOp::Concept::id: &'a str
 pub macrame::error::WriteOp::Concept::recorded_at: &'a str
 pub macrame::error::WriteOp::Delete
@@ -320,7 +328,8 @@ impl macrame::graph::CostEstimator
 pub fn macrame::graph::CostEstimator::estimate(&self, usize, macrame::graph::CandidateCount) -> macrame::error::Result<macrame::graph::CostEstimate>
 pub fn macrame::graph::CostEstimator::k_prime(&self, usize, usize) -> usize
 pub fn macrame::graph::CostEstimator::new(usize, usize, usize) -> Self
-pub struct macrame::graph::EdgeAssertion
+#[non_exhaustive] pub struct macrame::graph::EdgeAssertion
+pub macrame::graph::EdgeAssertion::branch: core::option::Option<macrame::branch::BranchId>
 pub macrame::graph::EdgeAssertion::edge_type: alloc::string::String
 pub macrame::graph::EdgeAssertion::properties: alloc::string::String
 pub macrame::graph::EdgeAssertion::source: alloc::string::String
@@ -331,6 +340,7 @@ pub macrame::graph::EdgeAssertion::weight: f64
 impl macrame::graph::EdgeAssertion
 pub fn macrame::graph::EdgeAssertion::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn macrame::graph::EdgeAssertion::normalized(self) -> macrame::error::Result<Self>
+pub fn macrame::graph::EdgeAssertion::on_branch(self, macrame::branch::BranchId) -> Self
 pub fn macrame::graph::EdgeAssertion::properties(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn macrame::graph::EdgeAssertion::valid_from(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn macrame::graph::EdgeAssertion::valid_to(self, impl core::convert::Into<alloc::string::String>) -> Self
@@ -554,6 +564,10 @@ pub macrame::prelude::DbError::AttributeModeUnstated
 pub macrame::prelude::DbError::AttributeModeUnstated::instants: macrame::error::StatedInstants
 pub macrame::prelude::DbError::BranchExists(alloc::string::String)
 pub macrame::prelude::DbError::BulkCancelled
+pub macrame::prelude::DbError::CrossLineage
+pub macrame::prelude::DbError::CrossLineage::attempted: alloc::string::String
+pub macrame::prelude::DbError::CrossLineage::held_by: alloc::string::String
+pub macrame::prelude::DbError::CrossLineage::id: alloc::string::String
 pub macrame::prelude::DbError::CurrentDrift
 pub macrame::prelude::DbError::CurrentDrift::n: usize
 pub macrame::prelude::DbError::DiagnosticConn
@@ -714,7 +728,8 @@ pub macrame::prelude::CheckpointReport::checkpointed_frames: u64
 pub macrame::prelude::CheckpointReport::log_frames: u64
 impl macrame::connection::CheckpointReport
 pub fn macrame::connection::CheckpointReport::is_complete(&self) -> bool
-pub struct macrame::prelude::ConceptUpsert
+#[non_exhaustive] pub struct macrame::prelude::ConceptUpsert
+pub macrame::prelude::ConceptUpsert::branch: core::option::Option<macrame::branch::BranchId>
 pub macrame::prelude::ConceptUpsert::content: alloc::string::String
 pub macrame::prelude::ConceptUpsert::embedding_model: core::option::Option<alloc::string::String>
 pub macrame::prelude::ConceptUpsert::id: alloc::string::String
@@ -727,6 +742,7 @@ pub fn macrame::connection::ConceptUpsert::content(self, impl core::convert::Int
 pub fn macrame::connection::ConceptUpsert::embedding_model(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn macrame::connection::ConceptUpsert::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn macrame::connection::ConceptUpsert::normalized(self) -> macrame::error::Result<Self>
+pub fn macrame::connection::ConceptUpsert::on_branch(self, macrame::branch::BranchId) -> Self
 pub fn macrame::connection::ConceptUpsert::retired(self, bool) -> Self
 pub fn macrame::connection::ConceptUpsert::valid_from(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn macrame::connection::ConceptUpsert::valid_to(self, impl core::convert::Into<alloc::string::String>) -> Self
@@ -774,6 +790,7 @@ pub async fn macrame::connection::Database::reconstruct(&self, &str) -> macrame:
 pub async fn macrame::connection::Database::register_model(&self, &macrame::vector::ModelName, usize) -> macrame::error::Result<()>
 pub async fn macrame::connection::Database::rehydrate(&self, &[&str]) -> macrame::error::Result<macrame::temporal::RehydrateReport>
 pub async fn macrame::connection::Database::retire_edge(&self, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, &str, &str) -> macrame::error::Result<()>
+pub async fn macrame::connection::Database::retire_edge_on(&self, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, &str, &str, macrame::branch::BranchId) -> macrame::error::Result<()>
 pub fn macrame::connection::Database::schema_version(&self) -> u32
 pub async fn macrame::connection::Database::shadow_step(&self, macrame::integrity::ShadowStep) -> macrame::error::Result<macrame::integrity::ShadowOutcome>
 pub fn macrame::connection::Database::snapshots_dir(&self) -> &std::path::Path
@@ -791,7 +808,8 @@ pub async fn macrame::connection::Database::load_subgraph(&self, &str, u32, &str
 pub async fn macrame::connection::Database::load_subgraph_with(&self, &macrame::graph::TraversalBuilder, &str, usize) -> macrame::error::Result<macrame::graph::Subgraph>
 impl core::ops::drop::Drop for macrame::connection::Database
 pub fn macrame::connection::Database::drop(&mut self)
-pub struct macrame::prelude::EdgeAssertion
+#[non_exhaustive] pub struct macrame::prelude::EdgeAssertion
+pub macrame::prelude::EdgeAssertion::branch: core::option::Option<macrame::branch::BranchId>
 pub macrame::prelude::EdgeAssertion::edge_type: alloc::string::String
 pub macrame::prelude::EdgeAssertion::properties: alloc::string::String
 pub macrame::prelude::EdgeAssertion::source: alloc::string::String
@@ -802,6 +820,7 @@ pub macrame::prelude::EdgeAssertion::weight: f64
 impl macrame::graph::EdgeAssertion
 pub fn macrame::graph::EdgeAssertion::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn macrame::graph::EdgeAssertion::normalized(self) -> macrame::error::Result<Self>
+pub fn macrame::graph::EdgeAssertion::on_branch(self, macrame::branch::BranchId) -> Self
 pub fn macrame::graph::EdgeAssertion::properties(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn macrame::graph::EdgeAssertion::valid_from(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn macrame::graph::EdgeAssertion::valid_to(self, impl core::convert::Into<alloc::string::String>) -> Self
@@ -1215,6 +1234,10 @@ pub macrame::DbError::AttributeModeUnstated
 pub macrame::DbError::AttributeModeUnstated::instants: macrame::error::StatedInstants
 pub macrame::DbError::BranchExists(alloc::string::String)
 pub macrame::DbError::BulkCancelled
+pub macrame::DbError::CrossLineage
+pub macrame::DbError::CrossLineage::attempted: alloc::string::String
+pub macrame::DbError::CrossLineage::held_by: alloc::string::String
+pub macrame::DbError::CrossLineage::id: alloc::string::String
 pub macrame::DbError::CurrentDrift
 pub macrame::DbError::CurrentDrift::n: usize
 pub macrame::DbError::DiagnosticConn
@@ -1367,7 +1390,8 @@ pub macrame::CheckpointReport::checkpointed_frames: u64
 pub macrame::CheckpointReport::log_frames: u64
 impl macrame::connection::CheckpointReport
 pub fn macrame::connection::CheckpointReport::is_complete(&self) -> bool
-pub struct macrame::ConceptUpsert
+#[non_exhaustive] pub struct macrame::ConceptUpsert
+pub macrame::ConceptUpsert::branch: core::option::Option<macrame::branch::BranchId>
 pub macrame::ConceptUpsert::content: alloc::string::String
 pub macrame::ConceptUpsert::embedding_model: core::option::Option<alloc::string::String>
 pub macrame::ConceptUpsert::id: alloc::string::String
@@ -1380,6 +1404,7 @@ pub fn macrame::connection::ConceptUpsert::content(self, impl core::convert::Int
 pub fn macrame::connection::ConceptUpsert::embedding_model(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn macrame::connection::ConceptUpsert::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn macrame::connection::ConceptUpsert::normalized(self) -> macrame::error::Result<Self>
+pub fn macrame::connection::ConceptUpsert::on_branch(self, macrame::branch::BranchId) -> Self
 pub fn macrame::connection::ConceptUpsert::retired(self, bool) -> Self
 pub fn macrame::connection::ConceptUpsert::valid_from(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn macrame::connection::ConceptUpsert::valid_to(self, impl core::convert::Into<alloc::string::String>) -> Self
@@ -1413,6 +1438,7 @@ pub async fn macrame::connection::Database::reconstruct(&self, &str) -> macrame:
 pub async fn macrame::connection::Database::register_model(&self, &macrame::vector::ModelName, usize) -> macrame::error::Result<()>
 pub async fn macrame::connection::Database::rehydrate(&self, &[&str]) -> macrame::error::Result<macrame::temporal::RehydrateReport>
 pub async fn macrame::connection::Database::retire_edge(&self, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, &str, &str) -> macrame::error::Result<()>
+pub async fn macrame::connection::Database::retire_edge_on(&self, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, &str, &str, macrame::branch::BranchId) -> macrame::error::Result<()>
 pub fn macrame::connection::Database::schema_version(&self) -> u32
 pub async fn macrame::connection::Database::shadow_step(&self, macrame::integrity::ShadowStep) -> macrame::error::Result<macrame::integrity::ShadowOutcome>
 pub fn macrame::connection::Database::snapshots_dir(&self) -> &std::path::Path

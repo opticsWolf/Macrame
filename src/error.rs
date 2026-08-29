@@ -215,6 +215,34 @@ pub enum DbError {
         parent_forked_at: String,
     },
 
+    /// A branch tried to restate a concept another lineage already holds
+    /// (§15.2, v12, D-225).
+    ///
+    /// # A guard that existed for three releases with nothing able to fire it
+    ///
+    /// `trg_concepts_cross_lineage` has been in the schema since v12 and
+    /// [`AbortKind::CrossLineage`] has recognised it since, but [`classify`]
+    /// had no arm for that kind, so it fell through to
+    /// [`DbError::Engine`] — the opaque variant every other guard exists to
+    /// avoid. Nothing was wrong with that until 0.14.8, because until 0.14.8
+    /// no write in this crate could name a lineage and no caller could reach
+    /// the trigger. It is the same shape D-224 found in a comment and D-223
+    /// found in a filter: **machinery written for an unbuilt caller is
+    /// exercised by nothing**, so a gap in it is invisible in a green suite.
+    ///
+    /// `held_by` is read back on the error path rather than parsed out of the
+    /// abort message, for [`RecordedAtRegression`](Self::RecordedAtRegression)'s
+    /// reason: the trigger cannot put it in the text, and the database knows it.
+    #[error(
+        "concept {id} belongs to lineage {held_by} and {attempted} may not \
+         restate it; a branch inherits concepts"
+    )]
+    CrossLineage {
+        id: String,
+        held_by: String,
+        attempted: String,
+    },
+
     #[error("subgraph exceeds budget ({n} > {budget})")]
     SubgraphTooLarge { n: usize, budget: usize },
 
@@ -708,6 +736,10 @@ pub enum WriteOp<'a> {
     Concept {
         id: &'a str,
         recorded_at: &'a str,
+        /// The lineage the upsert named, for `DbError::CrossLineage` (0.14.8).
+        /// It cannot be read back after the abort, because the row it would
+        /// have been on was never written.
+        branch: &'a str,
     },
     Delete {
         table: &'a str,
@@ -768,7 +800,12 @@ pub async fn classify(conn: &libsql::Connection, err: libsql::Error, op: WriteOp
             target_id: target_id.to_string(),
             edge_type: edge_type.to_string(),
         },
-        (AbortKind::RecordedAtRegression, WriteOp::Concept { id, recorded_at }) => {
+        (
+            AbortKind::RecordedAtRegression,
+            WriteOp::Concept {
+                id, recorded_at, ..
+            },
+        ) => {
             let had = current_recorded_at(conn, id).await.unwrap_or_default();
             DbError::RecordedAtRegression {
                 got: recorded_at.to_string(),
@@ -777,6 +814,11 @@ pub async fn classify(conn: &libsql::Connection, err: libsql::Error, op: WriteOp
         }
         (AbortKind::DeleteOutsideArchive, WriteOp::Delete { table }) => DbError::ArchiveViolation {
             table: table.to_string(),
+        },
+        (AbortKind::CrossLineage, WriteOp::Concept { id, branch, .. }) => DbError::CrossLineage {
+            id: id.to_string(),
+            held_by: lineage_of_concept(conn, id).await,
+            attempted: branch.to_string(),
         },
         // An annotation naming a concept that is not there. The engine says
         // "FOREIGN KEY constraint failed" and no more — not which row, and a
@@ -813,6 +855,30 @@ pub async fn classify(conn: &libsql::Connection, err: libsql::Error, op: WriteOp
     }
 }
 
+/// Who holds a concept id, for [`DbError::CrossLineage`].
+///
+/// The refused lineage is not read back — the row was never written — so it
+/// comes from [`WriteOp::Concept`], which is the only place it survives the
+/// abort. Falls back to `"?"` rather than guessing when the read fails, for
+/// [`missing_endpoint`]'s reason: a classifier that can fail twice is worse than
+/// one that answers approximately.
+async fn lineage_of_concept(conn: &libsql::Connection, id: &str) -> String {
+    let unknown = || "?".to_string();
+    let Ok(mut rows) = conn
+        .query(
+            "SELECT branch_id FROM concepts WHERE id = ?1",
+            libsql::params![id],
+        )
+        .await
+    else {
+        return unknown();
+    };
+    match rows.next().await {
+        Ok(Some(row)) => row.get::<String>(0).unwrap_or_else(|_| unknown()),
+        _ => unknown(),
+    }
+}
+
 /// Which endpoint of a refused edge is not in `concepts` (C-1).
 ///
 /// One query on an error path, for the reason [`classify`]'s own rustdoc gives:
@@ -820,17 +886,21 @@ pub async fn classify(conn: &libsql::Connection, err: libsql::Error, op: WriteOp
 /// by hand. Falls back to the source id if the query itself fails, because a
 /// classifier that can fail twice is worse than one that answers approximately.
 ///
-/// # The concepts path, and why it needs no arm of its own
+/// # The concepts path, and why it still needs no arm of its own
 ///
-/// C-1 names `links` **and** `concepts`. Since v12 `concepts` does carry an
-/// outbound key — `branch_id` into `branches` (§15.2) — so for the first time
-/// the question is not vacuous. It is also not reachable: every concept write
-/// in this crate omits `branch_id` and takes the `'main'` default, and the row
-/// it names is seeded by the baseline and by the rung, inside the same
-/// transaction, before any row can be stamped. The case is answered by
-/// construction rather than left open, which is what closing C-1 means here.
-/// When `fork()` lets a caller name a lineage, the arm it needs is this one
-/// with a different column.
+/// C-1 names `links` **and** `concepts`. Since v12 `concepts` carries an
+/// outbound key — `branch_id` into `branches` (§15.2) — and **since 0.14.8 a
+/// caller can choose what goes in it**, which is the condition this paragraph
+/// used to say would need an arm "with a different column".
+///
+/// It still does not, and the reason moved rather than held: the write path
+/// checks every lineage a write names *before* it opens the transaction
+/// (`connection::check_lineages`), so an unregistered branch comes back as
+/// [`DbError::UnknownBranch`] naming the branch, and the foreign key never
+/// fires. An arm here would be a classification for a state the API cannot
+/// reach — defect Q's shape, a typed error no code path can produce — and the
+/// honest place for the refusal is the one that can say *branch* rather than
+/// *constraint*.
 async fn missing_endpoint(conn: &libsql::Connection, source_id: &str, target_id: &str) -> String {
     for id in [source_id, target_id] {
         let Ok(mut rows) = conn
