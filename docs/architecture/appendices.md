@@ -393,6 +393,13 @@ db.optimize().await?;                                  // PRAGMA optimize, only 
 // -- Archive --
 let report = db.archive(cutoff).await?;                // ArchiveReport { links_archived,
                                                        //   log_entries_archived, horizon }
+// LINEAGE-AWARE ONLY SINCE 0.14.12 (D-229). Both predicates matched edge keys
+// ACROSS branches, so one lineage's write archived another's current belief;
+// and a branch's own CLOSED row at an ancestor's key was taken as "history",
+// which removed the branch's disbelief and let the ancestor's open row win
+// again. `audit_current` returns 0 across both -- links_current is honestly
+// re-derived from a ledger that was wrongly pruned, so Doctrine VI's check has
+// nothing outside the file to compare against.
 
 // Windowed: many bounded sessions instead of one unbounded hold (0.6.0, D-080).
 // A window that never advances, or one implying more than MAX_ARCHIVE_SESSIONS

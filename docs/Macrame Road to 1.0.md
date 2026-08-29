@@ -3461,6 +3461,18 @@ and the schema does not move.
   `archive` gains a branch-aware arm: an abandoned branch's rows are a contiguous
   archivable set by construction, which is the cheapest archive predicate in the
   crate.
+
+  **0.14.12 is the prerequisite this turned up**
+  ([D-229](architecture/s13-decision-register.md#d-229)). Preparing the arm meant
+  reading the predicates it would sit beside, and neither had learned the lineage
+  v12 gave `links_current` and the four folds. A link's `entity_id` carries no
+  branch, so "superseded by a later assertion for the same interval key" matched
+  **across** lineages and one `archive` left the trunk unable to reach a node it
+  still believed; and "a closed interval is history" is false of a shadow, so an
+  archive un-retired an edge a branch had stopped believing. Both are invisible
+  to `audit_current`, which compares the projection with the ledger and has
+  nothing to compare the ledger against. An arm that archives a *whole lineage's*
+  rows could not have been reviewed on top of that.
 - **Schema rung to v12**, with `a_version_bump_must_bring_its_own_rung_test`
   enforcing it and the existing-rows default proving the migration is additive.
 - **The Python surface, in the same release.** W6's finding was that a binding
@@ -3485,6 +3497,11 @@ and the schema does not move.
   rule the lapse suggests: a convention checked per *feature* gets checked on
   the surfaces that share an implementation, and the surfaces that do not share
   it are where it silently holds four times out of five.
+
+  0.14.12 adds no surface either, and its tests cross into Python anyway — the
+  repair is observable through `archive`, `retire_edge(branch=)` and
+  `query_as_of_edges(branch=)`, and D-227's finding is that a repair Python
+  cannot observe is a repair nobody there can test.
 
   0.14.6 adds no surface in either language and is neither a holding nor a lapse:
   the cutoff changes what the existing `branch=` *means*, so a binding written

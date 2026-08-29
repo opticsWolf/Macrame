@@ -121,12 +121,69 @@ const COLD_SCHEMA: &[&str] = &[
 ];
 
 /// A links assertion is archivable when it is older than the cutoff AND it is
-/// either superseded by a later assertion for the same interval key, or it is
-/// the current belief for an interval that closed before the cutoff.
+/// either superseded by a later assertion **of its own lineage** for the same
+/// interval key, or it is the current belief for an interval that closed before
+/// the cutoff.
 ///
 /// This keeps every row that `links_current` still projects (Doctrine VI: the
 /// materialization must stay rebuildable from `links`) while moving exactly the
 /// "closed intervals, superseded history" the §2 diagram assigns to the cold file.
+///
+/// # `newer.branch_id = links.branch_id`, added at 0.14.12 ([D-229])
+///
+/// Without it this predicate archived rows the ledger still believed. `links_current`
+/// is keyed by `(source, target, type, valid_from, branch_id)` and the four folds in
+/// `temporal::replay` partition by `(table_name, entity_id, branch_id)`, but a link's
+/// `entity_id` is `source|target|type|valid_from` and carries **no lineage**
+/// ([`crate::schema::ddl::CREATE_LINKS_LOG_INSERT`] says why re-keying it was
+/// refused). So "a later assertion for the same interval key" matched **across**
+/// lineages, and a branch asserting at an ancestor's key made the ancestor's own
+/// open, current row look superseded.
+///
+/// Measured before the repair, on a two-row fixture: the trunk asserts `a → b`, a
+/// branch forks and asserts at the same key, one `archive` runs, and the **trunk**
+/// stops reaching `b`. `audit_current` reports **0**, which is why nothing caught
+/// it — `links_current` is honestly re-derived from a `links` table that has been
+/// wrongly pruned, so the projection is correct with respect to what survives and
+/// the drift check has nothing to compare against. Doctrine VI's audit answers
+/// "is the projection the image of the ledger", never "is the ledger complete".
+///
+/// **Exact-branch equality, not ancestry**, and for
+/// [`crate::schema::ddl::CREATE_CONCEPTS_GUARD_LINEAGE`]'s reason. A descendant's
+/// row shadows an ancestor's *for the descendant's reads*; the ancestor still
+/// believes its own row, and Doctrine III is precisely that shadowing never
+/// touches it. A predicate that let a descendant supersede an ancestor would
+/// archive the parent's belief because a child disagreed.
+///
+/// [D-229]: ../../docs/architecture/s13-decision-register.md#d-229
+///
+/// # The closed-interval arm, and the row it must not take
+///
+/// "A closed interval is history" is true of a lineage that holds the only row
+/// at its key, and false of a **shadow**. A branch retires an inherited edge by
+/// writing its own closed row at the ancestor's key — the only cross-lineage
+/// retirement [Doctrine III] permits, because it never touches the parent's row.
+/// Archiving that row does not send history cold; it removes the branch's
+/// disbelief and lets the ancestor's open row win the resolution again.
+///
+/// Measured before the repair: a branch retires `b → c` over `[EPOCH, T1)`, one
+/// archive runs, and at `T2` the branch reaches `c` — an edge it had stopped
+/// believing, restored by a maintenance operation that mints no assertions. That
+/// is the resurrection [`crate::schema::ddl::CREATE_CONCEPTS_LOG_INSERT`] gates
+/// the rehydration insert against, reached down the other path.
+///
+/// So the arm stands down whenever **another lineage holds a hot row at the same
+/// interval key**. Conservative rather than exact: what strictly matters is an
+/// *ancestor's* row surviving this session, and both halves of that are more than
+/// this predicate can see. Ancestry would mean resolving `graph::lineage`'s chain
+/// for every branch, in a whole-database operation that takes no branch
+/// parameter; "surviving this session" is self-referential, since what survives
+/// is the answer this predicate is computing. Leaving rows hot costs file size
+/// and is never wrong, so the rule is the one that needs neither. A key held by
+/// exactly one lineage — every key on a ledger that has never forked — is
+/// unaffected, which the tests measure rather than argue from a column default.
+///
+/// [Doctrine III]: ../../docs/architecture/README.md
 const LINKS_ARCHIVABLE: &str = r#"
     recorded_at < :cutoff AND (
         EXISTS (
@@ -135,19 +192,48 @@ const LINKS_ARCHIVABLE: &str = r#"
               AND newer.target_id   = links.target_id
               AND newer.edge_type   = links.edge_type
               AND newer.valid_from  = links.valid_from
+              AND newer.branch_id   = links.branch_id
               AND newer.recorded_at > links.recorded_at
         )
-        OR (valid_to <> '9999-12-31T23:59:59.999999Z' AND valid_to <= :cutoff)
+        OR (valid_to <> '9999-12-31T23:59:59.999999Z' AND valid_to <= :cutoff
+            AND NOT EXISTS (
+                SELECT 1 FROM links other
+                WHERE other.source_id  = links.source_id
+                  AND other.target_id  = links.target_id
+                  AND other.edge_type  = links.edge_type
+                  AND other.valid_from = links.valid_from
+                  AND other.branch_id <> links.branch_id
+            ))
     )
 "#;
 
 /// A log entry is archivable when it is older than the cutoff and a later entry
-/// exists for the same entity, i.e. it is superseded. The newest entry per
-/// entity always stays hot so that `reconstruct(now)` never needs the cold file.
+/// exists **for the same entity on the same lineage**, i.e. it is superseded.
+/// The newest entry per fold partition always stays hot so that
+/// `reconstruct(now)` never needs the cold file.
+///
+/// # The lineage clause, added at 0.14.12 ([D-229])
+///
+/// The sentence above used to say "per entity", and the four folds in
+/// `temporal::replay` have partitioned by `(table_name, entity_id, branch_id)`
+/// since v12 — so the predicate stopped keeping the newest entry per *partition*
+/// hot the moment lineage arrived, and nothing said so. A branch writing at an
+/// ancestor's edge key made the ancestor's newest entry archivable, which is the
+/// same defect [`LINKS_ARCHIVABLE`] carried, reached from the log side.
+///
+/// It changes nothing for `concepts` entries and that is worth stating rather
+/// than leaving to be rediscovered: a concept's `entity_id` is its `id`, and
+/// [`crate::schema::ddl::CREATE_CONCEPTS_GUARD_LINEAGE`] refuses a branch
+/// restating an inherited one, so every log entry for one concept already
+/// carries one lineage. The clause is a no-op there by construction, not by
+/// accident.
+///
+/// [D-229]: ../../docs/architecture/s13-decision-register.md#d-229
 const LOG_ARCHIVABLE: &str = r#"
     recorded_at < :cutoff AND EXISTS (
         SELECT 1 FROM transaction_log newer
         WHERE newer.entity_id = transaction_log.entity_id
+          AND newer.branch_id = transaction_log.branch_id
           AND newer.seq_id    > transaction_log.seq_id
     )
 "#;

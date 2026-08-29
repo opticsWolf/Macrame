@@ -410,3 +410,54 @@ def test_a_rehydrated_concept_is_back_in_the_hot_table_not_merely_in_the_ledger(
     # And it is hot *with its columns intact*, which is what lets the predicate
     # admit it a second time.
     assert archivable_db.archive(FUTURE).concepts_archived == 1
+
+
+# --------------------------------------------------------------------------
+# archive and lineage (0.14.12, D-229)
+# --------------------------------------------------------------------------
+#
+# No binding changed here. These exist because the repair is *observable* from
+# Python — `archive`, `retire_edge(branch=)` and `query_as_of_edges(branch=)` are
+# all bound — and D-227's finding is that a repair Python cannot observe is a
+# repair nobody there can test. The predicates matched edge keys across lineages,
+# so one lineage's write archived another's current belief; `audit_current`
+# reported no drift throughout, because the projection was honestly re-derived
+# from a ledger that had been wrongly pruned.
+
+
+def pairs(edges):
+    return sorted((e[0], e[1]) for e in edges)
+
+
+def test_a_branch_writing_at_the_trunks_key_leaves_the_trunk_alone(db):
+    """The trunk lost an edge it still believed, because a branch disagreed."""
+    db.fork("alt")
+    db.assert_edge(
+        macrame.EdgeAssertion("a", "b", "CITES", valid_from=T0, weight=2.0, branch="alt")
+    )
+
+    db.archive(FUTURE)
+
+    assert pairs(db.query_as_of_edges(T1)) == [("a", "b"), ("b", "c")]
+    assert pairs(db.query_as_of_edges(T1, branch="alt")) == [("a", "b"), ("b", "c")]
+
+
+def test_archiving_does_not_resurrect_what_a_branch_retired(db):
+    """A maintenance operation that asserts nothing must un-assert nothing.
+
+    A branch retires an inherited edge by writing its **own** closed row at the
+    ancestor's key. Archiving that row as "a closed interval, therefore history"
+    deletes the branch's disbelief and lets the ancestor's open row win the
+    resolution again.
+    """
+    db.fork("alt")
+    db.retire_edge("b", "c", "CITES", T0, T1, branch="alt")
+
+    assert pairs(db.query_as_of_edges(T2, branch="alt")) == [("a", "b")]
+
+    db.archive(FUTURE)
+
+    assert pairs(db.query_as_of_edges(T2, branch="alt")) == [
+        ("a", "b")
+    ], "the archive un-retired an edge the branch had stopped believing"
+    assert pairs(db.query_as_of_edges(T2)) == [("a", "b"), ("b", "c")]
