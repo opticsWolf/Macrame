@@ -79,9 +79,16 @@ jobs:
       #
       # `--all-targets` is the point rather than a flourish: the break was in an
       # example, and a plain `cargo check --no-default-features` does not build
-      # examples. Check rather than test, because what is at stake is whether
-      # the feature-off configuration still *compiles* — the behaviour it gates
-      # is covered by the suite above.
+      # examples.
+      #
+      # **This step is kept and is not redundant** (0.14.24, D-241, §14.1 C-4).
+      # The `test` job now *runs* the suite with metrics off, and C-4 was written
+      # as "a build gate, not a `cargo check`" — a phrasing that reads as a
+      # replacement. Measured before acting: `cargo test --no-default-features`
+      # builds the examples but NOT `benches/budgets.rs`, which is
+      # `harness = false`. A deliberate type error in that bench is invisible to
+      # the suite and caught here. Each gate sees something the other cannot, so
+      # this one stays — cheap, early, and in the fast job.
       - name: check with metrics off
         run: cargo check --no-default-features --all-targets
         env:
@@ -280,6 +287,40 @@ jobs:
       # shape is a **crash-aware gate** — nonzero only on named failures — and
       # `run_rust_suite.py` already classifies well enough to build it, which is
       # why its exit codes are left exactly as they were.
+      # **The feature-off configuration is now run, not only compiled** (0.14.24,
+      # D-241, §14.1 C-4). `cargo check --no-default-features --all-targets` in
+      # the `lint` job proves this configuration *compiles*; nothing anywhere
+      # proved its 613 tests pass, while `README.md` published that count and
+      # [D-154](../../docs/architecture/s13-decision-register.md#d-154) said in
+      # writing that the path "is still built and tested". That is D-169's class
+      # one level up: a document publishing a fact about a configuration nobody
+      # runs.
+      #
+      # The gap is not hypothetical and was measured rather than argued.
+      # `MICROS_CEILING` is deliberately kept OUT of the `metrics` cfg —
+      # `src/metrics.rs` says why: "a build that does not record is exactly the
+      # build where nobody would notice it break." Widening it to `1 << 57`, so
+      # the packed duration overflows the kind bits, leaves
+      # `cargo check --no-default-features --all-targets` green and fails
+      # `metrics::tests::the_packing_leaves_room_for_both_fields` here. The
+      # crate already stated the intent that this run with the counters off;
+      # only CI had not.
+      #
+      # Ubuntu only. The feature switch is not OS-dependent — the matrix above
+      # exists for libSQL's platform behaviour, and R15 is a Windows fault —
+      # so a second full suite on all three would triple the cost of this job to
+      # re-answer the same question. Measured while writing this step: five runs
+      # of it on a developer Windows box gave four `completed` (613 passed) and
+      # one `crashed-R15` at 3/3 attempts, zero named failures throughout. On
+      # Windows this would be a step that goes red on a healthy tree often
+      # enough to fail D-236's test; on ubuntu it is a gate. Blocking, not `continue-on-error`: unlike
+      # the property step below, this one passes on a healthy tree, which is the
+      # test D-236 sets for whether a gate is a gate.
+      - name: test with metrics off (ubuntu only)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: python scripts/run_rust_suite.py --no-default-features --attempts 3
+
       - name: property tests (quarantined, R15-prone, non-blocking)
         shell: bash
         continue-on-error: true
