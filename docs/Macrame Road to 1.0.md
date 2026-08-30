@@ -3670,7 +3670,22 @@ so it is visible from both places.
    ([D-230](architecture/s13-decision-register.md#d-230)).
 3. Traversal cost against branch-chain depth is measured and recorded, and the
    strategy choice (§15.3) is a decision-register entry with the numbers in it.
-4. Cross-branch edges are refused with a named error, with a test.
+4. ~~Cross-branch edges are refused with a named error~~, with a test.
+   **Restated at 0.14.21, because the schema cannot represent the shape the
+   criterion refuses** ([D-238](architecture/s13-decision-register.md#d-238)):
+   an edge carries exactly one `branch_id` and concepts are shared vocabulary
+   ([D-214](architecture/s13-decision-register.md#d-214)), so there is no pair
+   of endpoints on different lineages for an edge to span — §16 records that
+   from the refusal's side. What is asserted instead is the reach a caller can
+   actually build, which the criterion was reaching for: one lineage naming
+   another's vocabulary. It is **accepted at assertion**, because refusing it
+   would refuse the inheritance that makes an O(1) fork possible, and
+   **refused at abandonment** with `BranchNotArchivable` naming the concept,
+   because that is where the reach becomes a contradiction rather than a
+   dependency. The remedy that refusal instructs the caller to take is taken
+   end to end, and the sibling arm of the guard — whose predicate says *any
+   other lineage* and whose only test used the trunk — is pinned for the first
+   time, in `tests/cross_branch_tests.rs`.
 5. ~~`diff(a, b)` returns exactly the assertions carrying `a`'s lineage and no
    others~~, over a fixture where the two branches disagree about the same edge.
    **Restated at 0.14.11, because the criterion as written pins the wrong
@@ -3985,3 +4000,14 @@ sentence from the one §17 item 4 contains. What a caller can actually attempt i
 refused and named: asserting through a view on a lineage the assertion does not
 name is `BranchMismatch`, naming an unregistered lineage is `UnknownBranch`, and
 restating an inherited concept is `CrossLineage`.
+
+**And one more thing a caller can attempt, which is what item 4 was reaching
+for** (0.14.21, [D-238](architecture/s13-decision-register.md#d-238)). A lineage
+cannot span two with an edge, but it can make its belief depend on another
+lineage's *vocabulary* — an edge on `beta` naming a concept minted on `alpha`.
+That is **accepted**, because the predicate that refused it would also refuse
+the trunk naming a branch's concept, which is the inheritance an O(1) fork is
+built on. It is refused one boundary later: `alpha` cannot then be abandoned
+while `beta`'s edge names its concept, and the refusal names the concept.
+`tests/cross_branch_tests.rs` pins both halves and walks the remedy the error
+message instructs.
