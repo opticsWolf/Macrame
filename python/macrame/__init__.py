@@ -61,6 +61,26 @@ Call `.to_dict()` when you want the copy.
 from __future__ import annotations
 
 import os as _os
+from typing import TYPE_CHECKING, Any, TypeVar
+
+if TYPE_CHECKING:  # pragma: no cover - types only
+    from collections.abc import Sequence
+
+    from ._macrame import (
+        CostEstimate,
+        Divergence,
+        Edge,
+        NodeAttributes,
+        Subgraph,
+        Timestamp,
+        VectorHit,
+    )
+
+# `_claim` returns what it was handed, and the two write types are unrelated
+# classes in the extension, so a value-restricted TypeVar is what says "same
+# type in, same type out" without inventing a shared base the binding does not
+# have.
+_Write = TypeVar("_Write", "EdgeAssertion", "ConceptUpsert")
 
 from ._macrame import (
     BUCKET_BOUNDS_MICROS,
@@ -339,7 +359,7 @@ class BranchView:
 
     # -- writes ------------------------------------------------------------
 
-    def _claim(self, item):
+    def _claim(self, item: _Write) -> _Write:
         """Stamp this lineage on an unnamed write; refuse a foreign one."""
         named = item.branch
         if named is None:
@@ -362,8 +382,8 @@ class BranchView:
         source: str,
         target: str,
         edge_type: str,
-        valid_from,
-        valid_to,
+        valid_from: Timestamp,
+        valid_to: Timestamp,
     ) -> None:
         """`Database.retire_edge` on this lineage.
 
@@ -382,35 +402,37 @@ class BranchView:
         """
         self._db.upsert_concept(self._claim(concept))
 
-    def write_bulk_atomic(self, edges) -> int:
+    def write_bulk_atomic(self, edges: Sequence[EdgeAssertion]) -> int:
         """`Database.write_bulk_atomic` with every edge on this lineage."""
         return self._db.write_bulk_atomic([self._claim(e) for e in edges])
 
-    def bulk_import(self, edges) -> int:
+    def bulk_import(self, edges: Sequence[EdgeAssertion]) -> int:
         """`Database.bulk_import` with every edge on this lineage."""
         return self._db.bulk_import([self._claim(e) for e in edges])
 
-    def write_concepts(self, concepts) -> int:
+    def write_concepts(self, concepts: Sequence[ConceptUpsert]) -> int:
         """`Database.write_concepts` with every concept on this lineage."""
         return self._db.write_concepts([self._claim(c) for c in concepts])
 
     # -- reads -------------------------------------------------------------
 
-    def traverse_ids(self, start_node: str, **kwargs):
+    def traverse_ids(self, start_node: str, **kwargs: Any) -> list[str]:
         """`Database.traverse_ids` on this lineage."""
         return self._db.traverse_ids(start_node, branch=self._id, **kwargs)
 
-    def traverse(self, start_node: str, **kwargs):
+    def traverse(self, start_node: str, **kwargs: Any) -> list[NodeAttributes]:
         """`Database.traverse` on this lineage."""
         return self._db.traverse(start_node, branch=self._id, **kwargs)
 
-    def load_subgraph(self, start_node: str, max_hops: int, byte_budget: int, **kwargs):
+    def load_subgraph(
+        self, start_node: str, max_hops: int, byte_budget: int, **kwargs: Any
+    ) -> Subgraph:
         """`Database.load_subgraph` on this lineage."""
         return self._db.load_subgraph(
             start_node, max_hops, byte_budget, branch=self._id, **kwargs
         )
 
-    def query_as_of_edges(self, ts=None):
+    def query_as_of_edges(self, ts: Timestamp | None = None) -> list[Edge]:
         """`Database.query_as_of_edges` on this lineage.
 
         The read the Rust view has had since 0.14.9 and this one has had
@@ -419,11 +441,13 @@ class BranchView:
         """
         return self._db.query_as_of_edges(ts, branch=self._id)
 
-    def search_filtered(self, *args, **kwargs):
+    def search_filtered(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[list[VectorHit], CostEstimate]:
         """`Database.search_filtered` on this lineage."""
         return self._db.search_filtered(*args, branch=self._id, **kwargs)
 
-    def diff(self, other: str):
+    def diff(self, other: str) -> list[Divergence]:
         """What this lineage believes that `other` does not.
 
         `Database.diff` with this view on the left. The direction matters and

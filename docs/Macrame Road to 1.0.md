@@ -3783,6 +3783,19 @@ so it is visible from both places.
     to green when the standing reds are triaged, and the gap between those two
     sentences is the honest statement of where this project's CI is.
 
+    **The obligation paid at 0.14.20, and what it found is a different animal
+    from the four above** ([D-237](architecture/s13-decision-register.md#d-237)).
+    `python.yml` runs `mypy --strict python/macrame`, and it had been red since
+    0.14.9, when `BranchView` — the one hand-written Python file in the package —
+    shipped with no annotations on twelve methods. **That gate was not broken.**
+    It ran, it was right, and eleven releases went past it, because `python.yml`
+    triggers on the same `push: branches: [main]` plus `pull_request` that
+    `ci.yml` does and `BranchView` has never existed on `main`: the code and the
+    gate that judges it were never in the same place until PR #2 put them there.
+    The first four findings were instruments that could not report; this is the
+    first one that reported and was not read — which is what the obligation
+    above exists to catch, and the first defect it has actually turned up.
+
 13. D-213 … the register's own next number, whatever it turns out to be. **Not a
     number this plan chooses**: three acceptance lists in a row have named
     decision numbers that were already spent by the time the work landed
