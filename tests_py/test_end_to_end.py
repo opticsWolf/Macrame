@@ -209,6 +209,17 @@ def test_the_counters_saw_the_whole_session(kb):
     # This assertion has been three things. It was an unconditioned zero, which
     # passed only because the swap happened to come in under 3 ms on a quiet
     # machine and began failing when the suite grew by ten tests. Then from
+    #
+    # **The v0.14.0 release run is the measurement D-233 did not have.** That
+    # release shipped with the kind still merged and this assertion still
+    # unconditioned, and the macOS runner failed it with
+    # `shadow_rebuild turns=4 over_budget=1` -- four turns, one over, and the
+    # one is the swap. So the conflation is not only readable in the counter's
+    # definition, which is how D-233 argued it; it is a red suite on a
+    # supported platform. It also fixes the shape of the hazard: the fills on
+    # that fixture stayed inside the budget and only the swap did not, which is
+    # why the split leaves this assertion unconditioned rather than merely
+    # differently carved.
     # 0.14.9 it carved out `shadow_rebuild`, which was honest about the decision
     # the crate had made — the kind covered both the fill chunks (meant to fit)
     # and the swap turn (three index builds under the lock, 46.8 ms, D-082) and
