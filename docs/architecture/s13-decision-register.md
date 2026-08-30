@@ -3495,6 +3495,8 @@ Rejected: *deleting the guard* (the cost regression it catches is invisible to e
 
 **The script exits three ways, and that is [D-147](s13-decision-register.md#d-147)'s lesson applied to a different noise source.** **0** the surface is the baseline, **1** it moved and here is the diff, **2** it could not be measured — nightly absent, or a rustdoc JSON change `cargo-public-api` has not caught up with. Collapsing 1 and 2 into a red job makes the job something people are told to ignore; collapsing them into a green one is worse. CI fails on 1 and emits a warning that is explicitly not a pass on 2.
 
+*Amended 0.14.17: **the script had two exit values, not three**, for its whole life to here.* Every "could not be measured" path was written `sys.exit("… [exit 2]")`, and `sys.exit` treats a **string** argument as a message to print before exiting **1** — only an `int` sets the status. So the third value did not exist, `ci.yml`'s `if [ "$code" = "2" ]` branch was unreachable, and a missing nightly or a missing `cargo-public-api` was reported to the reader as *the surface moved* — which is the first of the two collapses this paragraph forbids, shipped under the paragraph forbidding it. Six sites, now routed through one `cannot_measure()` that raises `SystemExit(2)`. **Found by mutation, and not by mutating this**: the target was 0.14.17's new appendix check, and the second mutation — move the anchor the count is read from — expected 2 and got 1. A gate whose failure modes are never exercised is a gate whose failure modes are prose; the paragraph below — *the gate was verified rather than assumed, and it was wrong on the first run* — is this same lesson, learned once and then not applied to the branch of the contract nobody had a reason to reach.
+
 **Three `--omit` flags, for the same reason.** Left in, blanket, auto-trait and auto-derived impls add roughly a thousand lines that move when a *dependency* changes — the first run reported `ppv_lite86::types::VZip` and `zerocopy::pointer::invariant::Read` implemented for `Tuning`, neither of which anyone here wrote or can affect. A baseline that churns for reasons outside the repository is one people learn to `--bless` without reading.
 
 **`--all-features`, because the subset needs no file.** `metrics` is on by default and `property-tests` adds no items, so this is the maximal surface and `--no-default-features` is a strict subset of it. A feature-gated item therefore cannot enter unnoticed by being gated.
@@ -4277,6 +4279,63 @@ cleanly for the first time: **fill (workload-dependent) not exempt; swap
 (expected-on-healthy) exempt.** This is the existing rule finally able to apply,
 not a new judgement.
 
+> **Amended 0.14.17 — the criterion above is the first of three, and it does not
+> hold ([D-234](#d-234) is a different finding; this one is internal).** The
+> house records evolutions, not final states, so the two falsified forms stay
+> here rather than being overwritten by the answer.
+>
+> **v1, above — *expected-on-healthy is exempt, workload-dependent is not*.**
+> Falsified by reading [D-197](#d-197) closely rather than by new measurement:
+> `Optimize` **runs on every close**. It is expected-on-healthy in the plainest
+> sense and it is counted. If expectedness decided the question it would be
+> exempt.
+>
+> **v2 — *if `over_budget` can differ from `turns`, count it*.** This was the
+> natural repair, and it is falsified by three of the exemptions themselves. An
+> `Archive` with nothing archivable, a `Rehydrate` of one row and a `Checkpoint`
+> on an empty WAL all come in *under* budget, so for each of them the counter
+> can differ from the turn count — the rule would un-exempt all three.
+>
+> **v3, the anchor taken — inapplicability.** *Exempt means the chunk bound does
+> not apply: the operation is atomic by necessity and has no smaller unit.
+> Counted means the bound applies, so exceeding it is information.* Every
+> exemption's own release argued it this way whatever the summary said
+> afterwards: `WriteBulkAtomic` ([D-014](#d-014)) is one statement and exists
+> precisely because the chunked variant is not atomic, `Archive`
+> ([D-012](#d-012)) and `ArchiveBranch` delete a consistent set or none of it,
+> `RebuildCurrent` ([D-023](#d-023)) re-derives a whole projection in one
+> transaction, `Rehydrate` ([D-152](#d-152)) is one unchunked transaction across
+> the file boundary, `Checkpoint` ([D-156](#d-156)) is a WAL boundary. None has
+> a smaller unit to chunk into.
+>
+> **Why the third one is different in kind and not just in accuracy.** v1 and v2
+> are *observational* — read off the outcomes the existing exemptions happened
+> to produce, and therefore available only after the fact. Inapplicability is
+> decidable at design time from what the operation is, which is what a criterion
+> must be if it is to settle the next case rather than rationalise the last one.
+> Expected-on-healthy survives as **corroboration, not definition**; `Optimize`
+> is exactly the case that shows why the symptom cannot be the test.
+>
+> The conclusion the passage above reaches is unaffected. The swap is exempt
+> under v3 for a better reason than under v1: not because it always exceeds, but
+> because it is one index build under the write lock with nothing smaller to cut
+> it into.
+
+> **Corroborated 0.14.17 — the v0.14.0 release run measured what this entry
+> argued.** D-233 reasoned from the counter's definition: `over_budget` is a
+> per-turn increment, the swap cannot fit the budget, therefore the merged kind
+> reads `N(rebuilds) + regressions`. That was a reading, not an observation, and
+> it is recorded here that an observation then arrived on its own. v0.14.0
+> shipped with the kind still merged and `tests_py/test_end_to_end.py` still
+> asserting an unconditioned zero; the **macOS** job of its release run failed
+> with `shadow_rebuild turns=4 over_budget=1`. Four turns, one over, and the one
+> is the swap — on a supported platform, in the release that was meant to be the
+> guarantee. It also sharpens the shape: on that fixture the *fill* chunks
+> stayed inside the budget and only the swap did not, which is why the split
+> leaves the Python assertion unconditioned rather than merely differently
+> carved. See [D-235](#d-235) for why that red was not seen until it blocked a
+> publish.
+
 **Why exempting the swap loses nothing an instrument can read, which is what
 decided this against keeping it counted.** `over_budget` is incremented once per
 turn that exceeds — it counts **occurrences, not magnitude**. The swap therefore
@@ -4298,9 +4357,20 @@ The honest residual, recorded rather than dismissed: if the swap ever grows
 pathological, a counted kind would put it in the list. That is the wrong
 instrument — a threshold on the kind's `longest` detects growth and a
 per-occurrence counter cannot, under either disposition. And the flip is cheap
-and loud: un-exempting is one function arm and one table row in a 1.x minor, and
-`a_swap_over_budget_is_not_a_violation` goes red the moment the exemption narrows
-**or** widens.
+and loud: un-exempting is one function arm and one table row in a 1.x minor.
+
+**The loudness is carried by a pair, and the pair is deliberately asymmetric.**
+This was first written here as one test going red "the moment the exemption
+narrows **or** widens", and that is wrong in the widening direction.
+`a_swap_over_budget_is_not_a_violation` owns *narrowing*: re-count the swap and
+its assertion goes from 0 to 1. It cannot own widening, because **broadening an
+exemption only ever removes entries from `budget_violations()`** — every
+assertion that some count is zero stays green under every widening, including
+one that swallows the fill half whole. That direction is owned by
+`a_long_fill_is_a_violation_and_a_long_swap_is_not` and by nothing else: it
+forges a hold against the fill kind and asserts it **is** counted, which is the
+only shape of assertion a widening can break. The integration test owns
+narrowing and the truth-condition; the unit canary alone owns widening.
 
 **Taken in an acceptance release, which needs its own justification.** §15.4 does
 not list this, §17 does not mention it, and §18 promises the public API is stable
@@ -4375,3 +4445,141 @@ any instrument can read, since `over_budget` cannot see magnitude);
 fill regressions to excuse the swap); *a threshold alarm on the swap instead of
 a kind* (the crate has no alarm surface, and inventing one to avoid an enum
 variant is a larger API than the variant).
+
+
+---
+
+<a id="d-234"></a>D-234 — CI had never run on the development branch, so sixteen releases were verified on one machine and called verified (0.14.17, W12.17, §17). [D-030](s13-decision-register.md#d-030), [D-107](s13-decision-register.md#d-107), [D-124](s13-decision-register.md#d-124), [D-147](s13-decision-register.md#d-147), [D-169](s13-decision-register.md#d-169), [D-205](s13-decision-register.md#d-205), [D-212](s13-decision-register.md#d-212), [D-233](#d-233), [D-235](#d-235). Evidence: `.github/workflows/ci.yml`, `gh run list`, PR #2.
+
+**The finding.** `ci.yml` triggers on `push: branches: [main]` and on
+`pull_request`. `dev/0.15.0` is neither, and no pull request existed. **CI did
+not run once across the whole of W12 — sixteen releases, 0.14.1 through
+0.14.16.** `gh run list` showed nothing on the branch at all.
+
+What that does and does not mean is worth being exact about, because the
+overclaim in either direction is easy. Every release in the series *was* gated:
+`cargo fmt`, clippy under `-D warnings` on three target sets, the fuzz crate's
+`cargo check`, rustdoc under `RUSTDOCFLAGS=-D warnings`, three feature
+configurations of the Rust suite, the serial property arm, the public-API diff,
+and the Python suite through a freshly built wheel. Each was run and each was
+read. The claim that fails is not *unverified*; it is **unreplicated**. All of
+it happened on one Windows box, on one toolchain, at one point in time, and the
+first thing that ran on Linux and macOS after sixteen releases immediately found
+something: the swap conflation of [D-233](#d-233) is a macOS red, not a Windows
+one, and Windows is the only platform the series had.
+
+**This is [D-030](#d-030)'s shape one level up.** D-030 is about a check that
+cannot fail; this is about a check that never ran, which is the same defect with
+the evidence one step further away — worse, because a green history is offered
+as the reason to trust the next release, and sixteen green histories here were
+sixteen absences of a run.
+
+**The policy, and the lever deliberately not pulled.** The obvious fix is to
+widen the push trigger to `dev/**`. Rejected: it double-runs every future pull
+request, and the trigger is not where the gap is. The gap is that a long-lived
+branch had no pull request. So: **branches live under pull requests; push
+triggers stay main-only.** Opening the pull request is the entire remedy —
+every push to a head branch fires `pull_request` from then on, with no workflow
+edit and no double-runs. `dev/0.15.0` is PR #2, opened as a draft because it is
+a development line and not a merge proposal; a bare `pull_request:` trigger
+fires on drafts.
+
+**Obligation, standing.** A release is not done until **a CI run exists for the
+pushed SHA**. Not *green* — green is not yet available while
+[D-147](#d-147)'s quarantined step is red about two runs in three and is
+documented as ungateable — but *exists and is attributed*, so the run can be
+read and its failures classified. This upgrades to *green for the pushed SHA*
+the moment the standing reds are triaged, and the distance between those two
+sentences is itself the honest description of where this project's CI is.
+
+Rejected: *widening `push:` to `dev/**`* (double-runs every PR, and treats the
+symptom); *treating the local gate battery as sufficient* (it is thorough and it
+is one machine — the macOS red is the counterexample); *waiting until 0.15.0 to
+open the pull request* (the value is CI on the commits still to come, so the
+only useful time to open it is the earliest one).
+
+---
+
+<a id="d-235"></a>D-235 — a CI gate bounded the whole process when its assertion was about a single allocation, and the difference is what skipped v0.14.0's crates.io publish (0.14.17, W12.17, §17). [D-030](s13-decision-register.md#d-030), [D-107](s13-decision-register.md#d-107), [D-147](s13-decision-register.md#d-147), [D-187](s13-decision-register.md#d-187), [D-205](s13-decision-register.md#d-205), [D-234](#d-234). Evidence: `.github/workflows/ci.yml`, `.github/workflows/release.yml`, run 33245127650, run 33297792432.
+
+**The finding.** The fuzz job ran each snapshot target with
+`-rss_limit_mb=256 -malloc_limit_mb=256`, and `ci.yml` described both as one
+assertion: "never an allocation storm". They are not one assertion.
+`-malloc_limit_mb` bounds a **single allocation**, which is the clause W8.2
+actually bounded the reader for. `-rss_limit_mb` bounds the **whole process**,
+and the process is not the loader.
+
+At v0.14.0 the difference stopped being academic. `verify / fuzz` failed,
+`release.yml` gates `publish to crates.io` on that workflow, and the upload was
+skipped — **0.14.0 shipped to PyPI and never reached crates.io**, which still
+topped out at 0.13.0. The report says so once it is read past its first line:
+
+```
+ERROR: libFuzzer: out-of-memory (used: 259Mb; limit: 256Mb)
+Live Heap Allocations: 24,732,141 bytes in 759 chunks;
+  quarantined: 202,052,055 bytes in 260,170 chunks
+```
+
+Live is 24 MiB. **202 MiB of the 259 is AddressSanitizer's free-quarantine** —
+memory ASan withholds after `free` so a later use-after-free stays diagnosable —
+accumulated across 570,597 executions. Three further facts rule out the loader:
+the failing input is the **empty** one (`Debug: []`, artifact
+`oom-da39a3ee5e6b4b0d3255bfef95601890afd80709`, which is SHA-1 of zero bytes),
+so no input caused it; RSS sat flat at 231 MiB from execution 65,536 to 448,293
+and moved only where new coverage reached new functions, which is bookkeeping
+growth and not a leak; and the largest live allocation arrives through
+`libstdc++`, i.e. libFuzzer's own corpus machinery rather than anything in this
+crate.
+
+**What the gate was actually measuring.** Not the loader's appetite — *how many
+cases the runner got through in ninety seconds*. Quarantine grows with execution
+count, so **a faster runner fails this sooner**, which is the exact opposite of
+what a fuzz gate should reward. It is also why the gate survived every pull
+request that preceded the release and then failed the release: nothing had
+changed except how far the fuzzer got.
+
+**The repair is a separation, not a raise.** `-malloc_limit_mb` stays at 256 and
+remains the assertion, with the offending input attached when it fires.
+`-rss_limit_mb` goes to 2048 and is redesignated in the comment as what it
+always was — a backstop against a genuine runaway taking down a 16 GiB runner,
+carrying no claim about the loader.
+
+**Not verifiable locally, and that is a property of this gate.** `cargo-fuzz`
+needs nightly and libFuzzer and does not support Windows, so this fix could not
+be exercised in the development loop at all; the pull request was the
+instrument. Which is [D-234](#d-234)'s point arriving from the other side: the
+one gate that *only* CI can run is the one that had been failing, on a branch
+where CI was not running.
+
+**The class.** This is [D-030](#d-030)'s inverse and belongs beside it. D-030 is
+a check that cannot fail; this is a check that fails for a reason unrelated to
+what it claims to check. Both end the same way — the signal is discarded,
+here by skipping a publish for eight days without anyone reading why.
+
+**Adjacent, found while fixing this and deliberately not fixed here.**
+`release.yml` documents a manual route ("run it by hand → verify and dry-run
+only, unless `publish` is explicitly set to `true`"), and that route has never
+been exercised — every run of the workflow is a tag push. It is very likely
+broken as written: `publish` declares `needs: [verify, check-version]`,
+`check-version` is skipped on a non-tag ref, and GitHub skips the dependents of
+a skipped job unless the dependent's `if` uses `always()` / `!cancelled()`. The
+comment in the file asserts the opposite. Named here rather than repaired,
+because 0.14.17 is scoped to documentation and scripts and a workflow condition
+that cannot be tested without spending a run is not a docs change.
+
+**A third instrument was found broken in the same release, and it is the same
+shape.** [D-205](s13-decision-register.md#d-205)'s public-API gate documents
+three exit codes and could only ever return two; the amendment is recorded
+there. Three for three: the fuzz limits measured the sanitizer's bookkeeping,
+the CI triggers excluded the branch every release was cut from, and the surface
+gate could not say *I could not measure this*. None of the three is a defect in
+the library, and none of them was reachable from the library's own gates being
+green — which is what this trio is evidence for, and why [§17](../Macrame%20Road%20to%201.0.md)
+item 12 records a standing obligation rather than three fixes.
+
+Rejected: *raising both limits* (removes the assertion along with the noise);
+*shortening `-max_total_time`* (hides the interaction by getting less fuzzing
+done, and leaves the limit wrong); *`-rss_limit_mb=0`* (removes the runaway
+backstop entirely — the limit is not wrong in kind, only in what it was pointed
+at); *reducing ASan's quarantine via `ASAN_OPTIONS`* (weakens use-after-free
+detection to protect a number that should not have been the gate).

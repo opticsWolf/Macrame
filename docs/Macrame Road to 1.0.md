@@ -3713,7 +3713,53 @@ so it is visible from both places.
     appending a variant legal in any 1.x minor. Taken now because doing it later
     lands the same edit as a new row on a live dashboard.
 
-12. D-213 … the register's own next number, whatever it turns out to be. **Not a
+12. **CI had never run on the branch, and one of its gates was measuring the
+    wrong quantity** ([D-234](architecture/s13-decision-register.md#d-234),
+    [D-235](architecture/s13-decision-register.md#d-235), 0.14.17). **Unscoped,
+    recorded here for the same reason item 11 is.** Documentation and scripts
+    only; the library is untouched.
+
+    `ci.yml` triggers on `push: branches: [main]` and on `pull_request`, and
+    `dev/0.15.0` is neither with no pull request open — so **no CI run exists
+    for any of W12's sixteen releases**. Every one of them was gated locally and
+    every gate was read; what fails is not *verified* but **unreplicated**, on
+    one Windows box. The first run on Linux and macOS found something
+    immediately: item 11's conflation is a **macOS** red, and macOS is a
+    platform the series never had. The remedy is the pull request itself, not a
+    wider trigger — branches live under pull requests, push triggers stay
+    main-only.
+
+    Separately, the fuzz gate bounded whole-process RSS with `-rss_limit_mb`
+    while its stated assertion — "never an allocation storm" — is about a single
+    allocation, which is `-malloc_limit_mb`'s job. It failed on
+    AddressSanitizer's free-quarantine (202 MiB of a 259 MiB total, over 570,597
+    executions, on an **empty** input), and because `release.yml` gates the
+    upload on that workflow it **skipped v0.14.0's crates.io publish** — the
+    release shipped to PyPI and not to crates.io, which still read 0.13.0.
+
+    And a third, found by mutation while testing something else: the public-API
+    gate ([D-205](architecture/s13-decision-register.md#d-205)) documents three
+    exit codes — *unchanged*, *moved*, *could not be measured* — and had only
+    ever had two, because every "could not be measured" path passed a **string**
+    to `sys.exit`, which prints it and exits **1**. So a missing nightly was
+    reported to the reader as *the surface moved*, which is precisely the
+    collapse the paragraph stating the contract forbids.
+
+    **Three for three, and none of them a defect in the library.** The fuzz
+    limits measured the sanitizer's bookkeeping; the triggers excluded the
+    branch every release was cut from; the surface gate could not say *I could
+    not measure this*. What they have in common is that a gate's own failure
+    modes are the part nobody exercises — the library is tested, and the things
+    that test the library are read.
+
+    The standing obligation this leaves: a release is not done until **a CI run
+    exists for the pushed SHA**. Not green — [D-147](architecture/s13-decision-register.md#d-147)'s
+    quarantined step is red about two runs in three and is documented as
+    ungateable — but *existing and attributed*, so it can be read. That upgrades
+    to green when the standing reds are triaged, and the gap between those two
+    sentences is the honest statement of where this project's CI is.
+
+13. D-213 … the register's own next number, whatever it turns out to be. **Not a
     number this plan chooses**: three acceptance lists in a row have named
     decision numbers that were already spent by the time the work landed
     ([D-188](architecture/s13-decision-register.md#d-188),

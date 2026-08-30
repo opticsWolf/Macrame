@@ -731,11 +731,18 @@ async fn a_swap_is_counted_as_shadow_swap_and_not_as_shadow_rebuild() {
 /// A swap that exceeds the budget is not a violation, on a fixture that makes it
 /// exceed (0.14.16, W12.16, D-233).
 ///
-/// **This is the quiet half, and it is what makes the exemption self-policing.**
-/// It fails in both directions: narrow the exemption to re-count the swap and
-/// the count goes to 1; widen it to swallow the fill half and the canary in
-/// `metrics.rs` goes red instead. Un-exempting is one function arm and one table
-/// row, and between them these two tests make that flip loud.
+/// **This is the quiet half, and the pair is the instrument.**
+///
+/// This test owns one direction. Narrow the exemption to re-count the swap and
+/// its assertion goes from 0 to 1. It cannot own the other direction, and that
+/// is not an oversight: **widening an exemption only removes entries from
+/// `budget_violations()`**, so every assertion here that a count is zero stays
+/// green under every widening, including one that swallows the fill half whole.
+/// Widening is caught by `a_long_fill_is_a_violation_and_a_long_swap_is_not` in
+/// `metrics.rs` — which forges a hold against the fill kind and asserts it **is**
+/// counted, the only shape of assertion a widening can break — and by nothing
+/// else. Un-exempting is one function arm and one table row; between them the
+/// two tests make that flip loud in both directions, asymmetrically.
 ///
 /// # The fixture is load-bearing, and the first draft of this test was not
 ///
@@ -797,6 +804,21 @@ async fn a_swap_over_budget_is_not_a_violation() {
         .unwrap();
 
     assert_eq!(swap.turns, 1, "a rebuild is exactly one swap turn");
+
+    // TRIPWIRE, and not only an anti-vacuity guard. If this assert fails
+    // because the fixture shrank, grow it -- that is the message below. But if
+    // it fails because the swap genuinely stopped exceeding the budget, then
+    // `ShadowSwap`'s exemption has lost the fact it rests on and must be
+    // revisited rather than resized around. The exemption's justification is
+    // *inapplicability*: the swap is atomic by necessity and has no smaller
+    // unit, so the chunk bound was never about it. A swap that fits inside 3 ms
+    // has a smaller unit by demonstration -- upstream chunked the index build,
+    // or SQLite grew `ALTER INDEX ... RENAME` and the swap stopped rebuilding
+    // all three -- and the exemption should then be removed, not preserved.
+    //
+    // This is what C surrendered and gets back as a standing guard: the
+    // exemption is no longer truth-conditional in the counter, so the condition
+    // it was traded for is asserted here instead.
     assert!(
         swap.longest > macrame::CHUNK_BUDGET,
         "the swap took {:?}, which is inside the {:?} budget, so this test \

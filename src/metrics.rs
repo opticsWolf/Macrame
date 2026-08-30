@@ -314,16 +314,50 @@ impl CommandKind {
     ///
     /// The register applied one rule three times without naming it, and naming
     /// it is what let the fourth case be decided rather than argued.
-    /// [`CommandKind::Archive`] ([D-012]), [`CommandKind::Rehydrate`] (W4.3)
-    /// and [`CommandKind::Checkpoint`] (W5.2) are all **expected-on-healthy**
-    /// overages: holds that structurally exceed the budget on every healthy
-    /// database that exercises them, and whose counting would make the
-    /// aggregate useless. [`CommandKind::Analyze`] and
-    /// [`CommandKind::Optimize`] are not, and the difference is the whole
-    /// point — their overage is *workload-dependent*, so a violation
-    /// discriminates between a call that did work and one that declined.
     ///
-    /// > **Expected-on-healthy is exempt. Workload-dependent is not.**
+    /// > **Exempt means the chunk bound does not apply: the operation is atomic
+    /// > by necessity and has no smaller unit. Counted means the bound applies,
+    /// > so exceeding it is information.**
+    ///
+    /// Every exemption on this list was argued that way in its own release,
+    /// whatever the summary sentence said afterwards.
+    /// [`CommandKind::WriteBulkAtomic`] ([D-014]) is one statement, and is the
+    /// kind that exists precisely because the chunked variant is *not* atomic.
+    /// [`CommandKind::Archive`] ([D-012]) and [`CommandKind::ArchiveBranch`]
+    /// delete a consistent set or none of it.
+    /// [`CommandKind::RebuildCurrent`] ([D-023]) re-derives a whole projection
+    /// in one transaction. [`CommandKind::Rehydrate`] ([D-152]) is one
+    /// unchunked transaction moving rows back across the file boundary.
+    /// [`CommandKind::Checkpoint`] ([D-156]) is a WAL boundary. None of them
+    /// has a smaller unit to chunk *into*, so 3 ms is not a bound they failed —
+    /// it is a bound that was never about them.
+    /// [`CommandKind::Analyze`] and [`CommandKind::Optimize`] ([D-197]) do have
+    /// one: they are bounded work that can take longer or shorter, so exceeding
+    /// is a fact about this database and worth counting.
+    ///
+    /// # The criterion took three tries, and the two that failed are the useful part
+    ///
+    /// **v1 — *expected-on-healthy is exempt, workload-dependent is not*.**
+    /// Falsified by reading [D-197] closely rather than by any new measurement:
+    /// `Optimize` **runs on every close** and stays counted. If expectedness
+    /// decided the question, `Optimize` would be exempt and it is not.
+    ///
+    /// **v2 — *if `over_budget` can differ from `turns`, count it*.** Falsified
+    /// by three of the exemptions themselves: an `Archive` with nothing
+    /// archivable, a `Rehydrate` of a single row and a `Checkpoint` on an empty
+    /// WAL all come in *under* budget, so their counters can differ from their
+    /// turn counts and the rule would un-exempt all three.
+    ///
+    /// Both were **observational** — read off the outcomes the existing
+    /// exemptions happened to produce, and so decidable only after the fact.
+    /// Inapplicability is decidable at design time from what the operation *is*,
+    /// which is what a criterion has to be if it is to settle the next case
+    /// rather than rationalise the last one.
+    ///
+    /// Expected-on-healthy survives as **corroboration, not definition**: a kind
+    /// with no smaller unit usually does exceed on every healthy database, so
+    /// the symptom is a fair sanity check on the diagnosis. `Optimize` is
+    /// exactly the case that shows why it cannot be the test itself.
     ///
     /// `over_budget` is incremented once per turn that exceeds, so it counts
     /// **occurrences and not magnitude**. That is the fact the criterion turns
@@ -358,12 +392,39 @@ impl CommandKind {
     /// fixture the swap finishes inside 3 ms and the assertion passes whether
     /// the kind is exempt or not; on a real one the *fill* chunks exceed the
     /// budget legitimately (3.14 ms at 200 keys in a debug build), so an empty
-    /// list is a property of small fixtures rather than of rebuilds. Together
-    /// with `a_long_fill_is_a_violation_and_a_long_swap_is_not` below, that
-    /// makes narrowing this exemption *and* widening it both red.
+    /// list is a property of small fixtures rather than of rebuilds.
+    ///
+    /// The two tests are **one instrument with two asymmetric halves**, and it
+    /// is worth being exact about which owns what.
+    /// `a_swap_over_budget_is_not_a_violation` owns **narrowing**: re-count the
+    /// swap and its assertion moves off zero. It cannot own widening, because
+    /// widening an exemption only ever *removes* entries from
+    /// [`MetricsSnapshot::budget_violations`] — an assertion that a count is
+    /// zero stays green under every widening, including one that swallows the
+    /// fill half whole. **Widening is owned by
+    /// `a_long_fill_is_a_violation_and_a_long_swap_is_not` below and by nothing
+    /// else**, because forging a long fill and asserting it **is** counted is
+    /// the only shape of assertion a widening can break.
+    ///
+    /// # Any claim about fill and this budget must name a build mode and a fixture size
+    ///
+    /// At fixture scale the 3 ms bound sits **inside** fill variance rather
+    /// than above it, so the same assertion is true or false depending on how
+    /// the binary was compiled and how much graph it was handed. Debug
+    /// especially: 200 keys × 4 generations puts the longest fill at 3.14 ms —
+    /// one violation, the counter working — while a release build of the same
+    /// shape stays under. A test that asserts anything about fill overages is
+    /// therefore asserting something about *its own fixture and profile*, and
+    /// has to say which. The swap is the opposite and that is why the exemption
+    /// is testable at all: it exceeds by 15.6× and it exceeds in every mode.
     ///
     /// [D-012]: ../docs/architecture/s13-decision-register.md#d-012
+    /// [D-014]: ../docs/architecture/s13-decision-register.md#d-014
+    /// [D-023]: ../docs/architecture/s13-decision-register.md#d-023
     /// [D-082]: ../docs/architecture/s13-decision-register.md#d-082
+    /// [D-152]: ../docs/architecture/s13-decision-register.md#d-152
+    /// [D-156]: ../docs/architecture/s13-decision-register.md#d-156
+    /// [D-197]: ../docs/architecture/s13-decision-register.md#d-197
     /// [D-233]: ../docs/architecture/s13-decision-register.md#d-233
     ///
     /// # `Rehydrate` is exempt, and splitting it out is what made that a
