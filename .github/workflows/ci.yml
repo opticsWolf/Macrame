@@ -266,12 +266,43 @@ jobs:
   # out-of-band session is for, and the corpus this job seeds is the same one it
   # would start from.
   #
-  # The limits are the assertion, not a safety margin. `-rss_limit_mb` and
-  # `-malloc_limit_mb` are how "never an allocation storm" -- the clause the
-  # plan states and the reason W8.2 bounded the reader at all -- becomes a
-  # reported finding with the offending input attached rather than a runner that
-  # quietly runs out of memory. 256 MiB is far above anything these targets
-  # legitimately touch and far below a storm.
+  # The limits are the assertion, not a safety margin -- but they are TWO
+  # DIFFERENT ASSERTIONS, and this job conflated them until v0.14.0 went red.
+  #
+  # `-malloc_limit_mb` is the gate. It bounds a SINGLE allocation, which is
+  # exactly the clause the plan states -- "never an allocation storm" -- and the
+  # reason W8.2 bounded the reader at all. A quarter-gigabyte request out of a
+  # 6 KB input is a finding, and libFuzzer reports it with the offending input
+  # attached. Unchanged at 256 MiB, deliberately.
+  #
+  # `-rss_limit_mb` bounds the WHOLE PROCESS, and the process is not the loader.
+  # At 256 MiB it failed the release run for v0.14.0 and, because `release.yml`
+  # gates the upload on this workflow, skipped the crates.io publish entirely.
+  # The report says what happened, once it is read past the first line:
+  #
+  #     ERROR: libFuzzer: out-of-memory (used: 259Mb; limit: 256Mb)
+  #     Live Heap Allocations: 24,732,141 bytes in 759 chunks;
+  #       quarantined: 202,052,055 bytes in 260,170 chunks
+  #
+  # Live is 24 MiB. **202 MiB of the 259 is AddressSanitizer's free-quarantine**
+  # -- memory ASan holds back after `free` so a later use-after-free is still
+  # diagnosable -- accumulated across 570,597 executions. Three more details
+  # rule out a defect in the loader: the failing input was the EMPTY one
+  # (`Debug: []`, artifact `oom-da39a3ee5e6b4b0d3255bfef95601890afd80709`, which
+  # is SHA-1 of zero bytes), so no input caused it; RSS sat flat at 231 MiB from
+  # execution 65,536 to 448,293 and moved only when new coverage reached new
+  # functions, which is bookkeeping growth and not a leak; and the top live
+  # allocation is reached through `libstdc++`, i.e. libFuzzer's own corpus
+  # machinery rather than anything in this crate.
+  #
+  # What the old limit actually measured, then, is HOW MANY CASES THE RUNNER GOT
+  # THROUGH IN 90 SECONDS. A faster runner fails it sooner -- the opposite of
+  # what a fuzz gate should reward -- and that is why it survived every PR that
+  # preceded the release and then blocked the release.
+  #
+  # 2048 MiB is a backstop against a genuine runaway taking down a 16 GiB
+  # runner. It is not a claim about the loader; the malloc limit is the claim
+  # about the loader, and it is the one that did not move.
   fuzz:
     name: fuzz (snapshot loader)
     runs-on: ubuntu-latest
@@ -296,11 +327,11 @@ jobs:
         run: cargo run --bin seed
 
       - name: snapshot_container
-        run: cargo fuzz run snapshot_container -- -max_total_time=90 -rss_limit_mb=256 -malloc_limit_mb=256
+        run: cargo fuzz run snapshot_container -- -max_total_time=90 -rss_limit_mb=2048 -malloc_limit_mb=256
       - name: snapshot_payload
-        run: cargo fuzz run snapshot_payload -- -max_total_time=90 -rss_limit_mb=256 -malloc_limit_mb=256
+        run: cargo fuzz run snapshot_payload -- -max_total_time=90 -rss_limit_mb=2048 -malloc_limit_mb=256
       - name: snapshot_frame
-        run: cargo fuzz run snapshot_frame -- -max_total_time=90 -rss_limit_mb=256 -malloc_limit_mb=256
+        run: cargo fuzz run snapshot_frame -- -max_total_time=90 -rss_limit_mb=2048 -malloc_limit_mb=256
 
       # A crash is the whole output of this job, and libFuzzer writes it to a
       # file rather than to the log. Without this the run says "the fuzzer
