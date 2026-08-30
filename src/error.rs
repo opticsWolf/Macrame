@@ -341,6 +341,42 @@ pub enum DbError {
     #[error("snapshot {path} is damaged: {reason}")]
     SnapshotCorrupt { path: String, reason: String },
 
+    /// A snapshot that could not be **written** (0.14.23, W12.23, C-2, [D-240]).
+    ///
+    /// The fourth case in the family above and the last one missing, which is
+    /// why it is worth saying what the other three had in common: each names
+    /// the subject a caller has to go and fix. Every failure inside
+    /// `save_snapshot` — the directory, the serialization, the compression, the
+    /// temp file, the write, the flush, the rename, and the directory flush
+    /// after it — used to be [`Self::ReplayCorrupt`], which says **the ledger
+    /// is damaged**, the worst thing this system can say. A full disk said it.
+    ///
+    /// * [`Self::SnapshotIncompatible`] — *a different build wrote this*.
+    /// * [`Self::SnapshotCorrupt`] — *the cache is damaged*, delete the file.
+    /// * [`Self::ReplayCorrupt`] — **the ledger is damaged**.
+    /// * This — *the cache could not be written*. **Nothing is damaged and
+    ///   nothing is lost**: [Doctrine VI] makes a snapshot derivative, so the
+    ///   next start folds from the previous anchor and the whole cost is a
+    ///   slower start. The subject is the filesystem.
+    ///
+    /// The read half of this correction shipped at 0.13.12: `load_snapshot`
+    /// stopped answering `ReplayCorrupt { seq: 0 }` for a damaged file, for
+    /// exactly this reason ([D-185](../docs/architecture/s13-decision-register.md#d-185)).
+    /// The write half kept it for ten releases.
+    ///
+    /// **One variant covers the directory flush as well**, and that is
+    /// [D-186](../docs/architecture/s13-decision-register.md#d-186)'s decision
+    /// rather than a simplification here: a failed `sync_directory` leaves the
+    /// snapshot at its final name and readable, unable only to promise the name
+    /// survives a power loss, and D-186 already placed it in "the same class the
+    /// file's own `sync_all` failure already returns". `reason` names which step
+    /// failed.
+    ///
+    /// [D-240]: ../docs/architecture/s13-decision-register.md#d-240
+    /// [Doctrine VI]: ../docs/architecture/s0-s3-foundations.md#doctrine-vi
+    #[error("snapshot {path} could not be saved: {reason}")]
+    SnapshotWriteFailed { path: String, reason: String },
+
     #[error("payload v{got} unsupported (max {max})")]
     PayloadVersion { got: u8, max: u8 },
 

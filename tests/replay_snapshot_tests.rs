@@ -254,6 +254,47 @@ async fn a_successful_save_leaves_no_temporary_file() {
     );
 }
 
+/// A save that cannot happen names the snapshot, not the ledger (0.14.23, C-2,
+/// [D-240]).
+///
+/// Every failure inside `save_snapshot` answered [`DbError::ReplayCorrupt`]
+/// until 0.14.23 — *"replay corrupt at seq N"*, the worst thing this system can
+/// say about itself — so a full disk, a read-only directory or a lost temp file
+/// all reported that the transaction log was damaged. Nothing in that function
+/// can damage the log: it reads a materialized state and writes a file.
+///
+/// The failure is forced by putting a **file** where the snapshot directory
+/// would go, which is portable in a way a permissions trick is not:
+/// `create_dir_all` refuses it on every platform this crate is tested on, and
+/// the test is about which error comes back rather than about which syscall
+/// failed.
+///
+/// [D-240]: ../docs/architecture/s13-decision-register.md#d-240
+#[tokio::test]
+async fn a_save_that_cannot_write_names_the_snapshot_and_not_the_ledger() {
+    let harness = TestHarness::new();
+    let blocked = harness.temp_dir.path().join("snapshots");
+    std::fs::write(&blocked, b"not a directory").unwrap();
+
+    let err = save_snapshot(&blocked, &empty_state(42)).unwrap_err();
+
+    let DbError::SnapshotWriteFailed { path, reason } = &err else {
+        panic!("a failed write must not claim the ledger is damaged, got {err:?}");
+    };
+    assert!(
+        path.ends_with("000000000000000042.snap.zst"),
+        "the error names the snapshot it could not write: {path}"
+    );
+    assert!(
+        reason.contains("failed to create snapshot directory"),
+        "and the step that failed: {reason}"
+    );
+    assert!(
+        !err.to_string().contains("replay corrupt"),
+        "the ledger is untouched and must not be named: {err}"
+    );
+}
+
 /// A save interrupted before the rename leaves a `.tmp` nothing will ever read.
 /// Left alone they accumulate for the life of the database.
 #[tokio::test]

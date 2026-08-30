@@ -217,28 +217,46 @@ fn sync_directory(_dir: &Path) -> std::io::Result<()> {
 /// Every async caller inside the crate goes through `save_and_prune`; a
 /// caller outside it wants `tokio::task::spawn_blocking` around this, and the
 /// signature stays synchronous so that they can have it.
+///
+/// # What a failure here means (0.14.23, C-2, [D-240])
+///
+/// [`DbError::SnapshotWriteFailed`], naming the snapshot and the step. **Not**
+/// [`DbError::ReplayCorrupt`], which is what every failure in here answered
+/// until 0.14.23 and which says the ledger is damaged: a full disk, a
+/// read-only directory or a lost temp file said the worst thing this system
+/// can say about itself. Nothing here can damage the ledger — the log is
+/// untouched, the previous anchor still stands, and [Doctrine VI] makes the
+/// cost of losing a snapshot a slower start rather than a wrong answer.
+///
+/// [D-240]: ../../docs/architecture/s13-decision-register.md#d-240
+/// [Doctrine VI]: ../../docs/architecture/s0-s3-foundations.md#doctrine-vi
 pub fn save_snapshot(snapshots_dir: &Path, state: &MaterializedState) -> Result<PathBuf> {
-    let fail = |what: &str, e: std::io::Error| DbError::ReplayCorrupt {
-        seq: state.seq_anchor,
+    // The name is computed before anything can fail, so every failure below can
+    // say which snapshot it was. Joining a path touches no filesystem.
+    let path = snapshots_dir.join(snapshot_filename(state.seq_anchor));
+    let tmp_path = path.with_extension("tmp");
+
+    // Generic over the cause because one of these is a `bincode::Error` and the
+    // rest are `io::Error`, and they are the same answer: the cache could not
+    // be written, the ledger is untouched (C-2, D-240). Until 0.14.23 this
+    // closure built `ReplayCorrupt`, which says the *ledger* is damaged — a
+    // full disk reported the worst thing this system can say.
+    let fail = |what: &str, e: &dyn std::fmt::Display| DbError::SnapshotWriteFailed {
+        path: path.display().to_string(),
         reason: format!("{what}: {e}"),
     };
 
     fs::create_dir_all(snapshots_dir)
-        .map_err(|e| fail("failed to create snapshot directory", e))?;
+        .map_err(|e| fail("failed to create snapshot directory", &e))?;
 
-    let path = snapshots_dir.join(snapshot_filename(state.seq_anchor));
-    let tmp_path = path.with_extension("tmp");
+    let serialized =
+        bincode::serialize(state).map_err(|e| fail("failed to serialize snapshot", &e))?;
 
-    let serialized = bincode::serialize(state).map_err(|e| DbError::ReplayCorrupt {
-        seq: state.seq_anchor,
-        reason: format!("failed to serialize snapshot: {e}"),
-    })?;
-
-    let compressed =
-        zstd::encode_all(&serialized[..], 3).map_err(|e| fail("failed to compress snapshot", e))?;
+    let compressed = zstd::encode_all(&serialized[..], 3)
+        .map_err(|e| fail("failed to compress snapshot", &e))?;
 
     let mut file =
-        fs::File::create(&tmp_path).map_err(|e| fail("failed to create snapshot temp file", e))?;
+        fs::File::create(&tmp_path).map_err(|e| fail("failed to create snapshot temp file", &e))?;
     // Header first, uncompressed: it has to be readable without committing to
     // decompressing a payload this build may not understand (D-043). Since v3
     // it also carries the checksum over the payload that follows it, which is
@@ -249,17 +267,17 @@ pub fn save_snapshot(snapshots_dir: &Path, state: &MaterializedState) -> Result<
         &compressed,
         serialized.len() as u64,
     ))
-    .map_err(|e| fail("failed to write snapshot header", e))?;
+    .map_err(|e| fail("failed to write snapshot header", &e))?;
     file.write_all(&compressed)
-        .map_err(|e| fail("failed to write snapshot bytes", e))?;
+        .map_err(|e| fail("failed to write snapshot bytes", &e))?;
     // Before the rename, or the rename can land ahead of the data.
     file.sync_all()
-        .map_err(|e| fail("failed to flush snapshot to disk", e))?;
+        .map_err(|e| fail("failed to flush snapshot to disk", &e))?;
     drop(file);
 
     fs::rename(&tmp_path, &path).map_err(|e| {
         let _ = fs::remove_file(&tmp_path);
-        fail("failed to publish snapshot", e)
+        fail("failed to publish snapshot", &e)
     })?;
 
     // After the rename, because it is the rename that has to survive. The file
@@ -269,7 +287,7 @@ pub fn save_snapshot(snapshots_dir: &Path, state: &MaterializedState) -> Result<
     // promises past `sync_all` above, and so it is reported rather than logged
     // (W8.3, D-186).
     sync_directory(snapshots_dir)
-        .map_err(|e| fail("failed to make the snapshot's directory entry durable", e))?;
+        .map_err(|e| fail("failed to make the snapshot's directory entry durable", &e))?;
 
     Ok(path)
 }

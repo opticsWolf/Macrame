@@ -153,6 +153,7 @@ from ._macrame import (
     ReplayCorruptError,
     SingleOpenViolationError,
     SnapshotCorruptError,
+    SnapshotWriteFailedError,
     SnapshotIncompatibleError,
     Subgraph,
     SubgraphTooLargeError,
@@ -255,6 +256,7 @@ __all__ = [
     # temporal
     "ReplayCorruptError",
     "SnapshotCorruptError",
+    "SnapshotWriteFailedError",
     "SnapshotIncompatibleError",
     "PayloadVersionError",
     "ArchiveViolationError",

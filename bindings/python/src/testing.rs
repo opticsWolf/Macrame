@@ -57,6 +57,7 @@ pub(crate) const DB_ERROR_VARIANTS: &[&str] = &[
     "ReplayCorrupt",
     "SnapshotIncompatible",
     "SnapshotCorrupt",
+    "SnapshotWriteFailed",
     "PayloadVersion",
     "ArchiveViolation",
     "AttributeModeUnstated",
@@ -169,6 +170,10 @@ fn sample(name: &str) -> Option<DbError> {
         "SnapshotCorrupt" => DbError::SnapshotCorrupt {
             path: "sample.snap".into(),
             reason: "sample-reason".into(),
+        },
+        "SnapshotWriteFailed" => DbError::SnapshotWriteFailed {
+            path: "snapshots/000000000000000042.snap.zst".into(),
+            reason: "failed to write snapshot bytes: no space left on device".into(),
         },
         "PayloadVersion" => DbError::PayloadVersion { got: 9, max: 2 },
         "ArchiveViolation" => DbError::ArchiveViolation {

@@ -49,7 +49,7 @@ use std::path::PathBuf;
 /// `errors.rs`, an entry in `testing.rs`'s `DB_ERROR_VARIANTS`, and a row in
 /// `tests_py/test_errors.py`'s `EXPECTED` — the first two of which the tests
 /// below check, and the third of which the Python suite checks.
-const DB_ERROR_VARIANTS: usize = 40;
+const DB_ERROR_VARIANTS: usize = 41;
 
 fn repo() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

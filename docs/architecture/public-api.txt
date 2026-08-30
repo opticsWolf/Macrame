@@ -275,6 +275,9 @@ pub macrame::error::DbError::SnapshotCorrupt::reason: alloc::string::String
 pub macrame::error::DbError::SnapshotIncompatible
 pub macrame::error::DbError::SnapshotIncompatible::path: alloc::string::String
 pub macrame::error::DbError::SnapshotIncompatible::reason: alloc::string::String
+pub macrame::error::DbError::SnapshotWriteFailed
+pub macrame::error::DbError::SnapshotWriteFailed::path: alloc::string::String
+pub macrame::error::DbError::SnapshotWriteFailed::reason: alloc::string::String
 pub macrame::error::DbError::SubgraphTooLarge
 pub macrame::error::DbError::SubgraphTooLarge::budget: usize
 pub macrame::error::DbError::SubgraphTooLarge::n: usize
@@ -679,6 +682,9 @@ pub macrame::prelude::DbError::SnapshotCorrupt::reason: alloc::string::String
 pub macrame::prelude::DbError::SnapshotIncompatible
 pub macrame::prelude::DbError::SnapshotIncompatible::path: alloc::string::String
 pub macrame::prelude::DbError::SnapshotIncompatible::reason: alloc::string::String
+pub macrame::prelude::DbError::SnapshotWriteFailed
+pub macrame::prelude::DbError::SnapshotWriteFailed::path: alloc::string::String
+pub macrame::prelude::DbError::SnapshotWriteFailed::reason: alloc::string::String
 pub macrame::prelude::DbError::SubgraphTooLarge
 pub macrame::prelude::DbError::SubgraphTooLarge::budget: usize
 pub macrame::prelude::DbError::SubgraphTooLarge::n: usize
@@ -1359,6 +1365,9 @@ pub macrame::DbError::SnapshotCorrupt::reason: alloc::string::String
 pub macrame::DbError::SnapshotIncompatible
 pub macrame::DbError::SnapshotIncompatible::path: alloc::string::String
 pub macrame::DbError::SnapshotIncompatible::reason: alloc::string::String
+pub macrame::DbError::SnapshotWriteFailed
+pub macrame::DbError::SnapshotWriteFailed::path: alloc::string::String
+pub macrame::DbError::SnapshotWriteFailed::reason: alloc::string::String
 pub macrame::DbError::SubgraphTooLarge
 pub macrame::DbError::SubgraphTooLarge::budget: usize
 pub macrame::DbError::SubgraphTooLarge::n: usize

@@ -470,6 +470,18 @@ create_exception!(
 );
 create_exception!(
     macrame,
+    SnapshotWriteFailedError,
+    TemporalError,
+    "A snapshot that could not be written. Attributes: `path`, `reason`.\n\n\
+     The fourth subject in the family above, and the one that was missing until \
+     0.14.23 (C-2): every failure inside `save_snapshot` raised \
+     `ReplayCorruptError` — a full disk said the ledger was damaged. Nothing \
+     here is damaged and nothing is lost. A snapshot is a cache, so the next \
+     start folds from the previous anchor and the whole cost is a slower start; \
+     the subject to look at is the filesystem."
+);
+create_exception!(
+    macrame,
     PayloadVersionError,
     TemporalError,
     "A log payload version this build cannot read. Attributes: `got`, `max`."
@@ -748,6 +760,13 @@ fn build(py: Python<'_>, err: DbError) -> PyErr {
             e.setattr("reason", reason)
         }),
 
+        DbError::SnapshotWriteFailed { path, reason } => {
+            raise::<SnapshotWriteFailedError, _>(py, m, |e| {
+                e.setattr("path", path)?;
+                e.setattr("reason", reason)
+            })
+        }
+
         DbError::PayloadVersion { got, max } => raise::<PayloadVersionError, _>(py, m, |e| {
             e.setattr("got", got)?;
             e.setattr("max", max)
@@ -949,6 +968,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
         ReplayCorruptError,
         SnapshotIncompatibleError,
         SnapshotCorruptError,
+        SnapshotWriteFailedError,
         PayloadVersionError,
         ArchiveViolationError,
         ArchiveWindowError,

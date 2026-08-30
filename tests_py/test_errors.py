@@ -188,6 +188,14 @@ EXPECTED: dict[str, tuple[str, str, dict]] = {
         "TemporalError",
         {"path": "sample.snap", "reason": "sample-reason"},
     ),
+    "SnapshotWriteFailed": (
+        "SnapshotWriteFailedError",
+        "TemporalError",
+        {
+            "path": "snapshots/000000000000000042.snap.zst",
+            "reason": "failed to write snapshot bytes: no space left on device",
+        },
+    ),
     "PayloadVersion": ("PayloadVersionError", "TemporalError", {"got": 9, "max": 2}),
     "ArchiveViolation": ("ArchiveViolationError", "TemporalError", {"table": "links"}),
     "ArchiveWindow": (
@@ -371,6 +379,11 @@ def test_an_archive_window_crosses_as_a_timedelta():
         # -- delete the snapshot, fold from the log -- is its own.
         ("SnapshotCorruptError", "SnapshotIncompatibleError", "damaged vs foreign"),
         ("SnapshotCorruptError", "ReplayCorruptError", "the cache vs the ledger"),
+        # And a fourth subject at 0.14.23 (C-2): a cache that could not be
+        # written is not a cache that is damaged, and neither is a damaged
+        # ledger. A full disk used to raise the last of those.
+        ("SnapshotWriteFailedError", "SnapshotCorruptError", "unwritten vs damaged"),
+        ("SnapshotWriteFailedError", "ReplayCorruptError", "the filesystem vs the ledger"),
         ("InvalidTimestampError", "ReplayCorruptError", "caller input vs damaged ledger"),
         ("SingleOpenViolationError", "OverlappingIntervalError", "the sentinel vs the general case"),
     ],

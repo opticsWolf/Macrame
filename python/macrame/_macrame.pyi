@@ -1500,6 +1500,23 @@ class SnapshotCorruptError(TemporalError):
     path: str
     reason: str
 
+class SnapshotWriteFailedError(TemporalError):
+    """A snapshot that could not be written (0.14.23, C-2).
+
+    The fourth subject in this family and the one that was missing: every
+    failure inside `save_snapshot` — the directory, the serialization, the temp
+    file, the write, the flush, the rename — used to raise
+    `ReplayCorruptError`, so a full disk reported that the *ledger* was damaged.
+
+    Nothing is damaged here and nothing is lost. A snapshot is a cache, so the
+    next start folds from the previous anchor and the whole cost is a slower
+    one. The subject to look at is the filesystem, and `reason` names the step
+    that failed.
+    """
+
+    path: str
+    reason: str
+
 class PayloadVersionError(TemporalError):
     got: int
     max: int

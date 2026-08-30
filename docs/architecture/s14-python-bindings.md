@@ -273,6 +273,8 @@ possible moment. The eight pairs above are pinned as non-inheriting classes, bec
 collapsing one is a regression no functional test would notice: both sides still raise.
 
 
+**And a fourth at 0.14.23 ([D-240](s13-decision-register.md#d-240), §14.1 C-2): `SnapshotWriteFailedError`, for a snapshot that could not be written at all.** Every failure inside `save_snapshot` raised `ReplayCorruptError` until then, so a full disk reported a damaged ledger — the write half of the correction the paragraph below made to the read half, ten releases late. It is the one member of the family where nothing is damaged and nothing is lost: a snapshot is a cache, the previous anchor still stands, and the cost is a slower start.
+
 **`SnapshotCorruptError` is the third name in a family that had two (0.13.12, W8.2, [D-185](s13-decision-register.md#d-185)).** `SnapshotIncompatibleError` means another build wrote the file, `ReplayCorruptError` means the ledger itself is damaged, and the new one means the *cache* is damaged and the ledger is not — three subjects, three responses, and the middle one is the worst thing this library can say about a database. Until v3 every failure of `load_snapshot` arrived as `ReplayCorruptError` with `seq = 0`, so a Python caller writing `except ReplayCorruptError` to catch a damaged ledger was also catching a snapshot file that could simply be deleted. Nothing on the ordinary path raises the new class — a damaged snapshot is skipped by the scan and the fold runs from the log — which is exactly why it needed the separate name: the case where a caller *does* see it is the case where they were about to act on the wrong diagnosis.
 
 
