@@ -3717,6 +3717,31 @@ so it is visible from both places.
    during the 0.14.0 cycle and tracked nowhere; the point of the table is that
    the next acceptance section has to look at it. Re-carrying is a legitimate
    outcome and a silent carry is not — D-212.
+
+   **Met, and all four are closed rather than re-carried**: C-1 at 0.14.2
+   ([D-218](architecture/s13-decision-register.md#d-218)), C-2 at 0.14.23
+   ([D-240](architecture/s13-decision-register.md#d-240)), C-4 at 0.14.24
+   ([D-241](architecture/s13-decision-register.md#d-241)), C-3 at 0.14.25
+   ([D-242](architecture/s13-decision-register.md#d-242)). C-5 is at 1.0 by
+   decision, so §14.1 carries nothing into this release.
+
+   **The row was wrong here before it was right.** The 0.15.0 note recorded this
+   item as met on the strength of *"C-2, C-3 and C-4 re-carried in writing"* —
+   and there was no such writing: §14.1 still held the original deferral
+   reasons, untouched. A carry asserted to have been made and never made is the
+   silent carry this table exists to forbid, wearing the table's own vocabulary.
+   Found by re-reading the acceptance list rather than by any failure, and
+   corrected by closing the items rather than by making the assertion true.
+
+   **None of the four closed the way its row predicted.** C-2's stated reason
+   for waiting — *a wave that was not changing the API* — expired inside the
+   release that takes `DbError` from 33 to 41 variants. C-4 asked for a build
+   gate *instead of* a `cargo check`, and measurement refused the phrasing: the
+   check catches the defect that motivated it and is the only gate that builds
+   the `harness = false` bench, so both are kept. C-3 was waiting on a design,
+   and the design turned out to be *do not invent one* — the taxonomy the Python
+   bindings already publish, with a gate to keep it single. A deferral records
+   why the work was not done; it does not get to record what the work will be.
 11. **`CommandKind::ShadowRebuild` covered two structural hold distributions,
     and the split ships here** ([D-233](architecture/s13-decision-register.md#d-233),
     0.14.16). **Unscoped work, taken in an acceptance release, recorded rather
