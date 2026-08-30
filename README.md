@@ -60,7 +60,7 @@ folds the same log for the *text* and raises the same error for the same reason 
 
 ```toml
 [dependencies]
-macrame-db = "0.13"
+macrame-db = "0.15"
 ```
 
 ```rust

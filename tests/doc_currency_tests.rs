@@ -19,6 +19,11 @@
 //! Three of these four assertions would have failed at 0.10.0, which is the
 //! release the drift started in.
 //!
+//! Since 0.15.0 it also checks the README's dependency pin, which is the
+//! same category reached one document further out: a mechanical claim, in a
+//! file nobody rereads while writing code, that is wrong in a way no reader
+//! of the code can see. It was found by a user rather than by this file.
+//!
 //! # What it deliberately does not check
 //!
 //! That the prose in a row is *true*. No test can. It checks that a row exists
@@ -29,6 +34,7 @@
 const MANIFEST: &str = include_str!("../Cargo.toml");
 const ARCH_README: &str = include_str!("../docs/architecture/README.md");
 const REGISTER: &str = include_str!("../docs/architecture/s13-decision-register.md");
+const README: &str = include_str!("../README.md");
 
 /// The crate's version, from the `[package]` table's first `version =`.
 fn crate_version() -> String {
@@ -79,6 +85,47 @@ fn highest_decision() -> u32 {
         })
         .max()
         .expect("the register defines decisions")
+}
+
+/// The version the README's Rust quick start tells a new user to depend on.
+///
+/// The pin is a two-component `major.minor`, which pre-1.0 is the whole of the
+/// compatibility claim: `"0.15"` resolves any `0.15.z` and refuses `0.16.0`.
+fn readme_dep_pin() -> Option<String> {
+    README
+        .lines()
+        .map(str::trim)
+        .find_map(|l| l.strip_prefix("macrame-db = \""))
+        .and_then(|rest| rest.split('"').next())
+        .map(str::to_string)
+}
+
+/// The series the crate is at, as the README would have to spell it.
+fn crate_series() -> String {
+    let v = crate_version();
+    let mut parts = v.split('.');
+    let major = parts.next().expect("a version has a major");
+    let minor = parts.next().expect("a version has a minor");
+    format!("{major}.{minor}")
+}
+
+#[test]
+fn the_readme_pins_the_series_the_crate_is_at() {
+    let series = crate_series();
+    let pin = readme_dep_pin().expect("the README's quick start pins a version");
+
+    assert_eq!(
+        pin, series,
+        "the README's quick start says `macrame-db = \"{pin}\"` while the crate \
+         is at {}. That line is not internal documentation: `README.md` is this \
+         package's front page on crates.io and PyPI, so it is the first \
+         instruction a new user follows, and a stale pin sends them to a series \
+         this repository has stopped changing. It read \"0.13\" when 0.15.0 was \
+         tagged and was caught by a reader rather than by a gate — the version \
+         sweep that release ran searched for `0.13.0` and `0.14.0`, and a \
+         two-component pin matches neither.",
+        crate_version()
+    );
 }
 
 #[test]
@@ -146,4 +193,9 @@ fn the_documents_are_shaped_the_way_these_tests_assume() {
     assert_eq!(rows[0][0], "0.1.0", "the table no longer starts at 0.1.0");
     assert!(highest_decision() >= 208);
     assert!(crate_version().starts_with("0."));
+    assert!(
+        readme_dep_pin().is_some(),
+        "the README no longer contains a `macrame-db = \"x.y\"` line; the \
+         quickstart moved and the pin test is measuring nothing"
+    );
 }
