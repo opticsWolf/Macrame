@@ -246,8 +246,43 @@ jobs:
       # The classifier removes that: a FAILED result returns on attempt 1 and is
       # never retried, so the only thing six attempts buys is more tolerance for
       # the one outcome that is known to be noise.
-      - name: property tests (quarantined, R15-prone)
+      #
+      # **`continue-on-error`, and it is not tolerance — it is the quarantine
+      # decision reaching this file** (0.14.19, D-236). `Cargo.toml` has said
+      # since 0.8.0 that `doctrine_property_tests` "still faults often enough
+      # serialised to be unusable as a gate on Windows", and that is the whole
+      # reason the feature exists. This step then blocked anyway: it is in the
+      # `test` job, `release.yml`'s `verify` calls this workflow, and `publish`
+      # needs `verify` — so an engine fault decided whether a release reached
+      # crates.io. v0.14.0 took two `gh run rerun --failed` cycles to publish a
+      # tree nothing was wrong with.
+      #
+      # The argument is not the runner-hours. At 65% red on a HEALTHY tree there
+      # is no contrast between this step's healthy and unhealthy output, so
+      # blocking on it does not verify the tree, it **selects** the runs where
+      # the coin landed heads. `public-api`'s comment above refuses
+      # `continue-on-error` for the opposite and correct reason: that gate can
+      # pass, and it distinguishes "moved" from "could not be measured" itself.
+      #
+      # What is given up, stated rather than implied: a publish can now ship
+      # with **zero completed property runs** for its SHA, and a genuine FAILED
+      # here no longer blocks either. The mitigation is a human read, which is
+      # what the classifier's three-state verdict below is for, and it is on the
+      # release checklist under D-234. R15's signature is teardown-shaped — the
+      # assertions report `ok` and the process dies at exit — so even a crashed
+      # attempt usually carries the verdict, and "zero named failures" is a
+      # receipt rather than an apology.
+      #
+      # Not silenced and not abandoned: the step still runs, on every push and
+      # every pull request, and reports. If release cadence thins after 1.0 this
+      # needs a scheduled home rather than a drawer (D-236's follow-up); the
+      # real exit is W1.3 upstream. If it ever returns to a blocking path the
+      # shape is a **crash-aware gate** — nonzero only on named failures — and
+      # `run_rust_suite.py` already classifies well enough to build it, which is
+      # why its exit codes are left exactly as they were.
+      - name: property tests (quarantined, R15-prone, non-blocking)
         shell: bash
+        continue-on-error: true
         run: python scripts/run_rust_suite.py --features property-tests --attempts 6
 
   # The snapshot loader's fuzz targets (0.13.14, W8.4, D-187).

@@ -4492,6 +4492,15 @@ read and its failures classified. This upgrades to *green for the pushed SHA*
 the moment the standing reds are triaged, and the distance between those two
 sentences is itself the honest description of where this project's CI is.
 
+*Amended 0.14.19 ([D-236](#d-236)): the quarantined step no longer makes a run
+red, so "green" is now reachable — and the obligation gains the clause that
+replaces what the block was pretending to buy.* **The property step is read, not
+merely run: `completed`, or `crashed-R15` with zero named failures confirmed.**
+The verdict is on the run's summary page for exactly this reason. A green job
+whose non-blocking step said `named failures` is a release that must not go out,
+and no mechanism will stop it — which is the accepted risk D-236 states rather
+than implies.
+
 Rejected: *widening `push:` to `dev/**`* (double-runs every PR, and treats the
 symptom); *treating the local gate battery as sufficient* (it is thorough and it
 is one machine — the macOS red is the counterexample); *waiting until 0.15.0 to
@@ -4583,3 +4592,35 @@ done, and leaves the limit wrong); *`-rss_limit_mb=0`* (removes the runaway
 backstop entirely — the limit is not wrong in kind, only in what it was pointed
 at); *reducing ASan's quarantine via `ASAN_OPTIONS`* (weakens use-after-free
 detection to protect a number that should not have been the gate).
+
+---
+
+<a id="d-236"></a>D-236 — a gate that is red 65% of the time on a healthy tree does not verify the tree, it selects the runs where the coin landed heads; the quarantine decision reaches the release wiring it was never applied to (0.14.19, W12.19, §17). [D-030](s13-decision-register.md#d-030), [D-035](s13-decision-register.md#d-035), [D-107](s13-decision-register.md#d-107), [D-110](s13-decision-register.md#d-110), [D-140](s13-decision-register.md#d-140), [D-147](s13-decision-register.md#d-147), [D-148](s13-decision-register.md#d-148), [D-205](s13-decision-register.md#d-205), [D-233](#d-233), [D-234](#d-234), [D-235](#d-235). Evidence: `.github/workflows/ci.yml`, `.github/workflows/release.yml`, `scripts/run_rust_suite.py`, `Cargo.toml`'s `[features]` block, run 33299307557.
+
+**This is not a new policy. It is an old one finally reaching a file it was never applied to.** `Cargo.toml` has said since 0.8.0, in the comment that justifies the `property-tests` feature existing at all, that `doctrine_property_tests` *"still faults often enough serialised to be unusable as a gate on Windows"*. That sentence is the quarantine. `release.yml` then wired the quarantined step as a gate anyway — not by deciding to, but because the step lives in `ci.yml`'s `test` job, `verify` calls that workflow whole, and `publish` needs `verify`. Nobody chose it; it fell out of the wiring, which is exactly the class of thing this register exists to catch.
+
+**Decision.** The step leaves every blocking path. `continue-on-error: true` in `ci.yml`, which keeps it running in the same `verify` run, on every push and every pull request, and stops its exit code reaching the job. One disposition everywhere: **runs, reports, blocks nothing.**
+
+**Grounds, and the runner-hours are the least of it.** v0.14.0's publish took two `gh run rerun --failed` cycles against a tree nothing was wrong with; the expectation is about three attempts and the tail is unbounded — better than five is about 12%. But the cost that matters is not time. **A gate red 65% of the time on a healthy tree has no contrast between its healthy and unhealthy output.** Blocking on it does not confirm the tree; it confirms the lottery. When the publish finally fires it fires because a coin came up heads, and the SHA that ships is selected rather than verified. [D-147](#d-147) named the second-order cost of exactly this: *kick it again* becoming the permanent answer to red, until a real failure is laundered by the same reflex that clears the noise.
+
+**The contrast with [D-205](#d-205)'s gate is the whole distinction, and that entry's comment argues the other way on purpose.** The public-API job refuses `continue-on-error` because *a job that is allowed to be red is a job nobody reads* — and that is right there, because that gate **can pass**, and it separates *the surface moved* from *I could not measure this* itself. This step cannot pass reliably and cannot make that separation from its exit code. Two gates, opposite dispositions, one rule underneath: **an instrument with no contrast between its healthy and unhealthy output is decoration.**
+
+**Measured once more while shipping this, because the entry should not rest only on the runner.** The quarantined step run locally at 0.14.19: **six attempts, six crashes, zero named failures**, naming `doctrine_property_tests` — verdict `crashed-R15`. That binary then run alone, three times, per the attribution procedure `.cargo/config.toml` has carried since 0.5.4: **`0xC0000005` twice with no panic and no named test, then 9 of 9 clean**. A step red six times over a binary that passes on its own is not a signal about the tree, and under the old wiring it was a blocked release. This is also the first real exercise of the verdict line, which reported the state correctly on the outcome the step produces most often.
+
+**The classifier becomes the step's output rather than its retry logic's justification.** With the exit code no longer reaching anyone, a green job with a quietly red step inside it would be the failure this family of findings is about. `run_rust_suite.py` now emits a verdict — `completed`, `crashed-R15`, `named failures`, or `did not run` — to stdout and to `$GITHUB_STEP_SUMMARY`, so it lands on the run's own page rather than inside a collapsed group. Four states and not three, because `BUILD` / `INCOMPLETE` / `TEARDOWN` are not a pass and are not a failing test, and printing them as either would be the collapse D-205's paragraph forbids in the other file. **Exit codes are deliberately untouched**, so returning to a blocking path is a change to `main`'s returns and nothing else.
+
+**Accepted risk, stated rather than implied.** What is surrendered is exactly one guarantee: **at least one completed, green property run per published SHA.** Two things make that delta smaller than it looks, and one thing makes it real.
+
+* R15's signature is **teardown-shaped** — every test prints `ok` and the process dies at exit — so a died-without-a-summary attempt usually still carries the assertions' verdict, and the classifier reads precisely that. *Zero named failures* is a receipt, not an apology.
+* The guarantee being given up was **luck-conditioned**: the old gate never verified a SHA, it selected one. Surrendering a selection effect costs less than surrendering a check.
+* What is genuinely lost: a publish can now ship with **zero completed property runs** for its SHA, and a genuine `named failures` no longer blocks either. Both are covered by a human read, not by a mechanism — [D-234](#d-234)'s release-checklist line gains a clause, and *read the verdict* is the same disposition `retired = 0` has had since F-31.
+
+**Quarantine is not abandonment, and the follow-up is named here so it cannot become a drawer.** If `verify` is the property suite's only home, the cadence thins after 1.0 and the quarantine becomes W1.4's failure mode — *1.0 ships and nobody re-asked* — arriving through the back door. So: non-blocking in `verify` now; **a scheduled run is the recorded follow-up if release cadence thins**; the real exit remains W1.3 upstream. This is the interim disposition and says so, which is W1.4's own standard for shipping 1.0 with a quarantine in the open.
+
+**One thing the survey of blocking paths turned up.** `main` has **no branch protection and no rulesets** — checked, both empty — so the pull request displays this step's red and nothing mechanically blocks a merge on it. The question left open at PR #1 therefore has an answer: the merge was gated by a reviewer's reading, not by a required check, and the `ci.yml` edit is sufficient to make the disposition uniform. If protection is ever added, this step must not be in the required set, and this paragraph is where to look.
+
+**Revisit.** If the suite returns to a blocking path the shape is a **crash-aware gate**: nonzero only on named failures, `CRASH` returning 0 with its verdict recorded. The classifier already draws that line better than rerun fatigue ever did, so this is a few lines rather than a design. The trigger is R15 being fixed or bounded upstream (W1.3), or the rate on the runner falling far enough that the step has contrast again.
+
+**The family line, because this is the third of its kind in one series.** [D-234](#d-234) found a gate that never ran; [D-233](#d-233) found a counter that could not be zero; this is a gate that could not pass. [D-030](#d-030) said a check that cannot fail is worse than none. The series has now found the other corners, and the sentence that prevents the fourth is the one above: **an instrument with no contrast between its healthy and unhealthy output is decoration** — whether the missing contrast is because it always passes, always fails, or never runs.
+
+Rejected: *keep rerunning* (about three attempts in expectation with an unbounded tail, and it trains the reflex D-147 warns about — the publish fires when a coin lands heads, which is selection and not verification); *raise the retry budget* (the same runner-hours and the same selection effect with the human attention automated out — under 1% needs about eleven attempts, eleven runner-hours a release to preserve the *appearance* of a gate, and `ci.yml`'s own comment already refuses budget-raising for the neighbouring reason); *delete the step* (these are the tests that found [D-035](#d-035), and D-148 explains why this set is the residue rather than bad luck); *a crash-aware gate now* (the right end state, and it makes a claim about the classifier's precision that this release has not measured — the verdict output is the instrument that would justify it, and it ships here); *`--features property-tests` folded back into the main suite* (that is [D-140](#d-140) inverted, and puts R15's highest-volume shape back inside the run the whole quarantine exists to protect).

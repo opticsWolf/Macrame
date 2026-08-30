@@ -395,6 +395,46 @@ def run_docs(features: str) -> int:
     return 1
 
 
+def verdict(state: str, detail: str) -> None:
+    """Say, in one line a human will actually meet, what this run was.
+
+    `ci.yml` runs the quarantined step with `continue-on-error`, so its exit
+    code no longer reaches anybody: the job is green either way and the reader
+    would have to open the log to find out which way (D-236). A green job with a
+    silently red step inside it is the same defect as a counter that cannot be
+    zero -- an instrument with no contrast between its healthy and unhealthy
+    output is decoration.
+
+    Four states and not three, because folding the fourth in would be a lie:
+
+    * `completed`      -- the suite ran and passed.
+    * `crashed-R15`    -- every attempt died without a summary, R15's shape,
+                          and **no test was named as failing**. That last clause
+                          is the receipt: R15 kills at teardown, after the
+                          assertions have reported, so a crashed attempt still
+                          usually carries the verdict.
+    * `named failures` -- a test failed. Not noise, and never retried.
+    * `did not run`    -- BUILD, INCOMPLETE or TEARDOWN: the suite did not
+                          produce an answer at all, which is neither a pass nor
+                          a failing test and must not print as either.
+
+    Written to `$GITHUB_STEP_SUMMARY` when it exists, which puts the line on the
+    run's own page rather than inside a collapsed group.
+    """
+    line = f"VERDICT: {state} -- {detail}"
+    print(line)
+    path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not path:
+        return
+    try:
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(f"**{state}** — {detail}\n\n")
+    except OSError as e:
+        # A summary that cannot be written is not a reason to fail a suite that
+        # ran. Say so and carry on.
+        print(f"::warning::could not write the job summary: {e}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -444,6 +484,7 @@ def main() -> int:
 
         if outcome.passed:
             print(f"{outcome.kind}: {outcome.detail} (attempt {attempt}/{args.attempts})")
+            verdict("completed", f"{outcome.detail} (attempt {attempt}/{args.attempts})")
             return 0
 
         for annotation in outcome.annotations:
@@ -451,6 +492,10 @@ def main() -> int:
 
         if outcome.kind != "CRASH":
             print(f"::error::{outcome.kind}: {outcome.detail}")
+            verdict(
+                "named failures" if outcome.kind == "FAILED" else "did not run",
+                f"{outcome.kind}: {outcome.detail}",
+            )
             return 1
 
         print(f"::warning::CRASH on attempt {attempt}/{args.attempts}: {outcome.detail}")
@@ -482,6 +527,12 @@ def main() -> int:
         f"rate nobody had measured on this step. Before treating it as real, "
         f"run the named binary on its own a few times: alone it should be "
         f"clean, and exit 0xC0000005 there is still R15."
+    )
+    verdict(
+        "crashed-R15",
+        f"{args.attempts} attempts, none with a summary, zero named failures. "
+        f"Read before trusting: a binary that fails ALONE is a real failure "
+        f"(.cargo/config.toml, D-147).",
     )
     return 1
 

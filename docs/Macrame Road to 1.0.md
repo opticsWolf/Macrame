@@ -3752,8 +3752,32 @@ so it is visible from both places.
     modes are the part nobody exercises — the library is tested, and the things
     that test the library are read.
 
+    **And a fourth, which is the first one of these that was a decision rather
+    than an oversight** ([D-236](architecture/s13-decision-register.md#d-236),
+    0.14.19). The quarantined property step was wired as a release gate — it
+    lives in `ci.yml`'s `test` job, `release.yml`'s `verify` calls that workflow
+    whole, and `publish` needs `verify` — while `Cargo.toml` has said since
+    0.8.0 that this set is *"unusable as a gate on Windows"*. So the quarantine
+    was recorded in one file and contradicted by another, and v0.14.0's publish
+    took two `gh run rerun --failed` cycles against a tree nothing was wrong
+    with. The step is now non-blocking everywhere: it **runs, reports, and
+    blocks nothing**, and `run_rust_suite.py` emits a four-state verdict to the
+    run's summary page so the report is met rather than buried. What that gives
+    up is stated in the entry rather than implied — a publish can ship with zero
+    completed property runs, and a genuine failure here no longer blocks — and
+    the mitigation is the checklist clause below.
+
+    The rule the four of them share, and the one that prevents a fifth: **an
+    instrument with no contrast between its healthy and unhealthy output is
+    decoration** — whether the missing contrast is because it always passes
+    ([D-030](architecture/s13-decision-register.md#d-030)), always fails
+    ([D-236](architecture/s13-decision-register.md#d-236)), cannot be zero
+    ([D-233](architecture/s13-decision-register.md#d-233)), or never runs
+    ([D-234](architecture/s13-decision-register.md#d-234)).
+
     The standing obligation this leaves: a release is not done until **a CI run
-    exists for the pushed SHA**. Not green — [D-147](architecture/s13-decision-register.md#d-147)'s
+    exists for the pushed SHA**, and **the property step is read** — `completed`,
+    or `crashed-R15` with zero named failures confirmed (0.14.19). Not green — [D-147](architecture/s13-decision-register.md#d-147)'s
     quarantined step is red about two runs in three and is documented as
     ungateable — but *existing and attributed*, so it can be read. That upgrades
     to green when the standing reds are triaged, and the gap between those two
