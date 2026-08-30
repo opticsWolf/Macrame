@@ -3932,3 +3932,19 @@ semantics.
 complete feature. Merging two belief lineages requires deciding which assertion
 supersedes which on the caller's behalf, and Doctrine III has no neutral answer
 to that. It is its own decision and must not ride in on W12's schema rung.
+
+**Cross-branch traversal.** §15.4, and recorded here at 0.14.18 because §17
+item 8 asks for it *in this section* and §15.4's own list was doing the job.
+An edge from a node on one lineage to a node on another is either a lineage
+violation or a merge in disguise, so refusing it is the same refusal as the one
+above rather than a second one. What the shipped design makes of that is worth
+stating, because it is not what the phrase suggests: **an edge carries exactly
+one `branch_id`**, and concepts are shared vocabulary across the whole ledger
+([D-214](architecture/s13-decision-register.md#d-214)) rather than rows a
+lineage owns. So there is no pair of endpoints "on different branches" for an
+edge to span — the shape the criterion refuses is one the schema cannot
+represent, which is a stronger guarantee than a runtime refusal and a different
+sentence from the one §17 item 4 contains. What a caller can actually attempt is
+refused and named: asserting through a view on a lineage the assertion does not
+name is `BranchMismatch`, naming an unregistered lineage is `UnknownBranch`, and
+restating an inherited concept is `CrossLineage`.

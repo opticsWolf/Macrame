@@ -23,6 +23,7 @@ Macrame stores concepts linked by typed, weighted relationships — where both c
 | **Single file, embedded** | The entire database is one file on the local filesystem. Link it directly into your application. Run on Windows desktop, Linux, or macOS — the Rust suite runs on all three in CI. |
 | **Graph + vectors + search** | Recursive CTE traversal, native DiskANN vector search, FTS5 keyword search, and hybrid RRF fusion — all in one crate, no external graph library. |
 | **Five in-memory analytics** | Dijkstra, A*, SCC, k-core, and Louvain — operating on a typed `Subgraph` with zero external dependencies. |
+| **Branching** | A fork is a lineage of belief, not a copy: one row in `branches`, no ledger table read or written. A branch reads its ancestry as of its fork point, writes its own rows *beside* its parent's rather than over them, answers `diff(a, b)` against another lineage, and is abandoned in one transaction that takes its links, its concepts, its log entries and its own register row. Merge is refused, in writing — Doctrine III has no neutral answer to which assertion supersedes which ([D-213](docs/architecture/s13-decision-register.md#d-213) … [D-232](docs/architecture/s13-decision-register.md#d-232), 0.15.0). |
 | **Rebuildable materialization** | `links_current` is a cache of current belief, always rebuildable from the append-only `transaction_log`. Drift is detectable by audit, recoverable by atomic or chunked rebuild. |
 | **Archival path** | Closed intervals move to a cold database inside atomic sessions. Point-in-time reconstruction composes from snapshots plus anchored folds — fast because it doesn't fold from genesis. |
 | **Runtime safety** | One Write Actor serialises all writes; read connections carry `PRAGMA query_only = ON` enforced at the engine level. No raw SQL escapes the guard. |
@@ -178,9 +179,13 @@ constant, `Optimize`'s is rare and therefore the informative one
 | v8 | `concepts.rowid_pk`, the third FTS trigger, and the two unread indices dropped |
 | v9 | `trg_concepts_guard_delete` becomes conditional on an archive session, so concepts can be archived (D-129) |
 | v10 | `trg_concepts_log_insert` becomes conditional on the same marker, so rehydration mints no transaction-time facts (D-131) |
-| v11 | `idx_links_recorded_at` and `idx_links_target` on the `links` ledger, so neither archive predicate scans it (D-151) — **current** |
+| v11 | `idx_links_recorded_at` and `idx_links_target` on the `links` ledger, so neither archive predicate scans it (D-151) |
+| v12 | The `branches` register, `branch_id` on all four ledger tables with a real foreign key, `links_current` re-keyed per lineage, three log triggers redefined and four guards added ([D-214](docs/architecture/s13-decision-register.md#d-214)…[D-217](docs/architecture/s13-decision-register.md#d-217)) |
+| v13 | `trg_branches_frozen_delete` becomes conditional on an archive session, so a lineage can be abandoned, and `cold.branches` arrives with it ([D-230](docs/architecture/s13-decision-register.md#d-230)) |
+| v14 | `idx_lc_lineage_cut` on `links_current`, the index the branched read seeks and the trunk walk does not ([D-231](docs/architecture/s13-decision-register.md#d-231)) |
+| v15 | `links`' primary key gains `branch_id`, last, and `cold.links` takes the same key ([D-232](docs/architecture/s13-decision-register.md#d-232)) — **current** |
 
-v8 is the last rung that could change a *primary key* before the 1.0 freeze: `rowid_pk INTEGER PRIMARY KEY` costs `id` the primary key, and D-036 forbids a primary-key change after 1.0 (D-119). It also drops `idx_annotations_label` and `idx_lc_tgt_active`, which shipped in the v7 baseline with no query that seeks on them — measured at −7.9% off `assert_edge` (D-089, D-118).
+**v15 is the last rung that changed a *primary key* before the 1.0 freeze, and v8 was the one before it.** D-036 forbids a primary-key diff after 1.0, and D-032 is what reserves the pre-1.0 window for exactly this: v15 widens `links` because two lineages are *allowed* to believe different things about one edge, and the old key refused that pair with a bare `UNIQUE` error naming a storage key the caller has never seen. `branch_id` goes **last**, so the five-column covering seek the archive sweep runs per candidate row survives the change. On v8: `rowid_pk INTEGER PRIMARY KEY` costs `id` the primary key, and D-036 forbids a primary-key change after 1.0 (D-119). It also drops `idx_annotations_label` and `idx_lc_tgt_active`, which shipped in the v7 baseline with no query that seeks on them — measured at −7.9% off `assert_edge` (D-089, D-118).
 
 ---
 
@@ -192,8 +197,8 @@ v8 is the last rung that could change a *primary key* before the 1.0 freeze: `ro
 | MSRV | **1.88** (verified, not declared) |
 | Runtime | tokio async, single process |
 | Engine | libSQL 0.9.30 (MIT, unmodified) |
-| Schema version | 11 |
-| Test suite | 503 Rust · 487 with `--no-default-features` · 457 Python — all green (measured 2026-08-27, 0.14.0). `metrics` is a **default** feature since 0.12.11, so the first figure is a plain `cargo test`; the second is the same suite with the counters compiled out, and the 16-test gap is `actor_metrics_tests` (10, the whole target), `src/metrics.rs`'s four unit tests, one gated test in `checkpoint_tests`, and the doc-test on `Database::metrics`. **That second figure was published for two releases against a configuration that did not build** — three examples called `Database::metrics()` with no `required-features` entry, which is [D-169](docs/architecture/s13-decision-register.md#d-169) recurring and is fixed in 0.13.36 ([D-209](docs/architecture/s13-decision-register.md#d-209)). The three `property-tests` binaries (23 tests) are **run as their own step** — see below. **`--all-features` is not a supported configuration**, see below. Regenerate rather than trust this line: `python scripts/run_rust_suite.py` |
+| Schema version | **15** |
+| Test suite | 627 Rust · 608 with `--no-default-features` · 553 Python (2 skipped) — all green (measured 2026-08-30, 0.14.17, one Windows box; the branch's CI history is [D-234](docs/architecture/s13-decision-register.md#d-234) and worth reading before quoting this line as replicated). `metrics` is a **default** feature since 0.12.11, so the first figure is a plain `cargo test`; the second is the same suite with the counters compiled out, and the 16-test gap is `actor_metrics_tests` (10, the whole target), `src/metrics.rs`'s four unit tests, one gated test in `checkpoint_tests`, and the doc-test on `Database::metrics`. **That second figure was published for two releases against a configuration that did not build** — three examples called `Database::metrics()` with no `required-features` entry, which is [D-169](docs/architecture/s13-decision-register.md#d-169) recurring and is fixed in 0.13.36 ([D-209](docs/architecture/s13-decision-register.md#d-209)). The three `property-tests` binaries (23 tests) are **run as their own step** — see below. **`--all-features` is not a supported configuration**, see below. Regenerate rather than trust this line: `python scripts/run_rust_suite.py` |
 | Dependencies | tokio, serde, bincode, zstd, thiserror, tracing, ulid |
 
 ### Module Map
@@ -205,12 +210,13 @@ v8 is the last rung that could change a *primary key* before the 1.0 freeze: `ro
 | `temporal` | `as_of()`, `reconstruct()`, snapshots, archive, rehydrate |
 | `vector` | Model registration, embedding upsert, DiskANN search, hybrid RRF |
 | `integrity` | Audit, atomic rebuild, chunked shadow-swap rebuild |
+| `branch` | `BranchId`, `Branch`, `BranchView`, `fork`, `diff`, lineage resolution |
 | `connection` | `Database` handle, Write Actor, priority channels |
 | `error` | `DbError` enum, error classification |
 
 ---
 
-## Python Bindings (v0.13.0)
+## Python Bindings (v0.15.0)
 
 | Detail | Value |
 |---|---|
@@ -228,7 +234,7 @@ v8 is the last rung that could change a *primary key* before the 1.0 freeze: `ro
 - **Opaque `Subgraph`** — A `#[pyclass]` with forwarded accessors; `.to_dict()` for callers who want the copy. It paid for itself in 0.8.0: the crate re-represented `EdgeRef` and **no binding signature moved**, because there is no converted copy whose layout had to follow (D-101, D-123).
 - **Open intervals cross as `None`** — Not a sentinel datetime, because `datetime.max` cannot survive `.astimezone()` east of UTC.
 - **Absent `content` crosses as `None`** — `load_subgraph` does not fetch document text unless asked (`content=True`). `""` cannot mark *not loaded*, because it is a valid value of the type (D-116, D-123).
-- **Every error is typed** — 35 exception classes under `MacrameError` (36 including the base), of which six are intermediate groups for catching sets — `IntegrityError`, `ValidationError`, `VectorError`, `TemporalError`, `WriterError`, `BudgetError` — leaving 29 leaves.
+- **Every error is typed** — 48 exception classes under `MacrameError` (49 including the base), of which seven are intermediate groups for catching sets — `IntegrityError`, `ValidationError`, `VectorError`, `TemporalError`, `WriterError`, `BudgetError`, `BranchError` — leaving 41 leaves. `BranchError` is 0.15.0's, over the six refusals a lineage can raise; `binding_parity_tests` fails to *compile* when a `DbError` variant is added without one.
 - **`metrics` shipped on** — The wheel ships with the `metrics` feature enabled because feature flags do not survive into binary artifacts. It has been a Rust default since 0.12.11 too, so the two sides no longer differ ([D-154](docs/architecture/s13-decision-register.md#d-154)).
 - **Parity is a wave, not a side effect** — 0.13.0 closed six gaps at once (W6): the archive-session and chunk-row constants, `registered_models()` / `declared_dimension()`, the maintenance calls and tuning keywords above, and a clock seam for tests. A gap opened in the release that created the feature is the one that never becomes a convention — the constants had gone eight releases for want of being anyone's next task.
 - **The chunk-row constants are ceilings, not sizes** — `CHUNK_ROWS_EDGES` and its three siblings bound the adaptive loop from above; a populated database converges below them. Dividing a batch by one to predict transaction count reads a 0.11.0 fact ([D-161](docs/architecture/s13-decision-register.md#d-161)).
@@ -379,9 +385,10 @@ criterion baselines, machine against itself. See [§9 of the architecture docs](
 ## Documentation
 
 - [Architecture specification](docs/architecture/README.md) — normative surfaces: §4 (schema) and Appendix A (API)
-- [Architecture Quick Reference](docs/quickref.md) — API, schema, decisions, performance. Marked **v0.12.0** and current to [D-148](docs/architecture/s13-decision-register.md#d-148); it does not yet carry the 0.13.0 wave (D-149…D-169) or the 0.13.x series toward 1.0 (D-170…[D-212](docs/architecture/s13-decision-register.md#d-212)), which includes the public-surface changes of D-205…D-208 — so its API section names paths this crate no longer offers. **Refreshing it is not scheduled**, and that is recorded rather than glossed: it is a derived document, and the architecture set below is the one kept true by gates. This README said "v0.9.0 reference" until 0.12.25, which was wrong about its own pointer. Where it disagrees with the architecture set, the architecture set wins — it is the normative one.
+- [Architecture Quick Reference](docs/quickref.md) — API, schema, decisions, performance. Marked **v0.12.0** and current to [D-148](docs/architecture/s13-decision-register.md#d-148); it does not yet carry the 0.13.0 wave (D-149…D-169) the 0.13.x series toward 1.0 (D-170…[D-212](docs/architecture/s13-decision-register.md#d-212)), which includes the public-surface changes of D-205…D-208, or the branching wave (D-213…[D-235](docs/architecture/s13-decision-register.md#d-235)) — so its API section names paths this crate no longer offers. **Refreshing it is not scheduled**, and that is recorded rather than glossed: it is a derived document, and the architecture set below is the one kept true by gates. This README said "v0.9.0 reference" until 0.12.25, which was wrong about its own pointer. Where it disagrees with the architecture set, the architecture set wins — it is the normative one.
 - [Python bindings](docs/architecture/s14-python-bindings.md) — §14: async→sync boundary, error tree, stubs
-- [Decision register](docs/architecture/s13-decision-register.md) — D-001…D-173 with rationale
+- [Decision register](docs/architecture/s13-decision-register.md) — D-001…D-235 with rationale
+- [Release notes](docs/releases) — one document per minor, most recently [v0.15.0](docs/releases/v0.15.0.md) (branching) and [v0.14.0](docs/releases/v0.14.0.md)
 
 ---
 
