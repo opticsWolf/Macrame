@@ -3811,6 +3811,20 @@ so it is visible from both places.
     first one that reported and was not read — which is what the obligation
     above exists to catch, and the first defect it has actually turned up.
 
+    **And it paid again at 0.14.22, on a corner that is not about the instrument
+    at all** ([D-239](architecture/s13-decision-register.md#d-239)).
+    `a_swap_over_budget_is_not_a_violation` first asserts that its fixture made
+    the swap exceed the chunk budget, because on a small fixture the claim would
+    pass whether the exemption existed or not. On `windows-latest` that
+    precondition failed — **2.572 ms, inside the 3 ms budget** — on a commit
+    where Linux, macOS and the development box all passed. The swap has not
+    acquired a smaller unit; the runner is quicker. **A threshold test
+    calibrated on one machine is calibrated for one machine**, so contrast can
+    be a property of the machine rather than of the instrument, and the fixture
+    is now sized with the margin measured rather than assumed. It cost almost
+    nothing because the test fails loudly when it stops being a test, which is
+    the whole return on writing it that way.
+
 13. D-213 … the register's own next number, whatever it turns out to be. **Not a
     number this plan chooses**: three acceptance lists in a row have named
     decision numbers that were already spent by the time the work landed

@@ -387,7 +387,7 @@ criterion baselines, machine against itself. See [§9 of the architecture docs](
 - [Architecture specification](docs/architecture/README.md) — normative surfaces: §4 (schema) and Appendix A (API)
 - [Architecture Quick Reference](docs/quickref.md) — API, schema, decisions, performance. Marked **v0.12.0** and current to [D-148](docs/architecture/s13-decision-register.md#d-148); it does not yet carry the 0.13.0 wave (D-149…D-169) the 0.13.x series toward 1.0 (D-170…[D-212](docs/architecture/s13-decision-register.md#d-212)), which includes the public-surface changes of D-205…D-208, or the branching wave (D-213…[D-235](docs/architecture/s13-decision-register.md#d-235)) — so its API section names paths this crate no longer offers. **Refreshing it is not scheduled**, and that is recorded rather than glossed: it is a derived document, and the architecture set below is the one kept true by gates. This README said "v0.9.0 reference" until 0.12.25, which was wrong about its own pointer. Where it disagrees with the architecture set, the architecture set wins — it is the normative one.
 - [Python bindings](docs/architecture/s14-python-bindings.md) — §14: async→sync boundary, error tree, stubs
-- [Decision register](docs/architecture/s13-decision-register.md) — D-001…D-238 with rationale
+- [Decision register](docs/architecture/s13-decision-register.md) — D-001…D-239 with rationale
 - [Release notes](docs/releases) — one document per minor, most recently [v0.15.0](docs/releases/v0.15.0.md) (branching) and [v0.14.0](docs/releases/v0.14.0.md)
 
 ---

@@ -762,9 +762,34 @@ async fn a_swap_is_counted_as_shadow_swap_and_not_as_shadow_rebuild() {
 /// first, and only the swap's own count is claimed. A fixture that stops
 /// exceeding fails loudly and says to grow it, rather than passing on a
 /// technicality.
+///
+/// # The size is a measurement against the fastest machine, not a constant
+/// (0.14.22, [D-239])
+///
+/// The tripwire fired in CI on `windows-latest` at 400 × 4: **2.572 ms, inside
+/// the 3 ms budget**, on the same commit where Linux and macOS passed and where
+/// this box passes. Both readings the comment above offers were available and
+/// the measurement chose between them — the swap has not acquired a smaller
+/// unit, it is the runner that is quick. Fastest of three, debug build, on the
+/// development machine: **3.6 ms at 400 × 4, 12.3 ms at 1,600 × 4, 25.4 ms at
+/// 3,200 × 4**, against [D-082]'s reference of 46.8 ms at 10,000 keys.
+///
+/// 400 × 4 therefore cleared the budget by 20% here and *failed* to clear it on
+/// a machine roughly 1.4× faster — which is the whole finding: **a threshold
+/// test calibrated on one machine is calibrated for one machine**, and it stops
+/// being an instrument on the first faster one. 3,200 × 4 clears it by ~8× here
+/// and ~6× on the runner that failed, so the tripwire now fires when the swap
+/// changes rather than when the hardware does, at a cost of a few seconds.
+///
+/// It went loud rather than quiet, which is the only reason this was cheap: the
+/// assertion could have been written as `violations().is_empty()` and would then
+/// have gone on passing on every machine too fast to exercise it.
+///
+/// [D-082]: ../docs/architecture/s13-decision-register.md#d-082
+/// [D-239]: ../docs/architecture/s13-decision-register.md#d-239
 #[tokio::test]
 async fn a_swap_over_budget_is_not_a_violation() {
-    const KEYS: usize = 400;
+    const KEYS: usize = 3_200;
     const GENERATIONS: usize = 4;
 
     let harness = TestHarness::new();
@@ -822,9 +847,15 @@ async fn a_swap_over_budget_is_not_a_violation() {
     assert!(
         swap.longest > macrame::CHUNK_BUDGET,
         "the swap took {:?}, which is inside the {:?} budget, so this test \
-         asserts nothing about the exemption. Grow KEYS or GENERATIONS until \
-         it exceeds — the number to beat is D-082's 46.8 ms at 10,000 keys, \
-         and 400 x 4 was ~6 ms in a debug build when this was written.",
+         asserts nothing about the exemption. Decide which reading applies \
+         before resizing: if the swap has acquired a smaller unit — upstream \
+         chunked the index build, or `ALTER INDEX ... RENAME` arrived — the \
+         exemption has lost its ground and should be removed, not resized \
+         around. Otherwise this is a faster machine and the fixture is the \
+         thing to grow. Measured in a debug build, fastest of three: 3.6 ms at \
+         400 x 4, 12.3 ms at 1,600 x 4, 25.4 ms at 3,200 x 4, against D-082's \
+         46.8 ms at 10,000 keys. 400 x 4 is what CI's windows runner did in \
+         2.572 ms (D-239).",
         swap.longest,
         macrame::CHUNK_BUDGET
     );
