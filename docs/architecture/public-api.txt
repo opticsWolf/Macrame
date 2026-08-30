@@ -285,8 +285,27 @@ pub macrame::error::DbError::UnknownBranch(alloc::string::String)
 pub macrame::error::DbError::WriterDroppedResponder
 pub macrame::error::DbError::WriterStopped(alloc::string::String)
 pub macrame::error::DbError::WriterUnavailable
+impl macrame::error::DbError
+pub fn macrame::error::DbError::kind(&self) -> macrame::error::ErrorKind
 impl core::convert::From<macrame::error::BulkInterrupted> for macrame::error::DbError
 pub fn macrame::error::DbError::from(macrame::error::BulkInterrupted) -> Self
+#[non_exhaustive] pub enum macrame::error::ErrorKind
+pub macrame::error::ErrorKind::Branch
+pub macrame::error::ErrorKind::Budget
+pub macrame::error::ErrorKind::Cancelled
+pub macrame::error::ErrorKind::Diagnostic
+pub macrame::error::ErrorKind::Engine
+pub macrame::error::ErrorKind::Integrity
+pub macrame::error::ErrorKind::Migration
+pub macrame::error::ErrorKind::NotFound
+pub macrame::error::ErrorKind::Temporal
+pub macrame::error::ErrorKind::Validation
+pub macrame::error::ErrorKind::Vector
+pub macrame::error::ErrorKind::Writer
+impl macrame::error::ErrorKind
+pub fn macrame::error::ErrorKind::as_str(self) -> &'static str
+impl core::fmt::Display for macrame::error::ErrorKind
+pub fn macrame::error::ErrorKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 #[non_exhaustive] pub enum macrame::error::StatedInstants
 pub macrame::error::StatedInstants::Both
 pub macrame::error::StatedInstants::Both::recorded: alloc::string::String
@@ -692,8 +711,27 @@ pub macrame::prelude::DbError::UnknownBranch(alloc::string::String)
 pub macrame::prelude::DbError::WriterDroppedResponder
 pub macrame::prelude::DbError::WriterStopped(alloc::string::String)
 pub macrame::prelude::DbError::WriterUnavailable
+impl macrame::error::DbError
+pub fn macrame::error::DbError::kind(&self) -> macrame::error::ErrorKind
 impl core::convert::From<macrame::error::BulkInterrupted> for macrame::error::DbError
 pub fn macrame::error::DbError::from(macrame::error::BulkInterrupted) -> Self
+#[non_exhaustive] pub enum macrame::prelude::ErrorKind
+pub macrame::prelude::ErrorKind::Branch
+pub macrame::prelude::ErrorKind::Budget
+pub macrame::prelude::ErrorKind::Cancelled
+pub macrame::prelude::ErrorKind::Diagnostic
+pub macrame::prelude::ErrorKind::Engine
+pub macrame::prelude::ErrorKind::Integrity
+pub macrame::prelude::ErrorKind::Migration
+pub macrame::prelude::ErrorKind::NotFound
+pub macrame::prelude::ErrorKind::Temporal
+pub macrame::prelude::ErrorKind::Validation
+pub macrame::prelude::ErrorKind::Vector
+pub macrame::prelude::ErrorKind::Writer
+impl macrame::error::ErrorKind
+pub fn macrame::error::ErrorKind::as_str(self) -> &'static str
+impl core::fmt::Display for macrame::error::ErrorKind
+pub fn macrame::error::ErrorKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 #[non_exhaustive] pub enum macrame::prelude::FutureStampPolicy
 pub macrame::prelude::FutureStampPolicy::Allow
 pub macrame::prelude::FutureStampPolicy::Default
@@ -1375,8 +1413,27 @@ pub macrame::DbError::UnknownBranch(alloc::string::String)
 pub macrame::DbError::WriterDroppedResponder
 pub macrame::DbError::WriterStopped(alloc::string::String)
 pub macrame::DbError::WriterUnavailable
+impl macrame::error::DbError
+pub fn macrame::error::DbError::kind(&self) -> macrame::error::ErrorKind
 impl core::convert::From<macrame::error::BulkInterrupted> for macrame::error::DbError
 pub fn macrame::error::DbError::from(macrame::error::BulkInterrupted) -> Self
+#[non_exhaustive] pub enum macrame::ErrorKind
+pub macrame::ErrorKind::Branch
+pub macrame::ErrorKind::Budget
+pub macrame::ErrorKind::Cancelled
+pub macrame::ErrorKind::Diagnostic
+pub macrame::ErrorKind::Engine
+pub macrame::ErrorKind::Integrity
+pub macrame::ErrorKind::Migration
+pub macrame::ErrorKind::NotFound
+pub macrame::ErrorKind::Temporal
+pub macrame::ErrorKind::Validation
+pub macrame::ErrorKind::Vector
+pub macrame::ErrorKind::Writer
+impl macrame::error::ErrorKind
+pub fn macrame::error::ErrorKind::as_str(self) -> &'static str
+impl core::fmt::Display for macrame::error::ErrorKind
+pub fn macrame::error::ErrorKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 #[non_exhaustive] pub enum macrame::FutureStampPolicy
 pub macrame::FutureStampPolicy::Allow
 pub macrame::FutureStampPolicy::Default

@@ -2845,13 +2845,25 @@ place where the argument for the work applies and the work was out of scope.
 |---|---|---|---|---|
 | C-1 | Foreign-key classification on the `links` and `concepts` paths | [D-176](architecture/s13-decision-register.md#d-176) (0.13.3) | **Closed early, in 0.14.2** ([D-218](architecture/s13-decision-register.md#d-218)). v12 gives `links` a third foreign key, so the release that made the unqualified message worse is the one that answers for it. The `concepts` half is answered by construction — no write in this crate can violate the only outbound key it has — and returns when `fork()` lets a caller name a lineage | ~~0.15.0~~ **0.14.2** |
 | C-2 | `save_snapshot` reports I/O failure as `ReplayCorrupt` — *the ledger is damaged* | [D-186](architecture/s13-decision-register.md#d-186) (0.13.13) | **Closed in 0.14.23** ([D-240](architecture/s13-decision-register.md#d-240)). `DbError::SnapshotWriteFailed` is the forty-first variant and completes the family [D-185](architecture/s13-decision-register.md#d-185) started: nothing is damaged and nothing is lost, so the subject is the filesystem. The deferral's reason — *a wave that was not changing the API* — expired in the release that takes `DbError` from 33 to 41 variants | ~~0.15.0~~ **0.14.23** |
-| C-3 | `DbError::kind()`, a stable discriminant for callers that must match | [D-207](architecture/s13-decision-register.md#d-207) (0.13.34) | `#[non_exhaustive]` makes matching a wildcard arm; the ergonomic answer needed a design, not a wave | 0.15.0 |
+| C-3 | `DbError::kind()`, a stable discriminant for callers that must match | [D-207](architecture/s13-decision-register.md#d-207) (0.13.34) | **Closed in 0.14.25** ([D-242](architecture/s13-decision-register.md#d-242)). The design the deferral was waiting for: twelve kinds that are *the Python hierarchy's own taxonomy* rather than a second one, and a `kind()` whose match has no wildcard — so a variant added without a classification does not compile, which is the guarantee [D-207](architecture/s13-decision-register.md#d-207) traded away. `#[non_exhaustive]` on `ErrorKind` too, because an exhaustive one makes a new *category* a major version, which is D-207's own rejected trap | ~~0.15.0~~ **0.14.25** |
 | C-4 | A **build** gate for `--no-default-features`, not a `cargo check` | [D-209](architecture/s13-decision-register.md#d-209) (0.13.36) | **Closed in 0.14.24** ([D-241](architecture/s13-decision-register.md#d-241)), and the wording did not survive contact: the check already catches D-169's defect, so *replacing* it was measured to be a loss — it is the only gate that builds the `harness = false` bench. The suite is now **run** with metrics off on ubuntu, which catches what a check cannot: an invariant `src/metrics.rs` deliberately keeps un-gated so it runs in the non-recording build | ~~0.15.0~~ **0.14.24** |
 | C-5 | `cargo-semver-checks` | [D-211](architecture/s13-decision-register.md#d-211) (0.13.38) | It understands what a *narrowing* is rather than only what a textual difference is — and it wants a released baseline, which is 1.0 itself | **at 1.0** |
 
 C-1 through C-4 are candidates for v0.15.0 and are named in §17's acceptance
 list. C-5 is not a candidate: it is the instrument that replaces the baseline
 diff once there is a released version to diff against.
+
+**All four are closed, and none of them closed the way the row predicted**
+(0.14.25). C-1 came early because v12 made the unqualified message worse.
+C-2's stated reason for waiting — *a wave that was not changing the API* —
+expired inside the very release that takes `DbError` from 33 to 41 variants.
+C-4's row asked for a build gate *instead of* a `cargo check` and the
+measurement refused the phrasing: the check catches the defect that motivated
+it, and is the only gate that builds the `harness = false` bench, so both are
+kept. C-3 was waiting for a design and the design turned out to be *don't
+invent one* — the taxonomy the Python bindings already publish, with a gate to
+keep it single. **A deferral records why the work was not done; it does not
+get to record what the work will be.**
 
 ---
 

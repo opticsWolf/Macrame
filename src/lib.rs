@@ -18,7 +18,7 @@ pub use connection::{
     Annotation, BulkControl, BulkProgress, CadencePolicy, CancelToken, CheckpointReport,
     ConceptUpsert, Database, Tuning, WalCheckpointPolicy, CHUNK_BUDGET,
 };
-pub use error::{BulkInterrupted, BulkResult, DbError, Overlap, Result, StatedInstants};
+pub use error::{BulkInterrupted, BulkResult, DbError, ErrorKind, Overlap, Result, StatedInstants};
 pub use util::{FutureStampPolicy, DEFAULT_FUTURE_STAMP_TOLERANCE};
 
 pub mod prelude {
@@ -33,7 +33,9 @@ pub mod prelude {
         CheckpointReport, ConceptUpsert, Database, Tuning, WalCheckpointPolicy,
         BULK_ATOMIC_WARN_HOLD, CHUNK_BUDGET, MAX_ARCHIVE_SESSIONS,
     };
-    pub use crate::error::{BulkInterrupted, BulkResult, DbError, Overlap, Result, StatedInstants};
+    pub use crate::error::{
+        BulkInterrupted, BulkResult, DbError, ErrorKind, Overlap, Result, StatedInstants,
+    };
     pub use crate::graph::{
         AttributeMode, CandidateCount, CostEstimate, CostEstimator, EdgeAssertion,
         FilteredVectorSearch, TraversalBuilder, VectorFilterStrategy,

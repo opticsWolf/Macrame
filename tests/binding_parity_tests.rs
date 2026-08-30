@@ -42,13 +42,22 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
-/// Every `DbError` variant is declared here, and adding one is a four-step act.
+/// Every `DbError` variant is declared here, and adding one is a ten-step act.
 ///
 /// A count rather than a floor, because every reason this number changes is a
-/// reason to look at this file. The three other steps are an arm in
-/// `errors.rs`, an entry in `testing.rs`'s `DB_ERROR_VARIANTS`, and a row in
-/// `tests_py/test_errors.py`'s `EXPECTED` — the first two of which the tests
-/// below check, and the third of which the Python suite checks.
+/// reason to look at this file.
+///
+/// **It said *four* until 0.14.23, and four was wrong** — the list had been
+/// read off one variant's commit, so it recorded what that commit happened to
+/// touch. Adding `SnapshotWriteFailed` found the rest by failing: `§7` of the
+/// architecture set *reproduces* this enum (`doc_sync_tests`), and
+/// `python/macrame/__init__.py` re-exports the exception class by name. The
+/// measured list is `src/error.rs`, `DbError::kind` beneath it (the compiler
+/// enforces that one), `bindings/python/src/errors.rs` — three edits there:
+/// the class, the arm, the registration — `bindings/python/src/testing.rs`,
+/// this constant, `tests_py/test_errors.py`, `python/macrame/_macrame.pyi`,
+/// `python/macrame/__init__.py`, `docs/architecture/s6-s10-flows-to-dependencies.md`,
+/// and the blessed `docs/architecture/public-api.txt`.
 const DB_ERROR_VARIANTS: usize = 41;
 
 fn repo() -> PathBuf {
@@ -143,6 +152,40 @@ fn without_comments(src: &str) -> String {
         .filter(|l| !l.trim_start().starts_with("//"))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Variant name -> the exception class its arm raises, from `fn build`.
+///
+/// Arms are ordered and each holds exactly one `raise::<Class, _>`, so the text
+/// between one `DbError::` and the next is that variant's arm. Extracted at
+/// 0.14.25 so the C-3 test below reads the same mapping rather than spelling a
+/// second one — which is the defect that test exists to prevent, and it would
+/// be a poor gate that reproduced it.
+fn class_of_variant(src: &str) -> BTreeMap<String, String> {
+    let build = src
+        .split_once("fn build(")
+        .expect("`fn build` is the mapping")
+        .1;
+    let mut class_of = BTreeMap::new();
+    let starts: Vec<usize> = build.match_indices("DbError::").map(|(i, _)| i).collect();
+    for (n, &start) in starts.iter().enumerate() {
+        let end = starts.get(n + 1).copied().unwrap_or(build.len());
+        let arm = &build[start..end];
+        let variant: String = arm["DbError::".len()..]
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        let class = arm
+            .split_once("raise::<")
+            .map(|(_, rest)| {
+                rest.chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect::<String>()
+            })
+            .unwrap_or_else(|| panic!("`DbError::{variant}`'s arm raises nothing"));
+        class_of.insert(variant, class);
+    }
+    class_of
 }
 
 /// How many times each `Enum::Variant` is written in `src`, for one enum.
@@ -240,33 +283,7 @@ fn every_db_error_variant_reaches_a_class_of_its_own() {
     let Some(src) = binding("errors.rs") else {
         return;
     };
-    let src = without_comments(&src);
-    let build = src
-        .split_once("fn build(")
-        .expect("`fn build` is the mapping")
-        .1;
-
-    // Arms are ordered and each holds exactly one `raise::<Class, _>`, so the
-    // text between one `DbError::` and the next is that variant's arm.
-    let mut class_of: BTreeMap<String, String> = BTreeMap::new();
-    let starts: Vec<usize> = build.match_indices("DbError::").map(|(i, _)| i).collect();
-    for (n, &start) in starts.iter().enumerate() {
-        let end = starts.get(n + 1).copied().unwrap_or(build.len());
-        let arm = &build[start..end];
-        let variant: String = arm["DbError::".len()..]
-            .chars()
-            .take_while(|c| c.is_alphanumeric() || *c == '_')
-            .collect();
-        let class = arm
-            .split_once("raise::<")
-            .map(|(_, rest)| {
-                rest.chars()
-                    .take_while(|c| c.is_alphanumeric() || *c == '_')
-                    .collect::<String>()
-            })
-            .unwrap_or_else(|| panic!("`DbError::{variant}`'s arm raises nothing"));
-        class_of.insert(variant, class);
-    }
+    let class_of = class_of_variant(&without_comments(&src));
 
     let mut by_class: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
     for (variant, class) in &class_of {
@@ -387,4 +404,152 @@ fn the_variant_parser_survives_a_wrapped_attribute() {
     Another,
 "#;
     assert_eq!(variant_names(body), vec!["RealVariant", "Another"]);
+}
+
+/// `DbError::kind` classifies each variant the way the Python hierarchy does
+/// (0.14.25, C-3, [D-242]).
+///
+/// [`ErrorKind`] is deliberately **not** a new taxonomy: it is the one the
+/// bindings have published since they existed — seven groups a caller can catch
+/// as a set, and five failures that belong to no group. Two spellings of one
+/// taxonomy is [D-227]'s finding waiting to happen, so this test is the thing
+/// that makes them one: for every variant, the group `kind()` assigns and the
+/// base class `errors.rs` derives from must agree.
+///
+/// It reads text on both sides and inherits this file's stated weakness. What
+/// it cannot drift past is the direction that matters — the compiler already
+/// refuses a variant with no arm in `kind()`, so the only way to get here with
+/// a mismatch is to classify it twice, differently.
+///
+/// [D-227]: ../docs/architecture/s13-decision-register.md#d-227
+/// [D-242]: ../docs/architecture/s13-decision-register.md#d-242
+#[test]
+fn the_kind_of_a_variant_and_the_base_of_its_exception_agree() {
+    let Some(errors_rs) = binding("errors.rs") else {
+        return;
+    };
+
+    // ErrorKind -> the Python base class that kind means. Written out rather
+    // than derived, because this table IS the claim under test.
+    let base_of_kind: BTreeMap<&str, &str> = [
+        ("Integrity", "IntegrityError"),
+        ("Validation", "ValidationError"),
+        ("Vector", "VectorError"),
+        ("Temporal", "TemporalError"),
+        ("Writer", "WriterError"),
+        ("Budget", "BudgetError"),
+        ("Branch", "BranchError"),
+        ("Cancelled", "MacrameError"),
+        ("Diagnostic", "MacrameError"),
+        ("Engine", "MacrameError"),
+        ("Migration", "MacrameError"),
+        ("NotFound", "MacrameError"),
+    ]
+    .into_iter()
+    .collect();
+
+    let kind_of = kind_arms();
+    let variants = variant_names(&enum_body("src/error.rs", "DbError"));
+    assert_eq!(
+        kind_of.len(),
+        variants.len(),
+        "`DbError::kind` classifies {} variants and the enum has {}. The \
+         compiler enforces the arms, so this is the parser losing one -- fix \
+         `kind_arms`, not `kind()`.",
+        kind_of.len(),
+        variants.len()
+    );
+
+    // class -> base, from `create_exception!(macrame, Class, Base, "...")`.
+    let mut base_of_class: BTreeMap<String, String> = BTreeMap::new();
+    for (i, _) in errors_rs.match_indices("create_exception!(") {
+        let rest = &errors_rs[i + "create_exception!(".len()..];
+        let head: Vec<String> = rest
+            .split(',')
+            .take(3)
+            .map(|f| f.trim().to_string())
+            .collect();
+        if head.len() == 3 && head[0] == "macrame" {
+            base_of_class.insert(head[1].clone(), head[2].clone());
+        }
+    }
+
+    let class_of = class_of_variant(&without_comments(&errors_rs));
+    let mut disagreements = Vec::new();
+    for variant in &variants {
+        let (Some(kind), Some(class)) = (kind_of.get(variant), class_of.get(variant)) else {
+            continue; // covered, and named, by the tests above
+        };
+        let expected = base_of_kind
+            .get(kind.as_str())
+            .unwrap_or_else(|| panic!("`ErrorKind::{kind}` has no row in this test's table"));
+        let actual = base_of_class
+            .get(class)
+            .unwrap_or_else(|| panic!("`{class}` is raised but never declared"));
+        if actual != expected {
+            disagreements.push(format!(
+                "{variant}: kind() says {kind} (-> {expected}), {class} derives from {actual}"
+            ));
+        }
+    }
+
+    assert!(
+        disagreements.is_empty(),
+        "one taxonomy, two answers -- the Rust classification and the Python \
+         hierarchy disagree about {} variant(s):\n  {}",
+        disagreements.len(),
+        disagreements.join("\n  ")
+    );
+
+    // A kind nothing produces is a name with nothing behind it.
+    let used: BTreeSet<&String> = kind_of.values().collect();
+    let unused: Vec<&&str> = base_of_kind
+        .keys()
+        .filter(|k| !used.contains(&k.to_string()))
+        .collect();
+    assert!(
+        unused.is_empty(),
+        "`ErrorKind` has {} variant(s) no `DbError` produces: {unused:?}",
+        unused.len()
+    );
+}
+
+/// Variant name -> `ErrorKind` name, read out of `DbError::kind`'s match.
+///
+/// The arms are `Self::A { .. } | Self::B => ErrorKind::K,` across as many
+/// lines as rustfmt wants, so names accumulate until an arrow names the kind.
+fn kind_arms() -> BTreeMap<String, String> {
+    let src = std::fs::read_to_string(repo().join("src/error.rs")).expect("valid utf-8");
+    let body = src
+        .split_once("pub fn kind(&self) -> ErrorKind {")
+        .expect("`DbError::kind` is where C-3 put it")
+        .1;
+
+    let mut out = BTreeMap::new();
+    let mut pending: Vec<String> = Vec::new();
+    for line in without_comments(body).lines() {
+        let line = line.trim();
+        if line == "}" && pending.is_empty() && !out.is_empty() {
+            break;
+        }
+        for (i, _) in line.match_indices("Self::") {
+            let name: String = line[i + "Self::".len()..]
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            if !name.is_empty() {
+                pending.push(name);
+            }
+        }
+        if let Some((_, tail)) = line.split_once("=> ErrorKind::") {
+            let kind: String = tail
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            for name in pending.drain(..) {
+                out.insert(name, kind.clone());
+            }
+        }
+    }
+    out
 }

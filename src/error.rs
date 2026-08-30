@@ -679,6 +679,179 @@ pub enum DbError {
     BulkCancelled,
 }
 
+/// What kind of failure a [`DbError`] is, as a value (0.14.25, §14.1 C-3,
+/// [D-242]).
+///
+/// # Why this exists
+///
+/// [`DbError`] is `#[non_exhaustive]` ([D-207]), so a downstream `match` needs
+/// a wildcard arm and can never be checked for completeness by the compiler.
+/// That was a deliberate trade — a ledger that will certainly add error
+/// variants after 1.0 cannot make each addition a major version — and its
+/// price was paid by callers, who lost the one guarantee that told them they
+/// had considered everything.
+///
+/// This buys part of it back, and the part it buys back is **inside this
+/// crate**: [`DbError::kind`] is one exhaustive match with no wildcard, so a
+/// variant added without a classification does not compile. The decision moves
+/// to the person adding the variant, at the line that needs it, which is
+/// exactly what [`crate::DbError`]'s binding lost in 0.13.34.
+///
+/// # The taxonomy is not new
+///
+/// These twelve names are the hierarchy the Python bindings have published
+/// since they existed — seven groups a caller can catch as a set, and five
+/// failures that belong to no group. Inventing a second, Rust-only taxonomy
+/// here would be [D-227]'s finding again: *a surface that spells its own
+/// version of a shared thing misses every repair made to the shared thing,
+/// quietly*. `binding_parity_tests` pins the two spellings together.
+///
+/// # What it is not
+///
+/// It is not a replacement for matching on [`DbError`] itself. A caller who
+/// needs the `path` a snapshot failed to write still matches the variant; this
+/// answers the coarser question — *whose problem is this, and can I retry it* —
+/// and, being `Copy + Eq + Hash`, answers it somewhere a [`DbError`] cannot go:
+/// a metrics key, a log field, a counter.
+///
+/// It is `#[non_exhaustive]` for the same reason [`DbError`] is. An exhaustive
+/// `ErrorKind` would give downstream its compile-time completeness back, and
+/// would do it by making a genuinely new *category* of failure a major
+/// version — which is the trap [D-207] rejected by name, one level up: the
+/// category would then not get added, and the ledger would report the wrong
+/// kind rather than a new one.
+///
+/// [D-207]: ../../docs/architecture/s13-decision-register.md#d-207
+/// [D-227]: ../../docs/architecture/s13-decision-register.md#d-227
+/// [D-242]: ../../docs/architecture/s13-decision-register.md#d-242
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
+pub enum ErrorKind {
+    /// The ledger's own invariants: overlap, drift, a leaked archive session,
+    /// a rebuild that failed or was interrupted. Something is wrong with the
+    /// data or with a repair of it, and no retry fixes it.
+    Integrity,
+    /// The caller's input was refused before anything was attempted.
+    Validation,
+    /// Embeddings and the model registry.
+    Vector,
+    /// Time, snapshots and the archive — the bitemporal machinery.
+    Temporal,
+    /// The write actor could not take, keep, or answer the request.
+    Writer,
+    /// A bound the caller set, or one the crate sets on the caller's behalf.
+    Budget,
+    /// Lineage: a branch that does not exist, cannot be forked, or may not be
+    /// named from where the caller is standing.
+    Branch,
+    /// A chunked bulk write stopped between chunks. Distinct from every other
+    /// kind because **part of it landed** — see [`BulkInterrupted`].
+    Cancelled,
+    /// The read-only diagnostic connection.
+    Diagnostic,
+    /// libSQL itself, passed through.
+    Engine,
+    /// Schema migration.
+    Migration,
+    /// The thing asked for is not there.
+    NotFound,
+}
+
+impl ErrorKind {
+    /// A stable name, for logs and metrics labels.
+    ///
+    /// Stable in the sense that matters for a label: these strings are part of
+    /// the public surface from 1.0 and will not be re-spelled. New kinds may
+    /// appear, which is what `#[non_exhaustive]` says.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Integrity => "integrity",
+            Self::Validation => "validation",
+            Self::Vector => "vector",
+            Self::Temporal => "temporal",
+            Self::Writer => "writer",
+            Self::Budget => "budget",
+            Self::Branch => "branch",
+            Self::Cancelled => "cancelled",
+            Self::Diagnostic => "diagnostic",
+            Self::Engine => "engine",
+            Self::Migration => "migration",
+            Self::NotFound => "not_found",
+        }
+    }
+}
+
+impl std::fmt::Display for ErrorKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl DbError {
+    /// This error's [`ErrorKind`].
+    ///
+    /// **The match below has no wildcard arm, and that is the whole point**
+    /// ([D-242], §14.1 C-3). `DbError` is `#[non_exhaustive]`, so no `match`
+    /// outside this crate can be checked for completeness — but inside it, the
+    /// compiler still checks. A variant added without a line here fails to
+    /// build, which is the guarantee [D-207] traded away for the binding and
+    /// could not get back there.
+    ///
+    /// [D-207]: ../../docs/architecture/s13-decision-register.md#d-207
+    /// [D-242]: ../../docs/architecture/s13-decision-register.md#d-242
+    pub fn kind(&self) -> ErrorKind {
+        match self {
+            Self::Engine(_) => ErrorKind::Engine,
+            Self::Migration { .. } => ErrorKind::Migration,
+            Self::NotFound { .. } => ErrorKind::NotFound,
+            Self::DiagnosticConn { .. } => ErrorKind::Diagnostic,
+            Self::BulkCancelled => ErrorKind::Cancelled,
+
+            Self::ArchiveSessionLeaked { .. }
+            | Self::CurrentDrift { .. }
+            | Self::FutureRecordedAt { .. }
+            | Self::NegativeEdgeWeight { .. }
+            | Self::OverlappingInterval { .. }
+            | Self::RebuildFailed { .. }
+            | Self::RebuildInterrupted { .. }
+            | Self::RecordedAtRegression { .. }
+            | Self::SingleOpenViolation { .. } => ErrorKind::Integrity,
+
+            Self::AttributeModeUnstated { .. }
+            | Self::HalfLifeWithoutInstant
+            | Self::InvalidBranchId { .. }
+            | Self::InvalidEdgeType { .. }
+            | Self::InvalidId { .. }
+            | Self::InvalidModelName { .. }
+            | Self::InvalidTimestamp { .. } => ErrorKind::Validation,
+
+            Self::DimMismatch { .. } | Self::ModelNotRegistered { .. } => ErrorKind::Vector,
+
+            Self::ArchiveViolation { .. }
+            | Self::ArchiveWindow { .. }
+            | Self::PayloadVersion { .. }
+            | Self::RecordedInstantUnreachable { .. }
+            | Self::ReplayCorrupt { .. }
+            | Self::SnapshotCorrupt { .. }
+            | Self::SnapshotIncompatible { .. }
+            | Self::SnapshotWriteFailed { .. } => ErrorKind::Temporal,
+
+            Self::WriterDroppedResponder
+            | Self::WriterStopped { .. }
+            | Self::WriterUnavailable { .. } => ErrorKind::Writer,
+
+            Self::SubgraphTooLarge { .. } => ErrorKind::Budget,
+
+            Self::BranchExists { .. }
+            | Self::BranchMismatch { .. }
+            | Self::BranchNotArchivable { .. }
+            | Self::CrossLineage { .. }
+            | Self::ForkPrecedesParent { .. }
+            | Self::UnknownBranch { .. } => ErrorKind::Branch,
+        }
+    }
+}
+
 pub type Result<T> = std::result::Result<T, DbError>;
 
 /// A chunked bulk write that stopped partway, and how much of it landed
@@ -1135,5 +1308,90 @@ mod tests {
             e.source().map(ToString::to_string).as_deref(),
             Some("the bulk write was cancelled between chunks")
         );
+    }
+
+    /// The kind is a property of the variant, not of what it is carrying
+    /// (0.14.25, C-3, [D-242]).
+    ///
+    /// [D-242]: ../../docs/architecture/s13-decision-register.md#d-242
+    #[test]
+    fn the_kind_is_the_same_whatever_the_fields_say() {
+        let a = DbError::SnapshotWriteFailed {
+            path: "snapshots/1.snap.zst".into(),
+            reason: "no space left on device".into(),
+        };
+        let b = DbError::SnapshotWriteFailed {
+            path: "elsewhere".into(),
+            reason: "read-only file system".into(),
+        };
+        assert_eq!(a.kind(), b.kind());
+        assert_eq!(a.kind(), ErrorKind::Temporal);
+    }
+
+    /// A snapshot that could not be written and a damaged ledger are the same
+    /// *kind*, and that is deliberate: [D-240] split them so a caller learns
+    /// which subject is broken, and the kind answers the coarser question. The
+    /// discriminant does not replace matching the variant, and this test is
+    /// where that is written down rather than assumed.
+    ///
+    /// [D-240]: ../../docs/architecture/s13-decision-register.md#d-240
+    #[test]
+    fn the_kind_is_coarser_than_the_variant_and_says_so() {
+        let unwritten = DbError::SnapshotWriteFailed {
+            path: "p".into(),
+            reason: "r".into(),
+        };
+        let damaged = DbError::ReplayCorrupt {
+            seq: 7,
+            reason: "r".into(),
+        };
+        assert_eq!(unwritten.kind(), damaged.kind());
+        assert_ne!(unwritten.to_string(), damaged.to_string());
+    }
+
+    /// Two kinds never share a name, or a metrics label collapses two
+    /// populations into one bar.
+    #[test]
+    fn no_two_kinds_spell_themselves_the_same_way() {
+        use std::collections::BTreeSet;
+        let kinds = [
+            ErrorKind::Integrity,
+            ErrorKind::Validation,
+            ErrorKind::Vector,
+            ErrorKind::Temporal,
+            ErrorKind::Writer,
+            ErrorKind::Budget,
+            ErrorKind::Branch,
+            ErrorKind::Cancelled,
+            ErrorKind::Diagnostic,
+            ErrorKind::Engine,
+            ErrorKind::Migration,
+            ErrorKind::NotFound,
+        ];
+        let names: BTreeSet<&str> = kinds.iter().map(|k| k.as_str()).collect();
+        assert_eq!(
+            names.len(),
+            kinds.len(),
+            "two kinds share a label: {names:?}"
+        );
+        for kind in kinds {
+            assert_eq!(kind.to_string(), kind.as_str(), "Display and as_str differ");
+        }
+    }
+
+    /// It goes where a `DbError` cannot: a key.
+    #[test]
+    fn a_kind_can_be_counted() {
+        use std::collections::HashMap;
+        let mut seen: HashMap<ErrorKind, usize> = HashMap::new();
+        for err in [
+            DbError::WriterStopped("a write".into()),
+            DbError::WriterDroppedResponder,
+            DbError::BulkCancelled,
+        ] {
+            *seen.entry(err.kind()).or_default() += 1;
+        }
+        assert_eq!(seen[&ErrorKind::Writer], 2);
+        assert_eq!(seen[&ErrorKind::Cancelled], 1);
     }
 }
