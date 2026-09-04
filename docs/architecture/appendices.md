@@ -192,6 +192,35 @@ let rows = TraversalBuilder::new(root)
 // -- Valid time (read side) --
 let edges = query_as_of_edges(db.read_conn(), ts).await?;
 
+// -- One value for what a read asks for (0.15.9, D-251, review F-34) --
+// The three qualifiers every read surface carries -- lineage, valid instant,
+// recorded instant -- as something that can be passed, stored and compared.
+// Every field None is the ordinary read: the trunk, now, current belief.
+let plan = ReadPlan::new()                 // #[non_exhaustive]; fields are pub
+    .on(BranchId::new("exp")?)             // plan.branch:   Option<BranchId>
+    .valid_at(tuesday)                     // plan.valid:    Option<String>
+    .recorded_at(march);                   // plan.recorded: Option<String>
+let beliefs: Vec<EdgeBelief> = db.edges(plan.clone()).await?;
+// ^ the whole projection at the plan's instants, on the plan's lineage. No
+//   start node, no budget: `load_subgraph` is the bounded neighbourhood read,
+//   and the order is unspecified, as it is for `query_as_of_edges`.
+//   It is the one edge read that takes a TRANSACTION-time instant: the same
+//   `links_at_tx` fold the traversal uses, bounded by the ancestry's cutoffs.
+//   `query_as_of_edges_on` is this statement with `recorded` unset and the
+//   sixth column dropped, so the two cannot disagree.
+//   `EdgeBelief` rather than a 5-tuple, so a row says WHICH LINEAGE holds it
+//   -- the thing nearest-ancestor resolution makes unreconstructable by hand.
+let walk = TraversalBuilder::new(root).plan(plan);   // sets all three
+let same: ReadPlan = walk.read_plan()?;              // and reads them back
+// `plan()` REPLACES rather than amends: a plan is the read, so applying
+// ReadPlan::new() clears an as_of_recorded set earlier. The three setters stay
+// -- `plan()` is additive, C-11's builder rework is breaking, and they do not
+// share a release. `read_plan()` is Err(InvalidBranchId) for a `branch` string
+// that is not one, which is the only way a builder can hold a name a plan
+// cannot; a lineage that is merely unregistered is the READ's refusal.
+// A plan validates its branch and nothing else. UnknownBranch,
+// RecordedInstantUnreachable and InvalidTimestamp all belong to the read.
+
 // -- Transaction time (read side) --
 let state: MaterializedState = db.reconstruct(ts).await?;   // composes (D-049)
 // Or the free function, when the caller is holding a connection rather than a
@@ -561,7 +590,7 @@ New in 0.13.38 ([D-211](s13-decision-register.md#d-211)). [Appendix A](appendice
 
 *Frozen* means a change requires a **major version**.
 
-**1. The public Rust API, item for item and path for path.** [`docs/architecture/public-api.txt`](public-api.txt) is the surface — **1,627 items**. No item is removed, no path stops resolving, and no signature narrows. Each item is reachable at exactly one canonical path, plus flat aliases at the crate root and in `macrame::prelude` ([D-208](s13-decision-register.md#d-208)). Held by `scripts/check_public_api.py` in CI and by `tests/public_path_tests.rs` in `cargo test`. The cycle that produced this surface was reviewed against 0.13.0 item by item before it was frozen — [`api-review-0.14.0.md`](api-review-0.14.0.md), [D-212](s13-decision-register.md#d-212) — which is the last release where that review is cheap.
+**1. The public Rust API, item for item and path for path.** [`docs/architecture/public-api.txt`](public-api.txt) is the surface — **1,662 items**. No item is removed, no path stops resolving, and no signature narrows. Each item is reachable at exactly one canonical path, plus flat aliases at the crate root and in `macrame::prelude` ([D-208](s13-decision-register.md#d-208)). Held by `scripts/check_public_api.py` in CI and by `tests/public_path_tests.rs` in `cargo test`. The cycle that produced this surface was reviewed against 0.13.0 item by item before it was frozen — [`api-review-0.14.0.md`](api-review-0.14.0.md), [D-212](s13-decision-register.md#d-212) — which is the last release where that review is cheap.
 
 **2. The ledger tables** — `concepts`, `links`, `transaction_log`. Additive only: `ALTER TABLE ADD COLUMN` and new indexes. A changed primary key, a dropped column or altered bitemporal semantics is a major version with an explicit ETL path, because bitemporal data is the hardest data to migrate: a rebuild means replaying history and recomputing transaction-time boundaries, which is rewriting the past ([D-036](s13-decision-register.md#d-036), [Doctrine III](s0-s3-foundations.md#doctrine-iii)).
 

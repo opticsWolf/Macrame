@@ -115,6 +115,23 @@ pub(crate) fn to_duration(obj: Option<&Bound<'_, PyAny>>) -> PyResult<Option<Dur
     Ok(Some(Duration::from_secs_f64(seconds)))
 }
 
+/// [`to_canonical`] where absent means **unset** rather than the open sentinel.
+///
+/// The two callers want opposite things from a missing timestamp and both are
+/// right. An edge's `valid_to` is a half-open interval's end and "not given"
+/// means *still open*, which is a real instant the ledger stores; a
+/// [`ReadPlan`](macrame::ReadPlan)'s `valid` means *no instant was named*, and
+/// widening that to the sentinel would ask every read for the end of time.
+pub(crate) fn to_canonical_opt(obj: Option<&Bound<'_, PyAny>>) -> PyResult<Option<String>> {
+    let Some(obj) = obj else {
+        return Ok(None);
+    };
+    if obj.is_none() {
+        return Ok(None);
+    }
+    to_canonical(Some(obj)).map(Some)
+}
+
 pub(crate) fn to_canonical(obj: Option<&Bound<'_, PyAny>>) -> PyResult<String> {
     let Some(obj) = obj else {
         return Ok(OPEN_SENTINEL.to_string());

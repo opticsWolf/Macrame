@@ -6,6 +6,7 @@ use crate::error::{classify, BulkInterrupted, BulkResult, DbError, Result, Write
 use crate::graph::edge::EdgeAssertion;
 use crate::graph::lineage::LineageShape;
 use crate::integrity::{rebuild_current, RebuildReport};
+use crate::plan::ReadPlan;
 use crate::schema::migrations;
 use crate::temporal::archive::{archive, rehydrate, ArchiveReport, RehydrateReport};
 use crate::temporal::interval::Interval;
@@ -2631,6 +2632,67 @@ impl Database {
             &ts,
             Some(&self.archive_path),
             Some(&self.snapshots_dir),
+        )
+        .await
+    }
+
+    /// Every edge one [`ReadPlan`] names (0.15.9, W13.4, [D-251]).
+    ///
+    /// The whole projection filtered to the plan's instants and lineage —
+    /// topology only, no start node, and no budget on the answer. On a large
+    /// ledger that is a large `Vec`; [`Self::load_subgraph`] is the bounded
+    /// neighbourhood read and [`crate::graph::TraversalBuilder`] is the
+    /// anchored one.
+    ///
+    /// # What this can express that nothing else could
+    ///
+    /// [`crate::temporal::query_as_of_edges_on`] is the same read at a
+    /// valid-time instant, and it takes no transaction-time one: before this
+    /// release, *"which edges did we believe existed, as of March, as they
+    /// stood in January"* had exactly two answers available — walk it from a
+    /// start node, or fold the entire log with [`Self::reconstruct`] and filter
+    /// the result. The first needs an anchor the question does not have and the
+    /// second is a different order of work. The fold this uses is the
+    /// traversal's own, so the bitemporal cell is now readable whole at the
+    /// cost of reading it.
+    ///
+    /// The two functions share one statement, which is why neither can drift
+    /// from the other; `query_as_of_edges_on` is this with `recorded` unset and
+    /// the lineage dropped from each row.
+    ///
+    /// # Errors
+    ///
+    /// [`DbError::UnknownBranch`](crate::DbError::UnknownBranch) naming a
+    /// lineage that was never registered — refused rather than answered for the
+    /// trunk, for `graph::lineage::lineage_shape`'s reason.
+    /// [`DbError::RecordedInstantUnreachable`](crate::DbError::RecordedInstantUnreachable)
+    /// when [`ReadPlan::recorded`] is below what the hot log still covers
+    /// ([D-247](../../docs/architecture/s13-decision-register.md#d-247)).
+    /// [`DbError::InvalidTimestamp`](crate::DbError::InvalidTimestamp) for a
+    /// stamp that is not canonical, from the same normaliser every other read
+    /// uses — a plan is inert and validates nothing, so this is where a
+    /// malformed instant is noticed.
+    ///
+    /// [D-251]: ../../docs/architecture/s13-decision-register.md#d-251
+    pub async fn edges(&self, plan: ReadPlan) -> Result<Vec<crate::temporal::EdgeBelief>> {
+        // `None` is now, and now is this handle's clock rather than the
+        // system's: a database opened on a `FakeClock` reads at the instant it
+        // is writing at, which is the whole reason the clock is a handle
+        // property (§5.1.1).
+        let valid = match plan.valid.as_deref() {
+            Some(ts) => timestamp::normalize(ts)?,
+            None => self.clock.now(),
+        };
+        let recorded = plan
+            .recorded
+            .as_deref()
+            .map(timestamp::normalize)
+            .transpose()?;
+        crate::plan::edges_at(
+            &self.read_conn,
+            &valid,
+            recorded.as_deref(),
+            plan.branch_name(),
         )
         .await
     }

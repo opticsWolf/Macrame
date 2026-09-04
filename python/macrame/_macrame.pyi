@@ -148,6 +148,44 @@ class Interval:
     def __hash__(self) -> int: ...
     def __repr__(self) -> str: ...
 
+class ReadPlan:
+    """The lineage and the two instants a read is taken at (0.15.9, W13.4).
+
+    Every argument is optional and every default is the ordinary read: no
+    branch is the trunk, no `valid` is now, no `recorded` is current belief.
+    A plan is inert — it validates the two instants and nothing else — so an
+    unregistered lineage or an unreachable belief is refused by the read that
+    takes it, not by this constructor.
+
+    Rust's `ReadPlan` is a fluent builder because Rust has no keyword
+    arguments. This is the same value with the scaffolding removed.
+    """
+
+    def __init__(
+        self,
+        *,
+        branch: str | None = None,
+        valid: Timestamp | None = None,
+        recorded: Timestamp | None = None,
+    ) -> None: ...
+    @property
+    def branch(self) -> str | None:
+        """The lineage this plan reads, or None for the trunk."""
+
+    @property
+    def valid(self) -> datetime | None:
+        """The valid-time instant — *what was true then* — or None for now."""
+
+    @property
+    def recorded(self) -> datetime | None:
+        """The transaction-time instant — *what did we believe then* — or None.
+
+        None is current belief, which is a projection read rather than a fold
+        bounded at the present: the same answer, and only one of them is cheap.
+        """
+
+    def __repr__(self) -> str: ...
+
 class ConceptUpsert:
     """A concept to write. Validated **in this constructor**, not at the write.
 
@@ -969,6 +1007,18 @@ class Database:
 
     # -- temporal --------------------------------------------------------------
     def reconstruct(self, ts: Timestamp) -> MaterializedState: ...
+    def edges(self, plan: ReadPlan) -> list[EdgeBelief]:
+        """Every edge one `ReadPlan` names, as the ledger held them (0.15.9).
+
+        Six-tuples where `query_as_of_edges` returns five: the sixth is the
+        lineage holding the belief, which on a forked ledger is the difference
+        between knowing an edge is visible and knowing whose it is.
+
+        The one read here that takes a **transaction-time** instant as well as
+        a valid one. Topology only, no start node, and no budget on the answer —
+        `load_subgraph` is the bounded neighbourhood read.
+        """
+
     def query_as_of_edges(
         self, ts: Timestamp | None = None, *, branch: str | None = None
     ) -> list[Edge]: ...

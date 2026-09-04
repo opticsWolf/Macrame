@@ -1164,6 +1164,28 @@ async fn a_recorded_instant_is_refused_once_rows_have_been_archived() {
         .expect("valid time does not read the log and must be unaffected");
     assert_eq!(by_valid, vec!["c1".to_string(), "c2".to_string()]);
 
+    // **The second entry point onto the same fold, added 0.15.9 (W13.4,
+    // D-251).** `Database::edges` folds `links_at_tx` exactly as the traversal
+    // does, so it has to refuse exactly where the traversal refuses; asserted
+    // on this fixture rather than on a copy of it, because the fixture is the
+    // expensive half and the guard is the cheap one.
+    let err = db
+        .edges(
+            macrame::ReadPlan::new()
+                .valid_at(REACH_NOW)
+                .recorded_at(REACH_EARLY),
+        )
+        .await
+        .expect_err("a plan reader that skipped the guard would fold a short log");
+    match &err {
+        macrame::DbError::RecordedInstantUnreachable { ts } => assert_eq!(ts, REACH_EARLY),
+        other => panic!("got {other:?}"),
+    }
+    // Without the recorded instant it is a projection read and answers.
+    db.edges(macrame::ReadPlan::new().valid_at(REACH_NOW))
+        .await
+        .expect("current belief never reads the log");
+
     db.close().await.unwrap();
 }
 

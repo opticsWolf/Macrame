@@ -148,6 +148,7 @@ from ._macrame import (
     PayloadVersionError,
     RebuildFailedError,
     RebuildInterruptedError,
+    ReadPlan,
     RebuildReport,
     RecordedAtRegressionError,
     ReplayCorruptError,
@@ -185,6 +186,8 @@ __all__ = [
     "Interval",
     "AttributeMode",
     "OPEN",
+    # read plan (W13.4)
+    "ReadPlan",
     # read path (P4.2)
     "Subgraph",
     "NodeAttributes",

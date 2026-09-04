@@ -19,6 +19,7 @@ mod database;
 mod errors;
 mod graph;
 mod observe;
+mod plan;
 mod rows;
 mod runtime;
 mod temporal;
@@ -116,6 +117,7 @@ fn _macrame(m: &Bound<'_, PyModule>) -> PyResult<()> {
     errors::register(m)?;
     types::register(m)?;
     graph::register(m)?;
+    plan::register(m)?;
     temporal::register(m)?;
     observe::register(m)?;
     vector::register(m)?;

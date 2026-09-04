@@ -130,6 +130,60 @@ impl TraversalBuilder {
         self
     }
 
+    /// Take all three read qualifiers from one [`ReadPlan`] (0.15.9, W13.4,
+    /// [D-251]).
+    ///
+    /// Exactly [`Self::on_branch`], [`Self::as_of_valid`] and
+    /// [`Self::as_of_recorded`] applied in turn, and **a `None` field unsets
+    /// what was there** rather than leaving it. That is the whole reason to
+    /// prefer a plan to three calls: a plan is the read, so applying one
+    /// answers what the read is instead of amending what it was. A caller who
+    /// wants to amend has the three setters and they are not going anywhere —
+    /// [C-11] decides their fate in W15.3, and this release is additive on
+    /// purpose so a caller pinned to `0.15` gets the plan without being broken
+    /// by it.
+    ///
+    /// The round trip is exact in both directions: `b.plan(p).read_plan() == p`
+    /// for every plan, and `b.plan(b.read_plan())` leaves `b` alone.
+    ///
+    /// [C-11]: ../../docs/Macrame%20Update%20Plan%20v0.16.0.md
+    /// [D-251]: ../../docs/architecture/s13-decision-register.md#d-251
+    pub fn plan(mut self, plan: crate::plan::ReadPlan) -> Self {
+        self.branch = plan.branch.map(|b| b.as_str().to_string());
+        self.as_of_valid = plan.valid;
+        self.as_of_recorded = plan.recorded;
+        self
+    }
+
+    /// What this traversal's three qualifiers say, as a [`ReadPlan`].
+    ///
+    /// The inverse of [`Self::plan`], and the reason the pair is worth having
+    /// over a one-way setter: a caller can take the qualifiers off a traversal
+    /// they were handed and give the *same read* to
+    /// [`Database::edges`](crate::Database::edges), or to a second traversal
+    /// from a different start node, without restating three fields and
+    /// without the restatement being the place they drift.
+    ///
+    /// # Errors
+    ///
+    /// [`DbError::InvalidBranchId`](crate::DbError::InvalidBranchId) when the
+    /// name in [`Self::branch`] is not one. This builder takes its lineage as
+    /// a `String` and validates it nowhere — `lineage_shape` refuses an
+    /// unregistered name at read time, which is a different question — so the
+    /// conversion to [`BranchId`](crate::BranchId) is where an unconstructible
+    /// name is finally noticed. Every branch that exists in a database passed
+    /// through `BranchId::new` to get there, so this fails only for a name
+    /// that could not have been read anyway.
+    pub fn read_plan(&self) -> Result<crate::plan::ReadPlan> {
+        let mut plan = crate::plan::ReadPlan::new();
+        if let Some(name) = self.branch.as_deref() {
+            plan = plan.on(crate::branch::BranchId::new(name)?);
+        }
+        plan.valid = self.as_of_valid.clone();
+        plan.recorded = self.as_of_recorded.clone();
+        Ok(plan)
+    }
+
     pub fn max_depth(mut self, depth: usize) -> Self {
         self.max_depth = depth;
         self

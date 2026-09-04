@@ -125,62 +125,19 @@ pub async fn query_as_of_edges_on(
     ts: &str,
     branch: Option<&str>,
 ) -> Result<Vec<(String, String, String, String, String)>> {
-    use crate::graph::lineage::{lineage_shape, LineageShape};
-    use crate::graph::plan::{lower, Resolution};
-
-    // The same two shapes the traversal picks between, and for the same
-    // measured reason (D-219): the resolved form is 3x on a database with
-    // nothing to resolve, and a `branches` table holding one row is a
-    // *sufficient* condition for the plain form rather than a heuristic.
-    let (sql, params): (String, Vec<libsql::Value>) = match lineage_shape(conn, branch).await? {
-        LineageShape::Trunk => (
-            r#"
-        SELECT source_id, target_id, edge_type, valid_from, valid_to
-        FROM links_current
-        WHERE valid_from <= ?1 AND ?1 < valid_to
-    "#
-            .to_string(),
-            vec![ts.into()],
-        ),
-        // One lowering with the traversal and `diff` (0.15.1, W13.1): this
-        // reader chooses only where its branch binds. Both shapes that name
-        // a lineage share this one text; what differs between them — the
-        // prelude, the relation, the predicate — is the lowering's to say
-        // (0.15.2, D-244).
-        shape @ (LineageShape::Resolved | LineageShape::TrunkOnForked) => {
-            let lowered = lower(&Resolution {
-                shape,
-                branch_slot: 2,
-                recorded_slot: None,
-                tag: "",
-                key: None,
-            });
+    Ok(crate::plan::edges_at(conn, ts, None, branch)
+        .await?
+        .into_iter()
+        .map(|e| {
             (
-                format!(
-                    "{}SELECT l.source_id, l.target_id, l.edge_type, l.valid_from, l.valid_to \
-                     FROM {} l WHERE l.valid_from <= ?1 AND ?1 < l.valid_to{}",
-                    lowered.with_clause(),
-                    lowered.source,
-                    lowered.filter,
-                ),
-                vec![
-                    ts.into(),
-                    branch.unwrap_or(crate::schema::ddl::MAIN_BRANCH).into(),
-                ],
+                e.source_id,
+                e.target_id,
+                e.edge_type,
+                e.valid_from,
+                e.valid_to,
             )
-        }
-    };
-    let mut rows = conn.query(&sql, params).await?;
-    let mut edges = Vec::new();
-    while let Some(row) = rows.next().await? {
-        let src: String = row.get(0)?;
-        let tgt: String = row.get(1)?;
-        let edge_type: String = row.get(2)?;
-        let vf: String = row.get(3)?;
-        let vt: String = row.get(4)?;
-        edges.push((src, tgt, edge_type, vf, vt));
-    }
-    Ok(edges)
+        })
+        .collect())
 }
 
 /// `?n, ?n+1, …` for `count` ids starting at `first`.

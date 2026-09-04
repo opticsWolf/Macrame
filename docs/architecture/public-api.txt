@@ -130,6 +130,7 @@ pub fn macrame::connection::Database::clock(&self) -> &alloc::sync::Arc<dyn macr
 pub async fn macrame::connection::Database::close(self) -> macrame::error::Result<()>
 pub async fn macrame::connection::Database::diagnostic_conn(&self) -> macrame::error::Result<libsql::connection::Connection>
 pub async fn macrame::connection::Database::diff(&self, &macrame::branch::BranchId, &macrame::branch::BranchId) -> macrame::error::Result<alloc::vec::Vec<macrame::branch::Divergence>>
+pub async fn macrame::connection::Database::edges(&self, macrame::plan::ReadPlan) -> macrame::error::Result<alloc::vec::Vec<macrame::temporal::EdgeBelief>>
 pub async fn macrame::connection::Database::fork(&self, macrame::branch::BranchId, macrame::branch::BranchId) -> macrame::error::Result<macrame::branch::Branch>
 pub fn macrame::connection::Database::metrics(&self) -> macrame::metrics::MetricsSnapshot
 pub async fn macrame::connection::Database::open(impl core::convert::AsRef<std::path::Path>) -> macrame::error::Result<Self>
@@ -473,6 +474,8 @@ pub fn macrame::graph::TraversalBuilder::max_depth(self, usize) -> Self
 pub fn macrame::graph::TraversalBuilder::min_weight(self, f64) -> Self
 pub fn macrame::graph::TraversalBuilder::new(impl core::convert::Into<alloc::string::String>) -> Self
 pub fn macrame::graph::TraversalBuilder::on_branch(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn macrame::graph::TraversalBuilder::plan(self, macrame::plan::ReadPlan) -> Self
+pub fn macrame::graph::TraversalBuilder::read_plan(&self) -> macrame::error::Result<macrame::plan::ReadPlan>
 pub const macrame::graph::DEFAULT_BYTE_BUDGET: usize
 pub const macrame::graph::DEFAULT_PROBE_CAP: usize
 pub fn macrame::graph::astar<F>(&macrame::graph::Subgraph, &str, &str, F) -> core::option::Option<(f64, alloc::vec::Vec<alloc::string::String>)> where F: core::ops::function::Fn(&str, &str) -> f64
@@ -568,6 +571,16 @@ impl macrame::metrics::MetricsSnapshot
 pub fn macrame::metrics::MetricsSnapshot::budget_violations(&self) -> alloc::vec::Vec<&macrame::metrics::KindSnapshot>
 pub const macrame::metrics::BUCKET_BOUNDS_MICROS: &[u64]
 pub const macrame::metrics::BUCKET_COUNT: usize
+pub mod macrame::plan
+#[non_exhaustive] pub struct macrame::plan::ReadPlan
+pub macrame::plan::ReadPlan::branch: core::option::Option<macrame::branch::BranchId>
+pub macrame::plan::ReadPlan::recorded: core::option::Option<alloc::string::String>
+pub macrame::plan::ReadPlan::valid: core::option::Option<alloc::string::String>
+impl macrame::plan::ReadPlan
+pub fn macrame::plan::ReadPlan::new() -> Self
+pub fn macrame::plan::ReadPlan::on(self, macrame::branch::BranchId) -> Self
+pub fn macrame::plan::ReadPlan::recorded_at(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn macrame::plan::ReadPlan::valid_at(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub mod macrame::prelude
 #[non_exhaustive] pub enum macrame::prelude::AttributeMode
 pub macrame::prelude::AttributeMode::AtTime
@@ -865,6 +878,7 @@ pub fn macrame::connection::Database::clock(&self) -> &alloc::sync::Arc<dyn macr
 pub async fn macrame::connection::Database::close(self) -> macrame::error::Result<()>
 pub async fn macrame::connection::Database::diagnostic_conn(&self) -> macrame::error::Result<libsql::connection::Connection>
 pub async fn macrame::connection::Database::diff(&self, &macrame::branch::BranchId, &macrame::branch::BranchId) -> macrame::error::Result<alloc::vec::Vec<macrame::branch::Divergence>>
+pub async fn macrame::connection::Database::edges(&self, macrame::plan::ReadPlan) -> macrame::error::Result<alloc::vec::Vec<macrame::temporal::EdgeBelief>>
 pub async fn macrame::connection::Database::fork(&self, macrame::branch::BranchId, macrame::branch::BranchId) -> macrame::error::Result<macrame::branch::Branch>
 pub fn macrame::connection::Database::metrics(&self) -> macrame::metrics::MetricsSnapshot
 pub async fn macrame::connection::Database::open(impl core::convert::AsRef<std::path::Path>) -> macrame::error::Result<Self>
@@ -1019,6 +1033,15 @@ pub macrame::prelude::Overlap::valid_to: alloc::string::String
 pub macrame::prelude::Overlap::within_batch: bool
 impl macrame::error::Overlap
 pub fn macrame::error::Overlap::provenance(&self) -> &'static str
+#[non_exhaustive] pub struct macrame::prelude::ReadPlan
+pub macrame::prelude::ReadPlan::branch: core::option::Option<macrame::branch::BranchId>
+pub macrame::prelude::ReadPlan::recorded: core::option::Option<alloc::string::String>
+pub macrame::prelude::ReadPlan::valid: core::option::Option<alloc::string::String>
+impl macrame::plan::ReadPlan
+pub fn macrame::plan::ReadPlan::new() -> Self
+pub fn macrame::plan::ReadPlan::on(self, macrame::branch::BranchId) -> Self
+pub fn macrame::plan::ReadPlan::recorded_at(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn macrame::plan::ReadPlan::valid_at(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub struct macrame::prelude::RebuildReport
 pub macrame::prelude::RebuildReport::drift_after: usize
 pub macrame::prelude::RebuildReport::rows_rebuilt: usize
@@ -1056,6 +1079,8 @@ pub fn macrame::graph::TraversalBuilder::max_depth(self, usize) -> Self
 pub fn macrame::graph::TraversalBuilder::min_weight(self, f64) -> Self
 pub fn macrame::graph::TraversalBuilder::new(impl core::convert::Into<alloc::string::String>) -> Self
 pub fn macrame::graph::TraversalBuilder::on_branch(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn macrame::graph::TraversalBuilder::plan(self, macrame::plan::ReadPlan) -> Self
+pub fn macrame::graph::TraversalBuilder::read_plan(&self) -> macrame::error::Result<macrame::plan::ReadPlan>
 pub struct macrame::prelude::Tuning
 pub macrame::prelude::Tuning::cadence: macrame::connection::CadencePolicy
 pub macrame::prelude::Tuning::clock: core::option::Option<alloc::sync::Arc<dyn macrame::util::Clock>>
@@ -1566,6 +1591,7 @@ pub fn macrame::connection::Database::clock(&self) -> &alloc::sync::Arc<dyn macr
 pub async fn macrame::connection::Database::close(self) -> macrame::error::Result<()>
 pub async fn macrame::connection::Database::diagnostic_conn(&self) -> macrame::error::Result<libsql::connection::Connection>
 pub async fn macrame::connection::Database::diff(&self, &macrame::branch::BranchId, &macrame::branch::BranchId) -> macrame::error::Result<alloc::vec::Vec<macrame::branch::Divergence>>
+pub async fn macrame::connection::Database::edges(&self, macrame::plan::ReadPlan) -> macrame::error::Result<alloc::vec::Vec<macrame::temporal::EdgeBelief>>
 pub async fn macrame::connection::Database::fork(&self, macrame::branch::BranchId, macrame::branch::BranchId) -> macrame::error::Result<macrame::branch::Branch>
 pub fn macrame::connection::Database::metrics(&self) -> macrame::metrics::MetricsSnapshot
 pub async fn macrame::connection::Database::open(impl core::convert::AsRef<std::path::Path>) -> macrame::error::Result<Self>
@@ -1620,6 +1646,15 @@ pub macrame::Overlap::valid_to: alloc::string::String
 pub macrame::Overlap::within_batch: bool
 impl macrame::error::Overlap
 pub fn macrame::error::Overlap::provenance(&self) -> &'static str
+#[non_exhaustive] pub struct macrame::ReadPlan
+pub macrame::ReadPlan::branch: core::option::Option<macrame::branch::BranchId>
+pub macrame::ReadPlan::recorded: core::option::Option<alloc::string::String>
+pub macrame::ReadPlan::valid: core::option::Option<alloc::string::String>
+impl macrame::plan::ReadPlan
+pub fn macrame::plan::ReadPlan::new() -> Self
+pub fn macrame::plan::ReadPlan::on(self, macrame::branch::BranchId) -> Self
+pub fn macrame::plan::ReadPlan::recorded_at(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn macrame::plan::ReadPlan::valid_at(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub struct macrame::Tuning
 pub macrame::Tuning::cadence: macrame::connection::CadencePolicy
 pub macrame::Tuning::clock: core::option::Option<alloc::sync::Arc<dyn macrame::util::Clock>>

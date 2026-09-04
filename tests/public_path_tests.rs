@@ -67,6 +67,17 @@ const BASELINE: &str = include_str!("../docs/architecture/public-api.txt");
 /// listing is what `declared_modules` reads, so a new `pub mod` is invisible
 /// here until `check_public_api.py --bless` writes it down — the gate fires on
 /// the commit that records the surface, not on the one that changes it.
+///
+/// `macrame::plan` is the twelfth and arrived at 0.15.9
+/// ([D-251](../../docs/architecture/s13-decision-register.md#d-251)). It holds
+/// one type — `ReadPlan`, what a read asks for — and is top-level rather than
+/// under `graph` because the three qualifiers it composes span `branch`,
+/// `temporal` and `graph` and belong to none of them. **The crate now has two
+/// modules called `plan`**, and that is the deliberate half: `graph::plan` is
+/// the crate-private lowering, so only one of the two is ever a path, and a
+/// caller who never reads SQL never meets the other. `ReadPlan` is re-exported
+/// at the root and in the prelude, which makes this the canonical path and
+/// those the convenience ones — the arrangement the two tests below pin.
 const PUBLIC_MODULES: &[&str] = &[
     "macrame",
     "macrame::branch",
@@ -76,6 +87,7 @@ const PUBLIC_MODULES: &[&str] = &[
     "macrame::graph",
     "macrame::integrity",
     "macrame::metrics",
+    "macrame::plan",
     "macrame::prelude",
     "macrame::schema",
     "macrame::schema::ddl",

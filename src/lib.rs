@@ -4,6 +4,7 @@ pub mod error;
 pub mod graph;
 pub mod integrity;
 pub mod metrics;
+pub mod plan;
 pub mod schema;
 pub mod temporal;
 pub mod util;
@@ -19,6 +20,7 @@ pub use connection::{
     ConceptUpsert, Database, Tuning, WalCheckpointPolicy, CHUNK_BUDGET,
 };
 pub use error::{BulkInterrupted, BulkResult, DbError, ErrorKind, Overlap, Result, StatedInstants};
+pub use plan::ReadPlan;
 pub use util::{FutureStampPolicy, DEFAULT_FUTURE_STAMP_TOLERANCE};
 
 pub mod prelude {
@@ -44,6 +46,7 @@ pub mod prelude {
     pub use crate::metrics::CommandKind;
     #[cfg(feature = "metrics")]
     pub use crate::metrics::{KindSnapshot, MetricsSnapshot};
+    pub use crate::plan::ReadPlan;
     // `archive` names both a module and a function in `temporal`, and an
     // explicit import binds the name in *both* namespaces. Listing it here
     // re-exported the module too — and once that module is `pub(crate)`, this

@@ -51,6 +51,7 @@ use crate::branch;
 use crate::errors::{closed_error, to_py, to_py_bulk};
 use crate::graph;
 use crate::observe;
+use crate::plan;
 use crate::rows;
 use crate::runtime::{check_not_forked, runtime};
 use crate::temporal;
@@ -1046,6 +1047,47 @@ impl PyDatabase {
             runtime().block_on(db.reconstruct(&ts)).map_err(to_py)
         })?;
         Ok(temporal::PyMaterializedState { inner })
+    }
+
+    /// Every edge one `ReadPlan` names, as the ledger held them (0.15.9,
+    /// W13.4, D-251).
+    ///
+    /// Six-tuples — `(source, target, edge_type, valid_from, valid_to, branch)`
+    /// — where `query_as_of_edges` returns five. The sixth is the lineage that
+    /// holds the belief, which on a forked ledger is the difference between
+    /// knowing that an edge is visible and knowing whose it is.
+    ///
+    /// # What this can ask that `query_as_of_edges` cannot
+    ///
+    /// A transaction-time instant. `query_as_of_edges` takes a valid instant
+    /// and a lineage and has no third argument; before this release, *"which
+    /// edges did we believe existed, as of March, as they stood in January"*
+    /// meant walking from a start node the question does not have, or folding
+    /// the whole log with `reconstruct` and filtering the result. `plan` is
+    /// where the third qualifier finally fits.
+    ///
+    /// Topology only, no start node and no budget: on a large ledger this is a
+    /// large list, and `load_subgraph` is the bounded neighbourhood read.
+    ///
+    /// # Raises
+    ///
+    /// `UnknownBranchError` naming an unregistered lineage — refused rather
+    /// than answered for the trunk. `RecordedInstantUnreachableError` when
+    /// `plan.recorded` is below what the hot log still covers; `reconstruct`
+    /// is what answers there.
+    fn edges<'py>(
+        &self,
+        py: Python<'py>,
+        plan: &plan::PyReadPlan,
+    ) -> PyResult<Vec<Bound<'py, pyo3::types::PyTuple>>> {
+        let inner = plan.inner.clone();
+        let beliefs = self.with_db(py, move |db| {
+            runtime().block_on(db.edges(inner)).map_err(to_py)
+        })?;
+        beliefs
+            .iter()
+            .map(|b| temporal::belief_to_py(py, b))
+            .collect()
     }
 
     /// Edges under current belief as of `ts`, as tuples.

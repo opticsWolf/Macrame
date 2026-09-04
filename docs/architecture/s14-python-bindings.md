@@ -888,6 +888,20 @@ does not: a view holds a lineage it can read through, and `view.archive()` would
 be a handle that dissolves the thing it is a handle *to*. The rule is about
 surfaces a view can still be used after.
 
+### 14.21 `ReadPlan`, and the first time the two spellings differ on purpose (0.15.9, W13.4, [D-251](s13-decision-register.md#d-251))
+
+W6's convention is that a binding ships in the release that creates the feature, and [§14.18](s14-python-bindings.md#fifth-read-surface) records the one lapse. This is the fifth holding of it, and the first release where the Rust and Python surfaces are deliberately *not* the same shape.
+
+`macrame::ReadPlan` is fluent — `ReadPlan::new().on(b).valid_at(t)` — for the reason every value type in the crate is: Rust has no keyword arguments, so a struct of three optional fields is either a builder or a function taking three `Option`s in an order nobody remembers. Python has keyword arguments. `ReadPlan(branch="exp", valid=tuesday)` is the same sentence with the scaffolding removed, and mirroring the builder here would have been mirroring a workaround.
+
+What has to match is the **meaning**, and it does: an unset field is the ordinary read on both sides — the trunk, now, current belief — and a plan is inert on both sides, so `UnknownBranchError` and `RecordedInstantUnreachableError` belong to `db.edges(plan)` rather than to the constructor. The one refusal that is the constructor's on both sides is the branch name, because [`BranchId`](s13-decision-register.md#d-224) validates it in Rust and the boundary validates it here, which is where every other lineage name in this binding is validated.
+
+**Timestamps are the exception to inertness, and have to be.** The binding canonicalises `valid=` and `recorded=` at construction rather than at the read, because a `datetime` is the form a Python caller actually holds and the ledger speaks strings; deferring would mean carrying a `PyObject` into the runtime and raising `TypeError` from inside a `block_on`. That needed a second helper beside `to_canonical`: an absent `valid_to` on an assertion means *still open* and widens to `OPEN_SENTINEL`, while an absent `valid` on a plan means *no instant was named* — the same missing argument, opposite meanings, and sharing one default would have asked every unqualified read for the end of time.
+
+**`plan=` is not a keyword on the traversal entry points, and that is the decision worth recording.** They have taken `as_of_valid=`, `as_of_recorded=` and `branch=` since 0.13.2 and 0.14.4. A fourth keyword naming the same three would put two spellings of one question in a single signature, with a precedence rule between them — [D-030](s13-decision-register.md#d-030)'s drift arriving as a convenience. `TraversalBuilder::plan` exists in Rust because Rust has no keywords to compose; Python composes them at the call site, and `**` is what a caller reaches for when they have a plan-shaped `dict`. The surface that takes a plan here is `db.edges(plan)`, which is new and has no keywords to duplicate.
+
+`edges` returns **six**-tuples where `query_as_of_edges` returns five, and the sixth is the lineage holding the belief — the same `EdgeBelief` shape `MaterializedState.edges` has carried since 0.14.5 ([D-222](s13-decision-register.md#d-222)), reached through `belief_to_py` rather than a second tuple builder.
+
 <!--nav-->
 ← [previous](s13-decision-register.md) · [index](README.md) · [next](appendices.md) →
 <!--/nav-->

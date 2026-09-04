@@ -102,6 +102,16 @@ impl Database { pub async fn edges(&self, ReadPlan) -> Result<Vec<Edge>>; }
 
 This is the release F-34 was about: the three qualifiers stated once and composed, with the builders lowering into the same struct the crate uses internally. `as_of_valid`, `as_of_recorded` and `branch` on `TraversalBuilder` stay (C-11 decides their fate in W15.3) and `plan()` sets all three. Appendix A gains the items, Appendix D.1's count moves, `public-api.txt` is regenerated, and the Python binding gets `ReadPlan` in the same release so that W6's finding — a Rust-only layer opened in the release that created it — is not repeated.
 
+**Shipped as 0.15.9, [D-251](architecture/s13-decision-register.md#d-251).** Surface **1,627 → 1,662**, all additive. Four departures from the sketch above, three of them narrowings.
+
+`limit` is **not** on the struct. It is in the sketch, and W13.5 is the release that makes it do something; a public field that is silently unread is the one failure mode a plan value has that three loose arguments do not, because a caller can see an argument go unused at a call site and cannot see a field go unread. `#[non_exhaustive]` makes it additive on the day it means something, which is the next release.
+
+`edges` returns `Vec<EdgeBelief>`, not `Vec<Edge>` — there is no `Edge` type in this crate and inventing one would have been a second shape for what `MaterializedState.edges` has carried since [D-222](architecture/s13-decision-register.md#d-222). It also earns the release more than the sketch claimed: `query_as_of_edges_on` has no transaction-time argument, so **a bitemporal whole-ledger read had no reader at all** before this — the question meant walking from a start node it does not have, or folding the whole log with `reconstruct` and filtering. That reader is what `edges` is, and `query_as_of_edges_on` is now that statement with `recorded` unset and its own two-arm `match` deleted.
+
+`TraversalBuilder` gained `read_plan()` as well as `plan()`, because a one-way setter makes a plan a way to *configure* a builder and the pair makes it a value: a caller can take the qualifiers off a traversal they were handed and give the same read to `edges`, and the round trip is asserted in both directions.
+
+The Python side takes `ReadPlan(branch=…, valid=…, recorded=…)` rather than a fluent builder, and `plan=` is **not** added to the traversal entry points — they already take the three keywords, and a fourth naming the same three would put two spellings of one question in one signature with a precedence rule between them. [§14.21](architecture/s14-python-bindings.md#1421-readplan-and-the-first-time-the-two-spellings-differ-on-purpose-0159-w134-d-251) argues it out.
+
 ### W13.5 · 0.15.5 — `limit` pushed into the walk (C-8)
 
 `ReadPlan::limit` becomes a `LIMIT ?n` on the walk CTE's outer `SELECT`, and `vector_filter.rs` stops truncating after the fact. `CostEstimator` then receives the count that was paid for. The plan-pinning test for the walk gains the limited form. Public surface: `ReadPlan::limit(self, usize)` and `TraversalBuilder::limit(self, usize)`.
@@ -201,7 +211,7 @@ Merge to `main` after W16.2, tagged. `docs/releases/v0.16.0.md` written before t
 | 1 | 0.15.1 | W13.1 | `plan.rs` lowering; three readers consume it; SQL byte-identical | `src/graph/{plan,builder,lineage,mod}.rs`, `src/temporal/as_of.rs`, `src/branch.rs` | every plan pin and golden string unchanged; surface 1,624 |
 | 2 | 0.15.2 | W13.2 | `TrunkOnForked`; three readers; the fold materialised — **done** | `lineage.rs`, `plan.rs`, `builder.rs`, `subgraph.rs`, `as_of.rs` | numbers in D-244; two plan pins |
 | 3 | 0.15.8 | W13.3 | key-narrowed lowering for the guard — **done** | `plan.rs`, `lineage.rs`, `connection.rs` | plan pinned on three shapes; numbers in D-250 |
-| 4 | 0.15.4 | W13.4 | public `ReadPlan`; Python parity | `src/plan.rs` (public), `bindings/python` | Appendix A/D.1, `public-api.txt` |
+| 4 | 0.15.9 | W13.4 | public `ReadPlan`; Python parity — **done** | `src/plan.rs` (public), `connection.rs`, `graph/builder.rs`, `temporal/as_of.rs`, `bindings/python` | Appendix A/D.1, `public-api.txt`; `read_plan_tests`, `test_read_plan.py`; numbers in D-251 |
 | 5 | 0.15.5 | W13.5 | `limit` in the walk | `plan.rs`, `builder.rs`, `vector_filter.rs` | walk pin gains the limited form |
 | 6 | 0.15.3 | W14.1 | keyed archive repair — **done** | `temporal/archive.rs`, `integrity/`, `benches` | `archive/archive_small_slice`; numbers in D-245 |
 | 7 | 0.15.4 | W14.2 | `hot_log_reach(ts)` — **done** | `temporal/replay.rs`, `error.rs`, `builder.rs` | three mutations; numbers in D-246 |
