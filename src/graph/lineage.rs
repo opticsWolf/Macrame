@@ -94,11 +94,15 @@
 //! reached from the branch side, not a new class of loss, and it is bounded to
 //! churned keys: the projection arm never degrades, because `links_current` is
 //! re-derived from surviving `links` rather than deleted from. It is
-//! deliberately **not** guarded by `check_recorded_reach`, whose bit
-//! (`hot_log_is_intact`) is coarse — any archive at all flips it, and refusing
-//! every branched read on any archived database would cost far more than the
-//! case it prevents. A cold arm for `links_cut` is the fix if it is ever
-//! needed, and it belongs with §3.2 rather than with the cutoff.
+//! deliberately **not** guarded by `check_recorded_reach`, and the reason has
+//! changed shape without changing sides (0.15.4, D-246). It used to be that the
+//! guard's bit was coarse — any archive at all flipped it, so guarding here
+//! would have refused every branched read on every archived database. The guard
+//! is now scoped to the instants the archive really took, which removes that
+//! objection and leaves the smaller one: `links_cut` reads the log for a *fork
+//! point*, not for a belief, and a fork point that has gone cold is a different
+//! question from an instant that has. A cold arm for `links_cut` is the fix if
+//! it is ever needed, and it belongs with §3.2 rather than with the cutoff.
 
 use crate::error::{DbError, Result};
 use crate::graph::plan::{lower, Resolution};

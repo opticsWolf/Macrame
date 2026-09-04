@@ -275,6 +275,12 @@ impl TraversalBuilder {
     /// path. Answering from a partial fold would return *nearly* the right
     /// topology, which is the worst failure available to a ledger.
     ///
+    /// **The refusal is scoped to the instants the archive actually took**
+    /// (0.15.4, W14.2, D-246). The newest row per entity is never archivable, so
+    /// an instant at or after the newest stamp still in the log — `now`
+    /// included — folds completely and is answered. Through 0.15.3 the guard
+    /// discarded the instant and refused everything on any archived database.
+    ///
     /// # Cost, stated rather than discovered
     ///
     /// `links_current` is a projection maintained for exactly this read and
@@ -485,8 +491,11 @@ ORDER BY w.node_id;
     /// Refuse a transaction-time instant the hot log can no longer answer for.
     ///
     /// See [`Self::as_of_recorded`]. Cheap enough to run unconditionally on the
-    /// folded path — two aggregates over an indexed column — and it only runs
-    /// there, so the ordinary traversal pays nothing.
+    /// folded path — aggregates over indexed columns — and it only runs there,
+    /// so the ordinary traversal pays nothing. An unarchived database, which is
+    /// every database until the first archive session, still costs exactly the
+    /// one `seq_id` aggregate it cost before 0.15.4; the second query is on the
+    /// branch that used to refuse outright.
     pub(crate) async fn check_recorded_reach(&self, conn: &libsql::Connection) -> Result<()> {
         let Some(ts) = self.as_of_recorded.as_deref() else {
             return Ok(());

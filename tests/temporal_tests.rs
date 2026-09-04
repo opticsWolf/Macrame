@@ -1024,7 +1024,82 @@ async fn a_rehydration_leaves_the_archive_hint_saying_exactly_what_it_said_befor
     );
 }
 
-/// `as_of_recorded` refuses once the hot log has been archived (W7.1, D-174).
+/// The valid time everything in [`a_ledger_archived_mid_history`] is asserted
+/// over. One instant for all of it: the axis under test is transaction time.
+const REACH_VALID_FROM: &str = "1970-01-01T00:00:00.000000Z";
+/// Inside the superseded region. The row that won here is the one that goes.
+const REACH_EARLY: &str = "1970-01-01T00:30:00.000000Z";
+/// After the last superseded row and before nothing: everything below it that
+/// has a successor is archivable.
+const REACH_CUTOFF: &str = "1970-01-01T02:30:00.000000Z";
+/// A valid-time "now" late enough to see every open interval in the fixture.
+const REACH_NOW: &str = "1970-01-01T03:00:00.000000Z";
+
+/// The newest `recorded_at` in the hot log — the boundary of the rule that
+/// survives archiving, read from the log rather than written down.
+///
+/// A literal will not do here. `FakeClock` advances a microsecond per reading
+/// so that two writes in the same simulated hour still order, which puts
+/// sub-second digits on every stamp; a hand-written `02:00:00.000000Z` is
+/// *before* the row it means and tests the arm next to the one it names.
+async fn newest_recorded_at(conn: &libsql::Connection) -> String {
+    conn.query("SELECT MAX(recorded_at) FROM transaction_log", ())
+        .await
+        .unwrap()
+        .next()
+        .await
+        .unwrap()
+        .unwrap()
+        .get(0)
+        .unwrap()
+}
+
+/// A whole topology recorded at once, then one of its three entities
+/// superseded twice — **and the other two left alone**.
+///
+/// That asymmetry is the fixture. `LOG_ARCHIVABLE` takes superseded rows
+/// wherever they sit in the sequence, so archiving here moves `c1`'s first two
+/// generations and leaves `c2`'s and the edge's original rows in place. The hot
+/// log therefore still *reaches back* to `00:00` while no longer being
+/// *complete* at `00:30`, which is the exact gap between the two questions
+/// 0.5.5 separated — and the state in which a reach test that consults
+/// `MIN(recorded_at)` returns a confidently wrong answer.
+///
+/// A `FakeClock` drives it because the windows are bounds on *transaction*
+/// time: with the wall clock supplying `recorded_at`, every write lands in the
+/// same microsecond and no cutoff can fall between them.
+async fn a_ledger_archived_mid_history(harness: &TestHarness) -> macrame::Database {
+    use macrame::prelude::*;
+
+    let db = harness.db_with_fake_clock().await;
+    let hour = std::time::Duration::from_secs(3_600);
+
+    // 00:00 — the whole graph, and `c1`'s first generation.
+    db.upsert_concept(ConceptUpsert::new("c1", "first").valid_from(REACH_VALID_FROM))
+        .await
+        .unwrap();
+    db.upsert_concept(ConceptUpsert::new("c2", "other").valid_from(REACH_VALID_FROM))
+        .await
+        .unwrap();
+    db.assert_edge(
+        macrame::graph::EdgeAssertion::new("c1", "c2", "KNOWS").valid_from(REACH_VALID_FROM),
+    )
+    .await
+    .unwrap();
+    harness.advance(hour);
+
+    // 01:00 and 02:00 — two more generations of `c1` alone.
+    for title in ["second", "third"] {
+        db.upsert_concept(ConceptUpsert::new("c1", title).valid_from(REACH_VALID_FROM))
+            .await
+            .unwrap();
+        harness.advance(hour);
+    }
+    db
+}
+
+/// `as_of_recorded` refuses at an instant the archive really did take the
+/// answer from (W7.1, D-174; narrowed 0.15.4, W14.2, review C-2).
 ///
 /// A transaction-time traversal folds `transaction_log`, and `archive` removes
 /// superseded rows from it. A traversal takes a `Connection` and no archive path,
@@ -1035,41 +1110,31 @@ async fn a_rehydration_leaves_the_archive_hint_saying_exactly_what_it_said_befor
 /// The valid-time axis is unaffected, and that half of the assertion is the
 /// point: the refusal is scoped to the mechanism that actually reads the log,
 /// not applied to every historical query on an archived database.
+///
+/// **The instant now has to earn the refusal, which the old fixture's did
+/// not.** Through 0.15.3 this test wrote on the wall clock and asked at
+/// `2028-01-01` — an instant *after* every row in the log, which
+/// [`reach_with_rows_removed`] answers exactly, and it passed only because the
+/// guard discarded the timestamp. It is paired with
+/// [`an_instant_at_or_after_the_newest_hot_row_survives_the_archive`], which
+/// takes the other side of the same boundary; neither is meaningful alone.
 #[tokio::test]
 async fn a_recorded_instant_is_refused_once_rows_have_been_archived() {
     use macrame::graph::TraversalBuilder;
-    use macrame::prelude::*;
 
     let harness = TestHarness::new();
-    let db = macrame::Database::open(&harness.db_path).await.unwrap();
-
-    // Supersede a concept so there is something archivable: the newest row per
-    // entity never moves, so a single write would archive nothing at all.
-    for title in ["first", "second", "third"] {
-        db.upsert_concept(ConceptUpsert::new("c1", title).valid_from(CTS))
-            .await
-            .unwrap();
-    }
-    db.upsert_concept(ConceptUpsert::new("c2", "other").valid_from(CTS))
-        .await
-        .unwrap();
-    db.assert_edge(macrame::graph::EdgeAssertion::new("c1", "c2", "KNOWS").valid_from(CTS))
-        .await
-        .unwrap();
-
-    let now = "2029-01-01T00:00:00.000000Z";
-    let instant = "2028-01-01T00:00:00.000000Z";
+    let db = a_ledger_archived_mid_history(&harness).await;
 
     // Before archiving, the fold is answerable and the traversal works.
     let before = TraversalBuilder::new("c1")
         .max_depth(1)
-        .as_of_recorded(instant)
-        .execute_ids(db.read_conn(), now)
+        .as_of_recorded(REACH_EARLY)
+        .execute_ids(db.read_conn(), REACH_NOW)
         .await
         .expect("an intact hot log answers for any instant");
     assert_eq!(before, vec!["c1".to_string(), "c2".to_string()]);
 
-    let report = db.archive("2030-01-01T00:00:00.000000Z").await.unwrap();
+    let report = db.archive(REACH_CUTOFF).await.unwrap();
     assert!(
         report.log_entries_archived >= 2,
         "the fixture needs log rows to have actually moved: {report:?}"
@@ -1078,12 +1143,12 @@ async fn a_recorded_instant_is_refused_once_rows_have_been_archived() {
     // After archiving the same call refuses, by name, and names the instant.
     let err = TraversalBuilder::new("c1")
         .max_depth(1)
-        .as_of_recorded(instant)
-        .execute_ids(db.read_conn(), now)
+        .as_of_recorded(REACH_EARLY)
+        .execute_ids(db.read_conn(), REACH_NOW)
         .await
         .expect_err("a short hot log must refuse rather than fold what is left");
     match &err {
-        macrame::DbError::RecordedInstantUnreachable { ts } => assert_eq!(ts, instant),
+        macrame::DbError::RecordedInstantUnreachable { ts } => assert_eq!(ts, REACH_EARLY),
         other => panic!("got {other:?}"),
     }
     // And it must send the caller somewhere that can answer.
@@ -1093,11 +1158,176 @@ async fn a_recorded_instant_is_refused_once_rows_have_been_archived() {
     // so archiving has nothing to do with it.
     let by_valid = TraversalBuilder::new("c1")
         .max_depth(1)
-        .as_of_valid(now)
-        .execute_ids(db.read_conn(), now)
+        .as_of_valid(REACH_NOW)
+        .execute_ids(db.read_conn(), REACH_NOW)
         .await
         .expect("valid time does not read the log and must be unaffected");
     assert_eq!(by_valid, vec!["c1".to_string(), "c2".to_string()]);
+
+    db.close().await.unwrap();
+}
+
+/// The other side of the boundary: an archived ledger still answers for the
+/// instants it never lost (0.15.4, W14.2, review C-2).
+///
+/// The newest row per entity is never archivable, so at an instant at or after
+/// the newest stamp the hot log still holds, every entity's winning row is its
+/// newest row and every one of those is hot. The fold is complete, and refusing
+/// it costs a deployment `AttributeMode::AtTime` and every `as_of_recorded`
+/// traversal for its whole history the first time it archives anything —
+/// including `as_of_recorded(now)`, the instant the archive is *guaranteed* to
+/// answer.
+///
+/// **Asked at the boundary itself** — the newest stamp in the log, read from
+/// it — rather than an instant comfortably past it, so an off-by-one in the
+/// comparison is a failure here and not a silence.
+///
+/// **Both readers, and the answer compared rather than restated.** The truth is
+/// taken while the log is intact and required back afterwards, so a guard that
+/// admitted the instant and a fold that then answered it wrongly cannot pass
+/// together — the mistake a test asserting `vec!["c1", "c2"]` in both places
+/// would let through.
+#[tokio::test]
+async fn an_instant_at_or_after_the_newest_hot_row_survives_the_archive() {
+    use macrame::graph::TraversalBuilder;
+
+    let harness = TestHarness::new();
+    let db = a_ledger_archived_mid_history(&harness).await;
+    let ids = vec!["c1".to_string()];
+    let late = newest_recorded_at(db.read_conn()).await;
+
+    let topology = TraversalBuilder::new("c1")
+        .max_depth(1)
+        .as_of_recorded(&late)
+        .execute_ids(db.read_conn(), REACH_NOW)
+        .await
+        .expect("an intact hot log answers for any instant");
+    let text = hydrate_attributes(
+        db.read_conn(),
+        &ids,
+        &AsOf::recorded_at(&late),
+        AttributeMode::AtTime,
+    )
+    .await
+    .expect("an intact hot log answers for any instant");
+
+    let report = db.archive(REACH_CUTOFF).await.unwrap();
+    assert!(
+        report.log_entries_archived >= 2,
+        "the fixture needs log rows to have actually moved: {report:?}"
+    );
+    assert_eq!(
+        newest_recorded_at(db.read_conn()).await,
+        late,
+        "the newest row per entity is never archivable, and the whole rule rests on it"
+    );
+
+    assert_eq!(
+        TraversalBuilder::new("c1")
+            .max_depth(1)
+            .as_of_recorded(&late)
+            .execute_ids(db.read_conn(), REACH_NOW)
+            .await
+            .expect("the newest row per entity is hot, so this instant is answerable"),
+        topology,
+        "the archive moved superseded rows, it did not change the topology at {late}"
+    );
+    assert_eq!(
+        hydrate_attributes(
+            db.read_conn(),
+            &ids,
+            &AsOf::recorded_at(&late),
+            AttributeMode::AtTime,
+        )
+        .await
+        .expect("the second reader takes the same verdict"),
+        text,
+        "the archive moved superseded rows, it did not change the text at {late}"
+    );
+
+    db.close().await.unwrap();
+}
+
+/// `reconstruct` with no archive path refuses at an instant the hot log cannot
+/// complete, even where the hot log still reaches back past it (0.15.4, W14.2,
+/// review C-2).
+///
+/// This is the arm 0.5.5 did not reach. That release replaced
+/// `MIN(recorded_at) <= ts` — *does the log stretch back to `ts`* — with the
+/// completeness test, and kept `MIN` for the case where **no archive file is
+/// present**, on the reasoning that nothing can have been removed then. The
+/// reasoning holds for a database that was never archived and not for one whose
+/// cold file the caller simply did not pass, which is the ordinary way to reach
+/// it: `reconstruct`'s `archive_path` is an `Option`.
+///
+/// [`a_ledger_archived_mid_history`] is the state that separates the two
+/// questions — `c2` and the edge keep their original rows, so `MIN` still sits
+/// at `00:00` while `c1`'s winning row at `00:30` is in the cold file. Before
+/// this release the fold ran and returned, with no error, a state holding the
+/// edge `c1 -> c2` and **no `c1` at all** — a graph carrying an edge out of a
+/// concept the same state says did not exist. Exactly D-189's silent short
+/// answer, at the one reader that has an archive path and was handed `None`.
+///
+/// The assertion is on the error, and separately on the fact that a fold *would*
+/// have been wrong — because a refusal that is right for the wrong reason is
+/// what this whole area keeps producing.
+#[tokio::test]
+async fn reconstructing_without_the_archive_path_refuses_rather_than_folding_a_gap() {
+    let harness = TestHarness::new();
+    let db = a_ledger_archived_mid_history(&harness).await;
+
+    let truth = reconstruct(db.read_conn(), REACH_EARLY, None, None)
+        .await
+        .expect("an intact hot log needs no archive");
+    assert!(
+        truth.concepts.contains_key("c1"),
+        "the fixture must have something at {REACH_EARLY} for the archive to take"
+    );
+
+    db.archive(REACH_CUTOFF).await.unwrap();
+
+    // The hot log still reaches back past the instant — this is the premise,
+    // and without it the old rule would have refused anyway and the test would
+    // be measuring nothing.
+    let floor: String = db
+        .read_conn()
+        .query("SELECT MIN(recorded_at) FROM transaction_log", ())
+        .await
+        .unwrap()
+        .next()
+        .await
+        .unwrap()
+        .unwrap()
+        .get(0)
+        .unwrap();
+    assert!(
+        floor.as_str() <= REACH_EARLY,
+        "the hot log must still stretch back past {REACH_EARLY} for this to be the case \
+         a `MIN(recorded_at)` reach test gets wrong; floor is {floor}"
+    );
+
+    let err = reconstruct(db.read_conn(), REACH_EARLY, None, None)
+        .await
+        .expect_err("the log reaches back to the instant but no longer completes it");
+    assert!(
+        matches!(err, macrame::DbError::ReplayCorrupt { .. }),
+        "got {err:?}"
+    );
+    assert!(
+        err.to_string().contains("no archive path was given"),
+        "the refusal must name the missing ingredient: {err}"
+    );
+
+    // And with the path, the same instant answers what it answered before.
+    assert_eq!(
+        db.reconstruct(REACH_EARLY)
+            .await
+            .expect("reconstruct takes the archive path and must answer")
+            .concepts
+            .get("c1"),
+        truth.concepts.get("c1"),
+        "the archive moved the row, it did not change what was believed"
+    );
 
     db.close().await.unwrap();
 }

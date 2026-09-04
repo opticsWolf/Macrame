@@ -815,46 +815,105 @@ async fn hot_log_reach(
     ts: &str,
     archive_path: Option<&Path>,
 ) -> Result<HotLogReach> {
+    if archive_path.is_some_and(|p| p.exists()) {
+        // An archive file beside the log is direct evidence that rows may have
+        // gone, and it is *stronger* evidence than [`hot_log_is_intact`] on one
+        // case: an empty hot log passes the seq_id test vacuously, so the
+        // fully-archived database would otherwise report its own emptiness as
+        // history. It cannot arise from `archive()` itself — the newest row per
+        // entity always stays — but answering "covered" there would make such a
+        // file reconstruct to the empty state with no error at all.
+        return reach_with_rows_removed(conn, ts).await;
+    }
+
+    hot_log_reach_within(conn, ts).await
+}
+
+/// The verdict the **hot file alone** supports (0.15.4, W14.2, review C-2).
+///
+/// This is the whole of the reach question minus the one thing an archive path
+/// adds, and it is a separate function because two callers need exactly it:
+/// [`hot_log_reach`] when no archive file is present, and
+/// [`hot_log_answers_for`] on behalf of readers that never had a path to offer.
+/// Those two used to answer differently — the first on `MIN(recorded_at)`, the
+/// second on intactness alone — and neither answer was the right one.
+///
+/// # Two cases, and the split is intactness rather than the timestamp
+///
+/// **Nothing was ever removed.** The hot log is the whole log, so it answers at
+/// every instant. Above its floor the fold runs; below it, *nothing had been
+/// recorded yet* is not a failure to find the answer, it is the answer
+/// ([`HotLogReach::PredatesRecordedHistory`], D-121).
+///
+/// **Rows were removed.** Only [`reach_with_rows_removed`]'s rule holds, and it
+/// is a bound on `ts` from above rather than below. This is the case the old
+/// `MIN(recorded_at) <= ts` arm got wrong: it asked whether the hot log
+/// *stretches back* far enough, which is the question 0.5.5 already established
+/// is not the same as whether it is still *complete*. With no archive path to
+/// fall through to, a `reconstruct` on an archived database whose cold file was
+/// not passed folded whatever was left and returned it as history — the silent
+/// short answer D-189 refused at the two connection-only readers, reachable at
+/// the one reader that takes a path and was handed `None`. Pinned by
+/// `reconstructing_without_the_archive_path_refuses_rather_than_folding_a_gap`.
+async fn hot_log_reach_within(conn: &libsql::Connection, ts: &str) -> Result<HotLogReach> {
+    if !hot_log_is_intact(conn).await? {
+        return reach_with_rows_removed(conn, ts).await;
+    }
+
+    Ok(match oldest_hot_stamp(conn).await? {
+        // Sound as a string comparison because every recorded_at is the
+        // canonical fixed width (D-029).
+        Some(min_ts) if min_ts.as_str() <= ts => HotLogReach::Covers,
+        // Below the floor of a complete log, or no log at all: either way
+        // nothing had been recorded by `ts` and the empty state is correct.
+        _ => HotLogReach::PredatesRecordedHistory,
+    })
+}
+
+/// The one rule that survives archiving, in the one place both callers read it.
+///
+/// `LOG_ARCHIVABLE` requires a later row at the same entity, so **the newest row
+/// per entity is never archivable**. If `ts` is at or after the newest stamp
+/// still in the hot log, then every entity's winning row at `ts` is its newest
+/// row overall, and every such row is hot — the fold is complete without
+/// knowing anything about what left. That covers `reconstruct(now)`, the common
+/// case and the one §5.7 designed `LOG_ARCHIVABLE` around, and nothing earlier.
+///
+/// Which is also why the two halves of the question have opposite senses. On an
+/// intact log the test is `MIN <= ts`: *does the log reach back to `ts`*. Once
+/// rows have gone it is `MAX <= ts`: *is `ts` late enough that nothing missing
+/// could matter*. Reading the second as a weaker form of the first is the
+/// mistake 0.5.5 corrected once and W14.2 corrected again in the arm 0.5.5 did
+/// not reach.
+async fn reach_with_rows_removed(conn: &libsql::Connection, ts: &str) -> Result<HotLogReach> {
+    Ok(match newest_hot_stamp(conn).await? {
+        Some(max_ts) if max_ts.as_str() <= ts => HotLogReach::Covers,
+        _ => HotLogReach::NeedsArchive,
+    })
+}
+
+/// The oldest `recorded_at` still in the hot log, or `None` if it is empty.
+async fn oldest_hot_stamp(conn: &libsql::Connection) -> Result<Option<String>> {
+    hot_stamp(conn, "MIN").await
+}
+
+/// The newest `recorded_at` still in the hot log, or `None` if it is empty.
+async fn newest_hot_stamp(conn: &libsql::Connection) -> Result<Option<String>> {
+    hot_stamp(conn, "MAX").await
+}
+
+/// One aggregate over `transaction_log.recorded_at`, which `idx_txlog_time`
+/// serves as an index scan of one row at either end.
+async fn hot_stamp(conn: &libsql::Connection, agg: &str) -> Result<Option<String>> {
     let row = conn
         .query(
-            "SELECT MIN(recorded_at), MAX(recorded_at) FROM transaction_log",
+            &format!("SELECT {agg}(recorded_at) FROM transaction_log"),
             (),
         )
         .await?
         .next()
         .await?;
-    let (min_recorded_at, max_recorded_at): (Option<String>, Option<String>) = match row {
-        Some(r) => (r.get(0).ok(), r.get(1).ok()),
-        None => (None, None),
-    };
-
-    // Sound as string comparisons because every recorded_at is the canonical
-    // fixed width (D-029).
-    if archive_path.is_some_and(|p| p.exists()) {
-        // An empty hot log beside an archive is the fully-archived case and
-        // covers nothing. It cannot arise from `archive()` itself — the newest
-        // row per entity always stays — but answering "covered" here would make
-        // such a file reconstruct to the empty state with no error at all.
-        return Ok(match max_recorded_at {
-            Some(max_ts) if max_ts.as_str() <= ts => HotLogReach::Covers,
-            _ => HotLogReach::NeedsArchive,
-        });
-    }
-
-    match min_recorded_at {
-        Some(min_ts) if min_ts.as_str() <= ts => Ok(HotLogReach::Covers),
-        // No log at all: a genuinely empty database, and the empty state has
-        // always been the answer here.
-        None => Ok(HotLogReach::PredatesRecordedHistory),
-        // `ts` is below the hot log's floor, and there is no archive file to
-        // consult. Which of the two meanings that has is decided by whether
-        // anything was ever removed from the log — see `hot_log_is_intact`.
-        Some(_) => Ok(if hot_log_is_intact(conn).await? {
-            HotLogReach::PredatesRecordedHistory
-        } else {
-            HotLogReach::NeedsArchive
-        }),
-    }
+    Ok(row.and_then(|r| r.get(0).ok()))
 }
 
 /// What the caller needs to know when the cold delta cannot be reached —
@@ -1014,15 +1073,32 @@ async fn hot_log_is_intact(conn: &libsql::Connection) -> Result<bool> {
 /// [D-189](../../docs/architecture/s13-decision-register.md#d-189)). The second
 /// was folding without asking, which is what §3.2 was.
 ///
-/// **One bit, and the conservative one.** `hot_log_is_intact` says whether
-/// anything was ever removed, not whether *this* instant survived the removal.
-/// The archive cutoff is not recorded hot-side — that is the marker D-132
-/// refused — so an archived database refuses every instant here, including ones
-/// a fold would have got right. `ts` is taken anyway rather than dropped from the
-/// signature, because the refusal names it and because a cutoff-aware version
-/// would need it.
-pub(crate) async fn hot_log_answers_for(conn: &libsql::Connection, _ts: &str) -> Result<bool> {
-    hot_log_is_intact(conn).await
+/// # It ignored `ts` until 0.15.4 (W14.2, review C-2)
+///
+/// The body was `hot_log_is_intact(conn)` and the parameter was `_ts`: one bit,
+/// *was anything ever removed*, with the instant discarded. So the first archive
+/// session a deployment ever ran took `AttributeMode::AtTime` and every
+/// `as_of_recorded` traversal away from it permanently, for its whole history
+/// rather than for the archived part of it — including `as_of_recorded(now)`,
+/// which is the instant the archive is *guaranteed* to answer.
+///
+/// The old comment here justified that as conservative-by-one-bit on the ground
+/// that the archive cutoff is not recorded hot-side (D-132's refused marker),
+/// and the ground was sound. The conclusion did not follow: the cutoff is not
+/// needed. [`reach_with_rows_removed`] decides the same question from the newest
+/// surviving stamp, which is hot by construction, and [`hot_log_reach`] had been
+/// computing exactly that verdict per timestamp since 0.5.5 two functions away.
+/// Both readers now take the three-way verdict and refuse on one arm of it.
+///
+/// [`HotLogReach::PredatesRecordedHistory`] is an answer, not a refusal: the
+/// fold returns the empty state, which is what was believed at an instant before
+/// anything was recorded. That is also what the old bit did there, so the arm is
+/// unchanged rather than newly permitted.
+pub(crate) async fn hot_log_answers_for(conn: &libsql::Connection, ts: &str) -> Result<bool> {
+    Ok(!matches!(
+        hot_log_reach_within(conn, ts).await?,
+        HotLogReach::NeedsArchive
+    ))
 }
 
 /// Run one fold query from nothing — the unanchored path.

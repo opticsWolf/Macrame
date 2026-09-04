@@ -525,15 +525,20 @@ pub enum DbError {
     /// (W9.1), where it had been returning a quietly shorter `Vec` — §3.2 of the
     /// review, and the same silence in the same wave as the first.
     ///
-    /// **Conservative by one bit, deliberately.** The test is
-    /// `hot_log_is_intact`: whether anything was *ever* removed. It cannot ask
-    /// whether this particular instant is above the archive cutoff, because the
-    /// cutoff is not recorded in the hot log — that is exactly what the hot-side
-    /// marker D-132 refused would have carried. So an archived database
-    /// refuses every `as_of_recorded`, including instants it could in principle
-    /// have answered. The alternative is answering some of them from a partial
-    /// fold, which returns *nearly* the right topology, and on a ledger that is
-    /// the worst failure available.
+    /// **Scoped to the instants that were actually lost (0.15.4, W14.2,
+    /// D-246).** The test was `hot_log_is_intact` — whether anything was *ever*
+    /// removed — with the instant discarded, so the first archive session a
+    /// deployment ran took `as_of_recorded` and `AttributeMode::AtTime` away for
+    /// its whole history rather than for the archived part, `as_of_recorded(now)`
+    /// included. That was justified on the ground that the archive cutoff is not
+    /// recorded hot-side (D-132's refused marker), which is true and does not
+    /// imply it: the cutoff is not needed. `LOG_ARCHIVABLE` requires a later row
+    /// at the same entity, so the newest row per entity is never archivable, and
+    /// an instant at or after the newest *surviving* stamp is answered entirely
+    /// by rows that are still hot. Below that stamp the refusal stands, and the
+    /// reason it stands is unchanged: answering from a partial fold returns
+    /// *nearly* the right topology, and on a ledger that is the worst failure
+    /// available.
     ///
     /// [`crate::temporal::reconstruct`] takes the archive path and answers the
     /// same question, which is why the message names it.

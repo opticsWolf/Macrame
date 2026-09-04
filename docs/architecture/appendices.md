@@ -171,9 +171,11 @@ let ids = TraversalBuilder::new(root)
 // Either instant alone is the ordinary case; both together is the bitemporal
 // cell. `as_of(ts)` was one parameter on two clocks through 0.13.1 and is gone
 // (D-174). `as_of_recorded` folds the hot log and raises
-// RecordedInstantUnreachable once rows have been archived out of it -- and so
-// does AttributeMode::AtTime, which folds the same log for the text (0.13.16,
-// D-189). Use reconstruct(), which takes the archive path.
+// RecordedInstantUnreachable at an instant the archive took the answer from
+// -- and so does AttributeMode::AtTime, which folds the same log for the text
+// (0.13.16, D-189). Instants at or after the newest surviving log row are
+// answered as before, `now` included (0.15.4, D-246). For the rest, use
+// reconstruct(), which takes the archive path.
 
 // An instant without a stated attribute mode is an error, not a default
 // (0.6.0, D-085; extended to both axes in 0.13.2). The two are independent
