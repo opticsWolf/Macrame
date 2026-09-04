@@ -106,6 +106,7 @@ macrame/
 │   │   ├── edge.rs             # assert / retire / re-assert lifecycle
 │   │   ├── lineage.rs          # §15.3 — two read shapes, ancestry resolution (D-220),
 │   │   │                       #         fork-point cutoffs and the hybrid (D-223)
+│   │   ├── plan.rs             # the lineage read lowered once — Resolution → CTEs + source (D-243)
 │   │   ├── vector_filter.rs    # §5.3 — strategies, cost model
 │   │   ├── subgraph.rs         # DB → Subgraph loader, byte budget, chunked write-back
 │   │   ├── dense.rs            # §5.4 — crate-private CSR view the algorithms run on
@@ -171,5 +172,5 @@ macrame/
 
 **Everything else here is an inventory, and 0.13.15 made that a gate ([D-188](s13-decision-register.md#d-188)).** The distinction above is only worth drawing if the entries that are *not* shapes can be relied on, and they could not be: `util/crc32.rs` shipped in 0.13.12 and reached neither this tree nor [§5.11](s5-modules.md#511-util--ids-clocks-timestamps-checksums-and-engine-ceilings)'s heading, `fuzz/` shipped in 0.13.14 and reached neither, and every gate stayed green through both. That is the failure `tests/doc_sync_tests.rs` was written for in 0.7.0, one document over: something was added to the code and nobody added it here. `every_module_in_src_is_named_in_the_crate_layout_tree` now walks `src/` and requires each module's file name to appear in the block above — shallow on purpose, because a check that fails on a reworded comment gets relaxed the first time it cries wolf. The `tests/` line went the other way: it said **28** while the directory held 35, so the entry that had been converted to a shape was still carrying an inventory in its one number, and the number is gone rather than corrected.
 
-Each module owns one concern and one failure mode. graph/builder.rs is the only place SQL strings for traversal are constructed; temporal/replay.rs is the only place the log is folded; integrity/ is the only place links_current is written outside the trigger path; and connection.rs is the only place a write-capable connection exists. This concentration is deliberate: when a class of bug has exactly one address, it can be tested there and nowhere else needs to worry.
+Each module owns one concern and one failure mode. graph/builder.rs is the only place SQL strings for traversal are constructed and graph/plan.rs the only place a lineage read's prelude is; temporal/replay.rs is the only place the log is folded; integrity/ is the only place links_current is written outside the trigger path; and connection.rs is the only place a write-capable connection exists. This concentration is deliberate: when a class of bug has exactly one address, it can be tested there and nowhere else needs to worry.
 

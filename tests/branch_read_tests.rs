@@ -399,7 +399,8 @@ async fn a_traversal_naming_an_unregistered_lineage_is_refused() {
 
 /// The fold under `as_of_recorded` resolves lineage too (the D-216 miss).
 ///
-/// `TraversalBuilder::links_at_tx_cte` partitioned on `entity_id` alone, and
+/// The `links_at_tx` fold (then `TraversalBuilder::links_at_tx_cte`, since
+/// 0.15.1 `graph::plan::links_at_tx_cte`) partitioned on `entity_id` alone, and
 /// `entity_id` for a link is `source|target|type|valid_from` — the edge key,
 /// shared across lineages by design. So an ancestor's assertion and a
 /// descendant's correction of it landed in one partition and the fold kept

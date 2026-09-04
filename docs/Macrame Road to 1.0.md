@@ -3663,6 +3663,14 @@ syntax over a working AST is additive whenever someone wants it.
 **This is the first item to cut if 0.15.0 grows.** Said in §0.4 and repeated here
 so it is visible from both places.
 
+**Cut from 0.15.0, and the first thing built for 0.16.0** — 0.15.1,
+[D-243](architecture/s13-decision-register.md#d-243). The 0.15.0 review
+(A-1) found that every remaining branching cost is a fourth copy of the
+lineage prelude waiting to be written, and that D-227's failure mode has no
+cure but one copy. The algebra lands first and crate-private, with the SQL
+byte-identical; the surface follows in its own release. The cycle's plan is
+`docs/Macrame Update Plan v0.16.0.md`.
+
 ---
 
 ## 17. Acceptance for 0.15.0

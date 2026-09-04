@@ -585,6 +585,14 @@ So the current-belief read is a **hybrid**, `links_cut`: the projection arm for 
 
 The three execution paths — `execute_ids`, `execute` and `Database::load_subgraph_with` — each ask `lineage_shape` and pass the answer down. `TraversalBuilder::build_sql` is a pure function and cannot; it emits the shape its own configuration implies and says so in its rustdoc, because it exists to explain the query rather than to run it. `temporal::as_of::query_as_of_edges` had the same gap and is fixed additively — it delegates to `query_as_of_edges_on(.., None)`, so its signature is unchanged and the two cannot drift.
 
+#### graph/plan.rs — the lineage read, lowered once (0.15.1, [D-243](s13-decision-register.md#d-243))
+
+The prelude above — `lineage`, then `links_at_tx` or `churned` + `links_cut`, then `visible` — is emitted by **one function**. `Resolution { shape, branch_slot, recorded_slot, tag }` is what a reader has decided before any SQL exists: where its branch binds, where its recorded instant binds if it has one, and the suffix that lets two lineages share a `WITH` list. `lower()` returns the CTEs in dependency order and the name of the relation the reader's own query joins — `visible{tag}` under `Resolved`, `links_current` or the fold under `Trunk`. The traversal, `query_as_of_edges_on` and `diff_sql` each construct a `Resolution` and splice the result; none of them names a lineage CTE any more, and `links_at_tx_cte` lives here rather than in the builder because the fold is prelude and not walk.
+
+**Why it exists is [D-227](s13-decision-register.md#d-227).** Three readers assembling the same prelude from the same generators agreed at 0.15.0 because a repair made them agree, not because anything kept them so; the as-of reader had spelled its own form and missed the cutoff for four releases. A lineage shape that lands here lands in every reader on the same day, which is what the third shape ([D-223](s13-decision-register.md#d-223)'s escalation, W13.2) and the walk's `limit` (W13.5) require. The lowering is crate-private; the public `ReadPlan` road map §16 asks for comes once the SQL has been stable through the shapes that follow, so the public-API gate and the plan pins never fail in one release.
+
+**Byte-identical by construction and by check.** `Lowered.ctes` is a `Vec` because the three readers glue the list three ways; twenty-seven captured texts matched after the move, and every plan pin and golden string passed unchanged. The overlap guard's per-key form (`overlap_candidates_resolved`, `retire_from_resolved`) is still its own spelling — it narrows to one key before the window runs — and is W13.3's work.
+
 #### branch.rs — the lineage's name and its one write (0.14.7, [D-224](s13-decision-register.md#d-224))
 
 The write half, and the smallest module this wave has added: a validated name, a

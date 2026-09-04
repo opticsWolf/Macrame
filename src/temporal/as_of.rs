@@ -104,8 +104,9 @@ pub async fn query_as_of_edges(
 /// returned four edges where the traversal on the same lineage reached five
 /// nodes, and nothing in either answer said they disagreed.
 ///
-/// So the resolved form is now the hybrid the traversal emits, assembled from
-/// the same functions in `graph::lineage` rather than a second copy of
+/// So the resolved form is now the hybrid the traversal emits, produced by
+/// the one lowering in `graph::plan` (since 0.15.1; before that, assembled
+/// from the same functions in `graph::lineage`) rather than a second copy of
 /// it: `links_cut` for what each ancestor may still show, and `visible` to pick
 /// the nearest lineage holding each key. **The trunk's answer is unchanged** —
 /// `main` has no ancestors and no cutoff, so `churned` is empty and `links_cut`
@@ -124,44 +125,48 @@ pub async fn query_as_of_edges_on(
     ts: &str,
     branch: Option<&str>,
 ) -> Result<Vec<(String, String, String, String, String)>> {
-    use crate::graph::lineage::{
-        ancestry_cte, churned_cte, lineage_shape, links_cut_cte, visible_cte, LineageShape,
-    };
+    use crate::graph::lineage::{lineage_shape, LineageShape};
+    use crate::graph::plan::{lower, Resolution};
 
     // The same two shapes the traversal picks between, and for the same
     // measured reason (D-219): the resolved form is 3x on a database with
     // nothing to resolve, and a `branches` table holding one row is a
     // *sufficient* condition for the plain form rather than a heuristic.
-    let (sql, params): (String, Vec<libsql::Value>) =
-        match lineage_shape(conn, branch).await? {
-            LineageShape::Trunk => (
-                r#"
+    let (sql, params): (String, Vec<libsql::Value>) = match lineage_shape(conn, branch).await? {
+        LineageShape::Trunk => (
+            r#"
         SELECT source_id, target_id, edge_type, valid_from, valid_to
         FROM links_current
         WHERE valid_from <= ?1 AND ?1 < valid_to
     "#
-                .to_string(),
-                vec![ts.into()],
-            ),
-            LineageShape::Resolved => (
-                // The CTE order is the prelude `TraversalBuilder::walk_cte`
-                // assembles, and it is an order rather than a list: `churned`
-                // reads `lineage`, `links_cut` reads `churned`, `visible` reads
-                // `links_cut`, and SQLite resolves a `WITH` list as written.
-                format!(
-                    "WITH RECURSIVE {},\n{},\n{},\n{}\n                     SELECT source_id, target_id, edge_type, valid_from, valid_to \
-                     FROM visible WHERE valid_from <= ?1 AND ?1 < valid_to",
-                    ancestry_cte(2, ""),
-                    churned_cte(""),
-                    links_cut_cte(""),
-                    visible_cte("links_cut", ""),
-                ),
-                vec![
-                    ts.into(),
-                    branch.unwrap_or(crate::schema::ddl::MAIN_BRANCH).into(),
-                ],
-            ),
-        };
+            .to_string(),
+            vec![ts.into()],
+        ),
+        LineageShape::Resolved => {
+            // One lowering with the traversal and `diff` (0.15.1, W13.1):
+            // this reader chooses only where its branch binds. The CTE
+            // order is the lowering's, and SQLite resolves a `WITH` list
+            // as written.
+            let lowered = lower(&Resolution {
+                shape: LineageShape::Resolved,
+                branch_slot: 2,
+                recorded_slot: None,
+                tag: "",
+            });
+            (
+                    format!(
+                        "WITH RECURSIVE {}\n                     SELECT source_id, target_id, edge_type, valid_from, valid_to \
+                         FROM {} WHERE valid_from <= ?1 AND ?1 < valid_to",
+                        lowered.with_list(),
+                        lowered.source,
+                    ),
+                    vec![
+                        ts.into(),
+                        branch.unwrap_or(crate::schema::ddl::MAIN_BRANCH).into(),
+                    ],
+                )
+        }
+    };
     let mut rows = conn.query(&sql, params).await?;
     let mut edges = Vec::new();
     while let Some(row) = rows.next().await? {

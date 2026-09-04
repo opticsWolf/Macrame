@@ -90,6 +90,7 @@
 //! needed, and it belongs with §3.2 rather than with the cutoff.
 
 use crate::error::{DbError, Result};
+use crate::graph::plan::{lower, Resolution};
 use crate::schema::ddl;
 
 /// Which form of the read to emit. See the module docs.
@@ -508,12 +509,26 @@ pub(crate) fn retire_from_resolved() -> String {
 ///
 /// [D-228]: ../../docs/architecture/s13-decision-register.md#d-228
 pub(crate) fn diff_sql() -> String {
+    // Two lowerings in one `WITH` list (0.15.1, W13.1): the same prelude
+    // the traversal and `query_as_of_edges_on` splice, told apart by tag.
+    let a = lower(&Resolution {
+        shape: LineageShape::Resolved,
+        branch_slot: 1,
+        recorded_slot: None,
+        tag: "_a",
+    });
+    let b = lower(&Resolution {
+        shape: LineageShape::Resolved,
+        branch_slot: 2,
+        recorded_slot: None,
+        tag: "_b",
+    });
     format!(
-        "WITH RECURSIVE {},\n{},\n{},\n{},\n{},\n{},\n{},\n{}\n\
+        "WITH RECURSIVE {},\n{}\n\
          SELECT a.source_id, a.target_id, a.edge_type, a.valid_from, \
                 a.valid_to, a.weight, a.branch_id \
-         FROM visible_a a \
-         LEFT JOIN visible_b b ON b.source_id  = a.source_id \
+         FROM {} a \
+         LEFT JOIN {} b ON b.source_id  = a.source_id \
                               AND b.target_id  = a.target_id \
                               AND b.edge_type  = a.edge_type \
                               AND b.valid_from = a.valid_from \
@@ -521,14 +536,10 @@ pub(crate) fn diff_sql() -> String {
             OR b.valid_to <> a.valid_to \
             OR b.weight   <> a.weight \
          ORDER BY a.source_id, a.target_id, a.edge_type, a.valid_from",
-        ancestry_cte(1, "_a"),
-        churned_cte("_a"),
-        links_cut_cte("_a"),
-        visible_cte("links_cut_a", "_a"),
-        ancestry_cte(2, "_b"),
-        churned_cte("_b"),
-        links_cut_cte("_b"),
-        visible_cte("links_cut_b", "_b"),
+        a.with_list(),
+        b.with_list(),
+        a.source,
+        b.source,
     )
 }
 
