@@ -122,6 +122,18 @@ The archive arm rebuilds `links_current` in full after deleting archived rows. R
 
 **Shipped as 0.15.4, [D-246](architecture/s13-decision-register.md#d-246), again ahead of the numbered order** — it is next in the review's own ranking and touches `replay.rs`, which nothing in W13 does. Two departures. The guard consults a *newest surviving stamp*, not "the earliest recorded instant the hot log still answers for": there is no such earliest instant on an archived log, because `LOG_ARCHIVABLE` removes rows scattered through the sequence rather than a prefix — the reach question has an upper bound, not a lower one, which is the sense error 0.5.5 corrected once. And the release is larger than "small" because asking the question properly exposed a **second** defect in the same rule: with no archive file passed, `reconstruct` was still deciding on `MIN(recorded_at) <= ts` and folding across its own gap. That is a silent wrong answer and is fixed in the same commit rather than filed.
 
+### W14.4 · 0.15.5 — the reach guard's cheap arm first (no review finding)
+
+**Not in the review, and it came out of writing [D-246](architecture/s13-decision-register.md#d-246) down wrong.** That entry's cost paragraph claimed the unarchived path was unchanged, was corrected to *two aggregates where there was one*, and the correction still treated the two as comparable. Measuring separated them: the intactness check is a covering scan linear in the hot log (0.1 ms at 2,000 rows, 24 ms at 500,000, and linear since 0.8.0), the stamp is a 3.4 µs seek.
+
+`MAX <= ts` is sound under both rules, so asking it before the case split lets the scan be skipped entirely at or after the newest surviving stamp — where `as_of_recorded(now)` and `reconstruct(now)` ask. **24.24 ms → 0.004 ms** at 500,000 rows. The historical arm is unchanged and stays linear; no exact cheaper test exists for it without the hot-side marker [D-132](architecture/s13-decision-register.md#d-132) refused, and that refusal gets its own decision rather than a rider on this one.
+
+It also caught a budget: §9's *AtTime hydration ≤ 30 ms* is justified as bounded by the result set, and the fold is — flat at 0.14 ms from 2,000 to 500,000 log rows — while the guard in front of it was 173× the read at the top of that range. Both §9 and §5.6 now say where the independence claim holds and where it does not.
+
+The deliverable is a pure reordering, so the acceptance is a state-space table rather than a number: `reach_table` enumerates intact and gapped logs at five instants including both boundaries, and catches four mutations on its own.
+
+**Shipped as 0.15.5, [D-247](architecture/s13-decision-register.md#d-247).**
+
 ### W14.3 · 0.15.8 — `ActorState` (C-5, C-6, C-24, A-3)
 
 The write actor is stateless between turns and pays for it three times: `hot_log_is_intact` counts the log on every recorded read, the single-edge path makes two round trips it could prepare once, and `check_lineages` recomputes an answer that changes only under `Fork` and `ArchiveBranch`. One `ActorState { prepared, lineage_generation, intact }` owned by `run_writer_actor`, invalidated by the two operations that can change it. The lineage cache here is the one A-2 later reads from.
@@ -181,14 +193,17 @@ Merge to `main` after W16.2, tagged. `docs/releases/v0.16.0.md` written before t
 | 5 | 0.15.5 | W13.5 | `limit` in the walk | `plan.rs`, `builder.rs`, `vector_filter.rs` | walk pin gains the limited form |
 | 6 | 0.15.3 | W14.1 | keyed archive repair — **done** | `temporal/archive.rs`, `integrity/`, `benches` | `archive/archive_small_slice`; numbers in D-245 |
 | 7 | 0.15.4 | W14.2 | `hot_log_reach(ts)` — **done** | `temporal/replay.rs`, `error.rs`, `builder.rs` | three mutations; numbers in D-246 |
-| 8 | 0.15.8 | W14.3 | `ActorState` | `connection.rs` | single-edge path round trips counted |
-| 9 | 0.15.9 | W15.1 | typed rehydrate refusal | `errors.rs`, `branch.rs` | kind gate |
-| 10 | 0.15.10 | W15.2 | schema v16, composite index | `schema.rs`, `migrations`, `index_plan_tests.rs` | rung tests; fold plan pinned |
-| 11 | 0.15.11 | W15.3 | builders + `#[non_exhaustive]` | `tuning.rs`, `builder.rs`, `snapshot.rs` | `api-review-0.16.0.md` |
-| 12 | 0.15.12 | W15.4 | lazy diagnostic handle | `connection.rs` | — |
-| 13 | 0.15.13 | W16.1 | ancestry in Rust | `plan.rs`, `branch.rs` | differential test against the CTE |
-| 14 | 0.15.14 | W16.2 | hygiene batch | various | one register row per item |
-| 15 | 0.16.0 | — | release note before merge; merge; tag | `docs/releases/v0.16.0.md` | §8 |
+| 8 | 0.15.5 | W14.4 | reach guard, cheap arm first — **done** | `temporal/replay.rs`, `graph/builder.rs` | `reach_table`; four mutations; numbers in D-247 |
+| 9 | 0.15.8 | W14.3 | `ActorState` | `connection.rs` | single-edge path round trips counted |
+| 10 | 0.15.9 | W15.1 | typed rehydrate refusal | `errors.rs`, `branch.rs` | kind gate |
+| 11 | 0.15.10 | W15.2 | schema v16, composite index | `schema.rs`, `migrations`, `index_plan_tests.rs` | rung tests; fold plan pinned |
+| 12 | 0.15.11 | W15.3 | builders + `#[non_exhaustive]` | `tuning.rs`, `builder.rs`, `snapshot.rs` | `api-review-0.16.0.md` |
+| 13 | 0.15.12 | W15.4 | lazy diagnostic handle | `connection.rs` | — |
+| 14 | 0.15.13 | W16.1 | ancestry in Rust | `plan.rs`, `branch.rs` | differential test against the CTE |
+| 15 | 0.15.14 | W16.2 | hygiene batch | various | one register row per item |
+| 16 | 0.16.0 | — | release note before merge; merge; tag | `docs/releases/v0.16.0.md` | §8 |
+
+**The Release column is a projection for every row not marked *done*, and it has already been overtaken.** W14.1, W14.2 and W14.4 shipped as 0.15.3, 0.15.4 and 0.15.5 — the three numbers this table had pencilled in for W13.3, W13.4 and W13.5 — because the review's findings were ranked by value and taken in that order rather than in wave order. A done row carries the version it actually shipped as; the rest carry a place in a queue. Renumbering the tail each time something jumps it would make the column look authoritative when the only thing it records is order.
 
 ---
 

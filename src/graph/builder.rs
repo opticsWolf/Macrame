@@ -493,16 +493,15 @@ ORDER BY w.node_id;
     /// See [`Self::as_of_recorded`]. It only runs on the folded path, so the
     /// ordinary traversal pays nothing.
     ///
-    /// **Two aggregates since 0.15.4, where it was one** — intactness over
-    /// `seq_id`, then one stamp over `recorded_at`, both served as one-row index
-    /// scans. The second is the price of consulting the instant rather than
-    /// discarding it, and it is paid on every recorded-time read including the
-    /// unarchived ones. It could be skipped on an intact log, where the verdict
-    /// is *answerable* whatever the instant — and is not, because that puts "an
-    /// intact log always answers" in a second place, which is the failure class
-    /// this whole area keeps producing (D-035). The fold this guards is a window
-    /// function over the bounded slice of `transaction_log`; an index scan of one
-    /// row does not register against it.
+    /// **One index seek at or after the newest surviving stamp, which is where
+    /// this is asked** (0.15.5, W14.4, D-247). `as_of_recorded(now)` and every
+    /// read at a recent instant take [`crate::temporal::replay`]'s cheap arm:
+    /// 3.4 µs, flat in the size of the log. Below that stamp the guard also
+    /// establishes whether rows were removed, which is a `COUNT(*)` over
+    /// `transaction_log` and therefore linear — 0.1 ms at 2,000 rows, 24 ms at
+    /// 500,000. That arm cannot be made cheaper without a marker
+    /// [D-132](../../docs/architecture/s13-decision-register.md#d-132) refused,
+    /// and it is the arm that usually goes on to refuse anyway.
     pub(crate) async fn check_recorded_reach(&self, conn: &libsql::Connection) -> Result<()> {
         let Some(ts) = self.as_of_recorded.as_deref() else {
             return Ok(());

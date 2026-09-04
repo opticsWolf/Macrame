@@ -770,6 +770,7 @@ fn newest_usable_snapshot(dir: &Path, ts: &str) -> Option<MaterializedState> {
 /// with *the delta is elsewhere*, so a question about a time before the ledger
 /// started came back as [`DbError::ReplayCorrupt`] — the class meaning the
 /// ledger is damaged — naming an archive file the caller had never created.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HotLogReach {
     /// The hot log holds everything needed at `ts`. Fold it.
     Covers,
@@ -856,8 +857,32 @@ async fn hot_log_reach(
 /// the one reader that takes a path and was handed `None`. Pinned by
 /// `reconstructing_without_the_archive_path_refuses_rather_than_folding_a_gap`.
 async fn hot_log_reach_within(conn: &libsql::Connection, ts: &str) -> Result<HotLogReach> {
+    // **The cheap arm first, and it is sound before the case split rather than
+    // inside one of its branches** (0.15.5, W14.4, [D-247]). `MAX <= ts` covers
+    // under *both* rules: on a log rows were removed from it is
+    // [`reach_with_rows_removed`]'s argument, and on an intact one
+    // `MIN <= MAX <= ts` gives the same verdict a step later. So the question
+    // "were rows removed" — the only expensive one here — does not have to be
+    // asked at all when the instant is at or after the newest surviving stamp.
+    //
+    // Which is where the readers actually ask. `as_of_recorded(now)`,
+    // `reconstruct(now)` and every read at a recent instant land here, and pay
+    // one index seek against `idx_txlog_time` instead of a covering scan whose
+    // cost is the whole hot log. Measured at 500,000 log rows: **3.4 µs against
+    // 24.2 ms**.
+    if newest_stamp_covers(conn, ts).await? {
+        return Ok(HotLogReach::Covers);
+    }
+
+    // Below the newest surviving stamp, and now it matters. An intact log
+    // answers at every instant; a log rows were taken out of answers at none
+    // below that stamp, and there is no cheaper exact test than counting —
+    // `LOG_ARCHIVABLE` removes rows scattered through the sequence, so a gap
+    // can be anywhere and only `COUNT(*)` finds it (see [`hot_log_is_intact`]).
+    // This arm is *not* made cheaper by the reordering and pays one extra seek
+    // for the arm that is: 3.4 µs on top of a scan that starts at 96 µs.
     if !hot_log_is_intact(conn).await? {
-        return reach_with_rows_removed(conn, ts).await;
+        return Ok(HotLogReach::NeedsArchive);
     }
 
     Ok(match oldest_hot_stamp(conn).await? {
@@ -886,10 +911,23 @@ async fn hot_log_reach_within(conn: &libsql::Connection, ts: &str) -> Result<Hot
 /// mistake 0.5.5 corrected once and W14.2 corrected again in the arm 0.5.5 did
 /// not reach.
 async fn reach_with_rows_removed(conn: &libsql::Connection, ts: &str) -> Result<HotLogReach> {
-    Ok(match newest_hot_stamp(conn).await? {
-        Some(max_ts) if max_ts.as_str() <= ts => HotLogReach::Covers,
-        _ => HotLogReach::NeedsArchive,
+    Ok(if newest_stamp_covers(conn, ts).await? {
+        HotLogReach::Covers
+    } else {
+        HotLogReach::NeedsArchive
     })
+}
+
+/// The rule itself, as a predicate, because two callers now read it and one of
+/// them ([`hot_log_reach_within`]'s first arm) is not deciding between the same
+/// two verdicts.
+///
+/// An empty log covers nothing, which is the arm that keeps a fully-archived
+/// database from reporting its own emptiness as history.
+async fn newest_stamp_covers(conn: &libsql::Connection, ts: &str) -> Result<bool> {
+    Ok(newest_hot_stamp(conn)
+        .await?
+        .is_some_and(|max_ts| max_ts.as_str() <= ts))
 }
 
 /// The oldest `recorded_at` still in the hot log, or `None` if it is empty.
@@ -1289,6 +1327,198 @@ impl Delta {
             // A delta was applied, so there was history to fold. `reconstruct`
             // sets the flag on the one path that never gets here.
             predates_recorded_history: false,
+        }
+    }
+}
+
+#[cfg(test)]
+mod reach_table {
+    //! Every cell of the reach question, named (0.15.5, W14.4, [D-247]).
+    //!
+    //! [`hot_log_reach_within`] decides on two facts — whether rows were removed
+    //! from the log, and where `ts` sits against the stamps that remain — and
+    //! the order it establishes them in is a **cost** decision, not a
+    //! correctness one. 0.15.5 reordered it so the cheap fact is enough on the
+    //! arm the readers actually use. A reordering is exactly the kind of change
+    //! that is obviously behaviour-preserving until it is not, and the argument
+    //! for it ("`MAX <= ts` covers under both rules") is short enough to be
+    //! believed without checking. This table is the checking.
+    //!
+    //! Enumerated rather than sampled, because the defects this area has
+    //! actually produced were all boundary cells: `ts` exactly at the newest
+    //! stamp (0.15.4), `ts` below the floor of an intact log (0.8.0, D-121),
+    //! and an empty log that passes the intactness test vacuously (0.5.5).
+
+    use super::*;
+
+    const A: &str = "1970-01-01T01:00:00.000000Z";
+    const B: &str = "1970-01-01T02:00:00.000000Z";
+    const C: &str = "1970-01-01T03:00:00.000000Z";
+    const BEFORE_A: &str = "1970-01-01T00:30:00.000000Z";
+    const BETWEEN: &str = "1970-01-01T02:30:00.000000Z";
+    const AFTER_C: &str = "1970-01-01T04:00:00.000000Z";
+
+    /// A log holding one row at each of `A`, `B`, `C`, optionally with `B`'s
+    /// removed the way an archive removes it — a hole in the middle of the
+    /// `seq_id` run, leaving the floor and the ceiling where they were.
+    ///
+    /// That shape is the point. A gap at the end cannot happen (the newest row
+    /// per entity is never archivable) and a gap at the front would move `MIN`
+    /// and make the two rules agree by accident.
+    async fn log(gapped: bool) -> libsql::Connection {
+        let db = libsql::Builder::new_local(":memory:")
+            .build()
+            .await
+            .unwrap();
+        let conn = db.connect().unwrap();
+        crate::schema::run_migrations(&conn).await.unwrap();
+        for (i, ts) in [A, B, C].iter().enumerate() {
+            conn.execute(
+                "INSERT INTO transaction_log \
+                 (table_name, entity_id, operation, payload, recorded_at) \
+                 VALUES ('concepts', ?1, 'upsert', '{}', ?2)",
+                libsql::params![format!("c{i}").as_str(), *ts],
+            )
+            .await
+            .unwrap();
+        }
+        if gapped {
+            let marker = crate::schema::ddl::ARCHIVE_SESSION_MARKER;
+            conn.execute(&format!("CREATE TABLE {marker} (x)"), ())
+                .await
+                .unwrap();
+            conn.execute(
+                "DELETE FROM transaction_log WHERE recorded_at = ?1",
+                libsql::params![B],
+            )
+            .await
+            .unwrap();
+            conn.execute(&format!("DROP TABLE {marker}"), ())
+                .await
+                .unwrap();
+        }
+        conn
+    }
+
+    async fn empty_log() -> libsql::Connection {
+        let db = libsql::Builder::new_local(":memory:")
+            .build()
+            .await
+            .unwrap();
+        let conn = db.connect().unwrap();
+        crate::schema::run_migrations(&conn).await.unwrap();
+        conn
+    }
+
+    /// An intact log is the whole log, so it answers at every instant: with the
+    /// fold above its floor, and with the empty state below it.
+    #[tokio::test]
+    async fn an_intact_log_answers_everywhere() {
+        let conn = log(false).await;
+        for (ts, want) in [
+            (BEFORE_A, HotLogReach::PredatesRecordedHistory),
+            (A, HotLogReach::Covers),
+            (B, HotLogReach::Covers),
+            (BETWEEN, HotLogReach::Covers),
+            (C, HotLogReach::Covers),
+            (AFTER_C, HotLogReach::Covers),
+        ] {
+            assert_eq!(
+                hot_log_reach_within(&conn, ts).await.unwrap(),
+                want,
+                "intact log at {ts}"
+            );
+            assert!(
+                hot_log_answers_for(&conn, ts).await.unwrap(),
+                "an intact log refuses nothing, and refused {ts}"
+            );
+        }
+    }
+
+    /// Once a row has gone, the boundary moves to the *newest* surviving stamp
+    /// and the sense of the comparison inverts.
+    ///
+    /// `A` is the case that matters and the one the old rule got wrong: the log
+    /// still reaches back to it — `MIN(recorded_at)` is `A` — and the answer at
+    /// `A` is nonetheless in the other file, because the row that won at `A`
+    /// for the entity whose `B` row went is no longer here to be found.
+    #[tokio::test]
+    async fn a_gapped_log_answers_only_from_its_newest_stamp() {
+        let conn = log(true).await;
+        for (ts, want) in [
+            (BEFORE_A, HotLogReach::NeedsArchive),
+            (A, HotLogReach::NeedsArchive),
+            (BETWEEN, HotLogReach::NeedsArchive),
+            (C, HotLogReach::Covers),
+            (AFTER_C, HotLogReach::Covers),
+        ] {
+            assert_eq!(
+                hot_log_reach_within(&conn, ts).await.unwrap(),
+                want,
+                "gapped log at {ts}"
+            );
+            assert_eq!(
+                hot_log_answers_for(&conn, ts).await.unwrap(),
+                want != HotLogReach::NeedsArchive,
+                "the boolean guard must agree with the verdict at {ts}"
+            );
+        }
+    }
+
+    /// `C` is the newest surviving stamp and must be *answered*, not refused.
+    ///
+    /// Split out of the table above rather than left as one row in it, because
+    /// it is the cell 0.15.4 was about and the cell a `<` instead of a `<=`
+    /// takes. A boundary that is one row of six is a boundary nobody reads.
+    #[tokio::test]
+    async fn the_newest_surviving_stamp_is_answered_and_not_refused() {
+        let conn = log(true).await;
+        assert_eq!(
+            hot_log_reach_within(&conn, C).await.unwrap(),
+            HotLogReach::Covers,
+            "at the newest surviving stamp every entity's winning row is its \
+             newest row, and every one of those is still here"
+        );
+    }
+
+    /// An empty log is intact vacuously — nothing was removed because nothing
+    /// is there — and the empty state is the honest answer at every instant.
+    ///
+    /// This is the cell that keeps the archive-file check in [`hot_log_reach`]
+    /// from being folded into intactness: the *same* database with a cold file
+    /// beside it is fully archived rather than young, and must not answer here.
+    #[tokio::test]
+    async fn an_empty_log_predates_everything_rather_than_covering_it() {
+        let conn = empty_log().await;
+        for ts in [BEFORE_A, C, AFTER_C] {
+            assert_eq!(
+                hot_log_reach_within(&conn, ts).await.unwrap(),
+                HotLogReach::PredatesRecordedHistory,
+                "empty log at {ts}"
+            );
+        }
+    }
+
+    /// The reordering is a cost change, so the cheap arm must give the verdict
+    /// the whole case split gives — on both sides of the split.
+    ///
+    /// Written as a comparison rather than as two expected values: it is the
+    /// property the optimisation rests on, and asserting literals here would
+    /// pass if the property were false and both sides were wrong together.
+    #[tokio::test]
+    async fn the_cheap_arm_agrees_with_the_rule_it_short_circuits() {
+        for gapped in [false, true] {
+            let conn = log(gapped).await;
+            for ts in [BEFORE_A, A, BETWEEN, C, AFTER_C] {
+                if newest_stamp_covers(&conn, ts).await.unwrap() {
+                    assert_eq!(
+                        hot_log_reach_within(&conn, ts).await.unwrap(),
+                        HotLogReach::Covers,
+                        "the cheap arm claimed {ts} on a gapped={gapped} log and \
+                         the full rule disagrees"
+                    );
+                }
+            }
         }
     }
 }
