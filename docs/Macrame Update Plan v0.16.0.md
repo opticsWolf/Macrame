@@ -80,6 +80,8 @@ pub(crate) fn lower(r: &Resolution<'_>) -> Lowered;
 
 The probe that chooses it is one query against `branches` and `links_current`, run where `lineage_shape` already runs. `examples/branch_traversal_probe.rs` measures the three shapes on the same database and the numbers go into the register entry, next to D-219's 1.1–1.3× and D-223's 1.45×, which are the costs this shape removes for the trunk. The three readers gain the shape in one release because the lowering is where it lives; that is the review's A-1 argument made concrete, and D-227's warning is the reason the release is not allowed to land the shape in fewer than all three.
 
+**Shipped as 0.15.2, [D-244](architecture/s13-decision-register.md#d-244), with three departures from the paragraph above.** The condition is the *root* — `parent_id IS NULL` on a forked ledger — and not the general post-cutoff probe: the root's answer is structural and free, the general probe is a query per branched read that no workload yet justifies, and it stays D-223's escalation on record. The predicate is `+l.branch_id`, not `l.branch_id`: served as an equality it takes the walk off its covering index and onto `idx_lc_lineage_cut` for a scan of the whole trunk per hop, which is D-231's prediction arriving; the plan is pinned. And the measurement found something the plan did not ask about: the transaction-time fold ran as a co-routine inside the recursive step on every shape since 0.13.2 — 10.6 s against 59 ms — because the only reads the probes ever timed were the branched ones, whose window materialises on its own. The numbers were taken by a temporary unit test rather than the example, since the example writes its traversal SQL longhand and the question here is what the *builder* emits.
+
 ### W13.3 · 0.15.3 — the overlap guard lowers too
 
 `Resolution` gains an optional `key: Option<KeySlots>` that narrows `links_cut` and the fold to one `(source, target, type)` before the window runs. `overlap_candidates_resolved` and `retire_from_resolved` become `lower(&Resolution { key: Some(…), … })` plus their own tail. The per-key CTE text in `lineage.rs` is deleted once the guard's tests pass against the lowered form, and `examples/branch_write_probe.rs` (or the existing write-cost bench group) confirms the guard's plan did not lose its seek.
@@ -169,7 +171,7 @@ Merge to `main` after W16.2, tagged. `docs/releases/v0.16.0.md` written before t
 | # | Release | Wave | Item | Files | Gates |
 |---|---|---|---|---|---|
 | 1 | 0.15.1 | W13.1 | `plan.rs` lowering; three readers consume it; SQL byte-identical | `src/graph/{plan,builder,lineage,mod}.rs`, `src/temporal/as_of.rs`, `src/branch.rs` | every plan pin and golden string unchanged; surface 1,624 |
-| 2 | 0.15.2 | W13.2 | `TrunkOnForked`; probe; three readers | `lineage.rs`, `plan.rs`, `examples/branch_traversal_probe.rs` | numbers in D-244 |
+| 2 | 0.15.2 | W13.2 | `TrunkOnForked`; three readers; the fold materialised — **done** | `lineage.rs`, `plan.rs`, `builder.rs`, `subgraph.rs`, `as_of.rs` | numbers in D-244; two plan pins |
 | 3 | 0.15.3 | W13.3 | key-narrowed lowering for the guard | `plan.rs`, `lineage.rs`, `connection.rs` | guard plan keeps its seek |
 | 4 | 0.15.4 | W13.4 | public `ReadPlan`; Python parity | `src/plan.rs` (public), `bindings/python` | Appendix A/D.1, `public-api.txt` |
 | 5 | 0.15.5 | W13.5 | `limit` in the walk | `plan.rs`, `builder.rs`, `vector_filter.rs` | walk pin gains the limited form |

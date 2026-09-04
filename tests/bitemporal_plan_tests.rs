@@ -245,7 +245,7 @@ async fn a_two_dimensional_candidate_is_used_as_a_one_dimensional_one() {
 /// The three tests above are about the *plan* — what the planner says it will
 /// do. This is about the program it compiles to, and it is the stronger form of
 /// the same claim: plan equality is an assertion about text SQLite chooses to
-/// print, and `(4, 2, 5)` on both arms is an assertion about work the VDBE
+/// print, and `(4, 2, 6)` on both arms is an assertion about work the VDBE
 /// actually does. Adding the valid instant opens no cursor, issues no seek and
 /// rewinds nothing extra.
 ///
@@ -289,7 +289,7 @@ async fn a_cross_axis_read_costs_what_the_transaction_time_read_costs() {
     );
     assert_eq!(
         recorded_only,
-        counts(4, 2, 5),
+        counts(4, 2, 6),
         "the transaction-time read's cost moved. Re-run \
          `cargo run --example bitemporal_index_probe` and read the sweep \
          before changing this number (D-195)"

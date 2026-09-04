@@ -142,29 +142,31 @@ pub async fn query_as_of_edges_on(
             .to_string(),
             vec![ts.into()],
         ),
-        LineageShape::Resolved => {
-            // One lowering with the traversal and `diff` (0.15.1, W13.1):
-            // this reader chooses only where its branch binds. The CTE
-            // order is the lowering's, and SQLite resolves a `WITH` list
-            // as written.
+        // One lowering with the traversal and `diff` (0.15.1, W13.1): this
+        // reader chooses only where its branch binds. Both shapes that name
+        // a lineage share this one text; what differs between them — the
+        // prelude, the relation, the predicate — is the lowering's to say
+        // (0.15.2, D-244).
+        shape @ (LineageShape::Resolved | LineageShape::TrunkOnForked) => {
             let lowered = lower(&Resolution {
-                shape: LineageShape::Resolved,
+                shape,
                 branch_slot: 2,
                 recorded_slot: None,
                 tag: "",
             });
             (
-                    format!(
-                        "WITH RECURSIVE {}\n                     SELECT source_id, target_id, edge_type, valid_from, valid_to \
-                         FROM {} WHERE valid_from <= ?1 AND ?1 < valid_to",
-                        lowered.with_list(),
-                        lowered.source,
-                    ),
-                    vec![
-                        ts.into(),
-                        branch.unwrap_or(crate::schema::ddl::MAIN_BRANCH).into(),
-                    ],
-                )
+                format!(
+                    "{}SELECT l.source_id, l.target_id, l.edge_type, l.valid_from, l.valid_to \
+                     FROM {} l WHERE l.valid_from <= ?1 AND ?1 < l.valid_to{}",
+                    lowered.with_clause(),
+                    lowered.source,
+                    lowered.filter,
+                ),
+                vec![
+                    ts.into(),
+                    branch.unwrap_or(crate::schema::ddl::MAIN_BRANCH).into(),
+                ],
+            )
         }
     };
     let mut rows = conn.query(&sql, params).await?;

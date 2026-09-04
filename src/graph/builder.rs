@@ -369,7 +369,7 @@ ORDER BY w.node_id;
 
     /// Where the transaction-time instant binds, when the traversal has one.
     pub(crate) fn recorded_slot(shape: LineageShape) -> usize {
-        Self::BRANCH_SLOT + usize::from(shape == LineageShape::Resolved)
+        Self::BRANCH_SLOT + usize::from(shape.binds_branch())
     }
 
     /// Where edge types start binding (0.13.2, W7.1; lineage slot 0.14.4).
@@ -422,12 +422,12 @@ ORDER BY w.node_id;
             self.valid_instant(now_ts).into(),
             self.min_weight.into(),
         ];
-        // Pushed only under `Resolved`, because only there does any emitted SQL
-        // name `BRANCH_SLOT`. An unbranched traversal on a forked database still
+        // Pushed only when the emitted SQL names `BRANCH_SLOT`, which is every
+        // shape but `Trunk`. An unbranched traversal on a forked database still
         // reaches this arm — `lineage_shape` answers for the database, not for
         // the builder — and reads `main`'s own lineage, which is the trunk's
         // belief and not the union of everything stored.
-        if shape == LineageShape::Resolved {
+        if shape.binds_branch() {
             params.push(self.branch.as_deref().unwrap_or(ddl::MAIN_BRANCH).into());
         }
         if let Some(recorded) = self.as_of_recorded.as_deref() {
@@ -468,6 +468,18 @@ ORDER BY w.node_id;
     /// for why the two shapes do not pick from the same pair.
     pub(crate) fn link_source(&self, shape: LineageShape) -> String {
         lower(&self.resolution(shape)).source
+    }
+
+    /// The lineage predicate the walk and the projections append to their
+    /// own `WHERE`, or empty (0.15.2, D-244).
+    ///
+    /// Non-empty only under [`LineageShape::TrunkOnForked`] under current
+    /// belief; see `Lowered::filter`. Spliced in both places the edge-type
+    /// filter is, and for the same reason (D-073): a projection that skipped
+    /// it would populate the trunk's subgraph with every lineage's edges
+    /// between the nodes the trunk reached.
+    pub(crate) fn lineage_filter_sql(&self, shape: LineageShape) -> String {
+        lower(&self.resolution(shape)).filter
     }
 
     /// Refuse a transaction-time instant the hot log can no longer answer for.
@@ -552,6 +564,7 @@ ORDER BY w.node_id;
         // which is the point: a shape that lands in `graph::plan` lands here.
         let lowered = lower(&self.resolution(shape));
         let source = &lowered.source;
+        let lineage_filter = &lowered.filter;
         let prelude = lowered.prelude();
 
         format!(
@@ -564,7 +577,7 @@ WITH RECURSIVE {prelude}walk(node_id, depth) AS (
     JOIN {source} l ON l.source_id = w.node_id
     WHERE w.depth < ?2
       AND l.valid_from <= ?3 AND ?3 < l.valid_to
-      AND l.weight >= ?4
+      AND l.weight >= ?4{lineage_filter}
       {edge_filter}
 )"#
         )
@@ -976,7 +989,7 @@ mod tests {
         // Carried out of the fold as well as partitioned on, because it is the
         // column the ancestry joins against.
         assert!(
-            sql.contains("valid_to, weight, branch_id) AS ("),
+            sql.contains("valid_to, weight, branch_id) AS MATERIALIZED ("),
             "the fold must expose what `visible` joins on: {sql}"
         );
         assert!(
@@ -1022,5 +1035,162 @@ mod tests {
             .build_sql()
             .contains("lineage"));
         assert!(!TraversalBuilder::new("a").build_sql().contains("lineage"));
+    }
+
+    /// The trunk on a forked ledger binds its name and filters on it, and
+    /// resolves nothing (0.15.2, D-244).
+    #[test]
+    fn the_forked_trunk_walk_is_the_trunk_walk_plus_one_predicate() {
+        let shape = LineageShape::TrunkOnForked;
+        let walk = TraversalBuilder::new("a");
+        let sql = walk.walk_cte(shape);
+        assert!(sql.contains("JOIN links_current l ON l.source_id = w.node_id"));
+        assert!(sql.contains("AND l.weight >= ?4 AND +l.branch_id = ?5\n"));
+        assert!(!sql.contains("lineage"), "a root resolves nothing: {sql}");
+        assert!(!sql.contains("ROW_NUMBER"), "{sql}");
+        assert_eq!(walk.link_source(shape), "links_current");
+        assert_eq!(walk.lineage_filter_sql(shape), " AND +l.branch_id = ?5");
+
+        // And the layout after the branch is the resolved layout: the branch
+        // is bound, so the recorded instant and the edge types move by one.
+        assert_eq!(TraversalBuilder::recorded_slot(shape), 6);
+        assert_eq!(walk.edge_type_base(shape), 6);
+        let params = walk.bind_params(TUE, shape);
+        assert_eq!(params.len(), 5, "start, depth, valid, weight, branch");
+        assert_eq!(
+            params[4],
+            libsql::Value::from(crate::schema::ddl::MAIN_BRANCH),
+            "an unbranched traversal on the forked trunk reads main"
+        );
+
+        let folded = TraversalBuilder::new("a").as_of_recorded(TUE);
+        let sql = folded.walk_cte(shape);
+        assert!(sql.contains("JOIN links_at_tx l ON l.source_id = w.node_id"));
+        assert!(sql.contains("AND +transaction_log.branch_id = ?5"));
+        assert!(sql.contains("recorded_at <= ?6"));
+        assert!(
+            !sql.contains("l.branch_id"),
+            "the fold already narrowed: {sql}"
+        );
+        assert!(!sql.contains("lineage"), "{sql}");
+        assert_eq!(folded.bind_params(TUE, shape).len(), 6);
+        assert_eq!(folded.edge_type_base(shape), 7);
+    }
+
+    /// The plan the third shape gets, pinned where the walk's other plans are
+    /// pinned: it still seeks `idx_lc_traversal_cover` on `source_id`, and no
+    /// materialised lineage relation appears anywhere in it.
+    #[tokio::test]
+    async fn the_forked_trunk_walk_seeks_the_traversal_index_and_materialises_nothing() {
+        let db = libsql::Builder::new_local(":memory:")
+            .build()
+            .await
+            .unwrap();
+        let conn = db.connect().unwrap();
+        crate::schema::run_migrations(&conn).await.unwrap();
+        conn.execute(
+            "INSERT INTO branches (branch_id, parent_id, forked_at, created_at) \
+             VALUES ('b', 'main', ?1, ?1)",
+            libsql::params![TUE],
+        )
+        .await
+        .unwrap();
+
+        for (label, builder) in [
+            ("unfiltered", TraversalBuilder::new("a").max_depth(3)),
+            (
+                "edge-typed",
+                TraversalBuilder::new("a")
+                    .max_depth(3)
+                    .edge_types(vec!["CITES".into()]),
+            ),
+        ] {
+            let shape = LineageShape::TrunkOnForked;
+            let sql = format!("EXPLAIN QUERY PLAN {}", builder.build_sql_with(shape));
+            let mut rows = conn
+                .query(&sql, builder.bind_params(TUE, shape))
+                .await
+                .unwrap();
+            let mut plan = Vec::new();
+            while let Some(row) = rows.next().await.unwrap() {
+                plan.push(row.get::<String>(3).unwrap());
+            }
+            let text = plan.join("\n");
+            assert!(
+                plan.iter()
+                    .any(|s| s.contains("SEARCH l USING") && s.contains("idx_lc_traversal_cover")),
+                "{label}: the forked trunk's walk left the traversal index:\n{text}"
+            );
+            assert!(
+                !text.contains("MATERIALIZE") && !text.contains("lineage"),
+                "{label}: the forked trunk's walk resolves an ancestry it does not have:\n{text}"
+            );
+        }
+    }
+
+    /// **The fold is materialised once per query, not re-run once per walk
+    /// row** (0.15.2, D-244).
+    ///
+    /// `links_at_tx` is referenced once, by the walk's recursive step, and
+    /// SQLite's default for a single-reference CTE is a co-routine — which for
+    /// a CTE joined *inside a recursive step* means the whole fold, window and
+    /// all, runs again for every row the walk produces. Measured on 11,110
+    /// trunk edges at depth 4: **10.6 s** as a co-routine, **59 ms**
+    /// materialised. The resolved shape never showed it because its `visible`
+    /// window forces materialisation on its own, which is how a 180× defect
+    /// on the trunk's transaction-time read hid behind the branched read being
+    /// the slower-looking one. Pinned on every shape that emits the fold; the
+    /// two trunk shapes also keep the seek the transaction-time bound has
+    /// always had (`bitemporal_plan_tests`).
+    #[tokio::test]
+    async fn the_fold_is_materialised_once_per_query_on_every_shape() {
+        let db = libsql::Builder::new_local(":memory:")
+            .build()
+            .await
+            .unwrap();
+        let conn = db.connect().unwrap();
+        crate::schema::run_migrations(&conn).await.unwrap();
+        conn.execute(
+            "INSERT INTO branches (branch_id, parent_id, forked_at, created_at) \
+             VALUES ('b', 'main', ?1, ?1)",
+            libsql::params![TUE],
+        )
+        .await
+        .unwrap();
+        let folded = TraversalBuilder::new("a").max_depth(3).as_of_recorded(TUE);
+        for shape in [
+            LineageShape::Trunk,
+            LineageShape::TrunkOnForked,
+            LineageShape::Resolved,
+        ] {
+            let sql = format!("EXPLAIN QUERY PLAN {}", folded.build_sql_with(shape));
+            let mut rows = conn
+                .query(&sql, folded.bind_params(TUE, shape))
+                .await
+                .unwrap();
+            let mut plan = Vec::new();
+            while let Some(row) = rows.next().await.unwrap() {
+                plan.push(row.get::<String>(3).unwrap());
+            }
+            let text = plan.join("\n");
+            assert!(
+                text.contains("MATERIALIZE links_at_tx"),
+                "{shape:?}: the fold went back to being a co-routine inside the \
+                 recursive step, which is the 180x defect:\n{text}"
+            );
+            // The resolved fold joins the ancestry, and the planner takes the
+            // equality over the range: an automatic index on
+            // `(table_name, branch_id)` built by scanning the log once per
+            // query, then a seek per lineage row. That is the fold as it has
+            // been since 0.10.0, measured at 121 ms against the trunk's 59 ms
+            // on the same fixture, and it is not this release's to change —
+            // the point pinned here is that no shape re-runs the fold per row.
+            if shape != LineageShape::Resolved {
+                assert!(
+                    text.contains("SEARCH transaction_log USING INDEX idx_txlog_time"),
+                    "{shape:?}: the transaction-time bound stopped seeking:\n{text}"
+                );
+            }
+        }
     }
 }

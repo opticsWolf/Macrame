@@ -673,6 +673,9 @@ pub(crate) async fn diff(
     // which one.
     let shape = lineage_shape(conn, Some(a.as_str())).await?;
     lineage_shape(conn, Some(b.as_str())).await?;
+    // `Trunk` only: a forked trunk is `TrunkOnForked` and reaches the
+    // statement below, where `diff_sql` lowers both sides `Resolved` — the
+    // third shape is a one-lineage read's saving, and a diff is two.
     if shape == LineageShape::Trunk {
         // `Trunk` is `branches` holding one row, and both names were just found
         // in it, so `a` and `b` are the same lineage and their views are equal

@@ -540,6 +540,64 @@ async fn the_subgraph_loader_reads_the_same_lineage() {
     db.close().await.unwrap();
 }
 
+/// The forked trunk's loader projects only the trunk's rows (0.15.2, D-244).
+///
+/// The test above survives a loader that filters the walk and not the
+/// projection, because its branch row is a retirement — closed at `TS2`, so
+/// the `valid_to` bound drops it at `NOW` whether or not the lineage does.
+/// This one gives the branch an **open** edge between two trunk nodes and an
+/// open reweight of an inherited one: rows the walk never needs (the nodes are
+/// reached on the trunk regardless) and the projection would return unless it
+/// is filtered too. Under `TrunkOnForked` the filter is one predicate in
+/// `lineage_filter_sql`, spliced after `min_weight`; deleting it from the
+/// projection leaves every walk test green and fails this.
+#[tokio::test]
+async fn the_forked_trunks_loader_projects_only_the_trunks_rows() {
+    let harness = TestHarness::new();
+    {
+        let conn = connect(&harness).await;
+        seed(&conn).await;
+        edge(&conn, "a", "d", "b1", SENTINEL, 2.0, TS2).await;
+        edge(&conn, "b", "c", "b1", SENTINEL, 5.0, TS2).await;
+    }
+
+    let db = Database::open(&harness.db_path).await.unwrap();
+
+    let trunk = db
+        .load_subgraph_with(&TraversalBuilder::new("a").max_depth(5), NOW, 1 << 20)
+        .await
+        .unwrap();
+    assert_eq!(trunk.node_count(), 4);
+    assert_eq!(
+        trunk.edge_count(),
+        3,
+        "the trunk's projection returned a lineage's row the trunk cannot see"
+    );
+    assert_eq!(
+        trunk.total_weight(),
+        3.0,
+        "the trunk's projection took the branch's reweight"
+    );
+
+    let branched = db
+        .load_subgraph_with(
+            &TraversalBuilder::new("a").max_depth(5).on_branch("b1"),
+            NOW,
+            1 << 20,
+        )
+        .await
+        .unwrap();
+    assert_eq!(branched.node_count(), 4);
+    assert_eq!(branched.edge_count(), 4, "the branch's own edge is missing");
+    assert_eq!(
+        branched.total_weight(),
+        9.0,
+        "the branch's reweight did not shadow the inherited row"
+    );
+
+    db.close().await.unwrap();
+}
+
 // ───────────────────────────────────────────────────────────────────────────
 // A gap found while writing the fixtures above, closed at v15
 // ───────────────────────────────────────────────────────────────────────────

@@ -1,7 +1,7 @@
 //! Reading one lineage's belief out of a ledger that holds several (§15.2,
 //! §15.3, D-219, D-220, D-223).
 //!
-//! # Two shapes, and the measurement that forced them
+//! # Three shapes, and the measurements that forced them
 //!
 //! `links_current` is keyed `(source_id, target_id, edge_type, valid_from,
 //! branch_id)` since v12, so a branch that corrects or retires an edge it
@@ -23,6 +23,17 @@
 //! way `temporal::replay::cold_lineage` picks one at the archive boundary
 //! (D-216): [`LineageShape::Trunk`] emits today's SQL, [`LineageShape::Resolved`]
 //! emits the ancestry join.
+//!
+//! The third shape is the trunk's, on a database that has forked
+//! ([`LineageShape::TrunkOnForked`], 0.15.2, D-244). Once `branches` holds
+//! two rows the trunk's read was `Resolved` like everyone else's, and paid
+//! the hybrid's fixed cost — D-223 measured 1.45× at zero churn, and the
+//! trunk has zero churn *structurally*: it has no ancestors, so no cutoff
+//! and no churned set. Its resolved read reduces to its own rows, and the
+//! third shape emits that reduction as one predicate on `branch_id`. It is
+//! the escalation D-223 named — the naive filter, emitted when the answer
+//! to *does any ancestor hold a post-cutoff row* is no — taken where the
+//! answer is no by construction rather than by probing.
 //!
 //! # Why one lineage is a sufficient condition for the fast shape
 //!
@@ -102,6 +113,35 @@ pub(crate) enum LineageShape {
     Trunk,
     /// More than one lineage exists. The read resolves along the ancestry.
     Resolved,
+    /// More than one lineage exists and the reader is a **root** — the
+    /// trunk, on every database this crate can write (0.15.2, D-244).
+    ///
+    /// A root has no ancestors, so its ancestry is one row with no cutoff,
+    /// its churned set is empty by construction, and the resolved read
+    /// reduces exactly to *its own rows*: `links_current WHERE branch_id =
+    /// ?` under current belief, and the fold over its own log entries at a
+    /// recorded instant. This shape emits that reduction directly. It is
+    /// the third shape [D-223] named as the escalation — "the naive filter
+    /// emitted when no ancestor holds a post-cutoff row" — taken at the
+    /// one lineage for which the condition is structural rather than
+    /// measured, and it is what stops the trunk paying for the branches
+    /// (review C-7). It **binds** the branch, unlike `Trunk`, because its
+    /// SQL names it.
+    ///
+    /// [D-223]: ../../docs/architecture/s13-decision-register.md#d-223
+    TrunkOnForked,
+}
+
+impl LineageShape {
+    /// Whether the emitted SQL names the reading branch at all.
+    ///
+    /// `Trunk` is the one shape that does not: there is one lineage and
+    /// nothing to name. Every placeholder layout that puts the branch at a
+    /// slot asks this rather than comparing against `Resolved`, so that a
+    /// shape added later binds correctly by default.
+    pub(crate) fn binds_branch(self) -> bool {
+        !matches!(self, LineageShape::Trunk)
+    }
 }
 
 /// Decide the shape, and refuse a lineage that was never registered.
@@ -132,17 +172,24 @@ pub(crate) async fn lineage_shape(
     branch: Option<&str>,
 ) -> Result<LineageShape> {
     let named = branch.unwrap_or(ddl::MAIN_BRANCH);
+    // The third aggregate is *is the named lineage a root*, and it is asked
+    // in the same statement for the same reason the first two are: the
+    // answer cannot change under a read, and a second round trip would buy
+    // nothing. It reads NULL when the name is unknown, which the `found`
+    // check below refuses before the value is looked at.
     let row = conn
         .query(
             "SELECT (SELECT COUNT(*) FROM branches), \
-                    (SELECT COUNT(*) FROM branches WHERE branch_id = ?1)",
+                    (SELECT COUNT(*) FROM branches WHERE branch_id = ?1), \
+                    (SELECT COUNT(*) FROM branches \
+                      WHERE branch_id = ?1 AND parent_id IS NULL)",
             libsql::params![named],
         )
         .await?
         .next()
         .await?;
-    let (total, found): (i64, i64) = match row {
-        Some(r) => (r.get(0)?, r.get(1)?),
+    let (total, found, root): (i64, i64, i64) = match row {
+        Some(r) => (r.get(0)?, r.get(1)?, r.get(2)?),
         // No row from a two-aggregate SELECT is not a state SQLite produces.
         // Treated as the trunk rather than raising, because the alternative is
         // an error class no caller can act on.
@@ -153,6 +200,8 @@ pub(crate) async fn lineage_shape(
     }
     Ok(if total <= 1 {
         LineageShape::Trunk
+    } else if root > 0 {
+        LineageShape::TrunkOnForked
     } else {
         LineageShape::Resolved
     })
@@ -582,4 +631,89 @@ pub(crate) fn visible_cte(source: &str, tag: &str) -> String {
     ) WHERE rn = 1
 )"#
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TS: &str = "2026-01-06T00:00:00.000000Z";
+
+    async fn fresh() -> libsql::Connection {
+        let db = libsql::Builder::new_local(":memory:")
+            .build()
+            .await
+            .unwrap();
+        let conn = db.connect().unwrap();
+        crate::schema::run_migrations(&conn).await.unwrap();
+        conn
+    }
+
+    async fn fork(conn: &libsql::Connection, child: &str, parent: &str) {
+        conn.execute(
+            "INSERT INTO branches (branch_id, parent_id, forked_at, created_at) \
+             VALUES (?1, ?2, ?3, ?3)",
+            libsql::params![child, parent, TS],
+        )
+        .await
+        .unwrap();
+    }
+
+    /// One row in `branches` is the trunk shape whatever name is asked for,
+    /// and an unknown name is refused before any shape is chosen.
+    #[tokio::test]
+    async fn one_lineage_is_the_trunk_shape() {
+        let conn = fresh().await;
+        assert_eq!(
+            lineage_shape(&conn, None).await.unwrap(),
+            LineageShape::Trunk
+        );
+        assert_eq!(
+            lineage_shape(&conn, Some("main")).await.unwrap(),
+            LineageShape::Trunk
+        );
+        assert!(matches!(
+            lineage_shape(&conn, Some("ghost")).await,
+            Err(DbError::UnknownBranch(name)) if name == "ghost"
+        ));
+    }
+
+    /// Once the ledger has forked, the root reads as itself and every other
+    /// lineage resolves (0.15.2, D-244).
+    #[tokio::test]
+    async fn a_forked_ledger_gives_the_root_its_own_shape() {
+        let conn = fresh().await;
+        fork(&conn, "b1", "main").await;
+        fork(&conn, "b2", "b1").await;
+        assert_eq!(
+            lineage_shape(&conn, None).await.unwrap(),
+            LineageShape::TrunkOnForked,
+            "an unbranched read on a forked ledger is the trunk's own read"
+        );
+        assert_eq!(
+            lineage_shape(&conn, Some("main")).await.unwrap(),
+            LineageShape::TrunkOnForked
+        );
+        assert_eq!(
+            lineage_shape(&conn, Some("b1")).await.unwrap(),
+            LineageShape::Resolved
+        );
+        assert_eq!(
+            lineage_shape(&conn, Some("b2")).await.unwrap(),
+            LineageShape::Resolved
+        );
+        assert!(matches!(
+            lineage_shape(&conn, Some("ghost")).await,
+            Err(DbError::UnknownBranch(_))
+        ));
+    }
+
+    /// Only `Trunk` leaves the branch unbound; the layouts ask this rather
+    /// than comparing against `Resolved`.
+    #[test]
+    fn every_shape_but_the_trunk_binds_the_branch() {
+        assert!(!LineageShape::Trunk.binds_branch());
+        assert!(LineageShape::Resolved.binds_branch());
+        assert!(LineageShape::TrunkOnForked.binds_branch());
+    }
 }

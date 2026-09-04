@@ -104,7 +104,7 @@ macrame/
 │   │   ├── mod.rs
 │   │   ├── builder.rs          # Traversal builder → CTE; AttributeMode hydration
 │   │   ├── edge.rs             # assert / retire / re-assert lifecycle
-│   │   ├── lineage.rs          # §15.3 — two read shapes, ancestry resolution (D-220),
+│   │   ├── lineage.rs          # §15.3 — three read shapes, ancestry resolution (D-220, D-244),
 │   │   │                       #         fork-point cutoffs and the hybrid (D-223)
 │   │   ├── plan.rs             # the lineage read lowered once — Resolution → CTEs + source (D-243)
 │   │   ├── vector_filter.rs    # §5.3 — strategies, cost model

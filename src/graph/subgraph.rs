@@ -886,6 +886,7 @@ impl Database {
         // there rather than agreed here.
         let edge_filter = traversal.edge_filter_sql(shape);
         let link_source = traversal.link_source(shape);
+        let lineage_filter = traversal.lineage_filter_sql(shape);
 
         // A transaction-time traversal folds the log, and the fold can be short.
         // Checked before the query rather than after, so an unanswerable instant
@@ -933,7 +934,7 @@ SELECT DISTINCT l.source_id, l.target_id, l.edge_type, l.weight, l.valid_from, l
 FROM walk w
 JOIN {link_source} l ON l.source_id = w.node_id
 WHERE l.valid_from <= ?3 AND ?3 < l.valid_to
-  AND l.weight >= ?4
+  AND l.weight >= ?4{lineage_filter}
   {edge_filter}
 ORDER BY l.source_id, l.target_id, l.edge_type
 "#

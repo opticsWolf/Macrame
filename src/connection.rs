@@ -3686,7 +3686,12 @@ impl OverlapGuard {
     async fn prepare(conn: &libsql::Connection, shape: LineageShape) -> Result<Self> {
         let sql = match shape {
             LineageShape::Trunk => std::borrow::Cow::Borrowed(OVERLAP_CANDIDATES),
-            LineageShape::Resolved => {
+            // The forked trunk takes the resolved form here, unlike on the
+            // read path: the per-key statement is exact for a root (its
+            // ancestry is itself) and narrows to one key before any window
+            // runs, so there is nothing for a third form to save yet. The
+            // guard's own lowering is W13.3's work.
+            LineageShape::Resolved | LineageShape::TrunkOnForked => {
                 std::borrow::Cow::Owned(crate::graph::lineage::overlap_candidates_resolved())
             }
         };
@@ -4100,8 +4105,10 @@ async fn retire_edge(
             .map_err(DbError::Engine)?,
         // Shadow retirement: the row being closed may belong to an ancestor,
         // and the row written carries *this* lineage's id. See
-        // `lineage::retire_from_resolved`.
-        LineageShape::Resolved => conn
+        // `lineage::retire_from_resolved`. The forked trunk takes this arm
+        // too: a root's resolved key is its own row, and the statement
+        // stamps the lineage the trunk form does not know to stamp.
+        LineageShape::Resolved | LineageShape::TrunkOnForked => conn
             .execute(
                 &crate::graph::lineage::retire_from_resolved(),
                 libsql::params![
@@ -4269,7 +4276,7 @@ async fn check_prepared(guard: &OverlapGuard, edge: &EdgeAssertion) -> Result<()
                 ])
                 .await?
         }
-        LineageShape::Resolved => {
+        LineageShape::Resolved | LineageShape::TrunkOnForked => {
             guard
                 .stmt
                 .query(libsql::params![

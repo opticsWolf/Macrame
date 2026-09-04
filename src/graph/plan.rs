@@ -72,11 +72,22 @@ pub(crate) struct Resolution<'a> {
 /// always `visible{tag}`, which holds one row per edge key from the nearest
 /// lineage that has one *and was entitled to be seen*; the reader does not
 /// need to know which relation `visible` reduced, nor that the reduction had
-/// two arms (D-223). Under `Trunk` it is that relation directly.
+/// two arms (D-223). Under `Trunk` and `TrunkOnForked` it is that relation
+/// directly.
+///
+/// `filter` is the predicate the reader appends to its own `WHERE`, on the
+/// alias `l`, when the source alone does not narrow to the lineage — ` AND
+/// l.branch_id = ?n` under [`LineageShape::TrunkOnForked`]'s current-belief
+/// read, and empty everywhere else: `visible` is already one lineage's
+/// view, `links_current` under `Trunk` holds one lineage, and the folded
+/// `TrunkOnForked` read narrows inside the fold (see [`links_at_tx_cte`]).
+/// It carries its own leading space, like the edge-type filter it sits
+/// beside, so a reader whose shape has none emits the text it always did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Lowered {
     pub ctes: Vec<String>,
     pub source: String,
+    pub filter: String,
 }
 
 impl Lowered {
@@ -92,6 +103,17 @@ impl Lowered {
     /// `WITH RECURSIVE`.
     pub(crate) fn with_list(&self) -> String {
         self.ctes.join(",\n")
+    }
+
+    /// The whole `WITH RECURSIVE … ` clause with its trailing newline, or
+    /// nothing when there is no prelude — for a reader whose query is one
+    /// `format!` across shapes and must not emit an empty `WITH`.
+    pub(crate) fn with_clause(&self) -> String {
+        if self.ctes.is_empty() {
+            String::new()
+        } else {
+            format!("WITH RECURSIVE {}\n", self.with_list())
+        }
     }
 }
 
@@ -117,6 +139,16 @@ impl Lowered {
 ///
 /// All four expose the columns `links_current` does, which is what lets each
 /// reader's own query — and [`visible_cte`] — be written once.
+///
+/// # The third shape, and why it is a filter rather than a prelude (D-244)
+///
+/// Under [`LineageShape::TrunkOnForked`] the reader is a root: no ancestry,
+/// no cutoff, no churned set, so the resolved read is *its own rows* and the
+/// lowering says so with one predicate instead of four CTEs. Under current
+/// belief that predicate is `l.branch_id = ?{branch_slot}` on the projection,
+/// handed back as `filter`; at a recorded instant it goes **inside** the
+/// fold, so the window ranks only the trunk's own log entries, and `filter`
+/// is empty because the source already is one lineage.
 pub(crate) fn lower(r: &Resolution<'_>) -> Lowered {
     let tag = r.tag;
     let folded = r.recorded_slot.is_some();
@@ -126,13 +158,26 @@ pub(crate) fn lower(r: &Resolution<'_>) -> Lowered {
         ctes.push(ancestry_cte(r.branch_slot, tag));
     }
     if let Some(slot) = r.recorded_slot {
-        ctes.push(links_at_tx_cte(r.shape, slot, tag));
+        ctes.push(links_at_tx_cte(r.shape, slot, r.branch_slot, tag));
     }
+    let mut filter = String::new();
+    // Both trunk shapes name the fold `links_at_tx{tag}` rather than
+    // `links_at_tx`: the tag is empty for both readers that fold today, so
+    // this is the same bytes, and a tagged folded trunk would otherwise join
+    // a relation `links_at_tx_cte` did not emit.
     let source = match r.shape {
         LineageShape::Trunk => {
             if folded {
-                "links_at_tx".to_string()
+                format!("links_at_tx{tag}")
             } else {
+                "links_current".to_string()
+            }
+        }
+        LineageShape::TrunkOnForked => {
+            if folded {
+                format!("links_at_tx{tag}")
+            } else {
+                filter = format!(" AND +l.branch_id = ?{}", r.branch_slot);
                 "links_current".to_string()
             }
         }
@@ -150,7 +195,11 @@ pub(crate) fn lower(r: &Resolution<'_>) -> Lowered {
             format!("visible{tag}")
         }
     };
-    Lowered { ctes, source }
+    Lowered {
+        ctes,
+        source,
+        filter,
+    }
 }
 
 /// `links_current` as the ledger believed it at the recorded instant
@@ -213,17 +262,49 @@ pub(crate) fn lower(r: &Resolution<'_>) -> Lowered {
 /// `EXPLAIN QUERY PLAN` prints the `FROM` clause: a two-character alias
 /// silently renames `transaction_log` in every plan assertion that mentions
 /// it, on a path where the alias buys nothing (D-223).
-pub(crate) fn links_at_tx_cte(shape: LineageShape, slot: usize, tag: &str) -> String {
+///
+/// Under [`LineageShape::TrunkOnForked`] the second bound is not a cutoff but
+/// the lineage itself — `transaction_log.branch_id = ?{branch_slot}` — and it
+/// is inside for the cost rather than for the answer: the partition is per
+/// lineage already, so a filter after the window would rank the other
+/// lineages' entries and then discard them. The unary `+` is planner
+/// steering, not arithmetic: without it SQLite takes the equality as an
+/// access path, walks `idx_txlog_entity` for the window's order, and gives up
+/// the `recorded_at` seek that `bitemporal_plan_tests` pins. The predicate is
+/// a filter and the `+` says so.
+///
+/// # `MATERIALIZED`, and the 180× it is worth (0.15.2, D-244)
+///
+/// The fold is referenced once, by the reader's join, and SQLite's default for
+/// a single-reference CTE is a co-routine. Inside a **recursive step** that
+/// means the entire fold — the `recorded_at` range, the window, the
+/// `json_extract`s — is evaluated again for every row the walk produces.
+/// Measured on 11,110 trunk edges at depth 4, transaction-time read: 10.6 s as
+/// a co-routine, 59 ms materialised. It went unmeasured for eleven releases
+/// because the resolved shape's `visible` window forces materialisation by
+/// itself, so the branched read — the one every probe timed — never showed
+/// it, and the trunk's folded read was assumed to be the cheap one. Pinned by
+/// plan in `builder.rs`'s tests on all three shapes.
+pub(crate) fn links_at_tx_cte(
+    shape: LineageShape,
+    slot: usize,
+    branch_slot: usize,
+    tag: &str,
+) -> String {
     let (lineage_join, cutoff) = match shape {
         LineageShape::Resolved => (
             format!("\n        JOIN lineage{tag} g ON g.branch_id = transaction_log.branch_id"),
             "\n          AND (g.cutoff IS NULL OR transaction_log.recorded_at <= g.cutoff)"
                 .to_string(),
         ),
+        LineageShape::TrunkOnForked => (
+            String::new(),
+            format!("\n          AND +transaction_log.branch_id = ?{branch_slot}"),
+        ),
         LineageShape::Trunk => (String::new(), String::new()),
     };
     format!(
-        r#"links_at_tx{tag}(source_id, target_id, edge_type, valid_from, valid_to, weight, branch_id) AS (
+        r#"links_at_tx{tag}(source_id, target_id, edge_type, valid_from, valid_to, weight, branch_id) AS MATERIALIZED (
     SELECT json_extract(payload, '$.source_id'),
            json_extract(payload, '$.target_id'),
            json_extract(payload, '$.edge_type'),
@@ -414,5 +495,60 @@ mod tests {
             })
             .replace("SELECT ?1, 0, NULL", "SELECT ?2, 0, NULL");
         assert_eq!(retagged, b.with_list());
+    }
+
+    /// The trunk on a forked ledger is its own rows: no prelude, one
+    /// predicate, and the branch bound where the reader said it would be.
+    #[test]
+    fn the_trunk_on_a_forked_ledger_lowers_to_a_filter() {
+        let l = lower(&Resolution {
+            shape: LineageShape::TrunkOnForked,
+            branch_slot: 5,
+            recorded_slot: None,
+            tag: "",
+        });
+        assert!(l.ctes.is_empty(), "no ancestry to resolve: {:?}", names(&l));
+        assert_eq!(l.source, "links_current");
+        assert_eq!(l.filter, " AND +l.branch_id = ?5");
+        assert_eq!(l.with_clause(), "");
+
+        // At a recorded instant the predicate moves inside the fold, before
+        // the window, and the reader has nothing left to add.
+        let folded = lower(&Resolution {
+            shape: LineageShape::TrunkOnForked,
+            branch_slot: 5,
+            recorded_slot: Some(6),
+            tag: "",
+        });
+        assert_eq!(names(&folded), ["links_at_tx"]);
+        assert_eq!(folded.source, "links_at_tx");
+        assert_eq!(folded.filter, "");
+        let fold = &folded.ctes[0];
+        assert!(fold.contains("recorded_at <= ?6"));
+        assert!(fold.contains("AND +transaction_log.branch_id = ?5"));
+        assert!(!fold.contains("lineage"), "a root has no ancestry to join");
+        assert!(folded
+            .with_clause()
+            .starts_with("WITH RECURSIVE links_at_tx("));
+    }
+
+    /// The other shapes hand the reader no filter: their source is already
+    /// one lineage's view, or the only lineage there is.
+    #[test]
+    fn only_the_forked_trunk_needs_a_reader_side_filter() {
+        for (shape, recorded) in [
+            (LineageShape::Trunk, None),
+            (LineageShape::Trunk, Some(5)),
+            (LineageShape::Resolved, None),
+            (LineageShape::Resolved, Some(6)),
+        ] {
+            let l = lower(&Resolution {
+                shape,
+                branch_slot: 5,
+                recorded_slot: recorded,
+                tag: "",
+            });
+            assert_eq!(l.filter, "", "{shape:?} at {recorded:?}");
+        }
     }
 }
