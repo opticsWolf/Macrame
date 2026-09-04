@@ -490,12 +490,19 @@ ORDER BY w.node_id;
 
     /// Refuse a transaction-time instant the hot log can no longer answer for.
     ///
-    /// See [`Self::as_of_recorded`]. Cheap enough to run unconditionally on the
-    /// folded path — aggregates over indexed columns — and it only runs there,
-    /// so the ordinary traversal pays nothing. An unarchived database, which is
-    /// every database until the first archive session, still costs exactly the
-    /// one `seq_id` aggregate it cost before 0.15.4; the second query is on the
-    /// branch that used to refuse outright.
+    /// See [`Self::as_of_recorded`]. It only runs on the folded path, so the
+    /// ordinary traversal pays nothing.
+    ///
+    /// **Two aggregates since 0.15.4, where it was one** — intactness over
+    /// `seq_id`, then one stamp over `recorded_at`, both served as one-row index
+    /// scans. The second is the price of consulting the instant rather than
+    /// discarding it, and it is paid on every recorded-time read including the
+    /// unarchived ones. It could be skipped on an intact log, where the verdict
+    /// is *answerable* whatever the instant — and is not, because that puts "an
+    /// intact log always answers" in a second place, which is the failure class
+    /// this whole area keeps producing (D-035). The fold this guards is a window
+    /// function over the bounded slice of `transaction_log`; an index scan of one
+    /// row does not register against it.
     pub(crate) async fn check_recorded_reach(&self, conn: &libsql::Connection) -> Result<()> {
         let Some(ts) = self.as_of_recorded.as_deref() else {
             return Ok(());
