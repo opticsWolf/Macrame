@@ -886,6 +886,224 @@ pub(crate) enum LowPriCommand {
     },
 }
 
+/// What the write actor knows between turns (0.15.6, W14.3, [D-248]).
+///
+/// [`run_writer_actor`] owned a connection and nothing else. Every command was
+/// handed `&conn`, and every fact a command established died with it — so a
+/// single-edge assertion asked `branches` how many lineages exist, compiled the
+/// overlap guard, and compiled `INSERT_LINK`, on every call, having done all
+/// three on the previous one. Measured on the trunk that is 76 µs of a 160 µs
+/// write; once the database has forked it is 155 µs of a 343 µs write, because
+/// the statement being compiled each time is the guard's resolved form.
+///
+/// **Everything here is cached for one reason and invalidated by name for the
+/// same one: the actor is the only writer** (D-014). `branches` is written by
+/// `Fork` and by `ArchiveBranch` and by nothing else in the crate; the
+/// statements are bound to a connection this task owns for the process
+/// lifetime. A cache whose only writer is holding it cannot go stale behind its
+/// own back, which is why this is a plain `&mut` and not an epoch or a lock.
+///
+/// Built lazily rather than at open. Eager construction pays on a database that
+/// never asserts an edge, and it puts fallible work in the spawn path, where
+/// there is no caller to hand the error to.
+///
+/// # What is deliberately not here
+///
+/// The **hot-log intactness verdict** (review C-5). It is read on `read_conn`
+/// by every recorded-time read, not by the actor, so caching it here would put
+/// it on the wrong side of the process. It needs a shared cell and an
+/// invalidation argument about a *reader* seeing a stale answer, which is a
+/// different argument from this one and gets its own release.
+///
+/// The **batch paths' statements**. `write_edges_atomic` prepares inside its
+/// own transaction and drops before it commits, because a live statement is
+/// what makes SQLite refuse to end one. It already prepares once per chunk
+/// rather than once per row (D-056, §8.8), which is where that path's cost was.
+///
+/// [D-248]: ../../docs/architecture/s13-decision-register.md#d-248
+struct ActorState {
+    /// `branches`, as this actor last left it.
+    lineages: Option<Lineages>,
+    /// `INSERT_LINK`, compiled against the actor's connection.
+    insert_link: Option<libsql::Statement>,
+    /// The overlap guard, with the shape it was compiled for.
+    guard: Option<OverlapGuard>,
+}
+
+/// Every lineage the database holds, and which of them are roots.
+///
+/// A `Vec` and a linear scan for [`distinct_branches`]' reason: the bound is the
+/// number of lineages, which is small and human-authored, and a set would
+/// allocate to deduplicate a list of length one.
+struct Lineages {
+    rows: Vec<(String, bool)>,
+}
+
+impl Lineages {
+    async fn load(conn: &libsql::Connection) -> Result<Self> {
+        let mut rows = conn
+            .query("SELECT branch_id, parent_id IS NULL FROM branches", ())
+            .await?;
+        let mut out = Vec::with_capacity(1);
+        while let Some(row) = rows.next().await? {
+            out.push((row.get::<String>(0)?, row.get::<i64>(1)? != 0));
+        }
+        Ok(Self { rows: out })
+    }
+
+    /// The shape for one name, or [`DbError::UnknownBranch`].
+    ///
+    /// Same three facts the `SELECT` this replaces asked for — the total, the
+    /// name's existence, and whether it is a root — read from the same table by
+    /// the only task that writes it.
+    fn shape(&self, name: &str) -> Result<LineageShape> {
+        let root = self
+            .rows
+            .iter()
+            .find(|(id, _)| id == name)
+            .map(|(_, root)| *root)
+            .ok_or_else(|| DbError::UnknownBranch(name.to_string()))?;
+        Ok(if self.rows.len() <= 1 {
+            LineageShape::Trunk
+        } else if root {
+            LineageShape::TrunkOnForked
+        } else {
+            LineageShape::Resolved
+        })
+    }
+
+    /// The shape a batch takes, given every lineage it names.
+    ///
+    /// Every name is checked, because that is the first thing the caller wants:
+    /// a batch naming a lineage that does not exist is refused **by name**,
+    /// rather than by whatever the guard finds when it looks in the wrong place.
+    ///
+    /// # Why the last answer used to be every answer, and why it is not one now
+    ///
+    /// Before 0.15.2 the shape was a function of the row *count* alone, so
+    /// asking per name and keeping the last was correct and read like a bug —
+    /// review C-24, and the docstring on the loop it replaces said as much.
+    /// [`LineageShape::TrunkOnForked`] (D-244) made the shape a function of the
+    /// **name** as well: a root and a fork on one database now have different
+    /// shapes, and the loop went on keeping whichever came last.
+    ///
+    /// That has stayed correct only because [`OverlapGuard`] compiles *one*
+    /// statement for both of those shapes, so the arbitrary choice happens to
+    /// be between two spellings of the same thing. That is a property of the
+    /// guard's current lowering and W13.3 is going to change it. So the
+    /// ambiguity is resolved rather than tie-broken by iteration order: where
+    /// the names disagree, the resolved form is the one exact for all of them,
+    /// roots included — which is the argument [`OverlapGuard::prepare`] already
+    /// makes for giving `TrunkOnForked` the resolved statement.
+    fn shape_of(&self, names: &[&str]) -> Result<LineageShape> {
+        let mut agreed: Option<LineageShape> = None;
+        for name in names {
+            let shape = self.shape(name)?;
+            agreed = Some(match agreed {
+                None => shape,
+                Some(prev) if prev == shape => prev,
+                Some(_) => LineageShape::Resolved,
+            });
+        }
+        // No names is the trunk: `distinct_branches` never returns empty, and
+        // `write_concepts_atomic` refuses an empty chunk before it gets here.
+        Ok(agreed.unwrap_or(LineageShape::Trunk))
+    }
+}
+
+impl ActorState {
+    fn new() -> Self {
+        Self {
+            lineages: None,
+            insert_link: None,
+            guard: None,
+        }
+    }
+
+    /// Forget `branches`. Called by the two commands that write it.
+    fn forget_lineages(&mut self) {
+        self.lineages = None;
+    }
+
+    /// Drop the compiled statements.
+    ///
+    /// Called by the commands that `ATTACH`, `DETACH`, or otherwise move the
+    /// schema under the connection. SQLite recompiles a statement across a
+    /// schema change on its own and this does not rely on that: a statement
+    /// dropped here costs one prepare on the next write, against a class of bug
+    /// whose symptom would be a stale plan on the archive path in production.
+    fn forget_statements(&mut self) {
+        self.insert_link = None;
+        self.guard = None;
+    }
+
+    /// Both of the above, for a command that does both.
+    fn forget_everything(&mut self) {
+        self.forget_lineages();
+        self.forget_statements();
+    }
+
+    async fn lineages(&mut self, conn: &libsql::Connection) -> Result<&Lineages> {
+        if self.lineages.is_none() {
+            self.lineages = Some(Lineages::load(conn).await?);
+        }
+        Ok(self
+            .lineages
+            .as_ref()
+            .expect("loaded on the line above or already present"))
+    }
+
+    /// [`Lineages::shape_of`], against the cache.
+    ///
+    /// This is what replaced `check_lineages`, and the round trip it replaced
+    /// is the one the review counted (C-6): one `SELECT` over `branches` per
+    /// write, for an answer that changes when a lineage is forked or forgotten.
+    async fn shape_of(
+        &mut self,
+        conn: &libsql::Connection,
+        names: &[&str],
+    ) -> Result<LineageShape> {
+        self.lineages(conn).await?.shape_of(names)
+    }
+
+    /// The overlap guard, compiled at most once per shape.
+    ///
+    /// Keyed on the shape rather than on the statement text because that is the
+    /// thing [`check_prepared`] reads: it binds four parameters for `Trunk` and
+    /// five otherwise, so a guard held under one shape and used under another
+    /// would bind the wrong row even where the SQL happened to match.
+    async fn guard(
+        &mut self,
+        conn: &libsql::Connection,
+        shape: LineageShape,
+    ) -> Result<&OverlapGuard> {
+        if self.guard.as_ref().map(|g| g.shape) != Some(shape) {
+            self.guard = Some(OverlapGuard::prepare(conn, shape).await?);
+        }
+        Ok(self
+            .guard
+            .as_ref()
+            .expect("prepared on the line above or already present"))
+    }
+
+    /// `INSERT_LINK`, compiled once.
+    ///
+    /// The single-edge path ran `conn.execute(INSERT_LINK, …)`, which compiles
+    /// the statement on every call — 61 µs of it, because `links` carries the
+    /// projection triggers and they are compiled with the insert. This is D-056
+    /// and D-057's lesson, which was learned on the batch path and never
+    /// carried across to the path a caller actually waits on.
+    async fn insert_link(&mut self, conn: &libsql::Connection) -> Result<&libsql::Statement> {
+        if self.insert_link.is_none() {
+            self.insert_link = Some(conn.prepare(INSERT_LINK).await?);
+        }
+        Ok(self
+            .insert_link
+            .as_ref()
+            .expect("prepared on the line above or already present"))
+    }
+}
+
 enum LoopCtl {
     Continue,
     Break,
@@ -3400,6 +3618,10 @@ async fn run_writer_actor(
     mut lowpri_rx: mpsc::Receiver<LowPriCommand>,
     shared: Arc<ActorShared>,
 ) {
+    // Owned by the loop and lent to each command, which is the whole of A-3:
+    // the actor had a connection and no memory, so every turn re-established
+    // what the turn before it had just established (0.15.6, W14.3, D-248).
+    let mut state = ActorState::new();
     loop {
         // Read once and reused by both the depth sample and the starvation
         // counter, so the two cannot disagree about what was queued when this
@@ -3412,12 +3634,12 @@ async fn run_writer_actor(
             Some(cmd) = highpri_rx.recv() => {
                 shared.metrics.record_priority_choice(true, low_queued);
                 let turn = Turn::start(cmd.kind(), &shared);
-                cmd.execute(&conn, &*clock, &turn).await
+                cmd.execute(&conn, &*clock, &turn, &mut state).await
             }
             Some(cmd) = lowpri_rx.recv() => {
                 shared.metrics.record_priority_choice(false, low_queued);
                 let turn = Turn::start(cmd.kind(), &shared);
-                cmd.execute(&conn, &*clock, &turn).await
+                cmd.execute(&conn, &*clock, &turn, &mut state).await
             }
             else => LoopCtl::Break,
         };
@@ -3624,17 +3846,9 @@ fn concept_params<'a>(concept: &'a ConceptUpsert, stamp: &'a str) -> [libsql::Va
 /// argument [`classify`](crate::error::classify) makes for annotations and
 /// edges, one table further along.
 ///
-/// # The shape is global, so the last answer is every answer
-///
-/// [`LineageShape`] is decided by how many rows `branches` holds, which does not
-/// vary by which branch was asked about. The loop exists for the **existence**
-/// check; that it also returns a shape is why there is no second query. A batch
-/// naming one lineage — every batch this crate has written so far — costs
-/// exactly one round trip on a table with no secondary indices.
-///
 /// # Why a trunk write pays for it too
 ///
-/// `None` resolves to `'main'` here rather than skipping the query, and that is
+/// `None` resolves to `'main'` here rather than skipping the check, and that is
 /// not tidiness. Once a second lineage can write, the *trunk's* overlap guard
 /// is wrong in the other direction — it would be refused for overlapping a
 /// branch's belief it cannot see — so the shape decision is one every write
@@ -3642,13 +3856,21 @@ fn concept_params<'a>(concept: &'a ConceptUpsert, stamp: &'a str) -> [libsql::Va
 /// forked the answer is [`LineageShape::Trunk`] and the guard is the statement
 /// it has always been.
 ///
+/// # This was a query per name until 0.15.6
+///
+/// It ran [`crate::graph::lineage::lineage_shape`] once per name and kept the
+/// last answer — one round trip per write, for a table only this task writes.
+/// [`ActorState`] holds `branches` instead, and [`Lineages::shape_of`] carries
+/// what is left of this function's reasoning, including the part about the last
+/// answer that stopped being true at 0.15.2.
+///
 /// [D-069]: ../../docs/architecture/s13-decision-register.md
-async fn check_lineages(conn: &libsql::Connection, names: &[&str]) -> Result<LineageShape> {
-    let mut shape = LineageShape::Trunk;
-    for name in names {
-        shape = crate::graph::lineage::lineage_shape(conn, Some(name)).await?;
-    }
-    Ok(shape)
+async fn check_lineages(
+    state: &mut ActorState,
+    conn: &libsql::Connection,
+    names: &[&str],
+) -> Result<LineageShape> {
+    state.shape_of(conn, names).await
 }
 
 /// The distinct lineages a batch names, in first-seen order.
@@ -3738,6 +3960,7 @@ impl HighPriCommand {
         conn: &libsql::Connection,
         clock: &dyn Clock,
         turn: &Turn<'_>,
+        state: &mut ActorState,
     ) -> LoopCtl {
         match self {
             HighPriCommand::Shutdown { responder } => {
@@ -3753,29 +3976,38 @@ impl HighPriCommand {
                 // Before the guard, because a write naming an unregistered
                 // lineage should be refused by name rather than by whatever the
                 // guard happens to find when it looks in the wrong place.
-                let shape = match check_lineages(conn, &[edge.branch_name()]).await {
+                let shape = match check_lineages(state, conn, &[edge.branch_name()]).await {
                     Ok(shape) => shape,
                     Err(e) => {
                         turn.answer(responder, Err(e));
                         return LoopCtl::Continue;
                     }
                 };
-                if let Err(e) = reject_overlapping_interval(conn, &edge, shape).await {
+                if let Err(e) = reject_overlapping_interval(state, conn, &edge, shape).await {
                     turn.answer(responder, Err(e));
                     return LoopCtl::Continue;
                 }
-                let res = match conn.execute(INSERT_LINK, edge_params(&edge, &stamp)).await {
-                    Ok(_) => Ok(()),
-                    Err(e) => Err(classify(
-                        conn,
-                        e,
-                        WriteOp::Edge {
-                            source_id: &edge.source,
-                            target_id: &edge.target,
-                            edge_type: &edge.edge_type,
-                        },
-                    )
-                    .await),
+                // The statement is held across turns, so it is reset before it
+                // is bound rather than after it was stepped — `check_prepared`
+                // makes the same argument at more length.
+                let res = match state.insert_link(conn).await {
+                    Err(e) => Err(e),
+                    Ok(stmt) => {
+                        stmt.reset();
+                        match stmt.execute(edge_params(&edge, &stamp)).await {
+                            Ok(_) => Ok(()),
+                            Err(e) => Err(classify(
+                                conn,
+                                e,
+                                WriteOp::Edge {
+                                    source_id: &edge.source,
+                                    target_id: &edge.target,
+                                    edge_type: &edge.edge_type,
+                                },
+                            )
+                            .await),
+                        }
+                    }
                 };
                 turn.answer(responder, res);
             }
@@ -3792,7 +4024,7 @@ impl HighPriCommand {
                 let name = branch
                     .as_ref()
                     .map_or(crate::schema::ddl::MAIN_BRANCH, |b| b.as_str());
-                let res = match check_lineages(conn, &[name]).await {
+                let res = match check_lineages(state, conn, &[name]).await {
                     Ok(shape) => {
                         retire_edge(
                             conn,
@@ -3813,7 +4045,7 @@ impl HighPriCommand {
             }
             HighPriCommand::UpsertConcept { concept, responder } => {
                 let stamp = clock.now();
-                let res = match check_lineages(conn, &[concept.branch_name()]).await {
+                let res = match check_lineages(state, conn, &[concept.branch_name()]).await {
                     Ok(_) => upsert_concept(conn, &concept, &stamp).await,
                     Err(e) => Err(e),
                 };
@@ -3824,7 +4056,7 @@ impl HighPriCommand {
                 // by one act, and giving them different transaction times would
                 // invent an ordering the caller never expressed.
                 let stamp = clock.now();
-                let res = write_edges_atomic(conn, &edges, &stamp).await;
+                let res = write_edges_atomic(state, conn, &edges, &stamp).await;
                 turn.answer(responder, res);
             }
             HighPriCommand::RebuildCurrent { responder } => {
@@ -3852,6 +4084,11 @@ impl HighPriCommand {
                 // columns anyway.
                 let stamp = clock.now();
                 let res = crate::branch::fork(conn, &name, &parent, &stamp).await;
+                // `branches` has a row it did not have. Unconditional rather
+                // than `if res.is_ok()`: a fork that failed leaves the table
+                // as it was, so forgetting costs one query and asserting that
+                // it failed cleanly costs an argument (0.15.6, D-248).
+                state.forget_lineages();
                 turn.answer(responder, res);
             }
         }
@@ -3919,6 +4156,7 @@ impl LowPriCommand {
         conn: &libsql::Connection,
         clock: &dyn Clock,
         turn: &Turn<'_>,
+        state: &mut ActorState,
     ) -> LoopCtl {
         match self {
             LowPriCommand::BulkImportChunk { chunk, responder } => {
@@ -3926,11 +4164,17 @@ impl LowPriCommand {
                 // separately, so a shared stamp would claim a simultaneity the
                 // storage does not have.
                 let stamp = clock.now();
-                turn.answer_chunk(responder, write_edges_atomic(conn, &chunk, &stamp).await);
+                turn.answer_chunk(
+                    responder,
+                    write_edges_atomic(state, conn, &chunk, &stamp).await,
+                );
             }
             LowPriCommand::WriteConceptsChunk { chunk, responder } => {
                 let stamp = clock.now();
-                turn.answer_chunk(responder, write_concepts_atomic(conn, &chunk, &stamp).await);
+                turn.answer_chunk(
+                    responder,
+                    write_concepts_atomic(state, conn, &chunk, &stamp).await,
+                );
             }
             LowPriCommand::WriteAnalyticsChunk { chunk, responder } => {
                 let stamp = clock.now();
@@ -3962,6 +4206,10 @@ impl LowPriCommand {
                 // both and they are different facts — see `archive()` (Wave 4.5).
                 let archived_at = clock.now();
                 let res = archive(conn, &cutoff, &archived_at, &archive_path).await;
+                // The session attached and detached a second database. The
+                // statements are dropped rather than trusted to recompile —
+                // see [`ActorState::forget_statements`].
+                state.forget_statements();
                 // Before the answer, so a shadow rebuild that reads the epoch on
                 // its next turn cannot miss an archive that has already deleted
                 // rows out from under it (T1.2).
@@ -3987,6 +4235,9 @@ impl LowPriCommand {
                     &archive_path,
                 )
                 .await;
+                // Both: this session attaches a second database *and* deletes
+                // the lineage's row from `branches`.
+                state.forget_everything();
                 // `Archive`'s reason exactly: a shadow rebuild reading the epoch
                 // on its next turn must not miss a session that has already
                 // deleted rows out from under it (T1.2).
@@ -4002,6 +4253,10 @@ impl LowPriCommand {
             } => {
                 let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
                 let res = rehydrate(conn, &refs, &archive_path).await;
+                // Attaches, like the two archive sessions. It restores concepts
+                // and log rows, never a lineage — `cold.branches` is read by
+                // `archive_hint` and not written back — so the lineages stand.
+                state.forget_statements();
                 // Same reason as `Archive`: rehydration moves rows into `links`'
                 // parent table, so a shadow rebuild in flight must see the epoch
                 // move before the caller is answered (T1.2).
@@ -4231,16 +4486,16 @@ fn defer_to_single_open(proposed: &Interval, existing: &Interval) -> bool {
 /// same `valid_from` is Doctrine III's ordinary case — a new belief about the
 /// same interval — and is settled by the primary key and the single-open
 /// trigger, not here.
-/// The single-assertion path prepares one statement for one check, which is what
-/// `AssertEdge` needs; the batch path prepares once and calls
+/// The single-assertion path holds one statement across turns (0.15.6, D-248);
+/// the batch path prepares one inside its own transaction and calls
 /// [`check_prepared`] per row.
 async fn reject_overlapping_interval(
+    state: &mut ActorState,
     conn: &libsql::Connection,
     edge: &EdgeAssertion,
     shape: LineageShape,
 ) -> Result<()> {
-    let guard = OverlapGuard::prepare(conn, shape).await?;
-    check_prepared(&guard, edge).await
+    check_prepared(state.guard(conn, shape).await?, edge).await
 }
 
 /// The guard's body, against a statement the caller has already prepared.
@@ -4256,6 +4511,18 @@ async fn reject_overlapping_interval(
 ///
 /// `reset()` between rows is not optional: libsql binds and steps without
 /// resetting, so a reused statement must be returned to its initial state.
+///
+/// # And once more on the way out (0.15.6, W14.3)
+///
+/// The reset used to be enough at the top, because the guard was compiled per
+/// call or per chunk and dropped where it was made — the drop finalized it, and
+/// SQLite's objection to a live statement never came up. [`ActorState`] holds
+/// this one across turns, and the loop below can leave a cursor open on it: the
+/// overlap arm returns from inside the `while`. A statement left mid-scan is
+/// what makes SQLite refuse to end a transaction, so the next `Archive` — not
+/// the next assertion — would be the thing that failed, a command and a
+/// diagnosis apart from the code that caused it. So the scan is a function of
+/// its own, and the statement is reset on both ways out of it.
 async fn check_prepared(guard: &OverlapGuard, edge: &EdgeAssertion) -> Result<()> {
     let proposed = Interval::new(edge.valid_from.clone(), edge.valid_to.clone());
 
@@ -4290,9 +4557,24 @@ async fn check_prepared(guard: &OverlapGuard, edge: &EdgeAssertion) -> Result<()
         }
     };
 
+    let verdict = scan_candidates(&mut rows, &proposed, edge).await;
+    drop(rows);
+    guard.stmt.reset();
+    verdict
+}
+
+/// The guard's loop, over candidates the statement has already produced.
+///
+/// Split from [`check_prepared`] so that the statement is reset on both exits
+/// from it, including the one that returns an overlap.
+async fn scan_candidates(
+    rows: &mut libsql::Rows,
+    proposed: &Interval,
+    edge: &EdgeAssertion,
+) -> Result<()> {
     while let Some(row) = rows.next().await? {
         let existing = Interval::new(row.get::<String>(0)?, row.get::<String>(1)?);
-        if defer_to_single_open(&proposed, &existing) {
+        if defer_to_single_open(proposed, &existing) {
             continue;
         }
         if proposed.overlaps(&existing) {
@@ -4487,6 +4769,7 @@ fn reject_overlaps_within(edges: &[EdgeAssertion]) -> Result<()> {
 /// without resetting, so a reused statement must be returned to its initial state
 /// or the second row steps a completed statement.
 async fn write_edges_atomic(
+    state: &mut ActorState,
     conn: &libsql::Connection,
     edges: &[EdgeAssertion],
     stamp: &str,
@@ -4500,7 +4783,7 @@ async fn write_edges_atomic(
     // lineage that does not exist is refused before it can take the lock at all
     // (0.14.8).
     reject_overlaps_within(edges)?;
-    let shape = check_lineages(conn, &distinct_branches(edges)).await?;
+    let shape = check_lineages(state, conn, &distinct_branches(edges)).await?;
 
     let tx = conn
         .transaction_with_behavior(libsql::TransactionBehavior::Immediate)
@@ -4631,6 +4914,7 @@ async fn write_annotations_atomic(
 }
 
 async fn write_concepts_atomic(
+    state: &mut ActorState,
     conn: &libsql::Connection,
     concepts: &[ConceptUpsert],
     stamp: &str,
@@ -4649,7 +4933,7 @@ async fn write_concepts_atomic(
             named.push(name);
         }
     }
-    check_lineages(conn, &named).await?;
+    check_lineages(state, conn, &named).await?;
 
     let tx = conn
         .transaction_with_behavior(libsql::TransactionBehavior::Immediate)
@@ -4685,6 +4969,118 @@ async fn write_concepts_atomic(
     drop(stmt);
     tx.commit().await?;
     Ok(concepts.len())
+}
+
+#[cfg(test)]
+mod lineage_cache {
+    //! [`Lineages::shape_of`] against every shape combination (0.15.6, W14.3).
+    //!
+    //! Unit tests rather than a write through the actor, because the case this
+    //! function exists for **cannot be observed from outside**: where a batch
+    //! names lineages of different shapes, both of them currently compile the
+    //! same overlap statement, so a wrong choice between them is invisible
+    //! until W13.3 gives the guard a third lowering. A behavioural test would
+    //! pass on the code this replaces and on the code that replaces it, and
+    //! would go on passing through the release that made it matter.
+
+    use super::*;
+
+    fn lineages(rows: &[(&str, bool)]) -> Lineages {
+        Lineages {
+            rows: rows
+                .iter()
+                .map(|(id, root)| ((*id).into(), *root))
+                .collect(),
+        }
+    }
+
+    fn trunk_only() -> Lineages {
+        lineages(&[("main", true)])
+    }
+
+    fn forked() -> Lineages {
+        lineages(&[("main", true), ("alt", false), ("other", false)])
+    }
+
+    /// One lineage is the trunk, whoever asks.
+    #[test]
+    fn one_lineage_is_the_trunk() {
+        assert_eq!(
+            trunk_only().shape_of(&["main"]).unwrap(),
+            LineageShape::Trunk
+        );
+    }
+
+    /// A root on a forked database is `TrunkOnForked`; anything else resolves.
+    #[test]
+    fn the_shape_reads_the_name_and_not_only_the_count() {
+        let l = forked();
+        assert_eq!(
+            l.shape_of(&["main"]).unwrap(),
+            LineageShape::TrunkOnForked,
+            "a root has no ancestors and D-244 emits that reduction directly"
+        );
+        assert_eq!(l.shape_of(&["alt"]).unwrap(), LineageShape::Resolved);
+    }
+
+    /// The case review C-24 is about: names of two different shapes.
+    ///
+    /// Pinned in **both orders**, which is the whole content of the finding.
+    /// The loop this replaces returned whichever came last, so a batch naming
+    /// `[main, alt]` and one naming `[alt, main]` disagreed about their own
+    /// shape while describing the same set of lineages.
+    #[test]
+    fn a_batch_of_mixed_shapes_resolves_rather_than_taking_the_last_name() {
+        let l = forked();
+        assert_eq!(
+            l.shape_of(&["main", "alt"]).unwrap(),
+            LineageShape::Resolved,
+            "the resolved form is exact for a root as well, which is the \
+             argument OverlapGuard::prepare already makes"
+        );
+        assert_eq!(
+            l.shape_of(&["alt", "main"]).unwrap(),
+            LineageShape::Resolved,
+            "and it must not depend on the order the batch happened to name them"
+        );
+    }
+
+    /// Agreement is kept rather than widened: two forks are still `Resolved`,
+    /// and two mentions of one root are still `TrunkOnForked`.
+    #[test]
+    fn names_that_agree_keep_their_shape() {
+        let l = forked();
+        assert_eq!(
+            l.shape_of(&["alt", "other"]).unwrap(),
+            LineageShape::Resolved
+        );
+        assert_eq!(
+            l.shape_of(&["main", "main"]).unwrap(),
+            LineageShape::TrunkOnForked
+        );
+    }
+
+    /// Existence is checked for **every** name, not only the one that decides.
+    ///
+    /// The check is why the loop existed at all, and the shape was the thing it
+    /// returned on the way past. A version that stopped at the first name would
+    /// let a batch name a lineage that does not exist and be refused later by
+    /// the foreign key, from inside a rolled-back transaction, naming neither
+    /// the column nor the branch — `check_lineages`' opening paragraph.
+    #[test]
+    fn an_unknown_name_is_refused_wherever_it_sits() {
+        let l = forked();
+        for names in [
+            ["ghost", "main"].as_slice(),
+            ["main", "ghost"].as_slice(),
+            ["main", "ghost", "alt"].as_slice(),
+        ] {
+            match l.shape_of(names) {
+                Err(DbError::UnknownBranch(name)) => assert_eq!(name, "ghost"),
+                other => panic!("expected UnknownBranch for {names:?}, got {other:?}"),
+            }
+        }
+    }
 }
 
 #[cfg(test)]

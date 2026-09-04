@@ -134,9 +134,17 @@ The deliverable is a pure reordering, so the acceptance is a state-space table r
 
 **Shipped as 0.15.5, [D-247](architecture/s13-decision-register.md#d-247).**
 
-### W14.3 · 0.15.8 — `ActorState` (C-5, C-6, C-24, A-3)
+### W14.3 · 0.15.6 — `ActorState` (C-6, C-24, A-3; C-5 split out)
 
-The write actor is stateless between turns and pays for it three times: `hot_log_is_intact` counts the log on every recorded read, the single-edge path makes two round trips it could prepare once, and `check_lineages` recomputes an answer that changes only under `Fork` and `ArchiveBranch`. One `ActorState { prepared, lineage_generation, intact }` owned by `run_writer_actor`, invalidated by the two operations that can change it. The lineage cache here is the one A-2 later reads from.
+The write actor is stateless between turns and pays for it three times: `hot_log_is_intact` counts the log on every recorded read, the single-edge path makes two round trips it could prepare once, and `check_lineages` recomputes an answer that changes only under `Fork` and `ArchiveBranch`. One `ActorState` owned by `run_writer_actor`, invalidated by the operations that can change it. The lineage cache here is the one A-2 later reads from.
+
+**C-5 is not in this release, and the reason is not scope.** The intactness verdict is read on `read_conn` by every recorded-time read — not by the actor — so an actor-private cache is on the wrong side of the process for it. It needs a cell both sides can see and an argument about a **reader** holding a stale answer while an archive commits under it, which is a different argument from this one and a worse one to bury in a commit about prepared statements. It is W14.5.
+
+**Shipped as 0.15.6, [D-248](architecture/s13-decision-register.md#d-248).** Measured on the single-edge write, best of 500: 0.184 → 0.099 ms on the trunk, 0.401 → 0.106 ms once forked. The forked figure is the finding the review did not have: a database with one abandoned experiment paid 2.2× the trunk's write latency, and almost all of it was compiling the guard's resolved form on every call. C-24 came with it and turned out not to be cosmetic — the shape stopped being a function of the row count at 0.15.2, and the loop that keeps its last answer is correct only for as long as the guard compiles one statement for both shapes, which is what W13.3 changes.
+
+### W14.5 · 0.15.7 — the hot-log verdict, shared (C-5)
+
+`hot_log_is_intact` is `COUNT(*)` over the log, and [D-247](architecture/s13-decision-register.md#d-247) has already removed it from the arm that reads at or after the newest surviving stamp. What is left is the historical arm, which is still linear and still has no exact cheaper test. A tri-state in `ActorShared`, computed on demand and invalidated before the delete rather than after the commit, so that a stale answer is a stale *unknown* and not a stale *intact*. The measurement that decides whether it is worth it: how much of a recorded read below the newest stamp is the count, at the sizes D-247 already has numbers for.
 
 ---
 
@@ -194,14 +202,15 @@ Merge to `main` after W16.2, tagged. `docs/releases/v0.16.0.md` written before t
 | 6 | 0.15.3 | W14.1 | keyed archive repair — **done** | `temporal/archive.rs`, `integrity/`, `benches` | `archive/archive_small_slice`; numbers in D-245 |
 | 7 | 0.15.4 | W14.2 | `hot_log_reach(ts)` — **done** | `temporal/replay.rs`, `error.rs`, `builder.rs` | three mutations; numbers in D-246 |
 | 8 | 0.15.5 | W14.4 | reach guard, cheap arm first — **done** | `temporal/replay.rs`, `graph/builder.rs` | `reach_table`; four mutations; numbers in D-247 |
-| 9 | 0.15.8 | W14.3 | `ActorState` | `connection.rs` | single-edge path round trips counted |
-| 10 | 0.15.9 | W15.1 | typed rehydrate refusal | `errors.rs`, `branch.rs` | kind gate |
-| 11 | 0.15.10 | W15.2 | schema v16, composite index | `schema.rs`, `migrations`, `index_plan_tests.rs` | rung tests; fold plan pinned |
-| 12 | 0.15.11 | W15.3 | builders + `#[non_exhaustive]` | `tuning.rs`, `builder.rs`, `snapshot.rs` | `api-review-0.16.0.md` |
-| 13 | 0.15.12 | W15.4 | lazy diagnostic handle | `connection.rs` | — |
-| 14 | 0.15.13 | W16.1 | ancestry in Rust | `plan.rs`, `branch.rs` | differential test against the CTE |
-| 15 | 0.15.14 | W16.2 | hygiene batch | various | one register row per item |
-| 16 | 0.16.0 | — | release note before merge; merge; tag | `docs/releases/v0.16.0.md` | §8 |
+| 9 | 0.15.6 | W14.3 | `ActorState` — **done** | `connection.rs` | `actor_state_tests`, `lineage_cache`; five mutations; numbers in D-248 |
+| 10 | 0.15.7 | W14.5 | hot-log verdict in `ActorShared` (C-5) | `replay.rs`, `connection.rs` | stale answer is a stale *unknown* |
+| 11 | 0.15.9 | W15.1 | typed rehydrate refusal | `errors.rs`, `branch.rs` | kind gate |
+| 12 | 0.15.10 | W15.2 | schema v16, composite index | `schema.rs`, `migrations`, `index_plan_tests.rs` | rung tests; fold plan pinned |
+| 13 | 0.15.11 | W15.3 | builders + `#[non_exhaustive]` | `tuning.rs`, `builder.rs`, `snapshot.rs` | `api-review-0.16.0.md` |
+| 14 | 0.15.12 | W15.4 | lazy diagnostic handle | `connection.rs` | — |
+| 15 | 0.15.13 | W16.1 | ancestry in Rust | `plan.rs`, `branch.rs` | differential test against the CTE |
+| 16 | 0.15.14 | W16.2 | hygiene batch | various | one register row per item |
+| 17 | 0.16.0 | — | release note before merge; merge; tag | `docs/releases/v0.16.0.md` | §8 |
 
 **The Release column is a projection for every row not marked *done*, and it has already been overtaken.** W14.1, W14.2 and W14.4 shipped as 0.15.3, 0.15.4 and 0.15.5 — the three numbers this table had pencilled in for W13.3, W13.4 and W13.5 — because the review's findings were ranked by value and taken in that order rather than in wave order. A done row carries the version it actually shipped as; the rest carry a place in a queue. Renumbering the tail each time something jumps it would make the column look authoritative when the only thing it records is order.
 
