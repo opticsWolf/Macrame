@@ -142,9 +142,11 @@ The write actor is stateless between turns and pays for it three times: `hot_log
 
 **Shipped as 0.15.6, [D-248](architecture/s13-decision-register.md#d-248).** Measured on the single-edge write, best of 500: 0.184 → 0.099 ms on the trunk, 0.401 → 0.106 ms once forked. The forked figure is the finding the review did not have: a database with one abandoned experiment paid 2.2× the trunk's write latency, and almost all of it was compiling the guard's resolved form on every call. C-24 came with it and turned out not to be cosmetic — the shape stopped being a function of the row count at 0.15.2, and the loop that keeps its last answer is correct only for as long as the guard compiles one statement for both shapes, which is what W13.3 changes.
 
-### W14.5 · 0.15.7 — the hot-log verdict, shared (C-5)
+### W14.5 · 0.15.7 — the hot-log verdict, kept by the log (C-5)
 
 `hot_log_is_intact` is `COUNT(*)` over the log, and [D-247](architecture/s13-decision-register.md#d-247) has already removed it from the arm that reads at or after the newest surviving stamp. What is left is the historical arm, which is still linear and still has no exact cheaper test. A tri-state in `ActorShared`, computed on demand and invalidated before the delete rather than after the commit, so that a stale answer is a stale *unknown* and not a stale *intact*. The measurement that decides whether it is worth it: how much of a recorded read below the newest stamp is the count, at the sizes D-247 already has numbers for.
+
+**Shipped as 0.15.7, [D-249](architecture/s13-decision-register.md#d-249) — and not in `ActorShared`, because there is no such place.** Both readers arrive through public APIs holding a bare `&libsql::Connection` from `read_conn`; the write actor is not on that path, and `read_conn` is `query_only` and refuses a temp table too. The fact is kept where it is generated instead: one row in `log_integrity` (schema **v16**), maintained by an `AFTER DELETE` trigger on `transaction_log`, because §4.2 admits raw SQL against the file and a bit maintained in Rust would be wrong after exactly that, silently. **32.6 ms → 0.033 ms at 500,000 log rows**, flat in the log's size; the trigger costs the archive 0.43 µs per row deleted, 5.6% of a 333,000-row session. It also closes a defect nobody was looking for: the old form called an *empty* log intact, so a fully archived database reported its own emptiness as history.
 
 ---
 
@@ -203,7 +205,7 @@ Merge to `main` after W16.2, tagged. `docs/releases/v0.16.0.md` written before t
 | 7 | 0.15.4 | W14.2 | `hot_log_reach(ts)` — **done** | `temporal/replay.rs`, `error.rs`, `builder.rs` | three mutations; numbers in D-246 |
 | 8 | 0.15.5 | W14.4 | reach guard, cheap arm first — **done** | `temporal/replay.rs`, `graph/builder.rs` | `reach_table`; four mutations; numbers in D-247 |
 | 9 | 0.15.6 | W14.3 | `ActorState` — **done** | `connection.rs` | `actor_state_tests`, `lineage_cache`; five mutations; numbers in D-248 |
-| 10 | 0.15.7 | W14.5 | hot-log verdict in `ActorShared` (C-5) | `replay.rs`, `connection.rs` | stale answer is a stale *unknown* |
+| 10 | 0.15.7 | W14.5 | hot-log verdict kept by the log (C-5) — **done** | `ddl.rs`, `migrations.rs`, `replay.rs` | schema v16; `log_integrity_probe`; numbers in D-249 |
 | 11 | 0.15.9 | W15.1 | typed rehydrate refusal | `errors.rs`, `branch.rs` | kind gate |
 | 12 | 0.15.10 | W15.2 | schema v16, composite index | `schema.rs`, `migrations`, `index_plan_tests.rs` | rung tests; fold plan pinned |
 | 13 | 0.15.11 | W15.3 | builders + `#[non_exhaustive]` | `tuning.rs`, `builder.rs`, `snapshot.rs` | `api-review-0.16.0.md` |

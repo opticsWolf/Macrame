@@ -743,6 +743,117 @@ pub fn create_embeddings_index(model: &crate::vector::ModelName) -> String {
 /// concepts are never physically deleted (D-022), and this table is rebuilt by
 /// re-running an algorithm that read `concepts` in the first place, so there is
 /// no insertion-order problem to solve.
+/// One row, one bit: has anything ever been deleted from `transaction_log`?
+/// (v16, 0.15.7, W14.5, [D-249], review C-5.)
+///
+/// # Why this is a table and not a query
+///
+/// The bit is [`crate::temporal::replay`]'s reach guard, and until v16 the
+/// guard computed it: `MIN(seq_id) = 1 AND COUNT(*) = MAX(seq_id)`, exact
+/// because `seq_id` is `INTEGER PRIMARY KEY AUTOINCREMENT` and never reused.
+/// The `MIN` and `MAX` are index seeks; the `COUNT(*)` is a scan of the whole
+/// log, and it ran on every recorded-time read below the newest surviving
+/// stamp. Measured (`examples/log_integrity_probe.rs`): 0.134 ms at 2,000 rows
+/// and **32.6 ms at 500,000**, against an id-bounded hydration that is flat at
+/// 0.14 ms whatever the log holds. Reading this row instead is 0.033 ms at
+/// every size.
+///
+/// There is no cheaper exact query. `LOG_ARCHIVABLE` removes superseded rows
+/// wherever they sit, so a gap can be anywhere in the sequence and only
+/// counting finds it. What there is instead is a fact the storage already
+/// knows at the moment it becomes true, and did not write down.
+///
+/// # Why a trigger and not the archive code
+///
+/// [`CREATE_TXLOG_MARK_GAP`] maintains it, so the bit is a property of the
+/// **table** rather than of the crate's archive path. §4.2 admits that raw SQL
+/// against the same file can do what this API refuses; a bit maintained in Rust
+/// would be wrong after exactly that, and wrong in the direction that folds a
+/// gap silently. A trigger is wrong in neither direction, because there is no
+/// route to deleting a log row that does not pass through it.
+///
+/// # The seed is computed, not assumed
+///
+/// A database arriving at v16 may already have gaps, so
+/// [`SEED_LOG_INTEGRITY`] derives the initial value from the log's own
+/// `sqlite_sequence` high-water mark. That test is exact where the guard's old
+/// `COUNT(*) = MAX(seq_id)` was exact **and in one state where it was not** —
+/// a hot log archived down to nothing, which the old form called intact. See
+/// `the_bit_agrees_with_the_count_it_replaced`.
+///
+/// [D-249]: ../../docs/architecture/s13-decision-register.md#d-249
+pub const CREATE_LOG_INTEGRITY_TABLE: &str = r#"
+    CREATE TABLE IF NOT EXISTS log_integrity (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        rows_removed INTEGER NOT NULL DEFAULT 0 CHECK (rows_removed IN (0, 1))
+    )
+"#;
+
+/// Compute [`CREATE_LOG_INTEGRITY_TABLE`]'s bit from the log itself (v16, [D-249]).
+///
+/// One statement, run by `baseline` and by the v15 -> v16 rung alike, because a
+/// rule stated twice is a rule that can disagree with itself ([D-035]) — and
+/// these two would have: a baseline log is empty, an upgraded one may have been
+/// archived for years, and "empty" is exactly where the obvious test is wrong.
+///
+/// # The witness is `sqlite_sequence`, not `MAX(seq_id)`
+///
+/// `transaction_log.seq_id` is `INTEGER PRIMARY KEY AUTOINCREMENT`, so SQLite
+/// keeps the high-water mark of every id it has ever allocated in
+/// `sqlite_sequence`, and **deleting rows does not lower it**. A rolled-back
+/// transaction rolls the counter back with it ([D-049]), so the mark is exactly
+/// the number of rows the log has ever held. Therefore `COUNT(*) = seq` holds
+/// if and only if nothing has left, whatever the shape of what left: interior
+/// gaps, a raised floor, or every row at once.
+///
+/// That last one is why this is not the test [`crate::temporal::replay`] used
+/// before v16. `MIN(seq_id) = 1 AND COUNT(*) = MAX(seq_id)` is exact on a
+/// non-empty log and says *intact* on an empty one, which is right for a
+/// database that has never been written and wrong for one that has been fully
+/// archived — the two states it cannot see apart. `sqlite_sequence` sees them
+/// apart: no row for a young log, a positive mark for an emptied one.
+///
+/// `OR REPLACE` because the ladder re-runs rungs over a stamped-back database
+/// and this one has to be idempotent. It is: the value is a function of the
+/// log, not of what is already in the row.
+///
+/// [D-035]: ../../docs/architecture/s13-decision-register.md#d-035
+/// [D-049]: ../../docs/architecture/s13-decision-register.md#d-049
+/// [D-249]: ../../docs/architecture/s13-decision-register.md#d-249
+pub const SEED_LOG_INTEGRITY: &str = r#"
+    INSERT OR REPLACE INTO log_integrity (id, rows_removed)
+    SELECT 1, CASE
+        WHEN (SELECT COUNT(*) FROM transaction_log)
+             = COALESCE(
+                 (SELECT seq FROM sqlite_sequence WHERE name = 'transaction_log'),
+                 0)
+        THEN 0
+        ELSE 1
+    END
+"#;
+
+/// Set the bit when a log row is physically deleted (v16, [D-249]).
+///
+/// `AFTER DELETE`, so it fires only on a delete that happened —
+/// [`CREATE_TXLOG_GUARD_DELETE`]'s `BEFORE DELETE` aborts first when there is
+/// no archive session, and an aborted delete must not mark the log.
+///
+/// It is `FOR EACH ROW` and it writes the same value every time, which looks
+/// wasteful and is the cheapest correct shape available: SQLite has no
+/// statement-level triggers, and a `WHEN` clause reading `log_integrity` to
+/// skip the write would cost a lookup per row to save a one-page update per
+/// row. Measured on a 333,000-row archive session: 2,520 ms without the
+/// trigger, 2,663 ms with it — **0.43 us per row deleted, 5.6% of a delete
+/// that was already the expensive half of archiving**. The read it pays for
+/// runs on every recorded-time read; this runs once per archive.
+pub const CREATE_TXLOG_MARK_GAP: &str = r#"
+    CREATE TRIGGER IF NOT EXISTS trg_txlog_mark_gap
+    AFTER DELETE ON transaction_log
+    BEGIN
+        UPDATE log_integrity SET rows_removed = 1 WHERE id = 1;
+    END;
+"#;
+
 pub const CREATE_ANALYTICS_ANNOTATIONS_TABLE: &str = concat!(
     r#"
 CREATE TABLE IF NOT EXISTS analytics_annotations (
@@ -1325,6 +1436,10 @@ pub const CREATE_TRIGGERS: &[&str] = &[
     CREATE_BRANCHES_GUARD_UPDATE,
     CREATE_BRANCHES_GUARD_DELETE,
     CREATE_LINKS_GUARD_DELETE,
+    // v16 (W14.5, D-249). After the guard below in effect as well as in this
+    // list: the guard is BEFORE DELETE and aborts, so a refused delete never
+    // reaches this one.
+    CREATE_TXLOG_MARK_GAP,
     concat!(
         r#"
     CREATE TRIGGER IF NOT EXISTS trg_txlog_guard_delete

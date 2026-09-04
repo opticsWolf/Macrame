@@ -49,6 +49,23 @@ const V12_ONLY_TRIGGERS: &[&str] = &[
     "trg_branches_frozen_delete",
 ];
 
+/// Triggers introduced *after* v12, which no pre-v12 fixture may carry
+/// (v16, W14.5, [D-249]).
+///
+/// The doc above predicted this list: a later release adding a trigger was to
+/// be "a compile-clean surprise here rather than a silent omission". It was a
+/// surprise, and it was not compile-clean — `CREATE TRIGGER` resolves nothing
+/// at creation time, so the fixture laid `trg_txlog_mark_gap` happily at v2
+/// and the climb died four rungs later, inside the v6 -> v7 rebuild, with
+/// `no such table: main.log_integrity`.
+///
+/// Kept apart from [`V12_ONLY_TRIGGERS`] because the two say different things.
+/// That list is a statement about v12; this one is a statement about every
+/// version above it, and it is the one a future release has to extend.
+///
+/// [D-249]: ../../docs/architecture/s13-decision-register.md#d-249
+const POST_V12_TRIGGERS: &[&str] = &["trg_txlog_mark_gap"];
+
 /// The five triggers v12 redefines, by name. Their v11 bodies are below.
 const V12_CHANGED_TRIGGERS: &[&str] = &[
     "trg_links_current_sync",
@@ -229,6 +246,7 @@ pub fn triggers_v11() -> Vec<&'static str> {
         .filter(|t| {
             !V12_ONLY_TRIGGERS.iter().any(|n| t.contains(n))
                 && !V12_CHANGED_TRIGGERS.iter().any(|n| t.contains(n))
+                && !POST_V12_TRIGGERS.iter().any(|n| t.contains(n))
         })
         .chain(TRIGGERS_V11.iter().copied())
         .collect()
@@ -311,11 +329,25 @@ pub async fn v11_schema(conn: &libsql::Connection) {
 /// `no such column: NEW.branch_id`. A rung is a statement about a shape, so the
 /// shape has to be there.
 pub async fn wind_back_to_v11(conn: &libsql::Connection) {
-    for trigger in V12_ONLY_TRIGGERS.iter().chain(V12_CHANGED_TRIGGERS) {
+    for trigger in V12_ONLY_TRIGGERS
+        .iter()
+        .chain(V12_CHANGED_TRIGGERS)
+        .chain(POST_V12_TRIGGERS)
+    {
         conn.execute(&format!("DROP TRIGGER IF EXISTS {trigger}"), ())
             .await
             .unwrap();
     }
+
+    // v16's table goes with v16's trigger (W14.5, D-249). Not cosmetic: the
+    // caller stamps this database back and climbs again, and the v15 -> v16
+    // rung seeds `log_integrity` with a plain `INSERT` of id 1. A surviving
+    // table would fail that rung on the primary key — which is the right
+    // failure, since a v11 database does not have this table and a fixture
+    // claiming otherwise is describing v16 with a v11 stamp on it.
+    conn.execute("DROP TABLE IF EXISTS log_integrity", ())
+        .await
+        .unwrap();
 
     for table in ["concepts", "transaction_log"] {
         conn.execute(&format!("ALTER TABLE {table} DROP COLUMN branch_id"), ())

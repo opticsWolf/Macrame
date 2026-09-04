@@ -1052,53 +1052,75 @@ async fn archive_hint(conn: &libsql::Connection) -> String {
 /// both raised — which made an ordinary question about a young database report
 /// the ledger as damaged.
 ///
-/// # Why `seq_id` settles it, with no marker and no schema change
+/// # It was a `COUNT(*)` until 0.15.7, and the count was the whole cost
 ///
-/// `transaction_log.seq_id` is `INTEGER PRIMARY KEY AUTOINCREMENT`, so values
-/// are allocated 1, 2, 3, … and **never reused**. A rolled-back transaction
-/// leaves no gap — `sqlite_sequence` rolls back with it, which
-/// [D-049](../../docs/architecture/s13-decision-register.md) established by
-/// measurement after assuming the opposite. So the only thing that can perturb
-/// the sequence is deletion, and `trg_txlog_guard_delete` confines deletion to
-/// an archive session.
+/// The v15 form was `MIN(seq_id) = 1 AND COUNT(*) = MAX(seq_id)`, and the
+/// argument for it was a proof rather than a heuristic. `transaction_log.seq_id`
+/// is `INTEGER PRIMARY KEY AUTOINCREMENT`, so values are allocated 1, 2, 3, …
+/// and **never reused**; a rolled-back transaction leaves no gap, which
+/// [D-049](../../docs/architecture/s13-decision-register.md#d-049) established
+/// by measurement after assuming the opposite; and `trg_txlog_guard_delete`
+/// confines deletion to an archive session. So if nothing was removed the ids
+/// are exactly `1..=MAX`, and conversely those two equalities force the `COUNT`
+/// distinct ids inside `[1, MAX]` to be all of it. Exact in both directions.
 ///
-/// Therefore: if nothing was removed, the ids are exactly `1..=MAX` and
-/// `COUNT(*) == MAX(seq_id)` with `MIN(seq_id) == 1`. And conversely — this is
-/// the half that makes it a proof rather than a heuristic — those two equalities
-/// force the set of `COUNT` distinct ids inside `[1, MAX]` to be all of it, so
-/// nothing is missing. The test is exact in both directions, not merely
-/// suggestive.
+/// It was also a scan. `MIN` and `MAX` on the rowid are index seeks and
+/// `COUNT(*)` is not, so this cost the whole hot log — **0.134 ms at 2,000 rows
+/// and 32.6 ms at 500,000** — on every recorded-time read below the newest
+/// surviving stamp, in front of an id-bounded hydration that is flat at 0.14 ms
+/// however long the log is (`examples/log_integrity_probe.rs`, review C-5,
+/// [D-247], [D-249]). The one-row read is **0.033 ms and does not move with the
+/// log**, which is the shape of the change rather than the factor: at 2,000
+/// rows it is 4x, at half a million it is 930x, and the difference between
+/// those two is the whole finding.
 ///
-/// **It does not depend on the archive removing a contiguous block**, which it
-/// does not: `archive()` removes *superseded* rows scattered through the
-/// sequence. Scattered removal leaves interior gaps, which fails the count
-/// equality; removal from the front raises `MIN` above 1. Removal from the end
-/// cannot happen, because the newest row per entity is never archivable.
+/// # So the storage writes it down at the moment it becomes true
+///
+/// `log_integrity.rows_removed`, maintained by `trg_txlog_mark_gap`, is the
+/// same bit as a one-row read. A **trigger** rather than the archive code,
+/// because there is no route to deleting a log row that avoids it — §4.2 admits
+/// that raw SQL against the file can do what this API refuses, and a bit
+/// maintained in Rust would be wrong after exactly that, in the direction that
+/// folds a gap silently.
+///
+/// The proof above did not go away; it moved. It is what the v15 → v16 rung
+/// runs, once, to seed a database that may already have been archived, and what
+/// `the_bit_agrees_with_the_count_it_replaced` asserts it against.
+///
+/// # One state changed hands, and it was wrong before
+///
+/// An **empty** hot log used to answer *intact*, unconditionally: `count == 0`
+/// returned `true`. That conflates a young database with a fully archived one,
+/// and the second then reported its own emptiness as history — the caller was
+/// told nothing had been recorded by `ts` when in truth everything had, and was
+/// told it without an error. [`hot_log_reach`] catches that case when it has an
+/// archive path to look at; [`hot_log_answers_for`] has none and could not.
+/// The bit tells them apart on the log alone, which is what a young database
+/// and an emptied one differ by.
 ///
 /// # What it deliberately does not claim
 ///
 /// Nothing about *when* the archiving happened or *what* went, which is what
-/// the rejected hot-side marker would have carried. It answers one bit, and one
-/// bit is what the branch above needs.
+/// the marker [D-132](../../docs/architecture/s13-decision-register.md#d-132)
+/// refused would have carried, and [D-249] does not revisit that refusal — this
+/// row answers the guard's own question and holds nothing a message would want.
+///
+/// [D-247]: ../../docs/architecture/s13-decision-register.md#d-247
+/// [D-249]: ../../docs/architecture/s13-decision-register.md#d-249
 async fn hot_log_is_intact(conn: &libsql::Connection) -> Result<bool> {
     let row = conn
-        .query(
-            "SELECT COUNT(*), MIN(seq_id), MAX(seq_id) FROM transaction_log",
-            (),
-        )
+        .query("SELECT rows_removed FROM log_integrity WHERE id = 1", ())
         .await?
         .next()
         .await?;
+    // No row is not a state the ladder produces: the rung seeds it and the
+    // baseline seeds it, and `verify` fails a database missing the table. A
+    // database that reached here without one is damaged in a way this function
+    // must not paper over with an optimistic answer.
     let Some(row) = row else {
-        return Ok(true);
+        return Ok(false);
     };
-    let count: i64 = row.get(0).unwrap_or(0);
-    if count == 0 {
-        return Ok(true);
-    }
-    let min: i64 = row.get(1).unwrap_or(0);
-    let max: i64 = row.get(2).unwrap_or(0);
-    Ok(min == 1 && count == max)
+    Ok(row.get::<i64>(0)? == 0)
 }
 
 /// Whether a connection alone can fold `transaction_log` at `ts` (W7.1, D-174).
@@ -1520,5 +1542,80 @@ mod reach_table {
                 }
             }
         }
+    }
+
+    /// Empty the log the way a long-running archive does.
+    async fn empty_the_log(conn: &libsql::Connection) {
+        let marker = crate::schema::ddl::ARCHIVE_SESSION_MARKER;
+        conn.execute(&format!("CREATE TABLE {marker} (x)"), ())
+            .await
+            .unwrap();
+        conn.execute("DELETE FROM transaction_log", ())
+            .await
+            .unwrap();
+        conn.execute(&format!("DROP TABLE {marker}"), ())
+            .await
+            .unwrap();
+    }
+
+    /// A log archived down to nothing is not a log nothing was written to
+    /// (0.15.7, W14.5, [D-249]).
+    ///
+    /// This is the cell the module doc names as a defect from 0.5.5 and the one
+    /// the table did not have: `count = 0` returned *intact* by a separate arm,
+    /// so a fully archived database was told `PredatesRecordedHistory` —
+    /// nothing had been recorded by `ts` — at every instant, with its whole
+    /// history sitting in the archive and no error to say so. [`hot_log_reach`]
+    /// catches it when it has an archive path to look at; this function has
+    /// none, and the bit is what it has instead.
+    #[tokio::test]
+    async fn a_log_archived_down_to_nothing_asks_for_the_archive() {
+        let conn = log(false).await;
+        empty_the_log(&conn).await;
+
+        for ts in [BEFORE_A, A, BETWEEN, C, AFTER_C] {
+            assert_eq!(
+                hot_log_reach_within(&conn, ts).await.unwrap(),
+                HotLogReach::NeedsArchive,
+                "an emptied log answered for {ts} out of its own emptiness"
+            );
+            assert!(
+                !hot_log_answers_for(&conn, ts).await.unwrap(),
+                "an emptied log claims to answer for {ts}"
+            );
+        }
+
+        // And the state it must not be confused with, unchanged: a log nothing
+        // was ever written to still predates history rather than refusing.
+        let young = empty_log().await;
+        assert_eq!(
+            hot_log_reach_within(&young, BEFORE_A).await.unwrap(),
+            HotLogReach::PredatesRecordedHistory,
+            "a young log was made to refuse, which is the opposite over-correction"
+        );
+    }
+
+    /// A database whose integrity row is gone is damaged, and damaged is not
+    /// intact (0.15.7, W14.5, [D-249]).
+    ///
+    /// The ladder seeds the row and `verify` requires the table, so nothing the
+    /// crate does produces this. Something outside the crate can — §4.2 says
+    /// so — and the arm that handles it chooses to refuse rather than to assume
+    /// the happy answer, because the happy answer here is *fold an incomplete
+    /// log and return it as belief*.
+    #[tokio::test]
+    async fn a_log_without_its_integrity_row_is_not_assumed_intact() {
+        let conn = log(false).await;
+        conn.execute("DELETE FROM log_integrity", ()).await.unwrap();
+
+        assert!(
+            !hot_log_is_intact(&conn).await.unwrap(),
+            "a missing integrity row was read as an intact log"
+        );
+        assert_eq!(
+            hot_log_reach_within(&conn, BETWEEN).await.unwrap(),
+            HotLogReach::NeedsArchive,
+            "a damaged database was answered from rather than refused"
+        );
     }
 }

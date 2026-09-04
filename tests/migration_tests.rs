@@ -442,7 +442,7 @@ async fn plan_string(conn: &libsql::Connection, sql: &str) -> String {
 #[test]
 fn a_version_bump_must_bring_its_own_rung_test() {
     assert_eq!(
-        SCHEMA_VERSION, 15,
+        SCHEMA_VERSION, 16,
         "SCHEMA_VERSION moved. Add a test for the new rung — one that starts \
          from a database at the previous version and asserts what the rung is \
          *for*, not merely that `run` reached the top."
@@ -1627,6 +1627,229 @@ async fn a_v15_stamp_over_a_v14_links_key_is_refused_at_open() {
     assert!(
         msg.contains("keyed by lineage") && msg.contains("branch_id"),
         "the refusal does not say what is wrong with the table: {msg}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// v15 → v16 — the log records whether anything has left it (W14.5, D-249)
+// ---------------------------------------------------------------------------
+
+/// The v15 intactness test, written out rather than imported.
+///
+/// `hot_log_is_intact` was this expression until 0.15.7 and is now a one-row
+/// read, so there is nothing left to import — and importing it would be asking
+/// the thing under test what it used to think. Returns 1 for *intact*, which is
+/// the polarity the old function had; `log_integrity.rows_removed` is the
+/// opposite polarity, and the tests below convert rather than assume.
+const V15_INTACT: &str = "SELECT CASE \
+     WHEN COUNT(*) = 0 THEN 1 \
+     WHEN MIN(seq_id) = 1 AND COUNT(*) = MAX(seq_id) THEN 1 \
+     ELSE 0 END FROM transaction_log";
+
+/// Take a v16 database back to v15: drop what the rung adds, and stamp.
+///
+/// The rung adds a table and a trigger and touches nothing else, so this really
+/// is what a v15 database is — unlike the wind-backs below it, which have to
+/// rebuild a table to undo a key.
+async fn wind_back_to_v15(conn: &libsql::Connection) {
+    conn.execute("DROP TRIGGER IF EXISTS trg_txlog_mark_gap", ())
+        .await
+        .unwrap();
+    conn.execute("DROP TABLE IF EXISTS log_integrity", ())
+        .await
+        .unwrap();
+    conn.execute("PRAGMA user_version = 15", ()).await.unwrap();
+}
+
+/// Delete log rows the way an archive session does, guard and all.
+///
+/// `trg_txlog_guard_delete` refuses a delete unless `macrame_archive_session`
+/// exists (D-126), so a test that wants a gap has to take the same route the
+/// archive takes. Which is the point: on a v16 database this also fires
+/// `trg_txlog_mark_gap`, so these helpers exercise the maintenance path rather
+/// than reaching around it.
+async fn delete_log_rows(conn: &libsql::Connection, where_clause: &str) {
+    conn.execute("CREATE TABLE macrame_archive_session (marker INTEGER)", ())
+        .await
+        .unwrap();
+    conn.execute(
+        &format!("DELETE FROM transaction_log WHERE {where_clause}"),
+        (),
+    )
+    .await
+    .unwrap();
+    conn.execute("DROP TABLE macrame_archive_session", ())
+        .await
+        .unwrap();
+}
+
+/// Write `n` concepts starting at `first`, each of which logs a row.
+///
+/// `first` rather than a counter because one caller writes again *after* a
+/// delete, and a second `c0` would fail on the primary key rather than on
+/// anything this file is about.
+async fn log_some_rows(conn: &libsql::Connection, first: usize, n: usize) {
+    for i in first..first + n {
+        conn.execute(
+            "INSERT INTO concepts (id, title, valid_from, recorded_at) \
+             VALUES (?1, 't', ?2, ?2)",
+            libsql::params![format!("c{i}"), TS],
+        )
+        .await
+        .unwrap();
+    }
+}
+
+/// v15 → v16: the rung reads the log's history off `sqlite_sequence` and writes
+/// down the one bit the reach guard used to count for (W14.5, [D-249], C-5).
+///
+/// Three v15 databases, differing only in what has been taken out of the log,
+/// and the rung has to tell them apart on arrival. The third is the one that
+/// makes this a rung rather than a default: a log archived down to nothing is
+/// indistinguishable from a log that was never written *by counting it*, and
+/// the high-water mark is what distinguishes them.
+#[tokio::test]
+async fn a_v15_database_climbs_to_v16_and_the_rung_seeds_the_bit_from_the_log() {
+    // Intact: three rows written, none removed.
+    let intact = TestHarness::new();
+    let conn = connect(&intact).await;
+    macrame::schema::run_migrations(&conn).await.unwrap();
+    log_some_rows(&conn, 0, 3).await;
+    wind_back_to_v15(&conn).await;
+    macrame::schema::run_migrations(&conn).await.unwrap();
+    assert_eq!(user_version(&conn).await, SCHEMA_VERSION);
+    assert_eq!(
+        scalar(&conn, "SELECT rows_removed FROM log_integrity").await,
+        0,
+        "an intact log was seeded as if it had been archived"
+    );
+
+    // A gap in the middle, which is the shape `LOG_ARCHIVABLE` actually leaves.
+    let holed = TestHarness::new();
+    let conn = connect(&holed).await;
+    macrame::schema::run_migrations(&conn).await.unwrap();
+    log_some_rows(&conn, 0, 3).await;
+    wind_back_to_v15(&conn).await;
+    delete_log_rows(&conn, "seq_id = 2").await;
+    macrame::schema::run_migrations(&conn).await.unwrap();
+    assert_eq!(
+        scalar(&conn, "SELECT rows_removed FROM log_integrity").await,
+        1,
+        "an interior gap was seeded as intact"
+    );
+
+    // Everything archived. `COUNT(*) = 0` is where the old test said *intact*.
+    let emptied = TestHarness::new();
+    let conn = connect(&emptied).await;
+    macrame::schema::run_migrations(&conn).await.unwrap();
+    log_some_rows(&conn, 0, 3).await;
+    wind_back_to_v15(&conn).await;
+    delete_log_rows(&conn, "1 = 1").await;
+    assert_eq!(
+        scalar(&conn, V15_INTACT).await,
+        1,
+        "the fixture is not standing on the state the old test got wrong"
+    );
+    macrame::schema::run_migrations(&conn).await.unwrap();
+    assert_eq!(
+        scalar(&conn, "SELECT rows_removed FROM log_integrity").await,
+        1,
+        "a fully archived log was seeded as a young one — which is the read \
+         defect D-249 exists to close, reintroduced at the rung"
+    );
+}
+
+/// The trigger keeps the bit true after the rung, on the one route that can
+/// change it (W14.5, [D-249]).
+///
+/// A seeded bit that never moves again would pass the rung test above and be
+/// worthless. This asserts the maintenance: intact at v16, then one archive
+/// session, then not.
+#[tokio::test]
+async fn the_bit_is_set_by_the_delete_and_not_by_the_write_path() {
+    let harness = TestHarness::new();
+    let conn = connect(&harness).await;
+    macrame::schema::run_migrations(&conn).await.unwrap();
+
+    log_some_rows(&conn, 0, 3).await;
+    assert_eq!(
+        scalar(&conn, "SELECT rows_removed FROM log_integrity").await,
+        0,
+        "writing to the log marked it as having lost rows"
+    );
+
+    delete_log_rows(&conn, "seq_id = 1").await;
+    assert_eq!(
+        scalar(&conn, "SELECT rows_removed FROM log_integrity").await,
+        1,
+        "a log row was deleted and the log did not notice"
+    );
+
+    // And it does not come back. There is no route that clears the bit, which
+    // is what makes it safe to read instead of counting.
+    log_some_rows(&conn, 3, 1).await;
+    assert_eq!(
+        scalar(&conn, "SELECT rows_removed FROM log_integrity").await,
+        1,
+        "a later write cleared a gap that is still there"
+    );
+}
+
+/// The bit, read in the polarity [`V15_INTACT`] uses, so the two are comparable
+/// without a reader having to hold the inversion in their head.
+async fn intact_by_bit(conn: &libsql::Connection) -> i64 {
+    scalar(conn, "SELECT 1 - rows_removed FROM log_integrity").await
+}
+
+/// The bit agrees with the count it replaced — and where it does not, the
+/// count was wrong (W14.5, [D-249]).
+///
+/// The v15 test was exact and was argued for at length: `seq_id` is
+/// `AUTOINCREMENT` so ids are never reused, a rollback leaves no gap (D-049),
+/// and `MIN = 1` with `COUNT(*) = MAX` forces the ids to be all of `1..=MAX`.
+/// The argument holds. What it never covered is the empty log, where the
+/// function returned *intact* by a separate arm and no proof at all — and an
+/// emptied log is precisely a log rows were removed from.
+///
+/// So this walks a database through four states and asserts agreement in three
+/// of them and disagreement in the fourth, in the direction that says the bit
+/// is right. A test asserting agreement everywhere would be asserting the bug.
+#[tokio::test]
+async fn the_bit_agrees_with_the_count_it_replaced() {
+    let harness = TestHarness::new();
+    let conn = connect(&harness).await;
+    macrame::schema::run_migrations(&conn).await.unwrap();
+
+    // (1) Never written.
+    assert_eq!(scalar(&conn, V15_INTACT).await, 1);
+    assert_eq!(intact_by_bit(&conn).await, 1, "a fresh log is intact");
+
+    // (2) Written, nothing removed.
+    log_some_rows(&conn, 0, 4).await;
+    assert_eq!(scalar(&conn, V15_INTACT).await, 1);
+    assert_eq!(intact_by_bit(&conn).await, 1, "a full log is intact");
+
+    // (3) An interior row gone — the shape archiving leaves, and the shape
+    // only a count can find.
+    delete_log_rows(&conn, "seq_id = 3").await;
+    assert_eq!(scalar(&conn, V15_INTACT).await, 0);
+    assert_eq!(intact_by_bit(&conn).await, 0, "a hole is not intact");
+
+    // (4) Emptied. Here they part company, and the old one is the one that is
+    // wrong: every row this log ever held has been archived away, and it
+    // reports itself as a database nothing was ever written to.
+    delete_log_rows(&conn, "1 = 1").await;
+    assert_eq!(
+        scalar(&conn, V15_INTACT).await,
+        1,
+        "the v15 expression has been transcribed wrongly — it called an empty \
+         log intact, and this test is about that"
+    );
+    assert_eq!(
+        intact_by_bit(&conn).await,
+        0,
+        "an emptied log claims to be intact, which is the conflation between a \
+         young database and a fully archived one that D-249 closes"
     );
 }
 

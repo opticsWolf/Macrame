@@ -13,7 +13,7 @@ use crate::schema::ddl::*;
 /// guarantee D-029 buys would be void on it while `user_version` insisted all
 /// was well. Reserving 1 as a value this build refuses by name is what makes
 /// "no legacy support" an enforced property instead of a README sentence.
-pub const SCHEMA_VERSION: u32 = 15;
+pub const SCHEMA_VERSION: u32 = 16;
 
 type StepFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
 
@@ -185,6 +185,15 @@ const STEPS: &[Step] = &[
         // v5 -> v6 and v10 -> v11 rungs stood on.
         suspends_foreign_keys: false,
         apply: |conn| Box::pin(add_lineage_cut_index(conn)),
+    },
+    Step {
+        from: 15,
+        to: 16,
+        name: "log-integrity-bit",
+        // Nothing declares a foreign key into or out of the new table, and the
+        // seed reads `transaction_log` without writing it.
+        suspends_foreign_keys: false,
+        apply: |conn| Box::pin(add_log_integrity(conn)),
     },
     Step {
         from: 14,
@@ -444,6 +453,12 @@ async fn baseline(conn: &libsql::Connection) -> Result<()> {
     conn.execute(CREATE_TRANSACTION_LOG_TABLE, ()).await?;
     // Derivative, and last: every index in CREATE_INDICES must have its table.
     conn.execute(CREATE_ANALYTICS_ANNOTATIONS_TABLE, ()).await?;
+    // v16 (W14.5, D-249). The same seed statement the rung runs, not a
+    // literal 0: a baseline log is empty and the answer is 0, but writing the
+    // answer here rather than deriving it is how the two paths start to
+    // disagree (D-035).
+    conn.execute(CREATE_LOG_INTEGRITY_TABLE, ()).await?;
+    conn.execute(SEED_LOG_INTEGRITY, ()).await?;
     // Before the triggers, not after: `trg_concepts_fts_*` name this table, and
     // SQLite resolves a trigger body's tables at CREATE TRIGGER time.
     conn.execute(CREATE_CONCEPTS_FTS, ()).await?;
@@ -456,6 +471,44 @@ async fn baseline(conn: &libsql::Connection) -> Result<()> {
         conn.execute(trigger_ddl, ()).await?;
     }
 
+    Ok(())
+}
+
+/// v15 → v16: the log records whether anything has left it (0.15.7, W14.5, [D-249]).
+///
+/// Review C-5: the reach guard's intactness test was `COUNT(*)` over the whole
+/// hot log, on every recorded-time read below the newest surviving stamp —
+/// 32.6 ms at 500,000 rows, in front of an id-bounded hydration that is flat at
+/// 0.14 ms.
+/// The fact is one bit and the storage knows it the moment it becomes true.
+///
+/// # The seed is derived, and it is stricter than the query it retires
+///
+/// A database arriving here may already have been archived, so the initial
+/// value cannot be assumed. [`SEED_LOG_INTEGRITY`] derives it from the log's
+/// `sqlite_sequence` high-water mark, which counts every id ever allocated and
+/// does not fall when rows are deleted ([D-049] for why a rollback is not a
+/// deletion). So a database migrated at v16 starts from the truth about its own
+/// history, whatever that history was — one statement, once, on the rung
+/// instead of a scan on every read.
+///
+/// It is deliberately *not* the comparison the guard used. `MIN(seq_id) = 1 AND
+/// COUNT(*) = MAX(seq_id)` is exact on a log with rows in it and blind on an
+/// empty one, where it answers *intact* — right for a database that has never
+/// been written, wrong for one archived down to nothing, and those are the two
+/// states a bit about archiving most needs to tell apart. Seeding from the
+/// high-water mark tells them apart: absent for the first, positive for the
+/// second. `the_bit_agrees_with_the_count_it_replaced` pins both halves of that
+/// — the agreement everywhere else, and the disagreement here.
+///
+/// [D-049]: ../../docs/architecture/s13-decision-register.md#d-049
+/// [D-249]: ../../docs/architecture/s13-decision-register.md#d-249
+async fn add_log_integrity(conn: &libsql::Connection) -> Result<()> {
+    conn.execute(CREATE_LOG_INTEGRITY_TABLE, ()).await?;
+    conn.execute(SEED_LOG_INTEGRITY, ()).await?;
+    // After the seed: the trigger must not fire during it, and it cannot —
+    // the seed does not delete — but the ordering is what a reader checks.
+    conn.execute(CREATE_TXLOG_MARK_GAP, ()).await?;
     Ok(())
 }
 
@@ -623,6 +676,20 @@ const V12_TRIGGERS: &[&str] = &[
     "trg_links_log_insert",
 ];
 
+/// Triggers introduced *after* v12, which a pre-v12 rung must also leave out
+/// (v16, W14.5, [D-249](../../docs/architecture/s13-decision-register.md#d-249)).
+///
+/// A second list rather than more entries in [`V12_TRIGGERS`], because the two
+/// exclusions are excluded for opposite reasons and a reader has to be able to
+/// tell them apart: v12's are left out because the rung must install their
+/// *older* bodies, listed in [`TRIGGERS_V11`]; these are left out because at
+/// that point on the ladder they have no older body — they do not exist yet,
+/// and `trg_txlog_mark_gap` names a table three rungs away from being created.
+/// It failed loudly rather than quietly, which is the one mercy: the v6 → v7
+/// rung deletes log rows, so the trigger fired against a missing table and the
+/// climb stopped.
+const LATER_TRIGGERS: &[&str] = &["trg_txlog_mark_gap"];
+
 /// The five redefined triggers **as v11 had them** (§15.2, D-214).
 ///
 /// Pinned for the reason [`CONCEPTS_LOG_INSERT_V9`] states, and the reason has
@@ -738,7 +805,12 @@ fn triggers_before_v12() -> impl Iterator<Item = &'static str> {
     CREATE_TRIGGERS
         .iter()
         .copied()
-        .filter(|t| !V12_TRIGGERS.iter().any(|name| t.contains(name)))
+        .filter(|t| {
+            !V12_TRIGGERS
+                .iter()
+                .chain(LATER_TRIGGERS.iter())
+                .any(|name| t.contains(name))
+        })
         .chain(TRIGGERS_V11.iter().copied())
 }
 
@@ -1464,6 +1536,8 @@ pub(crate) const BASELINE_TABLES: &[&str] = &[
     "transaction_log",
     "analytics_annotations",
     "concepts_fts",
+    // v16 (W14.5, D-249).
+    "log_integrity",
 ];
 
 /// Confirm the database actually holds what the DDL claims to create.

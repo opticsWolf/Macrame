@@ -1128,11 +1128,14 @@ pub const macrame::schema::ddl::CREATE_LINKS_GUARD_DELETE: &str
 pub const macrame::schema::ddl::CREATE_LINKS_LOG_INSERT: &str
 pub const macrame::schema::ddl::CREATE_LINKS_SINGLE_OPEN: &str
 pub const macrame::schema::ddl::CREATE_LINKS_TABLE: &str
+pub const macrame::schema::ddl::CREATE_LOG_INTEGRITY_TABLE: &str
 pub const macrame::schema::ddl::CREATE_TRANSACTION_LOG_TABLE: &str
 pub const macrame::schema::ddl::CREATE_TRIGGERS: &[&str]
+pub const macrame::schema::ddl::CREATE_TXLOG_MARK_GAP: &str
 pub const macrame::schema::ddl::MAIN_BRANCH: &str
 pub const macrame::schema::ddl::OPTIMIZE: &str
 pub const macrame::schema::ddl::REBUILD_CONCEPTS_FTS: &str
+pub const macrame::schema::ddl::SEED_LOG_INTEGRITY: &str
 pub const macrame::schema::ddl::SEED_MAIN_BRANCH: &str
 pub const macrame::schema::ddl::VERIFY_CONCEPTS_FTS: &str
 pub const macrame::schema::ddl::WEIGHT_CHECK: &str
