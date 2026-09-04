@@ -78,8 +78,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     println!("assert_edge, {iterations} iterations, one target per assertion\n");
 
-    for forked in [false, true] {
-        let label = if forked { "forked" } else { "trunk" };
+    // Three shapes, not two (0.15.8, W13.3). `trunk` is `LineageShape::Trunk`
+    // and `forked` is `TrunkOnForked` — the trunk of a database that has been
+    // forked, which is where D-248 found the 2.2x. Neither is `Resolved`: a
+    // write **on** the branch is the shape the four-CTE resolution is for, and
+    // nothing had ever timed it.
+    for label in ["trunk", "forked", "branch"] {
+        let forked = label != "trunk";
+        let on_branch = label == "branch";
         let db = Database::open(dir.path().join(format!("{label}.db"))).await?;
 
         // One source and a distinct target per assertion: the edge key differs
@@ -100,8 +106,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut best = f64::MAX;
         let mut total = 0.0;
         for i in 0..iterations {
+            let assertion = if on_branch {
+                edge(i).on_branch(BranchId::new("exp")?)
+            } else {
+                edge(i)
+            };
             let start = Instant::now();
-            db.assert_edge(edge(i)).await?;
+            db.assert_edge(assertion).await?;
             let ms = start.elapsed().as_secs_f64() * 1e3;
             best = best.min(ms);
             total += ms;

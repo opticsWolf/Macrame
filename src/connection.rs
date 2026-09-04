@@ -3906,17 +3906,15 @@ struct OverlapGuard {
 impl OverlapGuard {
     /// Prepare once per turn or per chunk, never per row (D-056, §8.8).
     async fn prepare(conn: &libsql::Connection, shape: LineageShape) -> Result<Self> {
-        let sql = match shape {
-            LineageShape::Trunk => std::borrow::Cow::Borrowed(OVERLAP_CANDIDATES),
-            // The forked trunk takes the resolved form here, unlike on the
-            // read path: the per-key statement is exact for a root (its
-            // ancestry is itself) and narrows to one key before any window
-            // runs, so there is nothing for a third form to save yet. The
-            // guard's own lowering is W13.3's work.
-            LineageShape::Resolved | LineageShape::TrunkOnForked => {
-                std::borrow::Cow::Owned(crate::graph::lineage::overlap_candidates_resolved())
-            }
-        };
+        // Three shapes, three statements, one spelling (0.15.8, W13.3,
+        // D-250). Until this release the trunk had a hand-written constant and
+        // the other two shared the resolved form, which was exact for a root
+        // only because a root's ancestry is itself — so `Lineages::shape_of`
+        // could return either of them and nothing observable changed. It
+        // cannot now: the root gets a two-predicate lookup on the projection
+        // and a branch gets the four-CTE resolution, and D-248's C-24 repair
+        // is what decides which.
+        let sql = crate::graph::lineage::overlap_candidates_resolved(shape);
         Ok(Self {
             stmt: conn.prepare(&sql).await?,
             shape,
@@ -4341,38 +4339,24 @@ async fn retire_edge(
     branch: &str,
     shape: LineageShape,
 ) -> Result<()> {
-    let affected = match shape {
-        // One lineage exists, so `links_current` *is* the visible set and the
-        // statement is the one this path has always issued. Kept rather than
-        // folded into the resolved form for [`LineageShape`]'s reason: the
-        // resolved form is opaque to the planner and costs 3.0x where there is
-        // nothing to resolve (D-220).
-        LineageShape::Trunk => conn
-            .execute(
-                "INSERT INTO links \
-                     (source_id, target_id, edge_type, valid_from, valid_to, weight, properties, recorded_at) \
-                 SELECT source_id, target_id, edge_type, valid_from, ?5, weight, properties, ?6 \
-                 FROM links_current \
-                 WHERE source_id = ?1 AND target_id = ?2 AND edge_type = ?3 AND valid_from = ?4",
-                libsql::params![source, target, edge_type, valid_from, valid_to, stamp],
-            )
-            .await
-            .map_err(DbError::Engine)?,
-        // Shadow retirement: the row being closed may belong to an ancestor,
-        // and the row written carries *this* lineage's id. See
-        // `lineage::retire_from_resolved`. The forked trunk takes this arm
-        // too: a root's resolved key is its own row, and the statement
-        // stamps the lineage the trunk form does not know to stamp.
-        LineageShape::Resolved | LineageShape::TrunkOnForked => conn
-            .execute(
-                &crate::graph::lineage::retire_from_resolved(),
-                libsql::params![
-                    source, target, edge_type, valid_from, branch, valid_to, stamp
-                ],
-            )
-            .await
-            .map_err(DbError::Engine)?,
-    };
+    // Shadow retirement: the row being closed may belong to an ancestor, and
+    // the row written carries *this* lineage's id. See
+    // `lineage::retire_from_resolved`.
+    //
+    // One statement for all three shapes since 0.15.8 (W13.3, D-250). The
+    // trunk had its own until then, kept apart on [`LineageShape`]'s ground —
+    // the resolved form was opaque to the planner and cost 3.0x where there
+    // was nothing to resolve (D-220). That ground is gone rather than
+    // overruled: a keyed `Trunk` resolution lowers to no CTEs at all, so the
+    // statement the lowering emits *is* the one this arm used to hold, with
+    // the lineage stamped rather than defaulted.
+    let affected = conn
+        .execute(
+            &crate::graph::lineage::retire_from_resolved(shape),
+            libsql::params![source, target, edge_type, valid_from, branch, valid_to, stamp],
+        )
+        .await
+        .map_err(DbError::Engine)?;
 
     if affected == 0 {
         return Err(DbError::NotFound(format!(
@@ -4405,40 +4389,6 @@ async fn upsert_concept(
         .await),
     }
 }
-
-/// Every recorded interval for one relationship key, for [`Interval::overlaps`]
-/// to judge.
-///
-/// **Three equalities and nothing else, deliberately — and the "and nothing
-/// else" was measured, not assumed.** The first version added
-/// `AND valid_from < :new_valid_to`, a provably safe narrowing (overlap requires
-/// `max(start) < min(end)`, so an interval starting at or after the new one's end
-/// cannot overlap it). It cost **9.8 ms on a 90-edge chunk into a 2,000-edge
-/// hub**, because it walked the planner straight into D-059's trap:
-///
-/// ```text
-/// with the range:     SEARCH links_current USING COVERING INDEX
-///                     idx_lc_traversal_cover (source_id=? AND valid_from<?)
-/// without it:         SEARCH links_current USING COVERING INDEX
-///                     idx_lc_open_interval (source_id=? AND target_id=? AND edge_type=?)
-/// ```
-///
-/// `idx_lc_traversal_cover` leads on `(source_id, valid_from, …)` and contains
-/// every column this query mentions, so with a `valid_from` range available it
-/// wins as a covering index while binding **one** equality column — and the
-/// guard scans the source's entire out-degree. That is the same shape as the
-/// defect D-059 diagnosed in `trg_links_single_open`, reintroduced by an
-/// optimisation, one wave after it was fixed.
-///
-/// Dropping the range makes the query a pure three-column point lookup that
-/// `idx_lc_open_interval` serves exactly, and the rows it returns are the
-/// intervals recorded for one `(source, target, edge_type)` — a version count,
-/// not an out-degree. **A narrowing predicate is not free if it changes the
-/// plan**, which is the general lesson and the reason this constant carries its
-/// own `EXPLAIN` output.
-const OVERLAP_CANDIDATES: &str = "SELECT valid_from, valid_to FROM links_current \
-     WHERE source_id = ?1 AND target_id = ?2 AND edge_type = ?3 \
-       AND valid_from <> ?4";
 
 /// Whether this pair is the storage layer's case rather than this guard's.
 ///

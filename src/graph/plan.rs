@@ -35,7 +35,9 @@
 //! whose proof is that nothing observable moved would make the public-API gate
 //! and the plan pins fail together, and neither failure would be diagnostic.
 
-use crate::graph::lineage::{ancestry_cte, churned_cte, links_cut_cte, visible_cte, LineageShape};
+use crate::graph::lineage::{
+    ancestry_cte, churned_cte, links_cut_cte, visible_cte, KeySlots, LineageShape,
+};
 
 /// What a reader has decided about a lineage read, before any SQL exists.
 ///
@@ -56,6 +58,20 @@ pub(crate) struct Resolution<'a> {
     pub branch_slot: usize,
     pub recorded_slot: Option<usize>,
     pub tag: &'a str,
+    /// The edge key the reader already holds, when it holds one (0.15.8,
+    /// W13.3, [D-250](../../docs/architecture/s13-decision-register.md#d-250)).
+    ///
+    /// `None` for every traversal: a walk discovers its edges and has no key
+    /// to push down. `Some` for the write path, which has one before any SQL
+    /// exists — see [`KeySlots`] for what it narrows and for the one column it
+    /// adds.
+    ///
+    /// It narrows **current belief** only. A keyed transaction-time read would
+    /// be correct and unnarrowed, because the fold's `entity_id` carries the
+    /// `valid_from` this key does not fix and a prefix match is not a seek;
+    /// there is no such reader today, and the day there is, that is the
+    /// release that decides how.
+    pub key: Option<KeySlots>,
 }
 
 /// The lowering's output: the prelude, and the relation the reader joins.
@@ -149,9 +165,35 @@ impl Lowered {
 /// handed back as `filter`; at a recorded instant it goes **inside** the
 /// fold, so the window ranks only the trunk's own log entries, and `filter`
 /// is empty because the source already is one lineage.
+///
+/// # Where a key goes, and why that is two places (0.15.8, W13.3, D-250)
+///
+/// `Resolution::key` is `Some` for the write path and `None` for every
+/// traversal. Where the reader joins a CTE chain — `Resolved` under current
+/// belief — the key is pushed into the base scans of [`churned_cte`] and
+/// [`links_cut_cte`], because that is the only place it can turn a scan of
+/// `links_current` into a seek on `idx_lc_open_interval`. Where the reader
+/// joins `links_current` itself there is no chain to push into, so the three
+/// equalities come back in `filter` beside the branch predicate, and the
+/// planner sees them in the reader's own `WHERE` where it would have seen
+/// them anyway.
+///
+/// The consequence worth stating: the **root's guard is no longer the
+/// resolved statement**. Until 0.15.8 `TrunkOnForked` prepared the four-CTE
+/// resolved form and got the right answer out of it, because a root's
+/// ancestry is itself; it now prepares a two-predicate lookup. That is what
+/// makes [`crate::connection`]'s choice of shape per batch load-bearing
+/// rather than cosmetic, which [D-248] said this release would do.
+///
+/// [D-248]: ../../docs/architecture/s13-decision-register.md#d-248
 pub(crate) fn lower(r: &Resolution<'_>) -> Lowered {
     let tag = r.tag;
     let folded = r.recorded_slot.is_some();
+    // A key narrows whatever the reader ends up joining. Where that is a CTE
+    // chain it goes into the base scans, which is the only place it can become
+    // a seek; where it is `links_current` itself there is no chain to push it
+    // into, so it joins the reader's own `WHERE` beside the branch predicate.
+    let key_filter = |k: KeySlots| format!(" AND {}", k.equalities("l"));
 
     let mut ctes: Vec<String> = Vec::new();
     if r.shape == LineageShape::Resolved {
@@ -170,6 +212,9 @@ pub(crate) fn lower(r: &Resolution<'_>) -> Lowered {
             if folded {
                 format!("links_at_tx{tag}")
             } else {
+                if let Some(k) = r.key {
+                    filter = key_filter(k);
+                }
                 "links_current".to_string()
             }
         }
@@ -178,6 +223,9 @@ pub(crate) fn lower(r: &Resolution<'_>) -> Lowered {
                 format!("links_at_tx{tag}")
             } else {
                 filter = format!(" AND +l.branch_id = ?{}", r.branch_slot);
+                if let Some(k) = r.key {
+                    filter.push_str(&key_filter(k));
+                }
                 "links_current".to_string()
             }
         }
@@ -187,11 +235,11 @@ pub(crate) fn lower(r: &Resolution<'_>) -> Lowered {
             let resolved = if folded {
                 format!("links_at_tx{tag}")
             } else {
-                ctes.push(churned_cte(tag));
-                ctes.push(links_cut_cte(tag));
+                ctes.push(churned_cte(tag, r.key));
+                ctes.push(links_cut_cte(tag, r.key));
                 format!("links_cut{tag}")
             };
-            ctes.push(visible_cte(&resolved, tag));
+            ctes.push(visible_cte(&resolved, tag, r.key));
             format!("visible{tag}")
         }
     };
@@ -349,6 +397,7 @@ mod tests {
             branch_slot: 5,
             recorded_slot: None,
             tag: "",
+            key: None,
         });
         assert!(l.ctes.is_empty());
         assert_eq!(l.source, "links_current");
@@ -365,6 +414,7 @@ mod tests {
             branch_slot: 5,
             recorded_slot: Some(5),
             tag: "",
+            key: None,
         });
         assert_eq!(names(&l), ["links_at_tx"]);
         assert_eq!(l.source, "links_at_tx");
@@ -381,6 +431,7 @@ mod tests {
             branch_slot: 5,
             recorded_slot: None,
             tag: "",
+            key: None,
         });
         assert_eq!(names(&l), ["lineage", "churned", "links_cut", "visible"]);
         assert_eq!(l.source, "visible");
@@ -397,6 +448,7 @@ mod tests {
             branch_slot: 5,
             recorded_slot: Some(6),
             tag: "",
+            key: None,
         });
         assert_eq!(names(&l), ["lineage", "links_at_tx", "visible"]);
         assert_eq!(l.source, "visible");
@@ -416,6 +468,7 @@ mod tests {
             branch_slot: 1,
             recorded_slot: None,
             tag: "_a",
+            key: None,
         });
         assert_eq!(
             names(&l),
@@ -435,6 +488,7 @@ mod tests {
             branch_slot: 1,
             recorded_slot: Some(3),
             tag: "_b",
+            key: None,
         });
         assert_eq!(names(&folded), ["lineage_b", "links_at_tx_b", "visible_b"]);
         assert!(folded.ctes[1].contains("JOIN lineage_b g"));
@@ -468,6 +522,7 @@ mod tests {
                 branch_slot: slot,
                 recorded_slot: None,
                 tag,
+                key: None,
             });
             assert!(
                 diff.contains(&side.with_list()),
@@ -481,12 +536,14 @@ mod tests {
             branch_slot: 1,
             recorded_slot: None,
             tag: "_a",
+            key: None,
         });
         let b = lower(&Resolution {
             shape: LineageShape::Resolved,
             branch_slot: 2,
             recorded_slot: None,
             tag: "_b",
+            key: None,
         });
         let retagged = ["lineage", "churned", "links_cut", "visible"]
             .iter()
@@ -506,6 +563,7 @@ mod tests {
             branch_slot: 5,
             recorded_slot: None,
             tag: "",
+            key: None,
         });
         assert!(l.ctes.is_empty(), "no ancestry to resolve: {:?}", names(&l));
         assert_eq!(l.source, "links_current");
@@ -519,6 +577,7 @@ mod tests {
             branch_slot: 5,
             recorded_slot: Some(6),
             tag: "",
+            key: None,
         });
         assert_eq!(names(&folded), ["links_at_tx"]);
         assert_eq!(folded.source, "links_at_tx");
@@ -547,6 +606,7 @@ mod tests {
                 branch_slot: 5,
                 recorded_slot: recorded,
                 tag: "",
+                key: None,
             });
             assert_eq!(l.filter, "", "{shape:?} at {recorded:?}");
         }

@@ -44,7 +44,7 @@ The reader's *own* query then names one relation: `visible` under `Resolved`, an
 
 So the lowering is a function of exactly `(shape, branch_slot, recorded_slot, tag)`, and its output is `(prelude CTEs, source relation)`. That is small enough to write in an afternoon and it is the whole of W13.1. Everything else in the wave is a *consumer* of that function gaining an argument.
 
-**The write path is not a fourth reader, yet.** `overlap_candidates_resolved` and `retire_from_resolved` use a per-key spelling (`key_rows`, `churned_key`, `visible_key`, `resolved_key`) because the guard has the key in hand and a full `links_cut` would be a table scan under a write lock. The lowering gains a key-narrowed form in W13.3; until then the guard keeps its own text and its own tests.
+**The write path is not a fourth reader, yet.** `overlap_candidates_resolved` and `retire_from_resolved` use a per-key spelling (`key_rows`, `churned_key`, `visible_key`, `resolved_key`) because the guard has the key in hand and a full `links_cut` would be a table scan under a write lock. The lowering gains a key-narrowed form in W13.3; until then the guard keeps its own text and its own tests. — *Shipped as 0.15.8, [D-250](architecture/s13-decision-register.md#d-250); the guard is the fourth reader and this paragraph is history.*
 
 ---
 
@@ -85,6 +85,8 @@ The probe that chooses it is one query against `branches` and `links_current`, r
 ### W13.3 · 0.15.3 — the overlap guard lowers too
 
 `Resolution` gains an optional `key: Option<KeySlots>` that narrows `links_cut` and the fold to one `(source, target, type)` before the window runs. `overlap_candidates_resolved` and `retire_from_resolved` become `lower(&Resolution { key: Some(…), … })` plus their own tail. The per-key CTE text in `lineage.rs` is deleted once the guard's tests pass against the lowered form, and `examples/branch_write_probe.rs` (or the existing write-cost bench group) confirms the guard's plan did not lose its seek.
+
+**Shipped as 0.15.8, [D-250](architecture/s13-decision-register.md#d-250).** Two departures from the sketch above. The key goes in **two** places rather than one — the reader's own `WHERE` on the trunk shapes, the base scans under `Resolved` — because appending it to the tail of a CTE chain narrows a relation already built over the ledger; the sketch said "narrows `links_cut` and the fold" and that half is right, the other half is the trunk case it did not have a name for. And the confirmation is not that "the guard's plan did not lose its seek": the plan pin *moved*, out of `migration_tests` where it read a hand-copied reproduction, into `lineage.rs` where it reads the generated statement on all three shapes. Measured best-of-500 on the single-edge write: trunk unchanged, forked trunk **−6.6%**, branch **+3.0%** for the shared `visible` join, with the trade written down. Six mutations, and the survivor was a correctness hole rather than a plan: an unnarrowed churned set makes another key's pre-fork interval this key's overlap, which every fixture in the file had missed by churning the key it then asserted.
 
 After this release the crate has one lineage spelling and D-227's failure mode — a reader that agrees with the others by accident — has no place left to happen.
 
@@ -198,7 +200,7 @@ Merge to `main` after W16.2, tagged. `docs/releases/v0.16.0.md` written before t
 |---|---|---|---|---|---|
 | 1 | 0.15.1 | W13.1 | `plan.rs` lowering; three readers consume it; SQL byte-identical | `src/graph/{plan,builder,lineage,mod}.rs`, `src/temporal/as_of.rs`, `src/branch.rs` | every plan pin and golden string unchanged; surface 1,624 |
 | 2 | 0.15.2 | W13.2 | `TrunkOnForked`; three readers; the fold materialised — **done** | `lineage.rs`, `plan.rs`, `builder.rs`, `subgraph.rs`, `as_of.rs` | numbers in D-244; two plan pins |
-| 3 | 0.15.3 | W13.3 | key-narrowed lowering for the guard | `plan.rs`, `lineage.rs`, `connection.rs` | guard plan keeps its seek |
+| 3 | 0.15.8 | W13.3 | key-narrowed lowering for the guard — **done** | `plan.rs`, `lineage.rs`, `connection.rs` | plan pinned on three shapes; numbers in D-250 |
 | 4 | 0.15.4 | W13.4 | public `ReadPlan`; Python parity | `src/plan.rs` (public), `bindings/python` | Appendix A/D.1, `public-api.txt` |
 | 5 | 0.15.5 | W13.5 | `limit` in the walk | `plan.rs`, `builder.rs`, `vector_filter.rs` | walk pin gains the limited form |
 | 6 | 0.15.3 | W14.1 | keyed archive repair — **done** | `temporal/archive.rs`, `integrity/`, `benches` | `archive/archive_small_slice`; numbers in D-245 |

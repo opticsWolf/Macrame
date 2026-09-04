@@ -407,6 +407,48 @@ async fn the_guard_sees_a_pre_fork_interval_the_projection_no_longer_holds() {
     db.close().await.unwrap();
 }
 
+/// The same fixture from the other side: a churned key that is **not** this
+/// one is not this one's overlap.
+///
+/// The guard resolves through [`macrame::graph`]'s lowering since 0.15.8
+/// (W13.3, D-250), and on a branch that lowering is four CTEs whose *only*
+/// mention of the edge key is inside them — the tail filters on `valid_from`
+/// alone. So the narrowing in `churned_cte` and `links_cut_cte` is load-bearing
+/// for the answer and not merely for the plan: drop it from the churned set and
+/// the fold arm goes and fetches every ancestor's pre-fork interval for every
+/// edge in the ledger, all of which reach the tail, any of which can overlap.
+///
+/// The write above is what makes that visible and this one is what makes it
+/// fail. Mutating the narrowing out passes every other test in this file,
+/// because every other fixture churns the key it then asserts.
+#[tokio::test]
+async fn a_pre_fork_interval_of_another_key_is_not_this_keys_overlap() {
+    let h = TestHarness::new();
+    let (db, alt) = forked(&h).await;
+    db.assert_edge(edge("c", "d", TS, Some(TS3))).await.unwrap();
+    h.advance(Duration::from_secs(60));
+    db.fork(alt.clone(), BranchId::main()).await.unwrap();
+    h.advance(Duration::from_secs(60));
+
+    // `c -> d` is churned after the fork, so its pre-fork interval is in the
+    // log and reachable by the fold arm — for `c -> d`.
+    db.assert_edge(edge("c", "d", TS, Some(TS3)).weight(4.0))
+        .await
+        .unwrap();
+
+    // `a -> b` has no interval on either lineage. `[TS2, NOW)` overlaps
+    // `c -> d`'s pre-fork `[TS, TS3)` and that is nothing to do with it.
+    db.assert_edge(edge("a", "b", TS2, Some(NOW)).on_branch(alt.clone()))
+        .await
+        .expect("another key's pre-fork interval was read as this key's");
+
+    // One row on the branch: the assertion it made, and no shadow of anyone
+    // else's key dragged in by the resolution.
+    assert_eq!(rows_on(&db, "alt").await, 1);
+
+    db.close().await.unwrap();
+}
+
 // ---------------------------------------------------------------------------
 // Batches
 // ---------------------------------------------------------------------------

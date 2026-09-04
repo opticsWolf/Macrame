@@ -460,6 +460,8 @@ ORDER BY w.node_id;
                 .as_ref()
                 .map(|_| Self::recorded_slot(shape)),
             tag: "",
+            // A walk discovers its edges; there is no key to push down.
+            key: None,
         }
     }
 

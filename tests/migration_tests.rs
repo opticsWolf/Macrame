@@ -1011,50 +1011,6 @@ async fn the_single_open_probe_seeks_rather_than_scans() {
     );
 }
 
-/// **The overlap guard's own query seeks on all three equality columns.**
-///
-/// The guard (D-060) fell into D-059's trap one wave after it was fixed. Its
-/// first version carried `AND valid_from < :new_valid_to` — a provably safe
-/// narrowing — and that range predicate made `idx_lc_traversal_cover` win as a
-/// covering index while binding only `source_id`, so the guard scanned the
-/// source's whole out-degree. Measured at **+9.8 ms** on a 90-edge chunk into a
-/// 2,000-edge hub, and invisible to every correctness test because the answer
-/// was right.
-///
-/// Pinned here because the failure mode is a *plan*, not a result: nothing about
-/// the returned rows changes when this regresses.
-#[tokio::test]
-async fn the_overlap_guard_seeks_on_all_three_equality_columns() {
-    let harness = TestHarness::new();
-    let conn = connect(&harness).await;
-    macrame::schema::run_migrations(&conn).await.unwrap();
-
-    // The guard's query, as `connection::OVERLAP_CANDIDATES` states it.
-    let probe = "SELECT valid_from, valid_to FROM links_current \
-                 WHERE source_id = ?1 AND target_id = ?2 AND edge_type = ?3 \
-                   AND valid_from <> ?4";
-
-    let mut rows = conn
-        .query(&format!("EXPLAIN QUERY PLAN {probe}"), ())
-        .await
-        .unwrap();
-    let mut plan = Vec::new();
-    while let Some(r) = rows.next().await.unwrap() {
-        plan.push(r.get::<String>(3).unwrap());
-    }
-    let step = plan.join(" | ");
-
-    assert!(
-        step.contains("idx_lc_open_interval"),
-        "the overlap guard is not using the index added for it: {step}"
-    );
-    assert!(
-        step.contains("source_id=? AND target_id=? AND edge_type=?"),
-        "the guard binds fewer columns than the index offers, so it scans the \
-         source's out-degree — this is D-059's defect in D-060's guard: {step}"
-    );
-}
-
 /// **The filtered subgraph walk still uses the traversal index (D-073).**
 ///
 /// Adding `edge_types` and `min_weight` to this query lands in exactly the code

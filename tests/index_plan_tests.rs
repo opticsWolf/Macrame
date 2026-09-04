@@ -105,7 +105,11 @@ const REGISTRY: &[(&str, Justification)] = &[
                   FROM links_current WHERE branch_id = ?1 AND recorded_at > ?2",
             source: Some((
                 include_str!("../src/graph/lineage.rs"),
-                "WHERE g.cutoff IS NOT NULL AND lc.recorded_at > g.cutoff",
+                // Without the `WHERE`: since 0.15.8 the clause carries an
+                // optional key narrowing in front of it (W13.3, D-250),
+                // and pinning the keyword would pin the interpolation
+                // rather than the comparison this index serves.
+                "g.cutoff IS NOT NULL AND lc.recorded_at > g.cutoff",
             )),
         },
     ),

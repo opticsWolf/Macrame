@@ -276,6 +276,44 @@ pub(crate) async fn lineage_shape(
 /// comparison written once, not an argument to restate in a second place.
 ///
 /// [D-228]: ../../docs/architecture/s13-decision-register.md#d-228
+/// The three placeholders that fix one edge key, when the reader has one.
+///
+/// The write path always does: [`crate::connection`]'s overlap guard and its
+/// retirement both hold a `(source, target, edge_type)` before any SQL exists,
+/// and asking the resolution about the whole projection to then discard all but
+/// one key would make a branched bulk write O(rows) per row.
+///
+/// Narrowing is **not** a filter appended to the resolved relation. It is
+/// pushed into the base scans of [`churned_cte`] and [`links_cut_cte`], where
+/// `idx_lc_open_interval` leads with exactly these three columns and each arm
+/// becomes a seek (0.14.8, [D-225]; lowered 0.15.8, W13.3, [D-250]).
+///
+/// It also decides one column. A keyed read is a *write* path read, and the
+/// write path carries `properties` through the resolution because
+/// [`retire_from_resolved`] restates it on the shadow row; an
+/// unkeyed traversal does not, and carrying a JSON blob through a window over
+/// the whole projection is not a cost a reader should pay for a column it never
+/// selects.
+///
+/// [D-225]: ../../docs/architecture/s13-decision-register.md#d-225
+/// [D-250]: ../../docs/architecture/s13-decision-register.md#d-250
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct KeySlots {
+    pub source: usize,
+    pub target: usize,
+    pub edge_type: usize,
+}
+
+impl KeySlots {
+    /// The three equalities, on `alias`, as one line of a `WHERE`.
+    pub(crate) fn equalities(&self, alias: &str) -> String {
+        format!(
+            "{alias}.source_id = ?{} AND {alias}.target_id = ?{} AND {alias}.edge_type = ?{}",
+            self.source, self.target, self.edge_type
+        )
+    }
+}
+
 pub(crate) fn ancestry_cte(slot: usize, tag: &str) -> String {
     format!(
         r#"lineage{tag}(branch_id, dist, cutoff) AS (
@@ -309,14 +347,23 @@ pub(crate) fn ancestry_cte(slot: usize, tag: &str) -> String {
 /// The `cutoff IS NOT NULL` clause is what makes this empty for a read on the
 /// root — `main` has no ancestors and no cutoff, so a forked database still
 /// pays nothing here to read its own trunk.
-pub(crate) fn churned_cte(tag: &str) -> String {
+pub(crate) fn churned_cte(tag: &str, key: Option<KeySlots>) -> String {
+    // Keyed, the three equalities go first and the base scan becomes a seek on
+    // `idx_lc_open_interval`. Composed from the *columns* either way rather
+    // than from the key's own placeholders: the rows are already narrowed to
+    // that key, so the two spellings hold the same string, and one of them is
+    // the spelling the unkeyed arm has to use anyway.
+    let narrow = match key {
+        Some(k) => format!("{} AND ", k.equalities("lc")),
+        None => String::new(),
+    };
     format!(
         r#"churned{tag}(entity_id, branch_id, cutoff) AS (
     SELECT lc.source_id || '|' || lc.target_id || '|' || lc.edge_type || '|' || lc.valid_from,
            lc.branch_id, g.cutoff
     FROM links_current lc
     JOIN lineage{tag} g ON g.branch_id = lc.branch_id
-    WHERE g.cutoff IS NOT NULL AND lc.recorded_at > g.cutoff
+    WHERE {narrow}g.cutoff IS NOT NULL AND lc.recorded_at > g.cutoff
 )"#
     )
 }
@@ -344,21 +391,49 @@ pub(crate) fn churned_cte(tag: &str) -> String {
 ///
 /// The column list matches `links_current`'s and `links_at_tx`'s exactly, which
 /// is what lets [`visible_cte`] reduce any of the three without knowing which.
-pub(crate) fn links_cut_cte(tag: &str) -> String {
+pub(crate) fn links_cut_cte(tag: &str, key: Option<KeySlots>) -> String {
+    // The narrowing goes on the **projection** arm only. The log arm joins
+    // `churned{tag}`, which is already one key when this one is, so repeating
+    // the equalities there would narrow nothing and read as though it did.
+    //
+    // The parentheses around the cutoff disjunction are the whole reason this
+    // is built rather than concatenated: `A AND B OR C` is `(A AND B) OR C` in
+    // SQL, so appending the key to this arm without them would return every
+    // ancestor's pre-cutoff row for every edge in the ledger.
+    let (narrow, props, log_props) = match key {
+        Some(k) => (
+            format!(
+                "{} AND (g.cutoff IS NULL OR lc.recorded_at <= g.cutoff)",
+                k.equalities("lc")
+            ),
+            ", properties",
+            "\n           json_extract(payload, '$.properties'),",
+        ),
+        None => (
+            "g.cutoff IS NULL OR lc.recorded_at <= g.cutoff".to_string(),
+            "",
+            "",
+        ),
+    };
+    let carried = if key.is_some() {
+        "lc.weight, lc.properties, lc.branch_id"
+    } else {
+        "lc.weight, lc.branch_id"
+    };
     format!(
-        r#"links_cut{tag}(source_id, target_id, edge_type, valid_from, valid_to, weight, branch_id) AS (
+        r#"links_cut{tag}(source_id, target_id, edge_type, valid_from, valid_to, weight{props}, branch_id) AS (
     SELECT lc.source_id, lc.target_id, lc.edge_type, lc.valid_from, lc.valid_to,
-           lc.weight, lc.branch_id
+           {carried}
     FROM links_current lc
     JOIN lineage{tag} g ON g.branch_id = lc.branch_id
-    WHERE g.cutoff IS NULL OR lc.recorded_at <= g.cutoff
+    WHERE {narrow}
     UNION ALL
     SELECT json_extract(payload, '$.source_id'),
            json_extract(payload, '$.target_id'),
            json_extract(payload, '$.edge_type'),
            json_extract(payload, '$.valid_from'),
            json_extract(payload, '$.valid_to'),
-           json_extract(payload, '$.weight'),
+           json_extract(payload, '$.weight'),{log_props}
            branch_id
     FROM (
         SELECT transaction_log.payload, transaction_log.branch_id,
@@ -376,8 +451,36 @@ pub(crate) fn links_cut_cte(tag: &str) -> String {
     )
 }
 
-/// The same resolution as [`links_cut_cte`] and [`visible_cte`], narrowed to a
-/// single edge key, for the **write** path (0.14.8, §15.4, D-225).
+/// The slots the write path binds, which are fixed by its two statements
+/// rather than by a layout type (0.14.8, D-225).
+///
+/// `?1` source, `?2` target, `?3` edge type, `?4` the `valid_from` each tail
+/// selects on, `?5` the writing lineage, and for the retirement `?6` the new
+/// `valid_to` and `?7` the stamp. Both callers bind all of them positionally
+/// at one site each.
+const WRITE_KEY: KeySlots = KeySlots {
+    source: 1,
+    target: 2,
+    edge_type: 3,
+};
+const WRITE_BRANCH_SLOT: usize = 5;
+
+/// What the write path has decided before any SQL exists.
+///
+/// Current belief always: the guard asks what this lineage believes *now*, and
+/// an assertion is made against now. There is no recorded slot to name.
+fn write_resolution(shape: LineageShape) -> Resolution<'static> {
+    Resolution {
+        shape,
+        branch_slot: WRITE_BRANCH_SLOT,
+        recorded_slot: None,
+        tag: "",
+        key: Some(WRITE_KEY),
+    }
+}
+
+/// Overlap candidates as the writing lineage can see them (0.14.8, §15.4,
+/// [D-225]; lowered 0.15.8, W13.3, [D-250]).
 ///
 /// # Why the write path needs a resolution at all
 ///
@@ -402,90 +505,97 @@ pub(crate) fn links_cut_cte(tag: &str) -> String {
 /// answer. **What a lineage may not overlap is what that lineage can see**,
 /// which is the read's definition and now the write's.
 ///
-/// # Restricted to one key rather than reusing the read's CTEs
+/// # It was a second spelling of that definition until 0.15.8
 ///
-/// [`churned_cte`] and [`links_cut_cte`] are written for a traversal and scan
-/// `links_current` whole. Calling them per assertion would make a branched
-/// bulk write O(rows) per row. These push the `(source, target, edge_type)`
-/// predicate down into the base scan instead, where `idx_lc_open_interval`
-/// leads with exactly those three columns, so each arm is a seek. The cost of
-/// the duplication is a second spelling of the fold, and what keeps it honest
-/// is that a mismatch cannot be quiet: the arms would disagree with the read
-/// about what a branch can see, and `branch_write_tests` asserts the two agree
-/// on the same fixture.
+/// The narrowing was real and is unchanged — [`churned_cte`] and
+/// [`links_cut_cte`] are written for a traversal and scan `links_current`
+/// whole, so calling them per assertion would make a branched bulk write
+/// O(rows) per row, and pushing the key into the base scans turns each arm
+/// into a seek on `idx_lc_open_interval`. What was not real was the *copy*:
+/// a `key_visibility_cte` holding its own `lineage`, its own churned set, its
+/// own two-arm hybrid and its own nearest-lineage window, four relations that
+/// had to keep agreeing with four in [`crate::graph::plan`] and were kept
+/// honest only by `branch_write_tests` asserting the two answers match on one
+/// fixture. [D-227](../../docs/architecture/s13-decision-register.md#d-227) is
+/// four releases of what happens when a reader spells its own. The key is a
+/// [`KeySlots`] on [`Resolution`] now, and this function is the lowering plus
+/// one line.
 ///
-/// Both tails are `rn = 1` over `PARTITION BY valid_from ORDER BY dist` — the
-/// nearest lineage holding that key — which is [`visible_cte`] with the edge
-/// triple already fixed and therefore out of the partition.
+/// # What that cost, and bought, on `examples/edge_write_probe`
 ///
-/// Slots: `?1` source, `?2` target, `?3` edge type, `?4` the `valid_from` the
-/// tail selects on, `?5` the writing lineage.
-fn key_visibility_cte() -> &'static str {
-    r#"WITH RECURSIVE
-lineage(branch_id, dist, cutoff) AS (
-    SELECT ?5, 0, NULL
-    UNION ALL
-    SELECT b.parent_id, g.dist + 1,
-           CASE WHEN g.cutoff IS NULL OR b.forked_at < g.cutoff
-                THEN b.forked_at ELSE g.cutoff END
-    FROM branches b JOIN lineage g ON b.branch_id = g.branch_id
-    WHERE b.parent_id IS NOT NULL
-),
-key_rows(valid_from, valid_to, weight, properties, recorded_at, branch_id, dist, cutoff) AS (
-    SELECT lc.valid_from, lc.valid_to, lc.weight, lc.properties,
-           lc.recorded_at, lc.branch_id, g.dist, g.cutoff
-    FROM links_current lc
-    JOIN lineage g ON g.branch_id = lc.branch_id
-    WHERE lc.source_id = ?1 AND lc.target_id = ?2 AND lc.edge_type = ?3
-),
-churned_key(entity_id, branch_id, cutoff, dist) AS (
-    SELECT ?1 || '|' || ?2 || '|' || ?3 || '|' || valid_from, branch_id, cutoff, dist
-    FROM key_rows
-    WHERE cutoff IS NOT NULL AND recorded_at > cutoff
-),
-visible_key(valid_from, valid_to, weight, properties, dist) AS (
-    SELECT valid_from, valid_to, weight, properties, dist FROM key_rows
-    WHERE cutoff IS NULL OR recorded_at <= cutoff
-    UNION ALL
-    SELECT json_extract(payload, '$.valid_from'),
-           json_extract(payload, '$.valid_to'),
-           json_extract(payload, '$.weight'),
-           json_extract(payload, '$.properties'),
-           dist
-    FROM (
-        SELECT transaction_log.payload, k.dist,
-               ROW_NUMBER() OVER (
-                   PARTITION BY transaction_log.entity_id, transaction_log.branch_id
-                   ORDER BY transaction_log.seq_id DESC
-               ) AS rn
-        FROM transaction_log
-        JOIN churned_key k ON k.entity_id = transaction_log.entity_id
-                          AND k.branch_id = transaction_log.branch_id
-        WHERE transaction_log.table_name = 'links'
-          AND transaction_log.recorded_at <= k.cutoff
-    ) WHERE rn = 1
-),
-resolved_key(valid_from, valid_to, weight, properties) AS (
-    SELECT valid_from, valid_to, weight, properties FROM (
-        SELECT valid_from, valid_to, weight, properties,
-               ROW_NUMBER() OVER (PARTITION BY valid_from ORDER BY dist) AS rn
-        FROM visible_key
-    ) WHERE rn = 1
-)
-"#
-}
-
-/// Overlap candidates as the writing lineage can see them. See
-/// [`key_visibility_cte`].
+/// Best of 500 `assert_edge` calls, three runs each, release build:
 ///
-/// `valid_from <> ?4` excludes the row being re-asserted, exactly as the trunk
-/// statement does: re-assertion at the same `valid_from` is Doctrine III's
-/// ordinary case and is settled by the primary key and the single-open trigger,
-/// not by the overlap guard.
-pub(crate) fn overlap_candidates_resolved() -> String {
+/// ```text
+///           0.15.7    0.15.8
+/// trunk    0.0958    0.0966 ms   unchanged
+/// forked   0.1044    0.0975 ms   -6.6%
+/// branch   0.1059    0.1091 ms   +3.0%
+/// ```
+///
+/// The forked trunk gains because it stopped taking the resolved form: it was
+/// exact there only because a root's ancestry is itself, and D-248's C-24
+/// repair is what lets [`crate::graph::LineageShape`] tell a root apart from a
+/// branch at all. It now lowers to a two-predicate lookup on `links_current`.
+///
+/// The branch loses because the shared [`visible_cte`] joins `lineage` to order
+/// by `dist`, where the deleted `key_visibility_cte` carried `dist` through its
+/// own relations and needed no join. Buying that 3% back means giving the keyed
+/// spelling its own `dist` column in three functions — a second shape for the
+/// hybrid, decided by the caller — which is the divergence this release exists
+/// to remove, over a join against a materialised ancestry of two rows.
+///
+/// **The `churned` base scan is unchanged and was never the cost.** It planned
+/// as `SEARCH lc USING COVERING INDEX idx_lc_lineage_cut (branch_id=? AND
+/// recorded_at>?)` in 0.15.7 and it plans that way now: SQLite inlines the
+/// key-narrowed CTE into each use, so the equalities and the `recorded_at`
+/// range meet in one scan either way. Splitting them apart with
+/// `AS MATERIALIZED` does restore the key seek, and costs more than it saves —
+/// the log arm then loses `SEARCH transaction_log USING INDEX idx_txlog_entity
+/// (entity_id=?)` and scans the whole log, because a materialised `churned` is
+/// no longer a small driving set the planner can see through. It was measured
+/// and not taken.
+///
+/// # The predicate set, which is three equalities and nothing else
+///
+/// `valid_from <> ?4` excludes the row being re-asserted: re-assertion at the
+/// same `valid_from` is Doctrine III's ordinary case and is settled by the
+/// primary key and the single-open trigger, not by this guard.
+///
+/// **The "and nothing else" was measured, not assumed**, and it is the half of
+/// this statement a lowering must not quietly improve. The first version added
+/// `AND valid_from < :new_valid_to`, a provably safe narrowing — overlap
+/// requires `max(start) < min(end)`, so an interval starting at or after the
+/// new one's end cannot overlap it. It cost **9.8 ms on a 90-edge chunk into a
+/// 2,000-edge hub**, because it walked the planner straight into D-059's trap:
+///
+/// ```text
+/// with the range:     SEARCH links_current USING COVERING INDEX
+///                     idx_lc_traversal_cover (source_id=? AND valid_from<?)
+/// without it:         SEARCH links_current USING COVERING INDEX
+///                     idx_lc_open_interval (source_id=? AND target_id=? AND edge_type=?)
+/// ```
+///
+/// `idx_lc_traversal_cover` leads on `(source_id, valid_from, …)` and contains
+/// every column that query mentions, so with a `valid_from` range available it
+/// wins as a covering index while binding **one** equality column — and the
+/// guard scans the source's entire out-degree. Same shape as the defect D-059
+/// diagnosed in `trg_links_single_open`, reintroduced by an optimisation one
+/// wave after it was fixed. Three equalities make it a point lookup that
+/// `idx_lc_open_interval` serves exactly, and the rows it returns are a version
+/// count rather than an out-degree. **A narrowing predicate is not free if it
+/// changes the plan** — which is also why [`KeySlots`] pushes its equalities
+/// into the base scans rather than appending them to the resolved relation,
+/// and why `index_plan_tests` pins this statement's plan on every shape.
+///
+/// [D-225]: ../../docs/architecture/s13-decision-register.md#d-225
+/// [D-250]: ../../docs/architecture/s13-decision-register.md#d-250
+pub(crate) fn overlap_candidates_resolved(shape: LineageShape) -> String {
+    let l = lower(&write_resolution(shape));
     format!(
-        "{}SELECT valid_from, valid_to FROM resolved_key WHERE valid_from <> ?4",
-        key_visibility_cte()
+        "{}SELECT l.valid_from, l.valid_to FROM {} l WHERE l.valid_from <> ?4{}",
+        l.with_clause(),
+        l.source,
+        l.filter
     )
 }
 
@@ -502,15 +612,20 @@ pub(crate) fn overlap_candidates_resolved() -> String {
 ///
 /// `?6` is the new `valid_to`, `?7` the stamp. `weight` and `properties` are
 /// carried from the visible row rather than restated, which is what makes this
-/// a retirement rather than a new assertion that happens to be closed.
-pub(crate) fn retire_from_resolved() -> String {
+/// a retirement rather than a new assertion that happens to be closed — and it
+/// is the reason a keyed resolution carries `properties` at all (see
+/// [`KeySlots`]).
+pub(crate) fn retire_from_resolved(shape: LineageShape) -> String {
+    let l = lower(&write_resolution(shape));
     format!(
         "{}INSERT INTO links \
              (source_id, target_id, edge_type, valid_from, valid_to, weight, \
               properties, recorded_at, branch_id) \
-         SELECT ?1, ?2, ?3, ?4, ?6, weight, properties, ?7, ?5 \
-         FROM resolved_key WHERE valid_from = ?4",
-        key_visibility_cte()
+         SELECT ?1, ?2, ?3, ?4, ?6, l.weight, l.properties, ?7, ?5 \
+         FROM {} l WHERE l.valid_from = ?4{}",
+        l.with_clause(),
+        l.source,
+        l.filter
     )
 }
 
@@ -569,12 +684,14 @@ pub(crate) fn diff_sql() -> String {
         branch_slot: 1,
         recorded_slot: None,
         tag: "_a",
+        key: None,
     });
     let b = lower(&Resolution {
         shape: LineageShape::Resolved,
         branch_slot: 2,
         recorded_slot: None,
         tag: "_b",
+        key: None,
     });
     format!(
         "WITH RECURSIVE {},\n{}\n\
@@ -620,12 +737,21 @@ pub(crate) fn diff_sql() -> String {
 /// source contributes at most one row per `(edge key, lineage)` and each
 /// lineage appears in `lineage` once. See [`ancestry_cte`] for why ordering by
 /// `recorded_at` instead would pick the same row.
-pub(crate) fn visible_cte(source: &str, tag: &str) -> String {
+pub(crate) fn visible_cte(source: &str, tag: &str, key: Option<KeySlots>) -> String {
+    // The partition stays the whole edge key even when three quarters of it is
+    // a constant: it is the same rows either way, and a partition that changed
+    // shape with the caller would be a second definition of what one edge is.
+    let props = if key.is_some() { ", properties" } else { "" };
+    let carried = if key.is_some() {
+        "l.properties, l.branch_id,"
+    } else {
+        "l.branch_id,"
+    };
     format!(
-        r#"visible{tag}(source_id, target_id, edge_type, valid_from, valid_to, weight, branch_id) AS (
-    SELECT source_id, target_id, edge_type, valid_from, valid_to, weight, branch_id FROM (
+        r#"visible{tag}(source_id, target_id, edge_type, valid_from, valid_to, weight{props}, branch_id) AS (
+    SELECT source_id, target_id, edge_type, valid_from, valid_to, weight{props}, branch_id FROM (
         SELECT l.source_id, l.target_id, l.edge_type, l.valid_from, l.valid_to, l.weight,
-               l.branch_id,
+               {carried}
                ROW_NUMBER() OVER (
                    PARTITION BY l.source_id, l.target_id, l.edge_type, l.valid_from
                    ORDER BY g.dist
@@ -661,6 +787,68 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    /// **The guard seeks the edge key on every shape it can be given.**
+    ///
+    /// D-060's overlap guard fell into D-059's trap one wave after D-059 fixed
+    /// it: a provably safe `AND valid_from < :new_valid_to` handed the planner
+    /// a range, `idx_lc_traversal_cover` won as a covering index while binding
+    /// **one** column, and the guard scanned the source's whole out-degree —
+    /// **+9.8 ms** on a 90-edge chunk into a 2,000-edge hub, invisible to every
+    /// correctness test because the rows returned were right.
+    ///
+    /// Until 0.15.8 that was pinned in `migration_tests` against a *hand-copied*
+    /// reproduction of `OVERLAP_CANDIDATES`, which is the weakest form of this
+    /// test: it pins a string next to the code rather than the code. The
+    /// statements are generated now ([`overlap_candidates_resolved`],
+    /// [`retire_from_resolved`]), so the plan is taken from the bytes the guard
+    /// will prepare — on all three shapes, including the two the old pin could
+    /// not reach because it predated them.
+    ///
+    /// **Three columns bound is the assertion**, not the index name: the
+    /// resolved shape reaches `links_current` through four CTEs and the trunk
+    /// shapes reach it directly, so which index serves the seek differs, and
+    /// what must not differ is that the seek is on the whole key. One column
+    /// bound is O(out-degree) wherever it appears.
+    #[tokio::test]
+    async fn the_guard_seeks_the_edge_key_on_every_shape() {
+        let conn = fresh().await;
+        fork(&conn, "exp", "main").await;
+
+        for shape in [
+            LineageShape::Trunk,
+            LineageShape::TrunkOnForked,
+            LineageShape::Resolved,
+        ] {
+            for (what, sql) in [
+                ("overlap", overlap_candidates_resolved(shape)),
+                ("retire", retire_from_resolved(shape)),
+            ] {
+                let mut rows = conn
+                    .query(&format!("EXPLAIN QUERY PLAN {sql}"), ())
+                    .await
+                    .unwrap();
+                let mut plan = Vec::new();
+                while let Some(r) = rows.next().await.unwrap() {
+                    plan.push(r.get::<String>(3).unwrap());
+                }
+                let step = plan.join(" | ");
+
+                assert!(
+                    step.contains("source_id=? AND target_id=? AND edge_type=?"),
+                    "{shape:?}/{what} binds fewer columns than the key has, so \
+                     it scans the source's out-degree — D-059 in D-060's \
+                     guard: {step}"
+                );
+                // The overlap read has no `valid_from` equality to fall back
+                // on, so it is the one that needs the index built for it.
+                assert!(
+                    what != "overlap" || step.contains("idx_lc_open_interval"),
+                    "{shape:?} overlap is off the index added for it: {step}"
+                );
+            }
+        }
     }
 
     /// One row in `branches` is the trunk shape whatever name is asked for,

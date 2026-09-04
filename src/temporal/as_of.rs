@@ -153,6 +153,7 @@ pub async fn query_as_of_edges_on(
                 branch_slot: 2,
                 recorded_slot: None,
                 tag: "",
+                key: None,
             });
             (
                 format!(
