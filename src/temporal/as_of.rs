@@ -125,7 +125,7 @@ pub async fn query_as_of_edges_on(
     ts: &str,
     branch: Option<&str>,
 ) -> Result<Vec<(String, String, String, String, String)>> {
-    Ok(crate::plan::edges_at(conn, ts, None, branch)
+    Ok(crate::plan::edges_at(conn, ts, None, branch, None)
         .await?
         .into_iter()
         .map(|e| {

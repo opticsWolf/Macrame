@@ -372,6 +372,11 @@ pub fn macrame::graph::CandidateCount::lower_bound(self) -> usize
 #[non_exhaustive] pub enum macrame::graph::VectorFilterStrategy
 pub macrame::graph::VectorFilterStrategy::PostFilter
 pub macrame::graph::VectorFilterStrategy::PreFilterCTE
+#[non_exhaustive] pub enum macrame::graph::WalkOutcome
+pub macrame::graph::WalkOutcome::Complete
+pub macrame::graph::WalkOutcome::LimitReached
+impl macrame::graph::WalkOutcome
+pub fn macrame::graph::WalkOutcome::hit_limit(self) -> bool
 pub struct macrame::graph::CostEstimate
 pub macrame::graph::CostEstimate::candidates: macrame::graph::CandidateCount
 pub macrame::graph::CostEstimate::k_prime: usize
@@ -458,6 +463,7 @@ pub macrame::graph::TraversalBuilder::attribute_mode: core::option::Option<macra
 pub macrame::graph::TraversalBuilder::branch: core::option::Option<alloc::string::String>
 pub macrame::graph::TraversalBuilder::content: bool
 pub macrame::graph::TraversalBuilder::edge_types: alloc::vec::Vec<alloc::string::String>
+pub macrame::graph::TraversalBuilder::limit: core::option::Option<usize>
 pub macrame::graph::TraversalBuilder::max_depth: usize
 pub macrame::graph::TraversalBuilder::min_weight: f64
 pub macrame::graph::TraversalBuilder::start_node: alloc::string::String
@@ -470,6 +476,8 @@ pub fn macrame::graph::TraversalBuilder::content(self, bool) -> Self
 pub fn macrame::graph::TraversalBuilder::edge_types(self, alloc::vec::Vec<alloc::string::String>) -> Self
 pub async fn macrame::graph::TraversalBuilder::execute(&self, &libsql::connection::Connection, &str) -> macrame::error::Result<alloc::vec::Vec<macrame::temporal::NodeAttributes>>
 pub async fn macrame::graph::TraversalBuilder::execute_ids(&self, &libsql::connection::Connection, &str) -> macrame::error::Result<alloc::vec::Vec<alloc::string::String>>
+pub async fn macrame::graph::TraversalBuilder::execute_ids_explained(&self, &libsql::connection::Connection, &str) -> macrame::error::Result<(alloc::vec::Vec<alloc::string::String>, macrame::graph::WalkOutcome)>
+pub fn macrame::graph::TraversalBuilder::limit(self, usize) -> Self
 pub fn macrame::graph::TraversalBuilder::max_depth(self, usize) -> Self
 pub fn macrame::graph::TraversalBuilder::min_weight(self, f64) -> Self
 pub fn macrame::graph::TraversalBuilder::new(impl core::convert::Into<alloc::string::String>) -> Self
@@ -574,9 +582,11 @@ pub const macrame::metrics::BUCKET_COUNT: usize
 pub mod macrame::plan
 #[non_exhaustive] pub struct macrame::plan::ReadPlan
 pub macrame::plan::ReadPlan::branch: core::option::Option<macrame::branch::BranchId>
+pub macrame::plan::ReadPlan::limit: core::option::Option<usize>
 pub macrame::plan::ReadPlan::recorded: core::option::Option<alloc::string::String>
 pub macrame::plan::ReadPlan::valid: core::option::Option<alloc::string::String>
 impl macrame::plan::ReadPlan
+pub fn macrame::plan::ReadPlan::limit(self, usize) -> Self
 pub fn macrame::plan::ReadPlan::new() -> Self
 pub fn macrame::plan::ReadPlan::on(self, macrame::branch::BranchId) -> Self
 pub fn macrame::plan::ReadPlan::recorded_at(self, impl core::convert::Into<alloc::string::String>) -> Self
@@ -768,6 +778,11 @@ pub macrame::prelude::VectorFilterStrategy::PreFilterCTE
 pub macrame::prelude::WalCheckpointPolicy::Default
 pub macrame::prelude::WalCheckpointPolicy::Disabled
 pub macrame::prelude::WalCheckpointPolicy::EveryPages(u32)
+#[non_exhaustive] pub enum macrame::prelude::WalkOutcome
+pub macrame::prelude::WalkOutcome::Complete
+pub macrame::prelude::WalkOutcome::LimitReached
+impl macrame::graph::WalkOutcome
+pub fn macrame::graph::WalkOutcome::hit_limit(self) -> bool
 pub struct macrame::prelude::Annotation
 pub macrame::prelude::Annotation::concept_id: alloc::string::String
 pub macrame::prelude::Annotation::label: alloc::string::String
@@ -1035,9 +1050,11 @@ impl macrame::error::Overlap
 pub fn macrame::error::Overlap::provenance(&self) -> &'static str
 #[non_exhaustive] pub struct macrame::prelude::ReadPlan
 pub macrame::prelude::ReadPlan::branch: core::option::Option<macrame::branch::BranchId>
+pub macrame::prelude::ReadPlan::limit: core::option::Option<usize>
 pub macrame::prelude::ReadPlan::recorded: core::option::Option<alloc::string::String>
 pub macrame::prelude::ReadPlan::valid: core::option::Option<alloc::string::String>
 impl macrame::plan::ReadPlan
+pub fn macrame::plan::ReadPlan::limit(self, usize) -> Self
 pub fn macrame::plan::ReadPlan::new() -> Self
 pub fn macrame::plan::ReadPlan::on(self, macrame::branch::BranchId) -> Self
 pub fn macrame::plan::ReadPlan::recorded_at(self, impl core::convert::Into<alloc::string::String>) -> Self
@@ -1063,6 +1080,7 @@ pub macrame::prelude::TraversalBuilder::attribute_mode: core::option::Option<mac
 pub macrame::prelude::TraversalBuilder::branch: core::option::Option<alloc::string::String>
 pub macrame::prelude::TraversalBuilder::content: bool
 pub macrame::prelude::TraversalBuilder::edge_types: alloc::vec::Vec<alloc::string::String>
+pub macrame::prelude::TraversalBuilder::limit: core::option::Option<usize>
 pub macrame::prelude::TraversalBuilder::max_depth: usize
 pub macrame::prelude::TraversalBuilder::min_weight: f64
 pub macrame::prelude::TraversalBuilder::start_node: alloc::string::String
@@ -1075,6 +1093,8 @@ pub fn macrame::graph::TraversalBuilder::content(self, bool) -> Self
 pub fn macrame::graph::TraversalBuilder::edge_types(self, alloc::vec::Vec<alloc::string::String>) -> Self
 pub async fn macrame::graph::TraversalBuilder::execute(&self, &libsql::connection::Connection, &str) -> macrame::error::Result<alloc::vec::Vec<macrame::temporal::NodeAttributes>>
 pub async fn macrame::graph::TraversalBuilder::execute_ids(&self, &libsql::connection::Connection, &str) -> macrame::error::Result<alloc::vec::Vec<alloc::string::String>>
+pub async fn macrame::graph::TraversalBuilder::execute_ids_explained(&self, &libsql::connection::Connection, &str) -> macrame::error::Result<(alloc::vec::Vec<alloc::string::String>, macrame::graph::WalkOutcome)>
+pub fn macrame::graph::TraversalBuilder::limit(self, usize) -> Self
 pub fn macrame::graph::TraversalBuilder::max_depth(self, usize) -> Self
 pub fn macrame::graph::TraversalBuilder::min_weight(self, f64) -> Self
 pub fn macrame::graph::TraversalBuilder::new(impl core::convert::Into<alloc::string::String>) -> Self
@@ -1648,9 +1668,11 @@ impl macrame::error::Overlap
 pub fn macrame::error::Overlap::provenance(&self) -> &'static str
 #[non_exhaustive] pub struct macrame::ReadPlan
 pub macrame::ReadPlan::branch: core::option::Option<macrame::branch::BranchId>
+pub macrame::ReadPlan::limit: core::option::Option<usize>
 pub macrame::ReadPlan::recorded: core::option::Option<alloc::string::String>
 pub macrame::ReadPlan::valid: core::option::Option<alloc::string::String>
 impl macrame::plan::ReadPlan
+pub fn macrame::plan::ReadPlan::limit(self, usize) -> Self
 pub fn macrame::plan::ReadPlan::new() -> Self
 pub fn macrame::plan::ReadPlan::on(self, macrame::branch::BranchId) -> Self
 pub fn macrame::plan::ReadPlan::recorded_at(self, impl core::convert::Into<alloc::string::String>) -> Self

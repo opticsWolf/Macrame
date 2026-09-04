@@ -28,11 +28,56 @@ pub enum AttributeMode {
     Omit,
 }
 
+/// Why a limited walk stopped (0.15.10, W13.5, C-8).
+///
+/// A list of ids cannot answer this. [`TraversalBuilder::limit`] bounds the
+/// walk's rows, and the projection then drops rows again — one node can enter
+/// the walk at two depths, and a retired concept is filtered after the walk has
+/// already spent the budget on it — so a limit of 100 can return 87 ids whether
+/// the graph held 87 or 87,000. That is the shape Doctrine II refuses to leave
+/// to a comment, and it is why [`TraversalBuilder::limit`] arrives with
+/// [`TraversalBuilder::execute_ids_explained`] rather than alone.
+///
+/// The answer is the walk's own row count, taken in the same statement, and it
+/// is exact rather than inferred: `LimitReached` means the walk produced the
+/// number of rows it was allowed and stopped, not that the id count happened to
+/// reach the ceiling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum WalkOutcome {
+    /// The walk ran out of graph: the depth bound or the frontier stopped it,
+    /// and the ids are every node the traversal describes.
+    Complete,
+    /// The walk ran out of budget. More of the graph satisfies the traversal
+    /// than came back, and what came back is the near end of it — the walk's
+    /// queue is breadth-first, so a limit drops the farthest nodes first.
+    LimitReached,
+}
+
+impl WalkOutcome {
+    /// Whether the ceiling bit. Named like
+    /// [`CandidateCount::is_capped`](crate::graph::CandidateCount::is_capped),
+    /// which is the same question one layer up.
+    pub fn hit_limit(self) -> bool {
+        matches!(self, Self::LimitReached)
+    }
+}
+
 /// Recursive CTE traversal query builder (§5.2).
 #[derive(Debug, Clone)]
 pub struct TraversalBuilder {
     pub start_node: String,
     pub max_depth: usize,
+    /// A ceiling on the rows the walk may produce, if the caller set one
+    /// (0.15.10, W13.5, C-8).
+    ///
+    /// `None` — the default — walks until [`Self::max_depth`] and the frontier
+    /// stop it. `Some(n)` emits `LIMIT ?n` **inside** the recursive CTE, which
+    /// is the placement that bounds work; [`Self::limit()`] carries the
+    /// measurement that decides it and the contract that follows.
+    ///
+    /// Set through [`Self::limit()`].
+    pub limit: Option<usize>,
     pub edge_types: Vec<String>,
     pub min_weight: f64,
     /// `None` means *defaulted*, not `Current` (T3.2, D-085).
@@ -105,6 +150,7 @@ impl TraversalBuilder {
         Self {
             start_node: start_node.into(),
             max_depth: 3,
+            limit: None,
             edge_types: Vec::new(),
             min_weight: 0.0,
             attribute_mode: None,
@@ -130,12 +176,17 @@ impl TraversalBuilder {
         self
     }
 
-    /// Take all three read qualifiers from one [`ReadPlan`] (0.15.9, W13.4,
+    /// Take every read qualifier from one [`ReadPlan`] (0.15.9, W13.4,
     /// [D-251]).
     ///
-    /// Exactly [`Self::on_branch`], [`Self::as_of_valid`] and
-    /// [`Self::as_of_recorded`] applied in turn, and **a `None` field unsets
-    /// what was there** rather than leaving it. That is the whole reason to
+    /// Exactly [`Self::on_branch`], [`Self::as_of_valid`],
+    /// [`Self::as_of_recorded`] and [`Self::limit()`] applied in turn, and **a
+    /// `None` field unsets what was there** rather than leaving it.
+    ///
+    /// It was three qualifiers when this shipped and is four since 0.15.10
+    /// ([D-252]), which is the change the wording is deliberately no longer
+    /// counting: a plan is whatever a read is qualified by, and this method's
+    /// contract is that it applies all of it. That is the whole reason to
     /// prefer a plan to three calls: a plan is the read, so applying one
     /// answers what the read is instead of amending what it was. A caller who
     /// wants to amend has the three setters and they are not going anywhere —
@@ -148,21 +199,23 @@ impl TraversalBuilder {
     ///
     /// [C-11]: ../../docs/Macrame%20Update%20Plan%20v0.16.0.md
     /// [D-251]: ../../docs/architecture/s13-decision-register.md#d-251
+    /// [D-252]: ../../docs/architecture/s13-decision-register.md#d-252
     pub fn plan(mut self, plan: crate::plan::ReadPlan) -> Self {
         self.branch = plan.branch.map(|b| b.as_str().to_string());
         self.as_of_valid = plan.valid;
         self.as_of_recorded = plan.recorded;
+        self.limit = plan.limit;
         self
     }
 
-    /// What this traversal's three qualifiers say, as a [`ReadPlan`].
+    /// What this traversal's read qualifiers say, as a [`ReadPlan`].
     ///
     /// The inverse of [`Self::plan`], and the reason the pair is worth having
     /// over a one-way setter: a caller can take the qualifiers off a traversal
     /// they were handed and give the *same read* to
     /// [`Database::edges`](crate::Database::edges), or to a second traversal
-    /// from a different start node, without restating three fields and
-    /// without the restatement being the place they drift.
+    /// from a different start node, without restating the fields and without
+    /// the restatement being the place they drift.
     ///
     /// # Errors
     ///
@@ -181,11 +234,69 @@ impl TraversalBuilder {
         }
         plan.valid = self.as_of_valid.clone();
         plan.recorded = self.as_of_recorded.clone();
+        plan.limit = self.limit;
         Ok(plan)
     }
 
     pub fn max_depth(mut self, depth: usize) -> Self {
         self.max_depth = depth;
+        self
+    }
+
+    /// Stop the walk once `n` rows have entered it (0.15.10, W13.5, C-8).
+    ///
+    /// # Why this is not a `LIMIT` on the projection
+    ///
+    /// C-8 is that `FilteredVectorSearch::probe_cap` "bounds memory, not work":
+    /// it ran the whole traversal and then truncated the tail, so a name that
+    /// reads as a ceiling on cost was a ceiling on the size of the answer. The
+    /// obvious repair — `LIMIT` on the statement's outer `SELECT` — repeats the
+    /// defect one line further down, because that projection sorts, and a sort
+    /// materialises the whole walk before the limit can apply. **Measured on
+    /// the same hub graph, counting edges visited by a walk of 20,050:**
+    ///
+    /// ```text
+    /// no limit                             20,050 edges
+    /// LIMIT 20 on the outer SELECT         20,050 edges
+    /// LIMIT 20 inside the recursive CTE     7,250 edges
+    /// LIMIT  5 inside the recursive CTE     1,250 edges
+    /// ```
+    ///
+    /// So the limit goes inside the CTE, where SQLite's recursion halts as soon
+    /// as the recursive table reaches it. Work is then bounded by the fan-out of
+    /// the first `n` rows *taken out of the queue*, which is why the saving is
+    /// proportional rather than absolute: at `LIMIT 200` the same graph still
+    /// visits every edge, because expanding 51 rows already costs all of them.
+    /// A limit buys nothing until it is smaller than the expensive frontier.
+    ///
+    /// # What `n` counts, and what comes back
+    ///
+    /// `n` counts **walk rows**, not answers. The walk holds `(node_id, depth)`
+    /// and dedupes on the pair, so a node reachable at two depths spends two of
+    /// them; the projection then drops retired concepts. The result is
+    /// therefore **at most `n` ids**, and fewer than `n` does not mean the graph
+    /// was smaller. [`Self::execute_ids_explained`] is where that is answered —
+    /// exactly, from the walk's own row count — and it is the reason this method
+    /// did not ship alone.
+    ///
+    /// The subset is the near end. SQLite's recursive queue is FIFO, so the walk
+    /// is breadth-first and a limit drops the farthest nodes first. Among nodes
+    /// at the same depth the cut is arbitrary, which is the one thing
+    /// [`Self::max_depth`] — the crate's other stated bound — does not do.
+    ///
+    /// # Every surface that runs the walk honours it
+    ///
+    /// [`Self::execute`] and
+    /// [`Database::load_subgraph_with`](crate::Database::load_subgraph_with)
+    /// splice the same CTE, so a limit set here bounds those too, and neither
+    /// return type can report having been cut short. That is deliberate rather
+    /// than overlooked: a subgraph's own bound is `byte_budget`, which
+    /// *refuses* with
+    /// [`DbError::SubgraphTooLarge`](crate::DbError::SubgraphTooLarge) rather
+    /// than truncating, and a caller who wants a bounded walk and needs to know
+    /// whether the bound bit asks [`Self::execute_ids_explained`] first.
+    pub fn limit(mut self, n: usize) -> Self {
+        self.limit = Some(n);
         self
     }
 
@@ -407,6 +518,9 @@ impl TraversalBuilder {
 
     /// [`Self::build_sql`] against a shape the caller has already established.
     pub(crate) fn build_sql_with(&self, shape: LineageShape) -> String {
+        if self.limit.is_some() {
+            return format!("{}{}", self.walk_cte(shape), Self::LIMITED_PROJECTION);
+        }
         format!(
             "{}{}",
             self.walk_cte(shape),
@@ -418,6 +532,36 @@ ORDER BY w.node_id;
             "#
         )
     }
+
+    /// The projection a limited walk uses, and why it is anchored on the count.
+    ///
+    /// [`WalkOutcome`] needs the walk's own row count, and the obvious way to
+    /// get it — a second column `(SELECT COUNT(*) FROM walk)` beside the id —
+    /// is free (the recursive CTE is materialised once; measured at identical
+    /// edge counts with and without it) and **unreadable in the one case that
+    /// matters most**: when every reached concept is retired the projection
+    /// returns no rows at all, so the walk hit its ceiling and nothing can say
+    /// so.
+    ///
+    /// So the count is the anchor and the ids are `LEFT JOIN`ed onto it. There
+    /// is always exactly one count row; `node_id` is `NULL` when the walk
+    /// reached nothing the projection kept, and
+    /// [`Self::execute_ids_explained`] skips those. Measured on the same hub
+    /// graph as [`Self::limit`]: identical edges visited, and the count present
+    /// in the all-retired case where the scalar-column form returned zero rows.
+    ///
+    /// The unlimited form is untouched and stays byte-identical, which is why
+    /// this is a separate string rather than a parameter of the other one.
+    const LIMITED_PROJECTION: &'static str = r#"
+SELECT r.n, w.node_id
+FROM (SELECT COUNT(*) AS n FROM walk) r
+LEFT JOIN (
+    SELECT DISTINCT w.node_id AS node_id
+    FROM walk w JOIN concepts c ON c.id = w.node_id
+    WHERE c.retired = 0
+) w ON 1 = 1
+ORDER BY w.node_id;
+            "#;
 
     /// Where the reading branch binds, when the shape has one: `?5`.
     ///
@@ -448,6 +592,17 @@ ORDER BY w.node_id;
     /// it in one place.
     pub(crate) fn edge_type_base(&self, shape: LineageShape) -> usize {
         Self::recorded_slot(shape) + usize::from(self.as_of_recorded.is_some())
+    }
+
+    /// Where [`Self::limit`] binds, when the traversal has one (0.15.10, W13.5).
+    ///
+    /// **After the edge types**, which is the only slot in this layout whose
+    /// position depends on how many parameters precede it rather than on which
+    /// of them are present. Put anywhere earlier it would have to shift the
+    /// variadic run, and [`Self::edge_filter_sql`] would need to know about a
+    /// clause it does not emit.
+    pub(crate) fn limit_slot(&self, shape: LineageShape) -> usize {
+        self.edge_type_base(shape) + self.edge_types.len()
     }
 
     /// The `AND l.edge_type IN (…)` fragment, or empty when unfiltered.
@@ -494,6 +649,13 @@ ORDER BY w.node_id;
             params.push(recorded.into());
         }
         params.extend(self.edge_types.iter().map(|t| t.as_str().into()));
+        // Last, matching `limit_slot`. Bound rather than spliced for the reason
+        // every other value here is: a `usize` cannot carry SQL, but a query
+        // whose text varies with a caller's argument is a second statement to
+        // prepare and a second plan to cache.
+        if let Some(n) = self.limit {
+            params.push((n as i64).into());
+        }
         params
     }
 
@@ -637,6 +799,13 @@ ORDER BY w.node_id;
         let source = &lowered.source;
         let lineage_filter = &lowered.filter;
         let prelude = lowered.prelude();
+        // Empty when unset, so every traversal written before 0.15.10 emits the
+        // byte-identical statement it always did — the property W13.1 spent a
+        // release establishing and every plan pin in `tests/` still asserts.
+        let limit_clause = match self.limit {
+            Some(_) => format!("\n    LIMIT ?{}", self.limit_slot(shape)),
+            None => String::new(),
+        };
 
         format!(
             r#"
@@ -649,7 +818,7 @@ WITH RECURSIVE {prelude}walk(node_id, depth) AS (
     WHERE w.depth < ?2
       AND l.valid_from <= ?3 AND ?3 < l.valid_to
       AND l.weight >= ?4{lineage_filter}
-      {edge_filter}
+      {edge_filter}{limit_clause}
 )"#
         )
     }
@@ -676,6 +845,31 @@ WITH RECURSIVE {prelude}walk(node_id, depth) AS (
         conn: &libsql::Connection,
         now_ts: &str,
     ) -> Result<Vec<String>> {
+        Ok(self.execute_ids_explained(conn, now_ts).await?.0)
+    }
+
+    /// [`Self::execute_ids`], plus whether [`Self::limit`] cut the walk short
+    /// (0.15.10, W13.5, C-8).
+    ///
+    /// Named for [`FilteredVectorSearch::execute_explained`](crate::graph::FilteredVectorSearch::execute_explained),
+    /// which is the same bargain: the plain method answers the question, and
+    /// the explained one also hands back the fact a caller would otherwise have
+    /// to guess at from the shape of the answer.
+    ///
+    /// Without a limit this is always
+    /// [`WalkOutcome::Complete`] and costs exactly what [`Self::execute_ids`]
+    /// costs — the reporting column is emitted only when there is a ceiling to
+    /// report on, so an unlimited traversal runs the statement it has always
+    /// run.
+    ///
+    /// # Errors
+    ///
+    /// The same two as [`Self::execute_ids`], and for the same reasons.
+    pub async fn execute_ids_explained(
+        &self,
+        conn: &libsql::Connection,
+        now_ts: &str,
+    ) -> Result<(Vec<String>, WalkOutcome)> {
         self.check_recorded_reach(conn).await?;
         // The database decides the shape, not the builder: an unbranched
         // traversal on a forked ledger must still resolve, or it reads every
@@ -687,10 +881,31 @@ WITH RECURSIVE {prelude}walk(node_id, depth) AS (
 
         let mut rows = conn.query(&sql, params).await?;
         let mut ids = Vec::new();
+        let mut walk_rows: i64 = 0;
         while let Some(row) = rows.next().await? {
-            ids.push(row.get(0)?);
+            match self.limit {
+                // `LIMITED_PROJECTION` puts the walk's row count first and the
+                // id second, and emits one row with a `NULL` id when the walk
+                // reached nothing the projection kept.
+                Some(_) => {
+                    walk_rows = row.get(0)?;
+                    if let Some(id) = row.get::<Option<String>>(1)? {
+                        ids.push(id);
+                    }
+                }
+                None => ids.push(row.get(0)?),
+            }
         }
-        Ok(ids)
+        // `>=` rather than `==` because the ceiling is what SQLite was told to
+        // stop at, not a number this code computed: a walk that ends level with
+        // it has been cut, and an engine that overshot by a row would still
+        // have been cut. Equality here would report `Complete` on the one
+        // reading that is certainly not.
+        let outcome = match self.limit {
+            Some(n) if walk_rows >= n as i64 => WalkOutcome::LimitReached,
+            _ => WalkOutcome::Complete,
+        };
+        Ok((ids, outcome))
     }
 
     /// Execute the traversal and hydrate attributes per [`Self::attribute_mode`]
@@ -704,6 +919,10 @@ WITH RECURSIVE {prelude}walk(node_id, depth) AS (
     /// attributes with no indication that the mode had been ignored. That is the
     /// exact failure Doctrine II exists to prevent, arriving as a silent wrong
     /// answer rather than as an error.
+    ///
+    /// [`Self::limit`] bounds this walk as it bounds every other, and this
+    /// return type cannot say whether it bit — hydrated nodes leave no room for
+    /// the answer. [`Self::execute_ids_explained`] is where that is asked.
     ///
     /// **[`AttributeMode::Omit`] returns `Ok(vec![])` here**, which is
     /// indistinguishable from a traversal that reached nothing. That is a

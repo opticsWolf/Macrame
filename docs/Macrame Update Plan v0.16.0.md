@@ -110,11 +110,25 @@ This is the release F-34 was about: the three qualifiers stated once and compose
 
 `TraversalBuilder` gained `read_plan()` as well as `plan()`, because a one-way setter makes a plan a way to *configure* a builder and the pair makes it a value: a caller can take the qualifiers off a traversal they were handed and give the same read to `edges`, and the round trip is asserted in both directions.
 
-The Python side takes `ReadPlan(branch=…, valid=…, recorded=…)` rather than a fluent builder, and `plan=` is **not** added to the traversal entry points — they already take the three keywords, and a fourth naming the same three would put two spellings of one question in one signature with a precedence rule between them. [§14.21](architecture/s14-python-bindings.md#1421-readplan-and-the-first-time-the-two-spellings-differ-on-purpose-0159-w134-d-251) argues it out.
+The Python side takes `ReadPlan(branch=…, valid=…, recorded=…)` rather than a fluent builder, and `plan=` is **not** added to the traversal entry points — they already take the three keywords, and a fourth naming the same three would put two spellings of one question in one signature with a precedence rule between them. [§14.21](architecture/s14-python-bindings.md#w134-readplan) argues it out.
 
-### W13.5 · 0.15.5 — `limit` pushed into the walk (C-8)
+### W13.5 · 0.15.10 — `limit` pushed into the walk (C-8)
 
 `ReadPlan::limit` becomes a `LIMIT ?n` on the walk CTE's outer `SELECT`, and `vector_filter.rs` stops truncating after the fact. `CostEstimator` then receives the count that was paid for. The plan-pinning test for the walk gains the limited form. Public surface: `ReadPlan::limit(self, usize)` and `TraversalBuilder::limit(self, usize)`.
+
+**Shipped as 0.15.10, [D-252](architecture/s13-decision-register.md#d-252).** Five departures from the sketch above, and the first is the sketch itself.
+
+*The `LIMIT` goes **inside** the recursive CTE, not on its outer `SELECT`.* That projection carries `ORDER BY w.node_id`, and a sort materialises the whole walk before a limit can apply — so the sketched fix returns `n` rows and visits every edge C-8 complains about. Measured on a hub graph whose walk visits 20,050 edges: no limit 20,050; `LIMIT 20` on the outer `SELECT` **20,050**; `LIMIT 20` inside **7,250**; `LIMIT 5` inside **1,250**. SQLite halts the recursion once the recursive table reaches the limit, so the bound is the fan-out of the first `n` rows taken out of the queue — proportional rather than absolute, and worth nothing until it is below the expensive frontier.
+
+*`WalkOutcome` and `execute_ids_explained` are public surface the sketch does not name.* `n` counts walk rows; the walk dedupes on `(node_id, depth)` and the projection then drops retired concepts, so a limit of ten can answer with eight ids whether the graph held eight or eight thousand. `len(ids) == limit` is not the question, so the walk reports its own row count instead — on a projection **anchored** on that count and left-joined to the ids, because a walk whose every reached concept is retired otherwise returns no row to read it from.
+
+*`Database::edges` honours `plan.limit` too* — the sketch names only the walk. There it is a plain `LIMIT` on one flat projection and needs no outcome: nothing drops rows after it applies, so `len() == n` is exact.
+
+*Python gains `traverse_ids_explained` beside the keyword.* A `limit=` that returns a shorter list is precisely the defect being repaired; `truncated` crosses as a `bool` on `CandidateCount`'s precedent.
+
+*`limit` is deliberately **absent** from `load_subgraph` and `search_filtered`.* A subgraph's own bound is `byte_budget`, which **refuses** rather than truncates; `probe_cap` *is* this ceiling under the name that surface already had. `traverse` takes it and says in its own docstring that it cannot report it.
+
+`CostEstimator` receives the count that was paid for by way of `CandidateCount::AtLeast` now carrying **the id count rather than the cap** — the two differ once the ceiling is on the walk, and the mutation that reported the cap survived the first pass. Nine mutations, nine caught.
 
 ---
 
@@ -212,7 +226,7 @@ Merge to `main` after W16.2, tagged. `docs/releases/v0.16.0.md` written before t
 | 2 | 0.15.2 | W13.2 | `TrunkOnForked`; three readers; the fold materialised — **done** | `lineage.rs`, `plan.rs`, `builder.rs`, `subgraph.rs`, `as_of.rs` | numbers in D-244; two plan pins |
 | 3 | 0.15.8 | W13.3 | key-narrowed lowering for the guard — **done** | `plan.rs`, `lineage.rs`, `connection.rs` | plan pinned on three shapes; numbers in D-250 |
 | 4 | 0.15.9 | W13.4 | public `ReadPlan`; Python parity — **done** | `src/plan.rs` (public), `connection.rs`, `graph/builder.rs`, `temporal/as_of.rs`, `bindings/python` | Appendix A/D.1, `public-api.txt`; `read_plan_tests`, `test_read_plan.py`; numbers in D-251 |
-| 5 | 0.15.5 | W13.5 | `limit` in the walk | `plan.rs`, `builder.rs`, `vector_filter.rs` | walk pin gains the limited form |
+| 5 | 0.15.10 | W13.5 | `limit` inside the recursion; `WalkOutcome` — **done** | `plan.rs`, `builder.rs`, `vector_filter.rs`, `subgraph.rs`, `connection.rs`, `bindings/python` | `walk_limit_tests`, `test_walk_limit.py`; nine mutations; numbers in D-252 |
 | 6 | 0.15.3 | W14.1 | keyed archive repair — **done** | `temporal/archive.rs`, `integrity/`, `benches` | `archive/archive_small_slice`; numbers in D-245 |
 | 7 | 0.15.4 | W14.2 | `hot_log_reach(ts)` — **done** | `temporal/replay.rs`, `error.rs`, `builder.rs` | three mutations; numbers in D-246 |
 | 8 | 0.15.5 | W14.4 | reach guard, cheap arm first — **done** | `temporal/replay.rs`, `graph/builder.rs` | `reach_table`; four mutations; numbers in D-247 |

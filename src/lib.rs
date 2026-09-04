@@ -40,7 +40,7 @@ pub mod prelude {
     };
     pub use crate::graph::{
         AttributeMode, CandidateCount, CostEstimate, CostEstimator, EdgeAssertion,
-        FilteredVectorSearch, TraversalBuilder, VectorFilterStrategy,
+        FilteredVectorSearch, TraversalBuilder, VectorFilterStrategy, WalkOutcome,
     };
     pub use crate::integrity::{audit_current, rebuild_current, RebuildReport};
     pub use crate::metrics::CommandKind;

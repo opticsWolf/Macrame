@@ -825,9 +825,17 @@ impl PyDatabase {
     /// rather than quietly answering for the trunk. Until `fork()` lands there
     /// is no way to create a second lineage from Python, which is why this
     /// parameter arrives with the read rather than after the write.
+    /// `limit` bounds the **walk** rather than the list it produces (0.15.10,
+    /// W13.5). It stops the recursion, so the answer is the nodes nearest
+    /// `start_node` and at most `limit` of them — fewer is possible and does
+    /// not mean the graph was smaller, because one node can enter the walk at
+    /// two depths and a retired concept is dropped after the walk has paid for
+    /// it. Use `traverse_ids_explained` when that difference matters; this
+    /// method cannot report it and does not pretend to.
     #[pyo3(signature = (
         start_node, *, max_depth = 2, edge_types = None, min_weight = 0.0,
-        as_of_valid = None, as_of_recorded = None, branch = None, now = None
+        as_of_valid = None, as_of_recorded = None, branch = None, limit = None,
+        now = None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn traverse_ids(
@@ -840,8 +848,60 @@ impl PyDatabase {
         as_of_valid: Option<&Bound<'_, PyAny>>,
         as_of_recorded: Option<&Bound<'_, PyAny>>,
         branch: Option<String>,
+        limit: Option<usize>,
         now: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Vec<String>> {
+        Ok(self
+            .traverse_ids_explained(
+                py,
+                start_node,
+                max_depth,
+                edge_types,
+                min_weight,
+                as_of_valid,
+                as_of_recorded,
+                branch,
+                limit,
+                now,
+            )?
+            .0)
+    }
+
+    /// `traverse_ids`, plus whether `limit` cut the walk short (0.15.10, W13.5).
+    ///
+    /// Returns `(ids, truncated)`. `truncated` is `False` for every traversal
+    /// that set no `limit`, and for one that set a ceiling the walk never
+    /// reached; it is `True` when the walk stopped because it ran out of
+    /// budget, so more of the graph satisfies the traversal than came back.
+    ///
+    /// **A `bool` rather than a class**, for the reason `CostEstimate` reports
+    /// `candidates_capped` the same way: the underlying `WalkOutcome` has two
+    /// states and no payload, and a class would make a caller unwrap it to
+    /// reach a question they wanted to write an `if` on.
+    ///
+    /// The answer is exact rather than inferred. `len(ids) == limit` is not the
+    /// same question — the walk's rows and the ids that survive its projection
+    /// are different counts — so a walk cut at 10 rows can return 8 ids, and
+    /// guessing from the length would call that a complete answer.
+    #[pyo3(signature = (
+        start_node, *, max_depth = 2, edge_types = None, min_weight = 0.0,
+        as_of_valid = None, as_of_recorded = None, branch = None, limit = None,
+        now = None
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn traverse_ids_explained(
+        &self,
+        py: Python<'_>,
+        start_node: &str,
+        max_depth: usize,
+        edge_types: Option<Vec<String>>,
+        min_weight: f64,
+        as_of_valid: Option<&Bound<'_, PyAny>>,
+        as_of_recorded: Option<&Bound<'_, PyAny>>,
+        branch: Option<String>,
+        limit: Option<usize>,
+        now: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<(Vec<String>, bool)> {
         let as_of_valid = as_of_valid.map(|t| to_canonical(Some(t))).transpose()?;
         let as_of_recorded = as_of_recorded.map(|t| to_canonical(Some(t))).transpose()?;
         let now = self.instant(py, now)?;
@@ -854,12 +914,14 @@ impl PyDatabase {
             as_of_valid,
             as_of_recorded,
             branch,
+            limit,
         );
-        self.with_db(py, move |db| {
+        let (ids, outcome) = self.with_db(py, move |db| {
             runtime()
-                .block_on(b.execute_ids(db.read_conn(), &now))
+                .block_on(b.execute_ids_explained(db.read_conn(), &now))
                 .map_err(to_py)
-        })
+        })?;
+        Ok((ids, outcome.hit_limit()))
     }
 
     /// Traverse and hydrate attributes, as a list of `NodeAttributes` (§5.2).
@@ -894,10 +956,17 @@ impl PyDatabase {
     /// the Rust method answers with an empty list that no caller can tell apart
     /// from a traversal that reached nothing. See the module docs for why this
     /// is the one place the binding refuses what the library accepts.
+    ///
+    /// `limit` bounds the walk exactly as it does on `traverse_ids`, and this
+    /// method cannot say whether it bit — a list of hydrated nodes has no room
+    /// for the answer. `traverse_ids_explained` is where that is asked; the
+    /// keyword is offered here anyway because refusing it would leave the one
+    /// surface a caller reaches for topology *and* attributes unable to bound
+    /// its own cost.
     #[pyo3(signature = (
         start_node, *, max_depth = 2, edge_types = None, min_weight = 0.0,
         attribute_mode = None, as_of_valid = None, as_of_recorded = None,
-        branch = None, now = None
+        branch = None, limit = None, now = None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn traverse(
@@ -911,6 +980,7 @@ impl PyDatabase {
         as_of_valid: Option<&Bound<'_, PyAny>>,
         as_of_recorded: Option<&Bound<'_, PyAny>>,
         branch: Option<String>,
+        limit: Option<usize>,
         now: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Vec<graph::PyNodeAttributes>> {
         if attribute_mode == Some(PyAttributeMode::Omit) {
@@ -933,6 +1003,7 @@ impl PyDatabase {
             as_of_valid,
             as_of_recorded,
             branch,
+            limit,
         );
         let hydrated = self.with_db(py, move |db| {
             runtime()
@@ -1019,6 +1090,12 @@ impl PyDatabase {
             as_of_valid,
             as_of_recorded,
             branch,
+            // No keyword, deliberately. A subgraph's bound is `byte_budget`,
+            // which *refuses* with `SubgraphTooLargeError` rather than
+            // truncating, and a `Subgraph` has nowhere to record that its walk
+            // was cut short — so a second, weaker ceiling here would return a
+            // sample that looks like a neighbourhood.
+            None,
         )
         .content(content);
         let inner = self.with_db(py, move |db| {
@@ -1652,6 +1729,10 @@ impl PyDatabase {
             as_of_valid,
             None,
             branch,
+            // `probe_cap` is this search's ceiling and reaches the same walk
+            // through `FilteredVectorSearch`. A `limit=` keyword beside it
+            // would be two spellings of one knob in one signature.
+            None,
         );
 
         let mut search =

@@ -861,6 +861,19 @@ impl Database {
     /// concept row, which is what a `Subgraph` has always carried. That is a
     /// narrower gap than the one above and a deliberate one — a `Subgraph` is
     /// the input to the six algorithms, none of which reads a title.
+    ///
+    /// # A limited traversal bounds this walk too (0.15.10, W13.5)
+    ///
+    /// [`TraversalBuilder::limit`](super::TraversalBuilder::limit) is spliced
+    /// into the same CTE, so a builder carrying one produces a subgraph of the
+    /// nodes nearest `start_node` rather than the neighbourhood. **A `Subgraph`
+    /// has nowhere to record that**, which is why no Python keyword offers it
+    /// here and why this section exists: the bound that belongs to this surface
+    /// is `byte_budget`, which refuses with
+    /// [`DbError::SubgraphTooLarge`] rather than truncating. A caller who wants
+    /// a bounded walk *and* wants to know whether the bound bit asks
+    /// [`TraversalBuilder::execute_ids_explained`](super::TraversalBuilder::execute_ids_explained)
+    /// first.
     pub async fn load_subgraph_with(
         &self,
         traversal: &super::TraversalBuilder,

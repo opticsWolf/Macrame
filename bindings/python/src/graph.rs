@@ -545,10 +545,16 @@ pub(crate) fn builder(
     as_of_valid: Option<String>,
     as_of_recorded: Option<String>,
     branch: Option<String>,
+    limit: Option<usize>,
 ) -> macrame::graph::TraversalBuilder {
     let mut b = macrame::graph::TraversalBuilder::new(start_node)
         .max_depth(max_depth)
         .min_weight(min_weight);
+    // `None` leaves the walk unbounded, which is what every entry point did
+    // before 0.15.10 and what all of them still do unless a caller asks.
+    if let Some(n) = limit {
+        b = b.limit(n);
+    }
     if let Some(types) = edge_types {
         b = b.edge_types(types);
     }

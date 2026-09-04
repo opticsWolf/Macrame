@@ -338,6 +338,42 @@ async fn a_capped_probe_reports_a_lower_bound() {
     db.close().await.unwrap();
 }
 
+/// **A capped probe reports what it counted, not what it asked for.**
+///
+/// `AtLeast(n)` is a claim that at least `n` candidates exist, and since
+/// 0.15.10 the cap is on the *walk* rather than on the list it produced — so
+/// the two numbers can differ and reporting the cap would be a claim nothing
+/// counted. `root → c0000, c0001` plus `c0000 → c0001` puts `c0001` in the walk
+/// at two depths: four rows, three ids, at a cap of four.
+#[tokio::test]
+async fn a_capped_probe_reports_what_it_counted() {
+    let harness = TestHarness::new();
+    let db = fixture(&harness, &[0, 1]).await;
+    db.assert_edge(
+        EdgeAssertion::new(node_id(0), node_id(1), "LINKS")
+            .valid_from(TS)
+            .valid_to(OPEN),
+    )
+    .await
+    .unwrap();
+
+    let (_, plan) =
+        FilteredVectorSearch::new(model(), query(), TraversalBuilder::new("root").max_depth(2))
+            .top_k(3)
+            .probe_cap(4)
+            .execute_explained(db.read_conn(), TS)
+            .await
+            .unwrap();
+
+    assert!(plan.candidates.is_capped(), "{:?}", plan.candidates);
+    assert_eq!(
+        plan.candidates.lower_bound(),
+        3,
+        "the walk spent four rows and produced three candidates; four is a          number nothing counted"
+    );
+    db.close().await.unwrap();
+}
+
 /// The chunked exact scan merges correctly.
 ///
 /// `run_pre_filter` splits the candidate ids across statements to stay under

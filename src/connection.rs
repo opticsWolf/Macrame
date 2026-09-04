@@ -2693,6 +2693,7 @@ impl Database {
             &valid,
             recorded.as_deref(),
             plan.branch_name(),
+            plan.limit,
         )
         .await
     }

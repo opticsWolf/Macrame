@@ -4,8 +4,8 @@
 //!
 //! `macrame::ReadPlan` is fluent — `ReadPlan::new().on(b).valid_at(t)` — for
 //! the reason every value type in that crate is: Rust has no keyword
-//! arguments, so a struct with three optional fields is either a builder or a
-//! function taking three `Option`s in an order nobody can remember. Python has
+//! arguments, so a struct with four optional fields is either a builder or a
+//! function taking four `Option`s in an order nobody can remember. Python has
 //! keyword arguments, and `ReadPlan(branch="exp", valid=tuesday)` is the same
 //! sentence with the scaffolding removed.
 //!
@@ -29,7 +29,7 @@ use macrame::ReadPlan;
 
 use crate::timestamps::{from_canonical, to_canonical_opt};
 
-/// The lineage and the two instants a read is taken at.
+/// The lineage, the two instants, and the ceiling a read is taken under.
 #[pyclass(name = "ReadPlan", module = "macrame", frozen, eq, from_py_object)]
 #[derive(Clone, PartialEq)]
 pub(crate) struct PyReadPlan {
@@ -45,12 +45,20 @@ impl PyReadPlan {
     /// at the present. The two give the same answer and only one of them is
     /// cheap, so `recorded=` is a thing to ask for and not a thing to pass
     /// through defensively.
+    ///
+    /// `limit=None` is the whole answer (0.15.10, W13.5). It is the one
+    /// argument that does not narrow *which* rows are true — it bounds what the
+    /// read costs — so a plan carrying one describes a sample. On
+    /// `Database.edges` that sample is arbitrary and `len(result) == limit` is
+    /// the exact signal that it was cut; the module docs say why the traversal
+    /// keywords need a second return value to say the same thing.
     #[new]
-    #[pyo3(signature = (*, branch = None, valid = None, recorded = None))]
+    #[pyo3(signature = (*, branch = None, valid = None, recorded = None, limit = None))]
     fn new(
         branch: Option<String>,
         valid: Option<&Bound<'_, PyAny>>,
         recorded: Option<&Bound<'_, PyAny>>,
+        limit: Option<usize>,
     ) -> PyResult<Self> {
         let mut plan = ReadPlan::new();
         if let Some(name) = branch {
@@ -61,6 +69,9 @@ impl PyReadPlan {
         }
         if let Some(ts) = to_canonical_opt(recorded)? {
             plan = plan.recorded_at(ts);
+        }
+        if let Some(n) = limit {
+            plan = plan.limit(n);
         }
         Ok(Self { inner: plan })
     }
@@ -92,12 +103,19 @@ impl PyReadPlan {
             .transpose()
     }
 
+    /// How many rows this read will pay for, or `None` for all of them.
+    #[getter]
+    fn limit(&self) -> Option<usize> {
+        self.inner.limit
+    }
+
     fn __repr__(&self) -> String {
         format!(
-            "ReadPlan(branch={:?}, valid={:?}, recorded={:?})",
+            "ReadPlan(branch={:?}, valid={:?}, recorded={:?}, limit={:?})",
             self.inner.branch.as_ref().map(|b| b.as_str()),
             self.inner.valid,
-            self.inner.recorded
+            self.inner.recorded,
+            self.inner.limit
         )
     }
 }

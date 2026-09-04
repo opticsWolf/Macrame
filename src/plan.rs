@@ -11,24 +11,33 @@
 //! not be passed, stored, compared, or given a default.
 //!
 //! [`ReadPlan`] is that value. It is caller-facing and deliberately dumb: it
-//! holds three `Option`s and knows no SQL. The lowering that turns a read into
+//! holds four `Option`s and knows no SQL. The lowering that turns a read into
 //! CTEs lives in `graph::plan` and stays crate-private, which is why there are
 //! two modules called `plan` and only one of them is a public path. The
 //! division is the useful one — this module is *what was asked*, that one is
 //! *how it is answered*, and a caller who never reads SQL should never meet
 //! the second.
 //!
-//! # What this release does not add
+//! # The fourth qualifier, and the promise 0.15.9 made about it
 //!
-//! `limit` is in [the 0.16.0 plan]'s sketch of this struct and is **not** here.
-//! W13.5 is the release that pushes a limit into the walk's outer `SELECT`;
-//! shipping the field one release early would put a public knob on the struct
-//! that silently does nothing, which is the one failure mode a plan value has
-//! that three loose arguments do not — a caller can *see* an argument go unused
-//! at a call site and cannot see a field go unread. [`ReadPlan`] is
-//! `#[non_exhaustive]`, so the field is additive on the day it means something.
+//! `limit` was in [the 0.16.0 plan]'s sketch of this struct and was left out of
+//! 0.15.9 on the grounds that a public knob that silently does nothing is the
+//! one failure mode a plan value has that three loose arguments do not — a
+//! caller can *see* an argument go unused at a call site and cannot see a field
+//! go unread. `#[non_exhaustive]` made it additive on the day it meant
+//! something, and 0.15.10 ([D-252]) is that day: it bounds the walk from
+//! inside the recursive CTE, and every surface that takes a plan reads it.
+//!
+//! It is not a fourth *temporal* qualifier and it does not compose like one.
+//! The other three narrow which rows are true; this one says how much of the
+//! answer to pay for, so two reads under the same plan can differ. That is
+//! stated on [`ReadPlan::limit()`] rather than smoothed over, and it is why
+//! the walk reports whether the ceiling bit
+//! ([`WalkOutcome`](crate::graph::WalkOutcome)) where it never had to report
+//! on an instant.
 //!
 //! [the 0.16.0 plan]: ../../docs/Macrame%20Update%20Plan%20v0.16.0.md
+//! [D-252]: ../../docs/architecture/s13-decision-register.md#d-252
 //! [`TraversalBuilder`]: crate::graph::TraversalBuilder
 
 use crate::branch::BranchId;
@@ -37,14 +46,14 @@ use crate::graph::lineage::lineage_shape;
 use crate::graph::plan::{lower, Resolution};
 use crate::temporal::EdgeBelief;
 
-/// The lineage and the two instants a read is taken at.
+/// The lineage, the two instants, and the ceiling a read is taken under.
 ///
-/// Every field is `None` by default and `None` means the same thing on all
-/// three: **the ordinary read**. No branch is the trunk, no valid instant is
-/// now, no recorded instant is current belief. A default [`ReadPlan`] and no
-/// plan at all are the same read, which is what lets
-/// [`TraversalBuilder::plan`](crate::graph::TraversalBuilder::plan) be additive
-/// over the three setters it composes rather than a fourth way to configure a
+/// Every field is `None` by default and `None` means the same thing on all of
+/// them: **the ordinary read**. No branch is the trunk, no valid instant is
+/// now, no recorded instant is current belief, no limit is the whole answer. A
+/// default [`ReadPlan`] and no plan at all are the same read, which is what
+/// lets [`TraversalBuilder::plan`](crate::graph::TraversalBuilder::plan) be
+/// additive over the setters it composes rather than another way to configure a
 /// traversal.
 ///
 /// # Why the branch is a [`BranchId`] and the instants are `String`
@@ -79,7 +88,7 @@ use crate::temporal::EdgeBelief;
 ///     .valid_at("2026-01-06T00:00:00.000000Z")
 ///     .recorded_at("2026-03-01T00:00:00.000000Z");
 ///
-/// // The same three qualifiers, on a whole-ledger read and on a walk.
+/// // The same qualifiers, on a whole-ledger read and on a walk.
 /// let edges = db.edges(plan.clone()).await?;
 /// let reached = TraversalBuilder::new("a")
 ///     .plan(plan)
@@ -103,6 +112,18 @@ pub struct ReadPlan {
     /// cheap. See
     /// [`TraversalBuilder::as_of_recorded`](crate::graph::TraversalBuilder::as_of_recorded).
     pub recorded: Option<String>,
+    /// How much of the answer to pay for, or `None` for all of it (0.15.10,
+    /// W13.5, C-8).
+    ///
+    /// **The one field that does not narrow which rows are true.** The other
+    /// three name a read; this one bounds it, so a plan carrying a limit
+    /// describes an answer that is a prefix of the read rather than the read.
+    /// What "prefix" means differs by surface and each says so:
+    /// [`TraversalBuilder::limit()`](crate::graph::TraversalBuilder::limit)
+    /// bounds the walk's rows and returns the near end of the neighbourhood,
+    /// [`Database::edges`](crate::Database::edges) bounds its own statement and
+    /// returns an arbitrary `n` of the ledger.
+    pub limit: Option<usize>,
 }
 
 impl ReadPlan {
@@ -126,6 +147,37 @@ impl ReadPlan {
     /// Read under the belief held at a transaction-time instant.
     pub fn recorded_at(mut self, ts: impl Into<String>) -> Self {
         self.recorded = Some(ts.into());
+        self
+    }
+
+    /// Pay for at most `n` rows (0.15.10, W13.5, C-8).
+    ///
+    /// A ceiling on the read's cost, not on which rows are true, and the two
+    /// surfaces that take a plan spend it differently because their statements
+    /// are different shapes. On a traversal it becomes
+    /// [`TraversalBuilder::limit()`](crate::graph::TraversalBuilder::limit),
+    /// where it stops the recursion and yields the nodes nearest the start. On
+    /// [`Database::edges`](crate::Database::edges) it becomes a `LIMIT` on one
+    /// flat projection, where the rows it keeps are **whichever `n` the engine
+    /// reaches first** — that read states no order and adding one to make the
+    /// truncation look principled would put a sort on the largest statement in
+    /// the crate.
+    ///
+    /// So a limited plan is honest about being a sample, and both surfaces let
+    /// a caller tell that it was one: the traversal by
+    /// [`WalkOutcome`](crate::graph::WalkOutcome), and `edges` by returning
+    /// exactly `n`, which is the ordinary convention because that statement
+    /// drops nothing after the limit applies.
+    ///
+    /// The method and the field share a name, as they do nowhere else on this
+    /// struct. `on`/`branch`, `valid_at`/`valid` and `recorded_at`/`recorded`
+    /// read as sentences and `limit_to`/`limit` does not; `p.limit(5)` and
+    /// `p.limit` are unambiguous to the compiler and to a reader, and the
+    /// spelling matches
+    /// [`TraversalBuilder::limit()`](crate::graph::TraversalBuilder::limit),
+    /// which is where a caller meets the idea first.
+    pub fn limit(mut self, n: usize) -> Self {
+        self.limit = Some(n);
         self
     }
 
@@ -156,11 +208,21 @@ const BRANCH_SLOT: usize = 2;
 /// crate to make its result look tidy; a caller who needs an order knows which
 /// one, and sorting a `Vec` they already own is cheaper than sorting a relation
 /// SQLite has to spill.
+///
+/// `limit` is a plain `LIMIT` on that projection, and it interacts with the
+/// unspecified order exactly as badly as it sounds: the rows kept are whichever
+/// the engine reaches first. It is offered anyway because the alternative —
+/// leaving [`ReadPlan::limit`] unread on this surface — is the silently
+/// ignored field 0.15.9 refused to ship, and because bounding a whole-ledger
+/// read is worth having even when the sample is arbitrary. Unlike the walk it
+/// needs nothing to report truncation: nothing drops rows after the limit
+/// applies, so `out.len() == n` is exact.
 pub(crate) async fn edges_at(
     conn: &libsql::Connection,
     valid: &str,
     recorded: Option<&str>,
     branch: Option<&str>,
+    limit: Option<usize>,
 ) -> Result<Vec<EdgeBelief>> {
     // Refuses an unregistered lineage, and picks between the three shapes for
     // D-219's measured reason: the resolved form is 3x on a database with
@@ -188,12 +250,24 @@ pub(crate) async fn edges_at(
         key: None,
     });
 
+    // Spliced rather than bound, which is the one place this file departs
+    // from its own rule. A `LIMIT` placeholder would have to sit after the
+    // lineage and recorded slots, whose presence varies by shape, so the
+    // number would be computed in a third place that has to agree with the
+    // other two — D-030's failure mode, bought for nothing. The value is a
+    // `usize` this function was handed, so there is no string to carry SQL.
+    let limit_clause = match limit {
+        Some(n) => format!(" LIMIT {n}"),
+        None => String::new(),
+    };
+
     let sql = format!(
         "{}SELECT l.source_id, l.target_id, l.edge_type, l.valid_from, l.valid_to, l.branch_id \
-         FROM {} l WHERE l.valid_from <= ?1 AND ?1 < l.valid_to{}",
+         FROM {} l WHERE l.valid_from <= ?1 AND ?1 < l.valid_to{}{}",
         lowered.with_clause(),
         lowered.source,
         lowered.filter,
+        limit_clause,
     );
 
     // Pushed in placeholder order, and only when the emitted SQL names the

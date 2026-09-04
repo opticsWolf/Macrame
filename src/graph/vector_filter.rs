@@ -76,12 +76,27 @@ pub enum VectorFilterStrategy {
 /// multi-hop reachability. So the count is *measured*, by running the traversal
 /// under a cap — and a probe that hits its cap has not measured anything except
 /// that the set is too big to care about the exact size.
+///
+/// **The cap became a real one at 0.15.10** ([D-252]). Until then the traversal
+/// ran to completion and the tail was dropped afterwards, so `AtLeast` recorded
+/// that the answer had been trimmed and never that any work had been saved —
+/// C-8's finding that `probe_cap` "bounds memory, not work". It is now
+/// [`TraversalBuilder::limit`](crate::graph::TraversalBuilder::limit), which
+/// stops the recursion, and the variant means what its name always claimed.
+///
+/// [D-252]: ../../docs/architecture/s13-decision-register.md#d-252
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum CandidateCount {
-    /// The traversal returned this many ids, below the cap.
+    /// The traversal ran to the end of the graph and returned this many ids.
     Exact(usize),
-    /// The probe hit its cap. The true count is at least this.
+    /// The walk stopped at the cap. The true count is at least this.
+    ///
+    /// **This is the id count, not the cap**, and the two can differ now that
+    /// the ceiling is on the walk rather than on the list it produced: the walk
+    /// dedupes on `(node, depth)` and the projection drops retired concepts, so
+    /// a walk cut at 10 rows can yield 8 ids. Reporting 8 is the true lower
+    /// bound; reporting 10 would be a number nothing counted.
     AtLeast(usize),
 }
 
@@ -89,6 +104,11 @@ impl CandidateCount {
     /// The number to compute with. For a capped probe this understates the true
     /// count, which is the safe direction: it makes `PreFilterCTE` look cheaper
     /// than it is, and `PreFilterCTE` is the exact strategy.
+    ///
+    /// It also now reflects what the traversal was *paid for* rather than what
+    /// survived a truncation, which is the half of C-8 the cost model cared
+    /// about: the estimator was pricing strategies against a candidate count
+    /// the walk had already exceeded.
     pub fn lower_bound(self) -> usize {
         match self {
             Self::Exact(n) | Self::AtLeast(n) => n,
@@ -228,6 +248,11 @@ pub const DEFAULT_BYTE_BUDGET: usize = 64 * 1024 * 1024;
 /// The probe costs a fraction of what it prices, and the cap is what bounds
 /// that fraction. Above it the planner knows only "more than the cap", which is
 /// already enough to reject `PreFilterCTE`.
+///
+/// **It bounds the walk since 0.15.10** and bounded only the returned list
+/// before it, which is C-8. The number is unchanged: 10,000 candidate ids is
+/// still far past the point where `PreFilterCTE` can win, and the release
+/// changed what reaching it costs rather than where it sits.
 pub const DEFAULT_PROBE_CAP: usize = 10_000;
 
 /// A vector search restricted to the nodes a traversal reaches (§5.3).
@@ -272,6 +297,14 @@ impl FilteredVectorSearch {
         self
     }
 
+    /// How many walk rows the counting probe may pay for.
+    ///
+    /// Applied as [`TraversalBuilder::limit`], so it stops the traversal rather
+    /// than trimming its result, and the two are not the same number: the walk
+    /// dedupes on `(node, depth)` and its projection drops retired concepts, so
+    /// a cap of `n` yields at most `n` candidates. That is exactly what the
+    /// probe wants — it is measuring whether the set is too big to care about
+    /// the size of, and an undercount is the safe direction.
     pub fn probe_cap(mut self, cap: usize) -> Self {
         self.probe_cap = cap;
         self
@@ -368,16 +401,33 @@ impl FilteredVectorSearch {
         Ok(self.execute_explained(conn, now_ts).await?.0)
     }
 
-    /// The counting probe: the traversal, capped.
+    /// The counting probe: the traversal, capped where the cap costs something.
+    ///
+    /// **This is C-8** ([D-252]). The cap used to be `ids.truncate(probe_cap)`
+    /// after a traversal that had already run: `DEFAULT_PROBE_CAP = 10_000` read
+    /// as a bound on cost and bounded only how much of the result was kept, so
+    /// on a hub-heavy graph the expensive part was paid in full and then thrown
+    /// away. The ceiling is now the walk's own, and the walk says whether it
+    /// bit — which is what keeps `Exact` honest. Inferring it from `ids.len() <
+    /// probe_cap` would not: the walk's rows and the ids that survive its
+    /// projection are different counts, so a cut walk can return fewer ids than
+    /// the cap and would have been reported as a complete answer.
+    ///
+    /// The clone is one `TraversalBuilder` per search, against a walk this
+    /// method is about to run. The alternative is a `&mut self` here or a
+    /// `limit` parameter threaded through `execute_ids_explained`, and both put
+    /// the cap somewhere other than on the thing it bounds.
+    ///
+    /// [D-252]: ../../docs/architecture/s13-decision-register.md#d-252
     async fn probe(
         &self,
         conn: &libsql::Connection,
         now_ts: &str,
     ) -> Result<(Vec<String>, CandidateCount)> {
-        let mut ids = self.traversal.execute_ids(conn, now_ts).await?;
-        let count = if ids.len() > self.probe_cap {
-            ids.truncate(self.probe_cap);
-            CandidateCount::AtLeast(self.probe_cap)
+        let capped = self.traversal.clone().limit(self.probe_cap);
+        let (ids, outcome) = capped.execute_ids_explained(conn, now_ts).await?;
+        let count = if outcome.hit_limit() {
+            CandidateCount::AtLeast(ids.len())
         } else {
             CandidateCount::Exact(ids.len())
         };

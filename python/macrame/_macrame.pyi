@@ -149,13 +149,18 @@ class Interval:
     def __repr__(self) -> str: ...
 
 class ReadPlan:
-    """The lineage and the two instants a read is taken at (0.15.9, W13.4).
+    """What a read asks for (0.15.9, W13.4; `limit` 0.15.10, W13.5).
 
     Every argument is optional and every default is the ordinary read: no
-    branch is the trunk, no `valid` is now, no `recorded` is current belief.
-    A plan is inert — it validates the two instants and nothing else — so an
-    unregistered lineage or an unreachable belief is refused by the read that
-    takes it, not by this constructor.
+    branch is the trunk, no `valid` is now, no `recorded` is current belief,
+    no `limit` is the whole answer. A plan is inert — it validates the two
+    instants and nothing else — so an unregistered lineage or an unreachable
+    belief is refused by the read that takes it, not by this constructor.
+
+    `limit` is the one field that does not narrow which rows are true; it
+    bounds what the read costs, so a plan carrying one describes a sample.
+    On `Database.edges` the rows kept are whichever the engine reaches first
+    and `len(result) == limit` says exactly that it was cut.
 
     Rust's `ReadPlan` is a fluent builder because Rust has no keyword
     arguments. This is the same value with the scaffolding removed.
@@ -167,6 +172,7 @@ class ReadPlan:
         branch: str | None = None,
         valid: Timestamp | None = None,
         recorded: Timestamp | None = None,
+        limit: int | None = None,
     ) -> None: ...
     @property
     def branch(self) -> str | None:
@@ -183,6 +189,10 @@ class ReadPlan:
         None is current belief, which is a projection read rather than a fold
         bounded at the present: the same answer, and only one of them is cheap.
         """
+
+    @property
+    def limit(self) -> int | None:
+        """How many rows this read will pay for, or None for all of them."""
 
     def __repr__(self) -> str: ...
 
@@ -951,8 +961,29 @@ class Database:
         as_of_valid: Timestamp | None = None,
         as_of_recorded: Timestamp | None = None,
         branch: str | None = None,
+        limit: int | None = None,
         now: Timestamp | None = None,
     ) -> list[str]: ...
+    def traverse_ids_explained(
+        self,
+        start_node: str,
+        *,
+        max_depth: int = 2,
+        edge_types: Sequence[str] | None = None,
+        min_weight: float = 0.0,
+        as_of_valid: Timestamp | None = None,
+        as_of_recorded: Timestamp | None = None,
+        branch: str | None = None,
+        limit: int | None = None,
+        now: Timestamp | None = None,
+    ) -> tuple[list[str], bool]:
+        """`traverse_ids`, plus whether `limit` cut the walk short (0.15.10).
+
+        Returns `(ids, truncated)`. `truncated` is exact rather than inferred:
+        `len(ids) == limit` asks a different question, because the walk's rows
+        and the ids that survive its projection are different counts, so a walk
+        cut at 10 rows can return 8 ids.
+        """
     def traverse(
         self,
         start_node: str,
@@ -964,6 +995,7 @@ class Database:
         as_of_valid: Timestamp | None = None,
         as_of_recorded: Timestamp | None = None,
         branch: str | None = None,
+        limit: int | None = None,
         now: Timestamp | None = None,
     ) -> list[NodeAttributes]:
         """Traverse and hydrate node text.

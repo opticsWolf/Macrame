@@ -888,6 +888,8 @@ does not: a view holds a lineage it can read through, and `view.archive()` would
 be a handle that dissolves the thing it is a handle *to*. The rule is about
 surfaces a view can still be used after.
 
+<a id="w134-readplan"></a>
+
 ### 14.21 `ReadPlan`, and the first time the two spellings differ on purpose (0.15.9, W13.4, [D-251](s13-decision-register.md#d-251))
 
 W6's convention is that a binding ships in the release that creates the feature, and [§14.18](s14-python-bindings.md#fifth-read-surface) records the one lapse. This is the fifth holding of it, and the first release where the Rust and Python surfaces are deliberately *not* the same shape.
@@ -901,6 +903,20 @@ What has to match is the **meaning**, and it does: an unset field is the ordinar
 **`plan=` is not a keyword on the traversal entry points, and that is the decision worth recording.** They have taken `as_of_valid=`, `as_of_recorded=` and `branch=` since 0.13.2 and 0.14.4. A fourth keyword naming the same three would put two spellings of one question in a single signature, with a precedence rule between them — [D-030](s13-decision-register.md#d-030)'s drift arriving as a convenience. `TraversalBuilder::plan` exists in Rust because Rust has no keywords to compose; Python composes them at the call site, and `**` is what a caller reaches for when they have a plan-shaped `dict`. The surface that takes a plan here is `db.edges(plan)`, which is new and has no keywords to duplicate.
 
 `edges` returns **six**-tuples where `query_as_of_edges` returns five, and the sixth is the lineage holding the belief — the same `EdgeBelief` shape `MaterializedState.edges` has carried since 0.14.5 ([D-222](s13-decision-register.md#d-222)), reached through `belief_to_py` rather than a second tuple builder.
+
+<a id="w135-limit"></a>
+
+### 14.22 `limit`, and the keyword that needed a second return value (0.15.10, W13.5, [D-252](s13-decision-register.md#d-252))
+
+The sixth holding of W6's convention, and the release that keeps a promise [§14.21](s14-python-bindings.md#w134-readplan) made: `limit` was left off `ReadPlan` in 0.15.9 because a public field that silently does nothing is worse than a loose argument, and this is the release that gives it something to do — on both sides at once.
+
+`ReadPlan(branch=…, valid=…, recorded=…, limit=…)` is the parity that costs nothing: a fourth keyword on a constructor that already has three, and `plan.limit` beside `plan.branch`. What cost something is `traverse_ids`.
+
+**A `limit=` keyword alone would have shipped the defect it fixes.** C-8 is that `probe_cap` bounded the returned list rather than the work, so a ceiling that returns a shorter list is exactly what was already there. What makes it honest is that the caller can tell whether the ceiling bit — and from Python that cannot be recovered from the list, for the same reason it cannot in Rust: the walk's rows and the ids surviving its projection are different counts, so a walk cut at ten rows can answer with eight and `len(ids) == limit` is a different question. So `traverse_ids_explained` arrives with the keyword, returning `(ids, truncated)`, and `traverse_ids` is that call with the second value dropped.
+
+**`truncated` is a `bool` rather than a `WalkOutcome` class**, and the precedent is `CostEstimate`: `CandidateCount` crosses this boundary as `candidates` and `candidates_capped` because the value has two states and no payload, and a class would make a caller unwrap it to reach a question they wanted to write an `if` on. The same reasoning gives the same shape.
+
+**Two surfaces refuse the keyword and a third takes it without being able to report, each for its own reason.** `load_subgraph` has `byte_budget`, which *refuses* with `SubgraphTooLargeError` rather than truncating, and a `Subgraph` has nowhere to record that its walk was cut — a second, weaker ceiling there would return a sample that looks like a neighbourhood. `search_filtered` has `probe_cap`, which *is* this ceiling under the name that surface already had; a `limit=` beside it would be two spellings of one knob in one signature, which is what §14.21 refused for `plan=`. `traverse` does take it, and cannot report it: hydrated nodes leave no room for the answer, so the keyword is offered and the docstring names `traverse_ids_explained` as where the question is asked. That last one is a judgement rather than a rule — refusing it would leave the surface a caller reaches for topology *and* attributes unable to bound its own cost, which is the worse of the two gaps.
 
 <!--nav-->
 ← [previous](s13-decision-register.md) · [index](README.md) · [next](appendices.md) →

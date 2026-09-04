@@ -488,12 +488,21 @@ WITH RECURSIVE walk(node_id, depth) AS (
       AND l.valid_from <= ?3 AND ?3 < l.valid_to      -- the valid-time window
       AND l.weight >= ?4
       AND l.edge_type IN (?5, ?6, ...)                -- bound, never spliced
+    LIMIT ?7                                          -- only when limit is set
 )
 SELECT DISTINCT w.node_id
 FROM walk w JOIN concepts c ON c.id = w.node_id
 WHERE c.retired = 0
 ORDER BY w.node_id;
 ```
+
+**The `LIMIT` is inside the recursion, and that is the whole content of the change (0.15.10, W13.5, [D-252](s13-decision-register.md#d-252), review C-8).** `FilteredVectorSearch::probe_cap` had bounded the *list* — the traversal ran to the end of the graph and the tail was dropped — so a name that read as a ceiling on cost was a ceiling on the size of the answer. The obvious repair, a `LIMIT` on the projection above, repeats the defect one line further down: that projection sorts, and a sort materialises the whole walk before a limit can apply. Measured on a hub graph whose walk visits 20,050 edges: **no limit 20,050; `LIMIT 20` on the outer `SELECT` 20,050; `LIMIT 20` inside the CTE 7,250; `LIMIT 5` inside 1,250.** SQLite halts the recursion once the recursive table reaches the limit, so the bound is the fan-out of the first `n` rows taken out of the queue — proportional, not absolute, and worth nothing until it is smaller than the expensive frontier.
+
+`?7` is written here as the seventh slot; it is actually `edge_type_base + edge_types.len()`, **after** the variadic run, because it is the only parameter in this layout whose position depends on how many precede it rather than on which are present. The clause is empty when no limit is set, so every traversal written before 0.15.10 emits the byte-identical statement it always did.
+
+**A limited walk answers with at most `n` ids, and the projection under a limit is a different one.** `n` counts *walk rows*: the walk holds `(node_id, depth)` and dedupes on the pair, so a node reachable at two depths spends two of them, and `c.retired = 0` then drops rows the walk has already paid for. So fewer than `n` does not mean the graph was smaller, and no id count can say whether the ceiling bit. `execute_ids_explained` returns a `WalkOutcome` taken from the walk's own row count in the same statement — and that count is the projection's **anchor**, left-joined to the ids rather than selected beside them, because a walk whose every concept is retired returns no rows to read a second column from and is exactly the case where the question matters most.
+
+The subset is the near end: SQLite's recursive queue is FIFO, so the walk is breadth-first and a limit drops the farthest nodes first. Among nodes at the same depth the cut is arbitrary, which is the one thing `max_depth` — the crate's other stated bound — does not do.
 
 **Two corrections to the pre-0.5.4 text (0.5.4).** First, the document described two SQL shapes — an "active mode" carrying `l.valid_to > :now`, and an `as_of(ts)` variant that "rewrites exactly two predicates". There is one shape. The half-open window `l.valid_from <= ?3 AND ?3 < l.valid_to` is parameterised by a timestamp, and "active" is that predicate evaluated at `now`. One shape means one thing to test and one place for the [D-029](s13-decision-register.md#d-029) canonical-form requirement to bite; a rewrite that produces a second predicate string is a second thing that can be wrong.
 
@@ -1203,7 +1212,9 @@ The relationship is asserted at **compile time**, not in a test: `const _: () = 
 
 ### 5.12 plan.rs — what a read asks for
 
-`ReadPlan` is the lineage and the two instants a read is taken at, as one value: `branch`, `valid`, `recorded`, every one of them `Option` and every `None` the ordinary read — the trunk, now, current belief (0.15.9, W13.4, [D-251](s13-decision-register.md#d-251), review F-34). `TraversalBuilder::plan` applies one, `read_plan` returns one, and `Database::edges` takes one.
+`ReadPlan` is what a read asks for, as one value: `branch`, `valid`, `recorded` and `limit`, every one of them `Option` and every `None` the ordinary read — the trunk, now, current belief, the whole answer (0.15.9, W13.4, [D-251](s13-decision-register.md#d-251), review F-34; `limit` 0.15.10, W13.5, [D-252](s13-decision-register.md#d-252)). `TraversalBuilder::plan` applies one, `read_plan` returns one, and `Database::edges` takes one.
+
+**`limit` is the one field that does not narrow which rows are true.** The other three name a read; this one bounds what it costs, so two reads under the same plan can differ and a plan carrying a limit describes a prefix rather than the read. What "prefix" means is the surface's to say and each does: on a traversal it is [§5.2](s5-modules.md#52-graphbuilderrs--traversal-valid-time-and-attribute-fidelity)'s ceiling on the walk, yielding the nodes nearest the start; on `edges` it is a plain `LIMIT` on one flat projection, whose rows are whichever the engine reaches first — that read states no order, and adding one so the truncation looked principled would put a sort on the largest statement in the crate. It needs nothing to report truncation, because nothing drops rows after the limit applies: `len() == n` is exact there where it is meaningless on the walk.
 
 **Two modules are called `plan` and only one is a public path.** This one is *what was asked*; `graph/plan.rs` ([§5.2](s5-modules.md#52-graphbuilderrs--traversal-valid-time-and-attribute-fidelity), [D-243](s13-decision-register.md#d-243)) is *how it is answered*, stays crate-private, and a caller who never reads SQL never meets it. The division is what the naming costs and what it buys.
 
