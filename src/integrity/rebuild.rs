@@ -43,7 +43,7 @@ pub(crate) enum Verify {
     ///
     /// For `archive()`, which calls this **inside its own write transaction**.
     /// The audit compares `links_current` against
-    /// [`LATEST_BELIEF_PROJECTION`](super::LATEST_BELIEF_PROJECTION); the insert
+    /// [`latest_belief_projection`](super::latest_belief_projection); the insert
     /// above fills `links_current` *from* that same projection, in the same
     /// transaction, with nothing else able to write in between. So the check is
     /// tautological — it verifies that `INSERT … SELECT` inserted what it
@@ -54,6 +54,64 @@ pub(crate) enum Verify {
     /// had two, byte-identical, in this file and `audit.rs`, and against two
     /// copies the post-rebuild audit was a real check: that they still agreed.
     No,
+}
+
+/// The five columns `links_current` is keyed by, in the order the primary key
+/// declares them.
+///
+/// Spelled once because the keyed repair names them four times — the temp
+/// table, the `DELETE`'s tuple, its subquery, and the re-projection's — and a
+/// list that has to agree with itself four times is a list that will not.
+pub(crate) const PROJECTION_KEY: &str = "source_id, target_id, edge_type, valid_from, branch_id";
+
+/// Re-derive `links_current` **at named keys only** (0.15.3, [D-245]).
+///
+/// `keys` is a table holding [`PROJECTION_KEY`] — the archive collects it from
+/// `links` before its `DELETE`, inside the same transaction, so it names every
+/// key the session is about to disturb and nothing else.
+///
+/// # Why this is exact, and not an approximation of the rebuild
+///
+/// `links_current` is a function of `links`, one row per key (Doctrine VI), and
+/// the function is *pointwise*: the row at a key depends on the `links` rows at
+/// that key and on nothing else. So a change confined to a set of keys can only
+/// change the projection at those keys, and re-deriving there is not a cheaper
+/// estimate of the full rebuild — it is the same answer with the untouched
+/// partitions left alone. Both halves matter and both are derived from the
+/// definition rather than described: the `DELETE` removes what was there, the
+/// `INSERT` puts back whatever the surviving rows project to, which is **no
+/// row** when the session archived the last belief at that key. That case is
+/// the one a hand-written compensation gets wrong, and it is why the repair is
+/// two statements against the projection instead of one `DELETE` with a
+/// predicate.
+///
+/// The full [`rebuild_within`] stays for `rebuild_current`, where the caller is
+/// asking for exactly that and has no key set to offer.
+///
+/// [D-245]: ../../docs/architecture/s13-decision-register.md#d-245
+pub(crate) async fn repair_keys_within(conn: &libsql::Connection, keys: &str) -> Result<usize> {
+    conn.execute(
+        &format!("DELETE FROM links_current WHERE ({PROJECTION_KEY}) IN (SELECT {PROJECTION_KEY} FROM {keys})"),
+        (),
+    )
+    .await?;
+
+    let rows = conn
+        .execute(
+            &format!(
+                "INSERT INTO links_current \
+                 (source_id, target_id, edge_type, valid_from, valid_to, weight, properties, \
+                  recorded_at, branch_id) \
+                 {projection}",
+                projection = super::projection_where(&format!(
+                    "({PROJECTION_KEY}) IN (SELECT {PROJECTION_KEY} FROM {keys})"
+                ))
+            ),
+            (),
+        )
+        .await?;
+
+    Ok(rows as usize)
 }
 
 /// The rebuild itself, without a transaction of its own.
@@ -74,7 +132,7 @@ pub(crate) async fn rebuild_within(
          (source_id, target_id, edge_type, valid_from, valid_to, weight, properties, \
           recorded_at, branch_id) \
          {projection}",
-        projection = super::LATEST_BELIEF_PROJECTION
+        projection = super::latest_belief_projection()
     );
     let rows_inserted = conn.execute(&insert_query, ()).await?;
 

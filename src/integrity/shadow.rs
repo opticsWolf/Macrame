@@ -52,6 +52,7 @@
 //! smaller win than "the swap is microseconds", which is what the naive reading
 //! of the shadow idea promises, and it is the real one.
 
+use super::projection_where;
 use crate::error::{DbError, Result};
 use crate::schema::ddl;
 
@@ -109,31 +110,6 @@ pub enum ShadowOutcome {
     Filled { last: Option<String> },
     /// Rows in the new `links_current`.
     Swapped { rows: usize },
-}
-
-/// The latest-belief projection, restricted by a `WHERE` on `links`.
-///
-/// Takes the same shape as [`LATEST_BELIEF_PROJECTION`](super::LATEST_BELIEF_PROJECTION)
-/// and exists so the restriction lands **inside** the subquery. Applied outside
-/// it, the window function would still rank every partition in the table and the
-/// chunk would cost as much as the whole rebuild.
-fn projection_where(clause: &str) -> String {
-    format!(
-        r#"
-        SELECT source_id, target_id, edge_type, valid_from,
-               valid_to, weight, properties, recorded_at, branch_id
-        FROM (
-            SELECT source_id, target_id, edge_type, valid_from,
-                   valid_to, weight, properties, recorded_at, branch_id,
-                   ROW_NUMBER() OVER (
-                       PARTITION BY source_id, target_id, edge_type, valid_from, branch_id
-                       ORDER BY recorded_at DESC
-                   ) AS rn
-            FROM links
-            WHERE {clause}
-        ) WHERE rn = 1
-    "#
-    )
 }
 
 const SHADOW_COLUMNS: &str = "(source_id, target_id, edge_type, valid_from, \

@@ -37,7 +37,7 @@ pub async fn audit_current(conn: &libsql::Connection) -> Result<usize> {
           + (SELECT COUNT(*) FROM (
                 SELECT * FROM projection EXCEPT SELECT * FROM materialized))
     "#,
-        projection = super::LATEST_BELIEF_PROJECTION
+        projection = super::latest_belief_projection()
     );
     let mut rows = conn.query(&query, ()).await?;
     let count: i64 = if let Some(row) = rows.next().await? {

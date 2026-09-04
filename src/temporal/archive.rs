@@ -534,6 +534,53 @@ async fn cold_has_branch(conn: &libsql::Connection, table: &str) -> Result<bool>
     Ok(false)
 }
 
+/// The temp table the keyed repair reads, and the statement that fills it.
+///
+/// Temp rather than a `WITH`: it has to be read **after** the `DELETE` that
+/// makes the rows it names disappear, so the key set must be materialised
+/// before then. It lives in the connection's `temp` database, which the
+/// archive's own `BEGIN IMMEDIATE` covers, and is dropped before the session
+/// ends so a second archive on the same connection starts from nothing.
+const ARCHIVED_KEYS: &str = "archived_keys";
+
+/// Collect the keys a `DELETE FROM links WHERE {clause}` is about to disturb.
+///
+/// Run before the delete, in its transaction, with the delete's own parameters:
+/// the two statements must see the same rows, and the only way to be sure of
+/// that is to give them the same predicate rather than a description of it.
+async fn collect_archived_keys(
+    tx: &libsql::Transaction,
+    clause: &str,
+    params: impl libsql::params::IntoParams,
+) -> Result<()> {
+    tx.execute(&format!("DROP TABLE IF EXISTS temp.{ARCHIVED_KEYS}"), ())
+        .await?;
+    tx.execute(
+        &format!(
+            "CREATE TEMP TABLE {ARCHIVED_KEYS} AS \
+             SELECT DISTINCT {key} FROM links WHERE {clause}",
+            key = crate::integrity::rebuild::PROJECTION_KEY
+        ),
+        params,
+    )
+    .await?;
+    Ok(())
+}
+
+/// Re-derive the projection at the collected keys, then drop the key table.
+///
+/// Called only when the `DELETE` removed something, for
+/// [D-080](../../docs/architecture/s13-decision-register.md#d-080)'s reason:
+/// `links_current` is a function of `links`, so a delete that removed nothing
+/// left nothing to repair. What changed at 0.15.3 is what "repair" costs —
+/// O(keys the session archived) rather than O(every link that survived it).
+async fn repair_archived_keys(tx: &libsql::Transaction) -> Result<()> {
+    crate::integrity::rebuild::repair_keys_within(tx, ARCHIVED_KEYS).await?;
+    tx.execute(&format!("DROP TABLE temp.{ARCHIVED_KEYS}"), ())
+        .await?;
+    Ok(())
+}
+
 /// `conn` is passed alongside `tx` only so [`delete_guarded`] can hand it to
 /// `classify`, which queries on the error path. Both name the same connection.
 async fn archive_session(
@@ -571,6 +618,15 @@ async fn archive_session(
         )
         .await? as usize;
 
+    // The keys this session is about to disturb, taken with the delete's own
+    // predicate and before the delete runs. See `collect_archived_keys`.
+    collect_archived_keys(
+        &tx,
+        LINKS_ARCHIVABLE,
+        libsql::named_params! {":cutoff": cutoff},
+    )
+    .await?;
+
     let links_deleted = delete_guarded(
         &tx,
         conn,
@@ -603,9 +659,15 @@ async fn archive_session(
     // reprojections to delete nothing — and windowing makes the archive slower
     // in total than not windowing. `log_entries_archived` deliberately does not
     // enter into it: archiving the transaction log cannot change `links`.
+    //
+    // **And the repair is keyed since 0.15.3 (D-245).** The skip above bounded
+    // *how often* the full reprojection ran; it could not bound what one costs,
+    // and a session that archives ten rows from a million-row ledger still paid
+    // for the million. The projection is pointwise in the key, so re-deriving
+    // at the disturbed keys is the same answer — the reasoning is in
+    // `repair_keys_within`, and `audit_current` is what checks it.
     if links_deleted > 0 {
-        crate::integrity::rebuild::rebuild_within(&tx, crate::integrity::rebuild::Verify::No)
-            .await?;
+        repair_archived_keys(&tx).await?;
     }
 
     // Concepts, and **only now** — after the `links` delete, never before it
@@ -992,6 +1054,13 @@ async fn archive_branch_session(
         )
         .await? as usize;
 
+    collect_archived_keys(
+        &tx,
+        "branch_id = :branch",
+        libsql::named_params! {":branch": branch},
+    )
+    .await?;
+
     let links_deleted = delete_guarded(
         &tx,
         conn,
@@ -1007,9 +1076,13 @@ async fn archive_branch_session(
     // `branches` row goes: `links_current.branch_id` carries the same foreign
     // key its three siblings do, so the projection has to have stopped naming
     // the lineage before the lineage can leave.
+    //
+    // Keyed since 0.15.3 (D-245), and here the key set is every key the lineage
+    // held — which is the whole of what it wrote and *not* the whole of
+    // `links`, so a branch archived out of a large trunk stops paying for the
+    // trunk.
     if links_deleted > 0 {
-        crate::integrity::rebuild::rebuild_within(&tx, crate::integrity::rebuild::Verify::No)
-            .await?;
+        repair_archived_keys(&tx).await?;
     }
 
     // Concepts after links, for [D-128]'s reason turned around: there it was
@@ -1381,5 +1454,127 @@ async fn delete_guarded(
     match tx.execute(sql, params).await {
         Ok(n) => Ok(n),
         Err(e) => Err(crate::error::classify(conn, e, WriteOp::Delete { table }).await),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const EPOCH: &str = "1970-01-01T00:00:00.000000Z";
+    const OPEN: &str = "9999-12-31T23:59:59.999999Z";
+    const CLOSED: &str = "1970-01-01T00:30:00.000000Z";
+    const CUTOFF: &str = "1970-01-01T02:00:00.000000Z";
+
+    async fn seeded() -> libsql::Connection {
+        let db = libsql::Builder::new_local(":memory:")
+            .build()
+            .await
+            .unwrap();
+        let conn = db.connect().unwrap();
+        crate::schema::run_migrations(&conn).await.unwrap();
+        for id in ["a", "b", "c", "e"] {
+            conn.execute(
+                "INSERT INTO concepts (id, title, valid_from, recorded_at) \
+                 VALUES (?1, 'n', ?2, ?2)",
+                libsql::params![id, EPOCH],
+            )
+            .await
+            .unwrap();
+        }
+        // `a → b` twice, so the older row is superseded and archivable;
+        // `a → c` closed before the cutoff, so the second arm takes it;
+        // `a → e` open and never superseded, so nothing can touch it.
+        for (target, valid_to, recorded_at) in [
+            ("b", OPEN, EPOCH),
+            ("b", OPEN, "1970-01-01T01:00:00.000000Z"),
+            ("c", CLOSED, EPOCH),
+            ("e", OPEN, EPOCH),
+        ] {
+            conn.execute(
+                "INSERT INTO links (source_id, target_id, edge_type, valid_from, valid_to, \
+                 weight, properties, recorded_at) VALUES ('a', ?1, 'LINKS', ?2, ?3, 1.0, '{}', ?4)",
+                libsql::params![target, EPOCH, valid_to, recorded_at],
+            )
+            .await
+            .unwrap();
+        }
+        conn
+    }
+
+    /// **The key set is the keys the delete will disturb, and no others**
+    /// (0.15.3, [D-245](../../docs/architecture/s13-decision-register.md#d-245)).
+    ///
+    /// A key set that is too wide leaves the projection *correct* — it
+    /// re-derives untouched partitions to the rows they already held — so
+    /// every equality test in `archive_projection_tests` passes with it, and
+    /// the whole point of the release does not. This is the assertion those
+    /// tests cannot make: what the repair is allowed to look at. `a → e` is
+    /// the row that must not appear, and the count is pinned as well, because
+    /// a key set that is too *narrow* is a correctness bug the equality tests
+    /// would catch but this one names.
+    #[tokio::test]
+    async fn the_collected_keys_are_only_the_ones_the_delete_disturbs() {
+        let conn = seeded().await;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .unwrap();
+        collect_archived_keys(
+            &tx,
+            LINKS_ARCHIVABLE,
+            libsql::named_params! {":cutoff": CUTOFF},
+        )
+        .await
+        .unwrap();
+
+        let mut rows = tx
+            .query(
+                &format!("SELECT target_id FROM {ARCHIVED_KEYS} ORDER BY target_id"),
+                (),
+            )
+            .await
+            .unwrap();
+        let mut targets = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            targets.push(row.get::<String>(0).unwrap());
+        }
+
+        assert_eq!(
+            targets,
+            vec!["b".to_string(), "c".to_string()],
+            "a → e is untouched by this cutoff and the repair has no business \
+             re-deriving it; a key set this wide is the full rebuild wearing \
+             the keyed repair's name"
+        );
+    }
+
+    /// Two rows at one key are one key, and the repair is per key.
+    ///
+    /// `DISTINCT` rather than a bare `SELECT`: `a → b` has two archivable-or-
+    /// not rows and the repair re-derives its partition once. Without it the
+    /// `IN` subquery still gives the right answer and the key table grows with
+    /// the *rows* archived rather than the keys, which is the same cost defect
+    /// one level down.
+    #[tokio::test]
+    async fn a_key_asserted_twice_is_collected_once() {
+        let conn = seeded().await;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .unwrap();
+        collect_archived_keys(&tx, "1 = 1", ()).await.unwrap();
+
+        let n: i64 = tx
+            .query(&format!("SELECT COUNT(*) FROM {ARCHIVED_KEYS}"), ())
+            .await
+            .unwrap()
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get(0)
+            .unwrap();
+        assert_eq!(n, 3, "four rows at three keys collected as three keys");
     }
 }

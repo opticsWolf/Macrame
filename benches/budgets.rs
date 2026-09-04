@@ -1275,6 +1275,63 @@ fn archive_cost(c: &mut Criterion) {
         )
     });
 
+    // **The shape C-1 was about: a small slice of a large ledger** (0.15.3,
+    // D-245).
+    //
+    // `archive_superseded` above archives *everything*, so the repair's cost
+    // and the session's work grow together and a full reprojection looks like
+    // a reasonable price. The real archive does not look like that. A ledger
+    // accumulates, a cutoff moves forward slowly, and each session takes a
+    // thin slice off the old end — which until 0.15.3 paid a `DELETE FROM
+    // links_current` plus a full `INSERT … SELECT` over every surviving link,
+    // under the write lock, budget-exempt, for having archived a handful of
+    // rows. This bench is that ratio: `edges` links, of which a fixed 200 are
+    // archivable. Its number should stay flat as `MACRAME_BENCH_SCALE` grows;
+    // before the keyed repair it grew with the fixture.
+    group.bench_function("archive_small_slice", |b| {
+        b.iter_batched(
+            || {
+                rt.block_on(async {
+                    let fx = fixture().await;
+                    seed_concepts(&fx.db, edges + 1).await;
+                    // Open intervals: neither arm of LINKS_ARCHIVABLE can take
+                    // them, so they are the ledger the session must not pay for.
+                    let mut batch = Vec::with_capacity(edges);
+                    for i in 1..=edges {
+                        batch.push(
+                            EdgeAssertion::new("c0000000", format!("c{i:07}"), "LINKS")
+                                .valid_from(TS),
+                        );
+                    }
+                    for chunk in batch.chunks(2_000) {
+                        fx.db.bulk_import(chunk.to_vec()).await.unwrap();
+                    }
+                    // The slice: 200 closed intervals, on their own edge type
+                    // so they do not disturb the keys above.
+                    let slice: Vec<_> = (1..=200)
+                        .map(|i| {
+                            EdgeAssertion::new("c0000000", format!("c{i:07}"), "SHED")
+                                .valid_from(TS)
+                                .valid_to(CLOSED)
+                        })
+                        .collect();
+                    fx.db.bulk_import(slice).await.unwrap();
+                    fx
+                })
+            },
+            |fx| {
+                let report = rt
+                    .block_on(fx.db.archive("2099-01-01T00:00:00.000000Z"))
+                    .unwrap();
+                assert_eq!(
+                    report.links_archived, 200,
+                    "the fixture archived the ledger, not the slice"
+                );
+            },
+            BatchSize::PerIteration,
+        )
+    });
+
     group.finish();
 }
 

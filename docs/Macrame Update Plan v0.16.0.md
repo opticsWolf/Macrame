@@ -110,9 +110,11 @@ This is the release F-34 was about: the three qualifiers stated once and compose
 
 The review's items 1, 2 and 3, in that order, because they are what a deployment hits first.
 
-### W14.1 · 0.15.6 — keyed projection repair in `archive_session` (C-1)
+### W14.1 · 0.15.3 — keyed projection repair in `archive_session` (C-1)
 
 The archive arm rebuilds `links_current` in full after deleting archived rows. Replace it with a repair keyed on the rows the arm deleted: for each `(source, target, type, valid_from, branch)` touched, re-derive that key's current row from surviving `links`. A bench group `archive_session` measures the rebuild before and after at three populations, and the register entry carries the numbers.
+
+**Shipped as 0.15.3, [D-245](architecture/s13-decision-register.md#d-245) — taken before the rest of W13 and out of the numbered order above.** It is the review's only High and the item a deployment hits first, and it touches `integrity/` and `archive.rs`, so nothing in W13.3–W13.5 was waiting on it or is disturbed by it. Two departures: the bench lives in the existing `archive` group as `archive_small_slice` rather than a new `archive_session` group (the group already exists and a second one measuring the same call would be the duplication this cycle keeps removing), and the three populations are measured on the repair itself rather than end to end, because the end-to-end number buries a flat term inside a linear one. `archive_branch_session` takes the same repair in the same release, for [D-227](architecture/s13-decision-register.md#d-227)'s reason.
 
 ### W14.2 · 0.15.7 — `hot_log_reach(ts)` (C-2)
 
@@ -175,7 +177,7 @@ Merge to `main` after W16.2, tagged. `docs/releases/v0.16.0.md` written before t
 | 3 | 0.15.3 | W13.3 | key-narrowed lowering for the guard | `plan.rs`, `lineage.rs`, `connection.rs` | guard plan keeps its seek |
 | 4 | 0.15.4 | W13.4 | public `ReadPlan`; Python parity | `src/plan.rs` (public), `bindings/python` | Appendix A/D.1, `public-api.txt` |
 | 5 | 0.15.5 | W13.5 | `limit` in the walk | `plan.rs`, `builder.rs`, `vector_filter.rs` | walk pin gains the limited form |
-| 6 | 0.15.6 | W14.1 | keyed archive repair | `temporal/archive.rs`, `benches` | bench group `archive_session` |
+| 6 | 0.15.3 | W14.1 | keyed archive repair — **done** | `temporal/archive.rs`, `integrity/`, `benches` | `archive/archive_small_slice`; numbers in D-245 |
 | 7 | 0.15.7 | W14.2 | `hot_log_reach(ts)` | `temporal/replay.rs`, `as_of.rs` | reach tests |
 | 8 | 0.15.8 | W14.3 | `ActorState` | `connection.rs` | single-edge path round trips counted |
 | 9 | 0.15.9 | W15.1 | typed rehydrate refusal | `errors.rs`, `branch.rs` | kind gate |
