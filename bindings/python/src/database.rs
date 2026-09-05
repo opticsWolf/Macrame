@@ -43,7 +43,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyType};
+use pyo3::types::{PyDict, PyTuple, PyType};
 
 use macrame::prelude::*;
 
@@ -55,7 +55,7 @@ use crate::plan;
 use crate::rows;
 use crate::runtime::{check_not_forked, runtime};
 use crate::temporal;
-use crate::timestamps::to_canonical;
+use crate::timestamps::{from_canonical, to_canonical};
 use crate::types::{PyAnnotation, PyAttributeMode, PyConceptUpsert, PyEdgeAssertion};
 use crate::vector;
 
@@ -1154,6 +1154,82 @@ impl PyDatabase {
             runtime().block_on(db.reconstruct(&ts)).map_err(to_py)
         })?;
         Ok(temporal::PyMaterializedState { inner })
+    }
+
+    /// The world at `ts` **as one lineage saw it** (0.15.17, D-259).
+    ///
+    /// `reconstruct` answers about the ledger and returns every lineage's
+    /// belief; this answers about `branch`. Each ancestor is bounded at its own
+    /// fork point and each edge key is taken from the nearest lineage holding
+    /// it — the resolution the traversals and `edges()` read through, applied
+    /// to a fold.
+    ///
+    /// `concepts` is narrowed but **not resolved**: a lineage outside the
+    /// ancestry contributes nothing and an ancestor's post-cutoff writes are cut,
+    /// but where two *visible* lineages both wrote a concept the winner is the
+    /// later log row rather than the nearer lineage. A folded concept row carries
+    /// no branch, so there is no nearest one left to pick. Only `edges` gets the
+    /// distance rule.
+    ///
+    /// On an **unforked** database this is `reconstruct` — same path, same
+    /// snapshots. On a forked one it cannot use snapshots at all: a snapshot
+    /// has no `recorded_at` left in it for a fork point to be compared
+    /// against, so this folds from genesis and costs about 3 ms flat whatever
+    /// the fork depth. Against `reconstruct` that is ~1.15x where no snapshots
+    /// are configured and ~4x where they are — the absolute cost is the same
+    /// either way, it is `reconstruct` that gets faster.
+    ///
+    /// Raises `UnknownBranchError` naming the lineage when it is not
+    /// registered, rather than quietly answering for the trunk.
+    fn reconstruct_on(
+        &self,
+        py: Python<'_>,
+        ts: &Bound<'_, PyAny>,
+        branch: &str,
+    ) -> PyResult<temporal::PyMaterializedState> {
+        let ts = to_canonical(Some(ts))?;
+        let branch = branch.to_string();
+        let inner = self.with_db(py, move |db| {
+            runtime()
+                .block_on(db.reconstruct_on(&ts, &branch))
+                .map_err(to_py)
+        })?;
+        Ok(temporal::PyMaterializedState { inner })
+    }
+
+    /// `branch`'s ancestry, nearest first: `[(branch_id, dist, cutoff)]`.
+    ///
+    /// `dist` is steps from the reader, so the first entry is `branch` itself
+    /// at `0`. `cutoff` is the instant past which that ancestor's writes are
+    /// not visible here — `None` for the reader, and for an ancestor it is the
+    /// **earliest** fork point on the path down to it, not the nearest.
+    ///
+    /// This is what `reconstruct_on` resolves against, published so the rule is
+    /// inspectable rather than only obeyed: a caller who wants to know *why* an
+    /// edge is or is not in a lineage's view can read the ancestry that decided
+    /// it.
+    ///
+    /// Raises `UnknownBranchError` for a lineage that is not registered.
+    fn ancestry<'py>(&self, py: Python<'py>, branch: &str) -> PyResult<Vec<Bound<'py, PyTuple>>> {
+        let name = branch.to_string();
+        let anc = self.with_db(py, move |db| {
+            runtime().block_on(db.ancestry(&name)).map_err(to_py)
+        })?;
+        anc.iter()
+            .map(|a| {
+                PyTuple::new(
+                    py,
+                    [
+                        a.branch_id.clone().into_pyobject(py)?.into_any(),
+                        a.dist.into_pyobject(py)?.into_any(),
+                        match &a.cutoff {
+                            Some(c) => from_canonical(py, c)?,
+                            None => py.None().into_bound(py),
+                        },
+                    ],
+                )
+            })
+            .collect()
     }
 
     /// Every edge one `ReadPlan` names, as the ledger held them (0.15.9,

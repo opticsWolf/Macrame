@@ -42,7 +42,7 @@
 
 use crate::branch::BranchId;
 use crate::error::Result;
-use crate::graph::lineage::lineage_shape;
+use crate::graph::lineage::{ancestry_params, resolve_for};
 use crate::graph::plan::{lower, Resolution};
 use crate::temporal::EdgeBelief;
 
@@ -227,7 +227,7 @@ pub(crate) async fn edges_at(
     // Refuses an unregistered lineage, and picks between the three shapes for
     // D-219's measured reason: the resolved form is 3x on a database with
     // nothing to resolve.
-    let shape = lineage_shape(conn, branch).await?;
+    let (shape, ancestry) = resolve_for(conn, branch).await?;
 
     // The traversal's reach guard, asked here for the same reason and at the
     // same cost (D-247): a fold below the hot log's newest surviving stamp is
@@ -240,6 +240,10 @@ pub(crate) async fn edges_at(
     }
 
     let recorded_slot = BRANCH_SLOT + usize::from(shape.binds_branch());
+    // After every fixed slot, for `TraversalBuilder::ancestry_slot`'s reason:
+    // the block's length is a function of the database's fork depth, so
+    // anything placed after it would move when an unrelated branch was created.
+    let ancestry_slot = recorded_slot + usize::from(recorded.is_some());
     let lowered = lower(&Resolution {
         shape,
         branch_slot: BRANCH_SLOT,
@@ -248,6 +252,8 @@ pub(crate) async fn edges_at(
         // A whole-projection read discovers its edges; there is no key to push
         // down. See `Resolution::key`.
         key: None,
+        ancestry: &ancestry,
+        ancestry_slot,
     });
 
     // Spliced rather than bound, which is the one place this file departs
@@ -280,6 +286,9 @@ pub(crate) async fn edges_at(
     if let Some(ts) = recorded {
         params.push(ts.into());
     }
+    // Last, matching `ancestry_slot`, and only under the shape that emits the
+    // relation — `ancestry` is empty under the other two anyway.
+    params.extend(ancestry_params(&ancestry));
 
     let mut rows = conn.query(&sql, params).await?;
     let mut out = Vec::new();

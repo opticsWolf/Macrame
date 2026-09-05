@@ -1,5 +1,5 @@
 use crate::error::{Result, StatedInstants};
-use crate::graph::lineage::{lineage_shape, LineageShape};
+use crate::graph::lineage::{ancestry_params, resolve_for, Ancestor, LineageShape};
 use crate::graph::plan::{lower, Resolution};
 use crate::schema::ddl;
 use crate::temporal::as_of::NodeAttributes;
@@ -136,7 +136,7 @@ pub struct TraversalBuilder {
     /// retires an inherited edge is seen to have done so.
     ///
     /// **An unregistered lineage is refused rather than defaulted**, by
-    /// `graph::lineage::lineage_shape`. Answering it
+    /// `graph::lineage::resolve_for`. Answering it
     /// with the trunk's view is the answer a caller is least able to detect,
     /// because on a database that has never forked it is the answer they
     /// expected anyway.
@@ -238,7 +238,7 @@ impl TraversalBuilder {
     ///
     /// [`DbError::InvalidBranchId`](crate::DbError::InvalidBranchId) when the
     /// name in [`Self::branch`] is not one. This builder takes its lineage as
-    /// a `String` and validates it nowhere — `lineage_shape` refuses an
+    /// a `String` and validates it nowhere — `Lineages::shape` refuses an
     /// unregistered name at read time, which is a different question — so the
     /// conversion to [`BranchId`](crate::BranchId) is where an unconstructible
     /// name is finally noticed. Every branch that exists in a database passed
@@ -516,12 +516,38 @@ impl TraversalBuilder {
     ///
     /// The execution paths do not have that gap: [`Self::execute_ids`],
     /// [`Self::execute`] and `Database::load_subgraph_with` each ask
-    /// `graph::lineage::lineage_shape` and pass the answer to the
+    /// `graph::lineage::resolve_for` and pass the answer to the
     /// shape-taking form of this method. This method stays for inspecting and
     /// explaining the query — which is what its callers in `tests/` do — and
     /// says so rather than quietly returning the shape that is usually right.
     pub fn build_sql(&self) -> String {
-        self.build_sql_with(self.implied_shape())
+        self.build_sql_with(self.implied_shape(), &self.implied_ancestry())
+    }
+
+    /// The ancestry [`Self::build_sql`] assumes when nobody has asked the
+    /// database (0.15.17).
+    ///
+    /// One row: the named lineage itself, at `dist` 0 with no cutoff. That is
+    /// the true ancestry of a *root*, and it is the only one derivable without
+    /// reading `branches` — the parents and their fork points are exactly what
+    /// this method has no access to.
+    ///
+    /// It is the same bargain [`Self::implied_shape`] already made, extended to
+    /// the relation that shape emits: the SQL stays **valid and explainable**,
+    /// and its `lineage` table is a floor rather than the answer. A traversal
+    /// run through it would see the branch's own rows and none of what it
+    /// inherits. Every execution path resolves against the database instead,
+    /// which is what [`Self::build_sql`]'s own docs already say and this does
+    /// not change.
+    pub(crate) fn implied_ancestry(&self) -> Vec<Ancestor> {
+        match self.branch.as_deref() {
+            Some(b) => vec![Ancestor {
+                branch_id: b.to_string(),
+                dist: 0,
+                cutoff: None,
+            }],
+            None => Vec::new(),
+        }
     }
 
     /// The shape [`Self::build_sql`] assumes when nobody has asked the database.
@@ -534,13 +560,17 @@ impl TraversalBuilder {
     }
 
     /// [`Self::build_sql`] against a shape the caller has already established.
-    pub(crate) fn build_sql_with(&self, shape: LineageShape) -> String {
+    pub(crate) fn build_sql_with(&self, shape: LineageShape, ancestry: &[Ancestor]) -> String {
         if self.limit.is_some() {
-            return format!("{}{}", self.walk_cte(shape), Self::LIMITED_PROJECTION);
+            return format!(
+                "{}{}",
+                self.walk_cte(shape, ancestry),
+                Self::LIMITED_PROJECTION
+            );
         }
         format!(
             "{}{}",
-            self.walk_cte(shape),
+            self.walk_cte(shape, ancestry),
             r#"
 SELECT DISTINCT w.node_id
 FROM walk w JOIN concepts c ON c.id = w.node_id
@@ -622,6 +652,22 @@ ORDER BY w.node_id;
         self.edge_type_base(shape) + self.edge_types.len()
     }
 
+    /// Where the ancestry block starts, when the shape emits one (0.15.17).
+    ///
+    /// **After everything else**, including the limit. Two reasons, and the
+    /// second is the one that matters: it is variadic like the edge types, so
+    /// it could only go at an end; and its length is a function of *the
+    /// database's fork depth* rather than of anything the caller passed, so a
+    /// block anywhere earlier would make every slot after it move when an
+    /// unrelated branch was created.
+    ///
+    /// Under [`LineageShape::Trunk`] and [`LineageShape::TrunkOnForked`] no
+    /// `lineage` relation is emitted and this names a slot nothing binds, which
+    /// is the same thing [`Self::BRANCH_SLOT`] does under `Trunk`.
+    pub(crate) fn ancestry_slot(&self, shape: LineageShape) -> usize {
+        self.limit_slot(shape) + usize::from(self.limit.is_some())
+    }
+
     /// The `AND l.edge_type IN (…)` fragment, or empty when unfiltered.
     ///
     /// Placeholders start at [`Self::edge_type_base`]. Bound, never spliced: an
@@ -647,7 +693,12 @@ ORDER BY w.node_id;
     /// drifted — the subgraph loader bound `now_ts` at `?3` where the builder
     /// bound the traversal's own instant, so **a historical `load_subgraph_with`
     /// silently read the present** (F-35, W7.1).
-    pub(crate) fn bind_params(&self, now_ts: &str, shape: LineageShape) -> Vec<libsql::Value> {
+    pub(crate) fn bind_params(
+        &self,
+        now_ts: &str,
+        shape: LineageShape,
+        ancestry: &[Ancestor],
+    ) -> Vec<libsql::Value> {
         let mut params: Vec<libsql::Value> = vec![
             self.start_node.as_str().into(),
             (self.max_depth as i64).into(),
@@ -656,7 +707,7 @@ ORDER BY w.node_id;
         ];
         // Pushed only when the emitted SQL names `BRANCH_SLOT`, which is every
         // shape but `Trunk`. An unbranched traversal on a forked database still
-        // reaches this arm — `lineage_shape` answers for the database, not for
+        // reaches this arm — `Lineages::shape` answers for the database, not for
         // the builder — and reads `main`'s own lineage, which is the trunk's
         // belief and not the union of everything stored.
         if shape.binds_branch() {
@@ -673,6 +724,12 @@ ORDER BY w.node_id;
         if let Some(n) = self.limit {
             params.push((n as i64).into());
         }
+        // Last, matching `ancestry_slot`, and only under the shape that emits
+        // the relation: the other two lower no `lineage` CTE, so binding it
+        // would push values at placeholders the SQL never names.
+        if shape == LineageShape::Resolved {
+            params.extend(ancestry_params(ancestry));
+        }
         params
     }
 
@@ -684,7 +741,11 @@ ORDER BY w.node_id;
     /// seam between them. `recorded_slot` is `Some` exactly when
     /// [`Self::as_of_recorded`] is, and the layout it names is the one
     /// [`Self::bind_params`] fills.
-    pub(crate) fn resolution(&self, shape: LineageShape) -> Resolution<'static> {
+    pub(crate) fn resolution<'a>(
+        &self,
+        shape: LineageShape,
+        ancestry: &'a [Ancestor],
+    ) -> Resolution<'a> {
         Resolution {
             shape,
             branch_slot: Self::BRANCH_SLOT,
@@ -695,6 +756,8 @@ ORDER BY w.node_id;
             tag: "",
             // A walk discovers its edges; there is no key to push down.
             key: None,
+            ancestry,
+            ancestry_slot: self.ancestry_slot(shape),
         }
     }
 
@@ -708,7 +771,11 @@ ORDER BY w.node_id;
     /// under current belief, the `links_at_tx` fold otherwise. See [`lower`]
     /// for why the two shapes do not pick from the same pair.
     pub(crate) fn link_source(&self, shape: LineageShape) -> String {
-        lower(&self.resolution(shape)).source
+        // `&[]`: neither field this reads depends on the ancestry — `source`
+        // names a relation and `filter` a predicate on the reader's own alias,
+        // and only `ctes` holds the `lineage` table. Passing the real ancestry
+        // would build a string this discards.
+        lower(&self.resolution(shape, &[])).source
     }
 
     /// The lineage predicate the walk and the projections append to their
@@ -720,7 +787,11 @@ ORDER BY w.node_id;
     /// it would populate the trunk's subgraph with every lineage's edges
     /// between the nodes the trunk reached.
     pub(crate) fn lineage_filter_sql(&self, shape: LineageShape) -> String {
-        lower(&self.resolution(shape)).filter
+        // `&[]`: neither field this reads depends on the ancestry — `source`
+        // names a relation and `filter` a predicate on the reader's own alias,
+        // and only `ctes` holds the `lineage` table. Passing the real ancestry
+        // would build a string this discards.
+        lower(&self.resolution(shape, &[])).filter
     }
 
     /// Refuse a transaction-time instant the hot log can no longer answer for.
@@ -806,13 +877,13 @@ ORDER BY w.node_id;
     /// optimal, against ~2,000× faster where it was not. Recorded rather than
     /// smoothed over: the trade is overwhelmingly worth taking and it is still a
     /// trade, and "within noise" was a claim from a different engine's numbers.
-    pub(crate) fn walk_cte(&self, shape: LineageShape) -> String {
+    pub(crate) fn walk_cte(&self, shape: LineageShape, ancestry: &[Ancestor]) -> String {
         let edge_filter = self.edge_filter_sql(shape);
         // The prelude and the source come from one lowering, shared with
         // `query_as_of_edges_on` and `diff_sql` (0.15.1, W13.1). The walk
         // splices what it is handed and knows nothing about what it holds,
         // which is the point: a shape that lands in `graph::plan` lands here.
-        let lowered = lower(&self.resolution(shape));
+        let lowered = lower(&self.resolution(shape, ancestry));
         let source = &lowered.source;
         let lineage_filter = &lowered.filter;
         let prelude = lowered.prelude();
@@ -892,9 +963,9 @@ WITH RECURSIVE {prelude}walk(node_id, depth) AS (
         // traversal on a forked ledger must still resolve, or it reads every
         // lineage's rows at once. See `build_sql` for why the pure function
         // cannot answer this and does not pretend to.
-        let shape = lineage_shape(conn, self.branch.as_deref()).await?;
-        let sql = self.build_sql_with(shape);
-        let params = self.bind_params(now_ts, shape);
+        let (shape, ancestry) = resolve_for(conn, self.branch.as_deref()).await?;
+        let sql = self.build_sql_with(shape, &ancestry);
+        let params = self.bind_params(now_ts, shape, &ancestry);
 
         let mut rows = conn.query(&sql, params).await?;
         let mut ids = Vec::new();
@@ -1002,8 +1073,30 @@ WITH RECURSIVE {prelude}walk(node_id, depth) AS (
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// A two-row ancestry: the reader, and one ancestor it inherits from.
+    ///
+    /// The smallest fixture that makes a `Resolved` lowering *mean* something.
+    /// An empty ancestry lowers to `VALUES ()`, which SQLite refuses, so a
+    /// golden-string test written against one would pin text no database would
+    /// accept (0.15.17, [D-259]).
+    ///
+    /// [D-259]: ../../docs/architecture/s13-decision-register.md#d-259
+    fn anc() -> Vec<Ancestor> {
+        vec![
+            Ancestor {
+                branch_id: "b1".to_string(),
+                dist: 0,
+                cutoff: None,
+            },
+            Ancestor {
+                branch_id: "main".to_string(),
+                dist: 1,
+                cutoff: Some("2026-01-01T00:00:00.000000Z".to_string()),
+            },
+        ]
+    }
+
     use crate::error::DbError;
-    use crate::graph::lineage::ancestry_cte;
 
     const TUE: &str = "2026-01-06T00:00:00.000000Z";
 
@@ -1189,7 +1282,7 @@ mod tests {
             "{}",
             plain.edge_filter_sql(trunk)
         );
-        assert_eq!(plain.bind_params(now, trunk).len(), 5);
+        assert_eq!(plain.bind_params(now, trunk, &anc()).len(), 5);
 
         let folded = plain.clone().as_of_recorded(TUE);
         assert_eq!(folded.edge_type_base(trunk), 6);
@@ -1198,7 +1291,7 @@ mod tests {
             "{}",
             folded.edge_filter_sql(trunk)
         );
-        assert_eq!(folded.bind_params(now, trunk).len(), 6);
+        assert_eq!(folded.bind_params(now, trunk, &anc()).len(), 6);
     }
 
     /// The lineage slot shifts everything after it, in both functions (0.14.4).
@@ -1212,37 +1305,51 @@ mod tests {
         let now = "2026-06-01T00:00:00.000000Z";
         let (trunk, resolved) = (LineageShape::Trunk, LineageShape::Resolved);
 
+        // Three values per ancestor, appended after everything the layout
+        // names positionally (0.15.17, [D-259]). Written as `ancestry_slot - 1
+        // + block` rather than as a number so that a slot added in the middle
+        // fails on the slot it broke instead of on an arithmetic surprise here.
+        let block = anc().len() * 3;
+
         let plain = TraversalBuilder::new("a").edge_types(vec!["CITES".into()]);
         assert_eq!(plain.edge_type_base(resolved), 6);
         assert!(plain.edge_filter_sql(resolved).contains("?6"));
-        assert_eq!(plain.bind_params(now, resolved).len(), 6);
+        assert_eq!(plain.ancestry_slot(resolved), 7);
+        assert_eq!(plain.bind_params(now, resolved, &anc()).len(), 6 + block);
 
         let folded = plain.clone().as_of_recorded(TUE);
         assert_eq!(folded.edge_type_base(resolved), 7);
         assert!(folded.edge_filter_sql(resolved).contains("?7"));
-        assert_eq!(folded.bind_params(now, resolved).len(), 7);
+        assert_eq!(folded.ancestry_slot(resolved), 8);
+        assert_eq!(folded.bind_params(now, resolved, &anc()).len(), 7 + block);
 
         // The branch lands in the slot the CTE reads it from, and it is the
         // *builder's* branch — not a positional accident that happens to hold a
         // string. `?5` is `BRANCH_SLOT`; `?6` is the recorded instant.
         let named = folded.clone().on_branch("b9");
-        let params = named.bind_params(now, resolved);
+        let params = named.bind_params(now, resolved, &anc());
         assert_eq!(
             params[TraversalBuilder::BRANCH_SLOT - 1],
             libsql::Value::from("b9")
         );
-        assert!(ancestry_cte(TraversalBuilder::BRANCH_SLOT, "").contains("?5"));
-        assert!(named.walk_cte(resolved).contains("recorded_at <= ?6"));
+        assert!(named
+            .walk_cte(resolved, &anc())
+            .contains("recorded_at <= ?6"));
+        // And the ancestry lands where `ancestry_slot` says, after the limit
+        // that is not there and the one edge type that is.
+        assert!(named
+            .walk_cte(resolved, &anc())
+            .contains("AS (VALUES (?8, ?9, ?10)"));
 
         // And an unnamed traversal that still has to resolve reads the trunk's
         // own lineage rather than the union of every lineage stored.
         assert_eq!(
-            folded.bind_params(now, resolved)[TraversalBuilder::BRANCH_SLOT - 1],
+            folded.bind_params(now, resolved, &anc())[TraversalBuilder::BRANCH_SLOT - 1],
             libsql::Value::from(ddl::MAIN_BRANCH)
         );
 
         // Nothing is bound for a slot the SQL never names.
-        assert!(!folded.walk_cte(trunk).contains("lineage"));
+        assert!(!folded.walk_cte(trunk, &anc()).contains("lineage"));
     }
 
     /// The fold replaces the projection, and only when it is asked for.
@@ -1252,11 +1359,11 @@ mod tests {
 
         let plain = TraversalBuilder::new("a");
         assert_eq!(plain.link_source(trunk), "links_current");
-        assert!(!plain.walk_cte(trunk).contains("transaction_log"));
+        assert!(!plain.walk_cte(trunk, &anc()).contains("transaction_log"));
 
         let folded = TraversalBuilder::new("a").as_of_recorded(TUE);
         assert_eq!(folded.link_source(trunk), "links_at_tx");
-        let sql = folded.walk_cte(trunk);
+        let sql = folded.walk_cte(trunk, &anc());
         assert!(sql.contains("links_at_tx"), "{sql}");
         assert!(sql.contains("recorded_at <= ?5"), "{sql}");
         assert!(
@@ -1276,7 +1383,7 @@ mod tests {
     #[test]
     fn the_folded_source_partitions_by_lineage() {
         let folded = TraversalBuilder::new("a").as_of_recorded(TUE);
-        let sql = folded.walk_cte(LineageShape::Resolved);
+        let sql = folded.walk_cte(LineageShape::Resolved, &anc());
 
         assert!(
             sql.contains("PARTITION BY transaction_log.entity_id, transaction_log.branch_id"),
@@ -1310,7 +1417,7 @@ mod tests {
     fn the_resolved_shape_puts_the_resolution_between_the_walk_and_the_rows() {
         let walk = TraversalBuilder::new("a");
 
-        let resolved = walk.walk_cte(LineageShape::Resolved);
+        let resolved = walk.walk_cte(LineageShape::Resolved, &anc());
         assert_eq!(walk.link_source(LineageShape::Resolved), "visible");
         assert!(resolved.contains("JOIN visible l ON l.source_id = w.node_id"));
         assert!(
@@ -1320,7 +1427,7 @@ mod tests {
 
         // And the trunk shape is byte-for-byte what shipped before 0.14.4: no
         // ancestry, no window function, the walk reading the table directly.
-        let trunk = walk.walk_cte(LineageShape::Trunk);
+        let trunk = walk.walk_cte(LineageShape::Trunk, &anc());
         assert!(!trunk.contains("lineage"), "{trunk}");
         assert!(!trunk.contains("ROW_NUMBER"), "{trunk}");
         assert!(trunk.contains("JOIN links_current l ON l.source_id = w.node_id"));
@@ -1350,7 +1457,7 @@ mod tests {
     fn the_forked_trunk_walk_is_the_trunk_walk_plus_one_predicate() {
         let shape = LineageShape::TrunkOnForked;
         let walk = TraversalBuilder::new("a");
-        let sql = walk.walk_cte(shape);
+        let sql = walk.walk_cte(shape, &anc());
         assert!(sql.contains("JOIN links_current l ON l.source_id = w.node_id"));
         assert!(sql.contains("AND l.weight >= ?4 AND +l.branch_id = ?5\n"));
         assert!(!sql.contains("lineage"), "a root resolves nothing: {sql}");
@@ -1362,7 +1469,7 @@ mod tests {
         // is bound, so the recorded instant and the edge types move by one.
         assert_eq!(TraversalBuilder::recorded_slot(shape), 6);
         assert_eq!(walk.edge_type_base(shape), 6);
-        let params = walk.bind_params(TUE, shape);
+        let params = walk.bind_params(TUE, shape, &anc());
         assert_eq!(params.len(), 5, "start, depth, valid, weight, branch");
         assert_eq!(
             params[4],
@@ -1371,7 +1478,7 @@ mod tests {
         );
 
         let folded = TraversalBuilder::new("a").as_of_recorded(TUE);
-        let sql = folded.walk_cte(shape);
+        let sql = folded.walk_cte(shape, &anc());
         assert!(sql.contains("JOIN links_at_tx l ON l.source_id = w.node_id"));
         assert!(sql.contains("AND +transaction_log.branch_id = ?5"));
         assert!(sql.contains("recorded_at <= ?6"));
@@ -1380,7 +1487,7 @@ mod tests {
             "the fold already narrowed: {sql}"
         );
         assert!(!sql.contains("lineage"), "{sql}");
-        assert_eq!(folded.bind_params(TUE, shape).len(), 6);
+        assert_eq!(folded.bind_params(TUE, shape, &anc()).len(), 6);
         assert_eq!(folded.edge_type_base(shape), 7);
     }
 
@@ -1413,9 +1520,12 @@ mod tests {
             ),
         ] {
             let shape = LineageShape::TrunkOnForked;
-            let sql = format!("EXPLAIN QUERY PLAN {}", builder.build_sql_with(shape));
+            let sql = format!(
+                "EXPLAIN QUERY PLAN {}",
+                builder.build_sql_with(shape, &anc())
+            );
             let mut rows = conn
-                .query(&sql, builder.bind_params(TUE, shape))
+                .query(&sql, builder.bind_params(TUE, shape, &anc()))
                 .await
                 .unwrap();
             let mut plan = Vec::new();
@@ -1470,9 +1580,12 @@ mod tests {
             LineageShape::TrunkOnForked,
             LineageShape::Resolved,
         ] {
-            let sql = format!("EXPLAIN QUERY PLAN {}", folded.build_sql_with(shape));
+            let sql = format!(
+                "EXPLAIN QUERY PLAN {}",
+                folded.build_sql_with(shape, &anc())
+            );
             let mut rows = conn
-                .query(&sql, folded.bind_params(TUE, shape))
+                .query(&sql, folded.bind_params(TUE, shape, &anc()))
                 .await
                 .unwrap();
             let mut plan = Vec::new();

@@ -53,10 +53,11 @@ pub mod prelude {
     // `pub use` republishes it as public at `prelude::archive`, with neither an
     // error nor a warning. Naming the function's own path is what imports the
     // function alone (D-208).
+    pub use crate::branch::Ancestor;
     pub use crate::temporal::archive::archive;
     pub use crate::temporal::{
-        query_as_of_edges, query_as_of_edges_on, reconstruct, ArchiveReport, EdgeBelief, Interval,
-        MaterializedState, SnapshotCadence,
+        query_as_of_edges, query_as_of_edges_on, reconstruct, reconstruct_on, resolve_beliefs,
+        ArchiveReport, EdgeBelief, Interval, MaterializedState, SnapshotCadence,
     };
     pub use crate::util::{
         Clock, FakeClock, FutureStampPolicy, SystemClock, DEFAULT_FUTURE_STAMP_TOLERANCE,

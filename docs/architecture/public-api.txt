@@ -9,6 +9,13 @@
 #
 pub mod macrame
 pub mod macrame::branch
+#[non_exhaustive] pub struct macrame::branch::Ancestor
+pub macrame::branch::Ancestor::branch_id: alloc::string::String
+pub macrame::branch::Ancestor::cutoff: core::option::Option<alloc::string::String>
+pub macrame::branch::Ancestor::dist: i64
+impl macrame::branch::Ancestor
+pub fn macrame::branch::Ancestor::cutoff(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn macrame::branch::Ancestor::new(impl core::convert::Into<alloc::string::String>, i64) -> Self
 #[non_exhaustive] pub struct macrame::branch::Branch
 pub macrame::branch::Branch::created_at: alloc::string::String
 pub macrame::branch::Branch::forked_at: core::option::Option<alloc::string::String>
@@ -117,6 +124,7 @@ pub fn macrame::connection::ConceptUpsert::valid_to(self, impl core::convert::In
 pub struct macrame::connection::Database
 impl macrame::connection::Database
 pub async fn macrame::connection::Database::analyze(&self) -> macrame::error::Result<()>
+pub async fn macrame::connection::Database::ancestry(&self, &str) -> macrame::error::Result<alloc::vec::Vec<macrame::branch::Ancestor>>
 pub async fn macrame::connection::Database::archive(&self, &str) -> macrame::error::Result<macrame::temporal::ArchiveReport>
 pub async fn macrame::connection::Database::archive_branch(&self, macrame::branch::BranchId) -> macrame::error::Result<macrame::temporal::ArchiveReport>
 pub fn macrame::connection::Database::archive_path(&self) -> &std::path::Path
@@ -144,6 +152,7 @@ pub async fn macrame::connection::Database::rebuild_current(&self) -> macrame::e
 pub async fn macrame::connection::Database::rebuild_current_chunked(&self) -> macrame::error::Result<macrame::integrity::RebuildReport>
 pub async fn macrame::connection::Database::rebuild_fts(&self) -> macrame::error::Result<()>
 pub async fn macrame::connection::Database::reconstruct(&self, &str) -> macrame::error::Result<macrame::temporal::MaterializedState>
+pub async fn macrame::connection::Database::reconstruct_on(&self, &str, &str) -> macrame::error::Result<macrame::temporal::MaterializedState>
 pub async fn macrame::connection::Database::register_model(&self, &macrame::vector::ModelName, usize) -> macrame::error::Result<()>
 pub async fn macrame::connection::Database::rehydrate(&self, &[&str]) -> macrame::error::Result<macrame::temporal::RehydrateReport>
 pub async fn macrame::connection::Database::retire_edge(&self, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, &str, &str) -> macrame::error::Result<()>
@@ -798,6 +807,13 @@ pub macrame::prelude::WalkOutcome::Complete
 pub macrame::prelude::WalkOutcome::LimitReached
 impl macrame::graph::WalkOutcome
 pub fn macrame::graph::WalkOutcome::hit_limit(self) -> bool
+#[non_exhaustive] pub struct macrame::prelude::Ancestor
+pub macrame::prelude::Ancestor::branch_id: alloc::string::String
+pub macrame::prelude::Ancestor::cutoff: core::option::Option<alloc::string::String>
+pub macrame::prelude::Ancestor::dist: i64
+impl macrame::branch::Ancestor
+pub fn macrame::branch::Ancestor::cutoff(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn macrame::branch::Ancestor::new(impl core::convert::Into<alloc::string::String>, i64) -> Self
 #[non_exhaustive] pub struct macrame::prelude::Annotation
 pub macrame::prelude::Annotation::concept_id: alloc::string::String
 pub macrame::prelude::Annotation::label: alloc::string::String
@@ -895,6 +911,7 @@ pub fn macrame::graph::CostEstimator::new(usize, usize, usize) -> Self
 pub struct macrame::prelude::Database
 impl macrame::connection::Database
 pub async fn macrame::connection::Database::analyze(&self) -> macrame::error::Result<()>
+pub async fn macrame::connection::Database::ancestry(&self, &str) -> macrame::error::Result<alloc::vec::Vec<macrame::branch::Ancestor>>
 pub async fn macrame::connection::Database::archive(&self, &str) -> macrame::error::Result<macrame::temporal::ArchiveReport>
 pub async fn macrame::connection::Database::archive_branch(&self, macrame::branch::BranchId) -> macrame::error::Result<macrame::temporal::ArchiveReport>
 pub fn macrame::connection::Database::archive_path(&self) -> &std::path::Path
@@ -922,6 +939,7 @@ pub async fn macrame::connection::Database::rebuild_current(&self) -> macrame::e
 pub async fn macrame::connection::Database::rebuild_current_chunked(&self) -> macrame::error::Result<macrame::integrity::RebuildReport>
 pub async fn macrame::connection::Database::rebuild_fts(&self) -> macrame::error::Result<()>
 pub async fn macrame::connection::Database::reconstruct(&self, &str) -> macrame::error::Result<macrame::temporal::MaterializedState>
+pub async fn macrame::connection::Database::reconstruct_on(&self, &str, &str) -> macrame::error::Result<macrame::temporal::MaterializedState>
 pub async fn macrame::connection::Database::register_model(&self, &macrame::vector::ModelName, usize) -> macrame::error::Result<()>
 pub async fn macrame::connection::Database::rehydrate(&self, &[&str]) -> macrame::error::Result<macrame::temporal::RehydrateReport>
 pub async fn macrame::connection::Database::retire_edge(&self, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, &str, &str) -> macrame::error::Result<()>
@@ -1168,7 +1186,9 @@ pub async fn macrame::prelude::query_as_of_edges_on(&libsql::connection::Connect
 pub async fn macrame::prelude::rebuild_current(&libsql::connection::Connection) -> macrame::error::Result<macrame::integrity::RebuildReport>
 pub fn macrame::prelude::reciprocal_rank_fusion(&[alloc::string::String], &[alloc::string::String], usize) -> alloc::vec::Vec<(alloc::string::String, f64)>
 pub async fn macrame::prelude::reconstruct(&libsql::connection::Connection, &str, core::option::Option<&std::path::Path>, core::option::Option<&std::path::Path>) -> macrame::error::Result<macrame::temporal::MaterializedState>
+pub async fn macrame::prelude::reconstruct_on(&libsql::connection::Connection, &str, &str, core::option::Option<&std::path::Path>, core::option::Option<&std::path::Path>) -> macrame::error::Result<macrame::temporal::MaterializedState>
 pub async fn macrame::prelude::registered_models(&libsql::connection::Connection) -> macrame::error::Result<alloc::vec::Vec<macrame::vector::ModelName>>
+pub fn macrame::prelude::resolve_beliefs(&[macrame::temporal::EdgeBelief], &[macrame::branch::Ancestor]) -> alloc::vec::Vec<macrame::temporal::EdgeBelief>
 pub async fn macrame::prelude::search_vector(&libsql::connection::Connection, &[f32], &macrame::vector::ModelName, usize, core::option::Option<&str>, core::option::Option<core::time::Duration>) -> macrame::error::Result<alloc::vec::Vec<macrame::vector::VectorSearchResult>>
 pub type macrame::prelude::BulkResult<T> = core::result::Result<T, macrame::error::BulkInterrupted>
 pub type macrame::prelude::Result<T> = core::result::Result<T, macrame::error::DbError>
@@ -1309,7 +1329,9 @@ pub fn macrame::temporal::load_snapshot(&std::path::Path) -> macrame::error::Res
 pub async fn macrame::temporal::query_as_of_edges(&libsql::connection::Connection, &str) -> macrame::error::Result<alloc::vec::Vec<(alloc::string::String, alloc::string::String, alloc::string::String, alloc::string::String, alloc::string::String)>>
 pub async fn macrame::temporal::query_as_of_edges_on(&libsql::connection::Connection, &str, core::option::Option<&str>) -> macrame::error::Result<alloc::vec::Vec<(alloc::string::String, alloc::string::String, alloc::string::String, alloc::string::String, alloc::string::String)>>
 pub async fn macrame::temporal::reconstruct(&libsql::connection::Connection, &str, core::option::Option<&std::path::Path>, core::option::Option<&std::path::Path>) -> macrame::error::Result<macrame::temporal::MaterializedState>
+pub async fn macrame::temporal::reconstruct_on(&libsql::connection::Connection, &str, &str, core::option::Option<&std::path::Path>, core::option::Option<&std::path::Path>) -> macrame::error::Result<macrame::temporal::MaterializedState>
 pub async fn macrame::temporal::rehydrate(&libsql::connection::Connection, &[&str], &std::path::Path) -> macrame::error::Result<macrame::temporal::RehydrateReport>
+pub fn macrame::temporal::resolve_beliefs(&[macrame::temporal::EdgeBelief], &[macrame::branch::Ancestor]) -> alloc::vec::Vec<macrame::temporal::EdgeBelief>
 pub fn macrame::temporal::save_snapshot(&std::path::Path, &macrame::temporal::MaterializedState) -> macrame::error::Result<std::path::PathBuf>
 pub async fn macrame::temporal::verify_snapshot_chain(&libsql::connection::Connection, &str, core::option::Option<&std::path::Path>, &std::path::Path) -> macrame::error::Result<macrame::temporal::ChainCheck>
 pub async fn macrame::temporal::write_final(&libsql::connection::Connection, &std::path::Path, &str, core::option::Option<&std::path::Path>) -> macrame::error::Result<std::path::PathBuf>
@@ -1638,6 +1660,7 @@ pub fn macrame::connection::ConceptUpsert::valid_to(self, impl core::convert::In
 pub struct macrame::Database
 impl macrame::connection::Database
 pub async fn macrame::connection::Database::analyze(&self) -> macrame::error::Result<()>
+pub async fn macrame::connection::Database::ancestry(&self, &str) -> macrame::error::Result<alloc::vec::Vec<macrame::branch::Ancestor>>
 pub async fn macrame::connection::Database::archive(&self, &str) -> macrame::error::Result<macrame::temporal::ArchiveReport>
 pub async fn macrame::connection::Database::archive_branch(&self, macrame::branch::BranchId) -> macrame::error::Result<macrame::temporal::ArchiveReport>
 pub fn macrame::connection::Database::archive_path(&self) -> &std::path::Path
@@ -1665,6 +1688,7 @@ pub async fn macrame::connection::Database::rebuild_current(&self) -> macrame::e
 pub async fn macrame::connection::Database::rebuild_current_chunked(&self) -> macrame::error::Result<macrame::integrity::RebuildReport>
 pub async fn macrame::connection::Database::rebuild_fts(&self) -> macrame::error::Result<()>
 pub async fn macrame::connection::Database::reconstruct(&self, &str) -> macrame::error::Result<macrame::temporal::MaterializedState>
+pub async fn macrame::connection::Database::reconstruct_on(&self, &str, &str) -> macrame::error::Result<macrame::temporal::MaterializedState>
 pub async fn macrame::connection::Database::register_model(&self, &macrame::vector::ModelName, usize) -> macrame::error::Result<()>
 pub async fn macrame::connection::Database::rehydrate(&self, &[&str]) -> macrame::error::Result<macrame::temporal::RehydrateReport>
 pub async fn macrame::connection::Database::retire_edge(&self, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, &str, &str) -> macrame::error::Result<()>

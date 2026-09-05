@@ -344,6 +344,43 @@ let edges = query_as_of_edges_on(db.read_conn(), ts, Some(&alt.id)).await?;
 //   cause, second symptom: it is also the read that had no `branch=` in
 //   Python until then -- `db.query_as_of_edges(ts, branch=...)` (§14).
 let g = db.load_subgraph_with(&builder.on_branch(alt.id), ts, budget).await?;
+
+// Folding the ledger for ONE lineage, which no read did before 0.15.17
+// (D-259, review C-10). `reconstruct(ts)` returns every lineage's belief
+// unresolved -- the nearest-ancestor rule lived only inside the readers' SQL,
+// so a caller holding a MaterializedState had rows a reader would never see and
+// no supported way to narrow them.
+let view: MaterializedState = db.reconstruct_on(ts, &alt.id).await?;
+// ^ `view.edges` is resolved: one belief per (source, target, type, valid_from),
+//   held by the NEAREST lineage that has one, each ancestor cut at its own fork
+//   point. Agrees edge for edge with db.edges(ReadPlan::new().on(alt.id)..).
+// `view.concepts` is NARROWED and NOT resolved -- it is keyed by concept id
+//   alone, so an invisible lineage contributes nothing and an ancestor's
+//   post-cutoff writes are cut, but where two VISIBLE lineages wrote the same
+//   concept the winner is the later log row, not the nearer lineage.
+// An unforked database pays none of this: the shape is Trunk and it delegates
+//   to `reconstruct`, snapshots and all. A forked one cannot use snapshots at
+//   all -- a snapshot has no recorded_at left in it for a cutoff to compare
+//   against -- so it folds from genesis and is ~4x `reconstruct` where
+//   snapshots are configured, flat in fork depth either way.
+// NOT a snapshot: it is one lineage's view, so `save_snapshot` on it would make
+//   a later `reconstruct` compose a whole-ledger answer onto a partial base.
+
+// The ancestry itself, and the rule applied to beliefs you already hold.
+let anc: Vec<Ancestor> = db.ancestry(&alt.id).await?;   // UnknownBranch if not
+anc[0].branch_id;   // String -- dist 0 is the reader itself                 //  registered
+anc[0].dist;        // i64    -- steps up the parent chain
+anc[0].cutoff;      // Option<String> -- the fork point, as a RUNNING MINIMUM
+                    //   down the path; None on the reader's own row.
+// #[non_exhaustive] (D-255): build with Ancestor::new(branch_id, dist), which
+//   leaves `cutoff` None, and .cutoff(ts) for the rest. Almost nobody needs to
+//   -- the constructor is for exercising `resolve_beliefs` without a database,
+//   and an ancestry written by hand is a distance rule YOU stated, which
+//   resolve_beliefs then applies as faithfully as it applies a resolved one.
+let resolved: Vec<EdgeBelief> = resolve_beliefs(&state.edges, &anc);
+// ^ pure, and it applies the DISTANCE rule only. It cannot apply the cutoff:
+//   an EdgeBelief carries no recorded_at, so the cutting is the fold's job and
+//   this is what is left once the rows are in hand.
 // Refusals: UnknownBranch (unregistered, in `fork` and in every read that names
 // one), BranchExists (taken, `"main"` included), InvalidBranchId, and
 // ForkPrecedesParent -- the cross-row half no CHECK can see (D-224).
@@ -658,7 +695,7 @@ New in 0.13.38 ([D-211](s13-decision-register.md#d-211)). [Appendix A](appendice
 
 *Frozen* means a change requires a **major version**.
 
-**1. The public Rust API, item for item and path for path.** [`docs/architecture/public-api.txt`](public-api.txt) is the surface — **1,733 items**. No item is removed, no path stops resolving, and no signature narrows. Each item is reachable at exactly one canonical path, plus flat aliases at the crate root and in `macrame::prelude` ([D-208](s13-decision-register.md#d-208)). Held by `scripts/check_public_api.py` in CI and by `tests/public_path_tests.rs` in `cargo test`. The cycle that produced this surface was reviewed against 0.13.0 item by item before it was frozen — [`api-review-0.14.0.md`](api-review-0.14.0.md), [D-212](s13-decision-register.md#d-212) — which is the last release where that review is cheap.
+**1. The public Rust API, item for item and path for path.** [`docs/architecture/public-api.txt`](public-api.txt) is the surface — **1,757 items**. No item is removed, no path stops resolving, and no signature narrows. Each item is reachable at exactly one canonical path, plus flat aliases at the crate root and in `macrame::prelude` ([D-208](s13-decision-register.md#d-208)). Held by `scripts/check_public_api.py` in CI and by `tests/public_path_tests.rs` in `cargo test`. The cycle that produced this surface was reviewed against 0.13.0 item by item before it was frozen — [`api-review-0.14.0.md`](api-review-0.14.0.md), [D-212](s13-decision-register.md#d-212) — which is the last release where that review is cheap.
 
 **2. The ledger tables** — `concepts`, `links`, `transaction_log`. Additive only: `ALTER TABLE ADD COLUMN` and new indexes. A changed primary key, a dropped column or altered bitemporal semantics is a major version with an explicit ETL path, because bitemporal data is the hardest data to migrate: a rebuild means replaying history and recomputing transaction-time boundaries, which is rewriting the past ([D-036](s13-decision-register.md#d-036), [Doctrine III](s0-s3-foundations.md#doctrine-iii)).
 

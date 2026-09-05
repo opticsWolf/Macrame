@@ -5247,4 +5247,68 @@ Suites unchanged: **726** and **707** Rust, **586** Python. Schema unchanged at 
 
 Rejected: *refusing the statement* (text matching that would read as a guarantee, defeated by whitespace or a comment, and invisible to a Rust caller). *Re-opening the connection per call* (measured identical; it addresses nothing here and costs what [D-256](s13-decision-register.md#d-256) removed). *Editing D-257's sentence to have been right all along* (Doctrine III — the claim is superseded here and D-257 now points at this entry). *Calling it a security boundary failure* (nothing crosses a boundary the crate ever claimed; the connection was documented as arbitrary-SQL from D-091 onward, and this makes the existing warning sharper rather than replacing it).
 
+<a id="d-259"></a>D-259 — the ancestry is walked once in Rust and bound as a list, `reconstruct_on` answers for one lineage, and the shape that was reasoned into the docs lost to the one that was measured (0.15.17, W16.1, review [A-2] and [C-10]). [D-219](s13-decision-register.md#d-219), [D-244](s13-decision-register.md#d-244), [D-248](s13-decision-register.md#d-248), [D-250](s13-decision-register.md#d-250), [D-254](s13-decision-register.md#d-254). Evidence: `examples/ancestry_resolve_probe.rs`, `examples/resolved_read_probe.rs`, `examples/reconstruct_on_probe.rs`, `tests/reconstruct_on_tests.rs`, `tests_py/test_temporal.py`.
+
+Two findings share this release because they are one change seen from two ends. A-2 asked why every read recomputes its ancestry inside SQL; C-10 asked why `reconstruct` cannot answer for one lineage. The first is answered by resolving the ancestry in Rust and binding it; once it is a value in hand, the second is a fold that can be given it.
+
+**The recursive CTE becomes a bound `VALUES` table.** `WITH lineage(branch_id, dist, cutoff) AS (VALUES (?9, ?10, ?11), …)` — three placeholders per ancestor, appended after each reader's own fixed slots so no existing layout moves. The argument that started it is portability: Turso has no `WITH RECURSIVE`, so this is the only form that runs there, and [D-219](s13-decision-register.md#d-219) had already measured the CTE as a constant on libSQL. The honest expectation was parity. Measured joined the way `churned_cte` and `links_cut_cte` join it (`ancestry_resolve_probe.rs` §4):
+
+| fork depth | recursive | bound |
+|---|---|---|
+| 1 | 27.0 µs | **12.6 µs** (−53%) |
+| 4 | 29.5 µs | **16.4 µs** (−44%) |
+| 8 | 31.7 µs | **24.0 µs** (−24%) |
+| 12 | 34.6 µs | **31.8 µs** (−8%) |
+| 16 | 37.5 µs | 40.4 µs (**+8%**) |
+
+**The bound form is not free at every depth, and the crossover is written down rather than left to be found.** The recursive CTE's cost is almost flat in depth; the bound form's grows with the number of placeholders, so the two meet near **depth 13** and past it the old form is faster. That is recorded because it is true, not because it changes the decision: a fork depth of 13 is thirteen successive forks of forks, the win below it is large and the loss above it is 3 µs.
+
+**On a whole read, none of that is the story.** A fragment measured in isolation is a design input and not a release note, so the same before/after was taken through the public API only, one source compiled against both trees (`resolved_read_probe.rs`, 400 concepts, best of 40):
+
+| read | depth | 0.15.16 | this |
+|---|---|---|---|
+| `edges`, current belief | 1 | 5825.2 µs | 5660.8 µs |
+| **`edges`, at a recorded instant** | **1** | **2254.6 µs** | **1879.7 µs (−17%)** |
+| traverse, depth 6 | 1 | 5708.0 µs | 5584.6 µs |
+| `edges`, current belief | 8 | 14130.4 µs | 13702.3 µs |
+| `edges`, at a recorded instant | 8 | 2537.6 µs | 2407.7 µs |
+| traverse, depth 6 | 8 | 14105.0 µs | 13929.0 µs |
+| `edges` on the trunk *(control)* | 1 / 8 | 338.2 / 338.8 µs | 333.1 / 332.2 µs |
+
+The control binds no ancestry at all and moves 1.5–1.9%, which sets the noise floor. Exactly one row clears it convincingly — the recorded-instant read on a fork, **−17% at depth 1** — and it is the one where the ancestry is the largest share of a read that is otherwise a single bounded fold. Everything else moves 2–3%, which is a real direction and an invisible amount. **The +8% at depth 16 does not surface anywhere**: by the time a read is a traversal, 3 µs is 0.02% of it.
+
+**A-2's cache was not built, because the premise it rested on is false.** The proposal was a cached `Vec<Branch>` with a generation counter, on the reasoning that resolving in Rust needs the *rows* where the old shape needed only three aggregates, so the extra read has to be paid for. Measured (§5), loading all 17 rows costs **9.6 µs** against the three-aggregate `SELECT`'s **10.4 µs** — the rows arrive for *less* than the answer they replace, because the cost was the round trip and never the payload. `lineage_shape` therefore became `resolve_for`, returning the shape and the ancestry from one load, and the read side gained no cache to keep coherent. The actor keeps the copy [D-248](s13-decision-register.md#d-248) gave it: that is a cache with an owner and two commands that invalidate it.
+
+**`reconstruct_on(ts, branch)` is C-10's answer, and `resolve_beliefs` is the rule it applies.** `MaterializedState::edges` returned every lineage's belief with no resolution — the nearest-holder rule existed only inside `visible_cte`, so a caller folding the ledger got rows a reader would never see and had no supported way to narrow them. There is now one fold with the ancestry joined in, each ancestor cut at its own fork point, and a pure `resolve_beliefs(&[EdgeBelief], &[Ancestor])` that picks the nearest holder of each key. `Database::ancestry(branch)` exposes the same list, so a caller can apply the rule to something else or check what a lineage can see. Surface **1,733 → 1,757**.
+
+**`Ancestor` was registered as a report, and the compiler refuted that inside the release.** [D-255](s13-decision-register.md#d-255)'s growth gate asks one question of every new public struct with public fields — *does a caller build one?* — and the first answer here was no: the crate resolves an ancestry out of `branches`, and one written by hand is a distance rule the caller invented, which `resolve_beliefs` would apply as faithfully as a resolved one. `#[non_exhaustive]` with no constructor. That broke this release's own test, which builds a two-row ancestry on purpose, because `resolve_beliefs` is pure and stating a pure function's properties should not need a database. The answer is therefore yes, and D-255's rule for yes is a named entry point rather than a refusal: `Ancestor::new(branch_id, dist)` plus `.cutoff(ts)`, the attribute kept. The warning survives as a warning in the rustdoc, where it belongs, instead of as an inability to compile a legitimate test.
+
+**The cut has to be inside the window's input, which is why this is a fold and not a filter.** If an ancestor wrote a row and superseded it *after* the fork, the reader inherits the earlier row. A predicate over a finished `MaterializedState` returns nothing for that key, because `ROW_NUMBER` already picked the later row and threw the inherited one away. Two new SQL constants say so — one hot, one a `UNION ALL` over hot and cold under a single cutoff predicate — and the cold one carries a bug the tests caught: `u` and `lineage g` both have a `branch_id`, and the unqualified projection was ambiguous.
+
+**The shape this shipped as is not the shape its own documentation argued for a day earlier.** The first implementation folded once per **distinct effective instant** — `min(ts, cutoff)` for the reader and each ancestor — keeping from each fold the lineages whose instant it was. It reuses `reconstruct` whole, snapshot composition included, and that reuse was the written rationale. Measured against the single bounded fold the rationale had explicitly rejected (`reconstruct_on_probe.rs`, 400 concepts, both shapes in one process, three alternating passes):
+
+| snapshots | fork depth | `reconstruct` | fold per bound | one bounded fold |
+|---|---|---|---|---|
+| off | 1 | 2538 µs | 5549 µs | **2889 µs** |
+| off | 8 | 2522 µs | 24001 µs | **3193 µs** |
+| on | 1 | 814 µs | **1967 µs** | 2843 µs |
+| on | 8 | 743 µs | 7411 µs | **3195 µs** |
+
+Fold-per-bound is linear in fork depth by construction; the flat one is flat, at ~2.9–3.2 ms whatever the depth and whatever the snapshot configuration. The argument for the shipped-first shape holds at **one of the four configurations measured**, and loses 0.9 ms there. So the documentation was rewritten around the measurement rather than the measurement filed next to the documentation.
+
+**The re-measurement was asked for, and it found three things wrong with the first one.** The two shapes had been timed in *different processes against different builds* minutes apart; nothing had checked that "snapshots on" wrote a snapshot, which is the entire premise of the losing side; and nothing had checked that the two shapes **returned the same answer**, so one of them might have been measured doing less work. The probe now rebuilds fold-per-bound out of `ancestry` + `reconstruct` + `resolve_beliefs` — all public, step for step what the removed code did — runs both alternately in one process, asserts the two results are equal edge for edge, and counts the snapshot files (0 when off, 2 when on) before quoting a number. The conclusion did not change. It is recorded that it *could* have.
+
+**What this deliberately does not do.** `MaterializedState::concepts` is keyed by concept id alone, so once a row is folded there is no lineage left on it to pick a nearer one by. The fold narrows concepts — an invisible lineage contributes nothing and an ancestor's post-cutoff writes are cut — but where two *visible* lineages wrote the same concept, the winner is the later log row and not the nearer lineage. Only `edges` gets the distance rule, which is the field C-10 named. Symmetrically, `resolve_beliefs` cannot apply the cutoff: `EdgeBelief` carries no `recorded_at`, so the pure function ranks by distance and the fold does the cutting. Both are written into the rustdoc, the binding and the `.pyi` rather than left for a caller to discover from a wrong answer.
+
+**The differential oracle is what made the reversal cheap.** `reconstruct_on_tests.rs` does not pin SQL or assert a hand-written expectation; it compares `reconstruct_on` against `Database::edges(ReadPlan)` — the lowering the entire crate already reads through — at four seeded instants across a forked and diverged fixture, with a non-vacuity assertion so an empty agreement cannot pass for one. When the implementation was replaced wholesale, all eight tests passed unchanged, and that is the only reason replacing it was a half-day rather than a re-verification of the whole read path.
+
+**Two tests were wrong in ways that passing did not reveal.** The cold-arm test never reached the cold arm: with an archive present, reach is `NeedsArchive` only when the newest surviving hot stamp is *after* the instant asked for, so a read at "now" takes the hot arm however much was archived. Proven by panicking inside `bounded_cold_fold` and watching the test pass; re-pointed at an early instant, it then caught the ambiguous-column bug above. And the sweep across instants did not catch a mutation of the distance rule (`<` to `>`), because the fixture had no key held by two lineages at once — the shadow edge moved into the shared fixture, and the mutation now fails it.
+
+Suites **738** and **719** Rust, **592** Python. Schema unchanged at **v17**.
+
+Rejected: *A-2's cached `Vec<Branch>` on the read side* (the rows load for less than the aggregates they replace; a cache the read path does not need is a coherency question it does not have to answer). *Interpolating branch ids into the `VALUES` text* (a branch id is caller-supplied, [D-258](s13-decision-register.md#d-258) is the one arbitrary-SQL surface this crate has and it is not getting a second; measured, binding the values costs nothing). *Spelling `dist` as a literal to save a third of the placeholders* (1–5%, inside the noise, and it would spell one of three columns differently from the other two). *Keeping the recursive CTE behind a feature flag for deep forks* (two lowerings to keep in step for a 3 µs win past depth 13, on a read where it is invisible). *Fold-per-bound* (measured above; it wins one configuration in four by 0.9 ms and costs a factor of 7 at depth 8). *Resolving concepts by lineage too* (`MaterializedState::concepts` is keyed by id, so this is a change to a public field's type and is its own decision, not a detail of this one). *A second window function in the SQL for the distance rule* (it is a function of the rows in hand; Rust states it in eight lines that can be unit-tested without a database).
+
+[A-2]: ../Macrame%20Codebase%20Review%20v0.15.0.md
+[C-10]: ../Macrame%20Codebase%20Review%20v0.15.0.md
+
 [C-11]: ../Macrame%20Update%20Plan%20v0.16.0.md

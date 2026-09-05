@@ -36,7 +36,7 @@
 //! and the plan pins fail together, and neither failure would be diagnostic.
 
 use crate::graph::lineage::{
-    ancestry_cte, churned_cte, links_cut_cte, visible_cte, KeySlots, LineageShape,
+    ancestry_values, churned_cte, links_cut_cte, visible_cte, Ancestor, KeySlots, LineageShape,
 };
 
 /// What a reader has decided about a lineage read, before any SQL exists.
@@ -72,6 +72,26 @@ pub(crate) struct Resolution<'a> {
     /// there is no such reader today, and the day there is, that is the
     /// release that decides how.
     pub key: Option<KeySlots>,
+    /// The reader's ancestry, resolved in Rust before any SQL exists.
+    ///
+    /// Read only under [`LineageShape::Resolved`], which is the only shape that
+    /// emits a `lineage` relation at all. Empty for the other two, and the
+    /// lowering does not look at it there.
+    ///
+    /// This is what replaced `ancestry_cte`'s `WITH RECURSIVE` in 0.15.17
+    /// ([D-259]): the relation is the same three columns, computed by
+    /// [`crate::graph::lineage::resolve`] and bound rather than recomputed by
+    /// SQLite per query. See [`ancestry_values`] for why every value binds.
+    ///
+    /// [D-259]: ../../docs/architecture/s13-decision-register.md#d-259
+    pub ancestry: &'a [Ancestor],
+    /// Where the ancestry block starts, occupying `3 × ancestry.len()` slots.
+    ///
+    /// Every reader places it **after** its own fixed slots, so that adding the
+    /// block moved no layout that already existed. Like [`Self::branch_slot`]
+    /// this is named by the reader and not allocated here: the lowering spells
+    /// slots, it does not hand them out (D-030, D-035).
+    pub ancestry_slot: usize,
 }
 
 /// The lowering's output: the prelude, and the relation the reader joins.
@@ -197,7 +217,7 @@ pub(crate) fn lower(r: &Resolution<'_>) -> Lowered {
 
     let mut ctes: Vec<String> = Vec::new();
     if r.shape == LineageShape::Resolved {
-        ctes.push(ancestry_cte(r.branch_slot, tag));
+        ctes.push(ancestry_values(r.ancestry.len(), r.ancestry_slot, tag));
     }
     if let Some(slot) = r.recorded_slot {
         ctes.push(links_at_tx_cte(r.shape, slot, r.branch_slot, tag));
@@ -389,6 +409,29 @@ pub(crate) fn links_at_tx_cte(
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// A two-row ancestry: the reader, and one ancestor it inherits from.
+    ///
+    /// The smallest fixture that makes a `Resolved` lowering *mean* something.
+    /// An empty ancestry lowers to `VALUES ()`, which SQLite refuses, so a
+    /// golden-string test written against one would pin text no database would
+    /// accept (0.15.17, [D-259]).
+    ///
+    /// [D-259]: ../../docs/architecture/s13-decision-register.md#d-259
+    fn anc() -> Vec<Ancestor> {
+        vec![
+            Ancestor {
+                branch_id: "b1".to_string(),
+                dist: 0,
+                cutoff: None,
+            },
+            Ancestor {
+                branch_id: "main".to_string(),
+                dist: 1,
+                cutoff: Some("2026-01-01T00:00:00.000000Z".to_string()),
+            },
+        ]
+    }
+
     use crate::graph::builder::TraversalBuilder;
 
     const TUE: &str = "2026-01-06T00:00:00.000000Z";
@@ -410,6 +453,8 @@ mod tests {
             recorded_slot: None,
             tag: "",
             key: None,
+            ancestry: &anc(),
+            ancestry_slot: 9,
         });
         assert!(l.ctes.is_empty());
         assert_eq!(l.source, "links_current");
@@ -427,6 +472,8 @@ mod tests {
             recorded_slot: Some(5),
             tag: "",
             key: None,
+            ancestry: &anc(),
+            ancestry_slot: 9,
         });
         assert_eq!(names(&l), ["links_at_tx"]);
         assert_eq!(l.source, "links_at_tx");
@@ -444,10 +491,26 @@ mod tests {
             recorded_slot: None,
             tag: "",
             key: None,
+            ancestry: &anc(),
+            ancestry_slot: 9,
         });
         assert_eq!(names(&l), ["lineage", "churned", "links_cut", "visible"]);
         assert_eq!(l.source, "visible");
-        assert!(l.ctes[0].contains("SELECT ?5, 0, NULL"));
+        // The first CTE is the ancestry itself, bound rather than walked
+        // (0.15.17, [D-259]): one tuple per ancestor, three placeholders each,
+        // starting at the slot the reader chose. It used to be a recursive
+        // anchor row reading the branch out of `?5`.
+        assert!(l.ctes[0].starts_with("lineage(branch_id, dist, cutoff) AS (VALUES "));
+        assert!(
+            l.ctes[0].contains("(?9, ?10, ?11), (?12, ?13, ?14)"),
+            "{}",
+            l.ctes[0]
+        );
+        assert!(
+            !l.ctes[0].contains("SELECT"),
+            "nothing is walked: {}",
+            l.ctes[0]
+        );
         assert!(l.ctes[3].contains("FROM links_cut l"));
     }
 
@@ -461,6 +524,8 @@ mod tests {
             recorded_slot: Some(6),
             tag: "",
             key: None,
+            ancestry: &anc(),
+            ancestry_slot: 9,
         });
         assert_eq!(names(&l), ["lineage", "links_at_tx", "visible"]);
         assert_eq!(l.source, "visible");
@@ -481,6 +546,8 @@ mod tests {
             recorded_slot: None,
             tag: "_a",
             key: None,
+            ancestry: &anc(),
+            ancestry_slot: 9,
         });
         assert_eq!(
             names(&l),
@@ -501,6 +568,8 @@ mod tests {
             recorded_slot: Some(3),
             tag: "_b",
             key: None,
+            ancestry: &anc(),
+            ancestry_slot: 9,
         });
         assert_eq!(names(&folded), ["lineage_b", "links_at_tx_b", "visible_b"]);
         assert!(folded.ctes[1].contains("JOIN lineage_b g"));
@@ -514,27 +583,33 @@ mod tests {
     fn the_three_readers_share_one_prelude() {
         use crate::graph::lineage::diff_sql;
 
-        let walk = TraversalBuilder::new("a").walk_cte(LineageShape::Resolved);
-        let ours = lower(&TraversalBuilder::new("a").resolution(LineageShape::Resolved));
+        let walk = TraversalBuilder::new("a").walk_cte(LineageShape::Resolved, &anc());
+        let ours = lower(&TraversalBuilder::new("a").resolution(LineageShape::Resolved, &anc()));
         assert!(
             walk.contains(&ours.prelude()),
             "the walk assembles its own prelude"
         );
 
         let folded = TraversalBuilder::new("a").as_of_recorded(TUE);
-        let walk = folded.walk_cte(LineageShape::Resolved);
-        assert!(walk.contains(&lower(&folded.resolution(LineageShape::Resolved)).prelude()));
-        let walk = folded.walk_cte(LineageShape::Trunk);
-        assert!(walk.contains(&lower(&folded.resolution(LineageShape::Trunk)).prelude()));
+        let walk = folded.walk_cte(LineageShape::Resolved, &anc());
+        assert!(walk.contains(&lower(&folded.resolution(LineageShape::Resolved, &anc())).prelude()));
+        let walk = folded.walk_cte(LineageShape::Trunk, &anc());
+        assert!(walk.contains(&lower(&folded.resolution(LineageShape::Trunk, &anc())).prelude()));
 
-        let diff = diff_sql();
-        for (slot, tag) in [(1, "_a"), (2, "_b")] {
+        // `diff_sql` binds the two lineages at `?1` and `?2`, then `a`'s
+        // ancestry block, then `b`'s — so the two sides no longer lower to the
+        // same text at the same slots, and the test has to say where each one
+        // starts (0.15.17, [D-259]).
+        let diff = diff_sql(&anc(), &anc());
+        for (slot, tag, ancestry_slot) in [(1, "_a", 3), (2, "_b", 3 + anc().len() * 3)] {
             let side = lower(&Resolution {
                 shape: LineageShape::Resolved,
                 branch_slot: slot,
                 recorded_slot: None,
                 tag,
                 key: None,
+                ancestry: &anc(),
+                ancestry_slot,
             });
             assert!(
                 diff.contains(&side.with_list()),
@@ -549,6 +624,8 @@ mod tests {
             recorded_slot: None,
             tag: "_a",
             key: None,
+            ancestry: &anc(),
+            ancestry_slot: 9,
         });
         let b = lower(&Resolution {
             shape: LineageShape::Resolved,
@@ -556,6 +633,8 @@ mod tests {
             recorded_slot: None,
             tag: "_b",
             key: None,
+            ancestry: &anc(),
+            ancestry_slot: 9,
         });
         let retagged = ["lineage", "churned", "links_cut", "visible"]
             .iter()
@@ -576,6 +655,8 @@ mod tests {
             recorded_slot: None,
             tag: "",
             key: None,
+            ancestry: &anc(),
+            ancestry_slot: 9,
         });
         assert!(l.ctes.is_empty(), "no ancestry to resolve: {:?}", names(&l));
         assert_eq!(l.source, "links_current");
@@ -590,6 +671,8 @@ mod tests {
             recorded_slot: Some(6),
             tag: "",
             key: None,
+            ancestry: &anc(),
+            ancestry_slot: 9,
         });
         assert_eq!(names(&folded), ["links_at_tx"]);
         assert_eq!(folded.source, "links_at_tx");
@@ -619,6 +702,8 @@ mod tests {
                 recorded_slot: recorded,
                 tag: "",
                 key: None,
+                ancestry: &anc(),
+                ancestry_slot: 9,
             });
             assert_eq!(l.filter, "", "{shape:?} at {recorded:?}");
         }

@@ -441,10 +441,14 @@ class MaterializedState:
         """One entry per lineage per edge, not one per edge.
 
         A fork and its ancestor believing different things about one edge key
-        are two beliefs, and both are here, each labelled. For one lineage's
-        view of an instant use ``query_as_of_edges`` or a traversal's
-        ``branch=``, which resolve; do not filter this list by hand, because
-        resolution is nearest-ancestor and not equality.
+        are two beliefs, and both are here, each labelled.
+
+        Do not filter this list by lineage. Resolution is nearest-ancestor and
+        bounded at each fork point, and neither half can be written as a
+        predicate over these tuples — they carry no ``recorded_at``. For one
+        lineage's view of this same instant use
+        ``Database.reconstruct_on(ts, branch)`` (0.15.17); for a valid-time
+        instant, ``query_as_of_edges`` or a traversal's ``branch=``.
         """
 
     @property
@@ -1039,6 +1043,44 @@ class Database:
 
     # -- temporal --------------------------------------------------------------
     def reconstruct(self, ts: Timestamp) -> MaterializedState: ...
+    def reconstruct_on(self, ts: Timestamp, branch: str) -> MaterializedState:
+        """The world at `ts` as one lineage saw it (0.15.17).
+
+        `reconstruct` answers about the ledger and returns every lineage's
+        belief; this answers about `branch`. Each ancestor is bounded at its
+        own fork point and each edge key comes from the nearest lineage holding
+        it — the resolution every other reader applies, applied to a fold.
+
+        `concepts` is narrowed but not *resolved*: a lineage outside the
+        ancestry contributes nothing and an ancestor's post-cutoff writes are
+        cut, but where two visible lineages both wrote a concept the winner is
+        the later log row, not the nearer lineage — a folded concept row carries
+        no branch. Only `edges` gets the distance rule.
+
+        On an **unforked** database this is `reconstruct` — same path, same
+        snapshots. On a forked one it cannot use snapshots at all: a snapshot
+        has no `recorded_at` left in it for a fork point to be compared
+        against, so this folds from genesis and costs about 3 ms flat whatever
+        the fork depth. Against `reconstruct` that is ~1.15x where no snapshots
+        are configured and ~4x where they are — the absolute cost is the same
+        either way, it is `reconstruct` that gets faster.
+
+        Raises `UnknownBranchError`, naming it, for an unregistered lineage.
+        """
+
+    def ancestry(self, branch: str) -> list[tuple[str, int, datetime | None]]:
+        """`branch`'s ancestry, nearest first: `(branch_id, dist, cutoff)`.
+
+        `dist` is steps from the reader, so the first entry is `branch` itself
+        at `0`. `cutoff` is the instant past which that ancestor's writes are
+        invisible here — `None` for the reader, and for an ancestor the
+        *earliest* fork point on the path down to it, not the nearest.
+
+        What `reconstruct_on` resolves against, published so the rule can be
+        inspected rather than only obeyed.
+
+        Raises `UnknownBranchError` for an unregistered lineage.
+        """
     def edges(self, plan: ReadPlan) -> list[EdgeBelief]:
         """Every edge one `ReadPlan` names, as the ledger held them (0.15.9).
 

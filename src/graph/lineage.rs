@@ -148,67 +148,340 @@ impl LineageShape {
     }
 }
 
-/// Decide the shape, and refuse a lineage that was never registered.
+/// The shape, and the ancestry the shape needs — one round trip for both.
 ///
-/// One query, on a table that holds one row per branch and is never large. The
-/// same round trip answers both questions because they are asked together and
-/// neither can change under us mid-read.
+/// This is what `lineage_shape` became (0.15.17, [D-259]). Where that asked
+/// SQLite for three aggregates, this loads the rows and answers from them;
+/// measured, that is **10.0 µs against 11.0**
+/// (`examples/ancestry_resolve_probe.rs` §5), so the ancestry arrives for less
+/// than the shape alone used to cost and nothing has to be cached to afford it.
 ///
-/// # Refusing an unregistered lineage rather than answering for the trunk
+/// The ancestry is empty under the two trunk shapes. Neither emits a `lineage`
+/// relation, so resolving one would be a walk whose result no SQL names — and
+/// an empty slice is what makes [`crate::graph::plan::lower`] able to ignore
+/// the field rather than branch on whether it was populated.
 ///
-/// A traversal naming a branch that is not in `branches` has asked a question
-/// about something that does not exist. Answering it with the trunk's view
-/// would be the [D-069] failure — a right-looking answer to a question that was
-/// not asked — and it is the answer a caller is *least* able to detect, because
-/// on a database that has never forked the trunk's view is what they expected
-/// to see anyway.
+/// A caller wanting the question and not the answer goes through [`Lineages`]
+/// directly: `branch::diff` loads the register once and asks [`Lineages::shape`]
+/// per name, which refuses an unregistered lineage before either side is
+/// lowered — and is one round trip for both, where a free function per name was
+/// two.
 ///
-/// The refusal is [`DbError::UnknownBranch`] from 0.14.7 and was
-/// [`DbError::NotFound`] before it, whose `Display` reads *"node {0} not
-/// found"* — the wrong noun, pointing a caller at their concept ids. There was
-/// no better variant until `fork()` needed one, and shipping the right variant
-/// while leaving this on the old one would have been two spellings of one
-/// fact.
-///
-/// [D-069]: ../../docs/architecture/s13-decision-register.md
-pub(crate) async fn lineage_shape(
+/// [D-259]: ../../docs/architecture/s13-decision-register.md#d-259
+pub(crate) async fn resolve_for(
     conn: &libsql::Connection,
     branch: Option<&str>,
-) -> Result<LineageShape> {
+) -> Result<(LineageShape, Vec<Ancestor>)> {
     let named = branch.unwrap_or(ddl::MAIN_BRANCH);
-    // The third aggregate is *is the named lineage a root*, and it is asked
-    // in the same statement for the same reason the first two are: the
-    // answer cannot change under a read, and a second round trip would buy
-    // nothing. It reads NULL when the name is unknown, which the `found`
-    // check below refuses before the value is looked at.
-    let row = conn
-        .query(
-            "SELECT (SELECT COUNT(*) FROM branches), \
-                    (SELECT COUNT(*) FROM branches WHERE branch_id = ?1), \
-                    (SELECT COUNT(*) FROM branches \
-                      WHERE branch_id = ?1 AND parent_id IS NULL)",
-            libsql::params![named],
-        )
-        .await?
-        .next()
-        .await?;
-    let (total, found, root): (i64, i64, i64) = match row {
-        Some(r) => (r.get(0)?, r.get(1)?, r.get(2)?),
-        // No row from a two-aggregate SELECT is not a state SQLite produces.
-        // Treated as the trunk rather than raising, because the alternative is
-        // an error class no caller can act on.
-        None => return Ok(LineageShape::Trunk),
+    let lineages = Lineages::load(conn).await?;
+    let shape = lineages.shape(named)?;
+    let ancestry = match shape {
+        LineageShape::Resolved => lineages.ancestry(named),
+        _ => Vec::new(),
     };
-    if found == 0 {
-        return Err(DbError::UnknownBranch(named.to_string()));
+    Ok((shape, ancestry))
+}
+
+/// One lineage's row in `branches`, as the resolution needs it.
+///
+/// Three columns and not the table: `created_at` is the audit column and no
+/// read resolves over it, so loading it would be bytes moved for nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BranchRow {
+    pub(crate) id: String,
+    pub(crate) parent: Option<String>,
+    pub(crate) forked_at: Option<String>,
+}
+
+/// Every lineage the database holds — the table [`resolve`] walks.
+///
+/// A `Vec` and a linear scan, for the reason `distinct_branches` gives: the
+/// bound is the number of lineages, which is small and human-authored, and a
+/// map would allocate to index a list that is usually of length one.
+///
+/// # Why this is loaded per read rather than cached (0.15.17, [D-259])
+///
+/// [A-2] proposed a cached `Vec<Branch>` with a generation counter, on the
+/// premise that resolving ancestry in Rust needs the *rows* where the shape
+/// needed only three aggregates, and that the extra read has to be paid for.
+/// Measured (`examples/ancestry_resolve_probe.rs`, §5), it does not: loading 17
+/// rows costs **10.0 µs** against the three-aggregate `SELECT`'s **11.0 µs**,
+/// so the rows arrive for *less* than the answer they replace. The cache is an
+/// optimisation nothing has asked for, and a cache the read side does not need
+/// is a coherency question the read side does not have to answer.
+///
+/// The actor keeps its copy ([`crate::connection`]'s `ActorState`) because the
+/// write path already had one and invalidates it on the two commands that write
+/// `branches`. That is a cache with an owner; this is not.
+///
+/// [A-2]: ../../docs/Macrame%20Codebase%20Review%20v0.15.0.md
+/// [D-259]: ../../docs/architecture/s13-decision-register.md#d-259
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Lineages {
+    pub(crate) rows: Vec<BranchRow>,
+}
+
+impl Lineages {
+    /// Load `branches`, in no particular order.
+    ///
+    /// Unordered because every consumer here searches by name or walks parent
+    /// links, and neither cares; `Database::branches` is the listing that
+    /// promises trunk-first and it sorts for itself.
+    pub(crate) async fn load(conn: &libsql::Connection) -> Result<Self> {
+        let mut rows = conn
+            .query("SELECT branch_id, parent_id, forked_at FROM branches", ())
+            .await?;
+        let mut out = Vec::with_capacity(1);
+        while let Some(row) = rows.next().await? {
+            out.push(BranchRow {
+                id: row.get::<String>(0)?,
+                parent: row.get::<Option<String>>(1)?,
+                forked_at: row.get::<Option<String>>(2)?,
+            });
+        }
+        Ok(Self { rows: out })
     }
-    Ok(if total <= 1 {
-        LineageShape::Trunk
-    } else if root > 0 {
-        LineageShape::TrunkOnForked
-    } else {
-        LineageShape::Resolved
-    })
+
+    fn find(&self, name: &str) -> Option<&BranchRow> {
+        self.rows.iter().find(|b| b.id == name)
+    }
+
+    /// The shape for one name, or [`DbError::UnknownBranch`].
+    ///
+    /// The same three facts `lineage_shape`'s `SELECT` asked for until 0.15.17 — the total,
+    /// the name's existence, and whether it is a root — read off the rows
+    /// instead of counted by SQLite.
+    /// # Refusing an unregistered lineage rather than answering for the trunk
+    ///
+    /// A read naming a branch that is not in `branches` has asked a question
+    /// about something that does not exist. Answering it with the trunk's view
+    /// would be the [D-069] failure — a right-looking answer to a question that
+    /// was not asked — and it is the answer a caller is *least* able to detect,
+    /// because on a database that has never forked the trunk's view is what
+    /// they expected to see anyway.
+    ///
+    /// The refusal is [`DbError::UnknownBranch`] from 0.14.7 and was
+    /// [`DbError::NotFound`] before it, whose `Display` reads *"node {0} not
+    /// found"* — the wrong noun, pointing a caller at their concept ids. There
+    /// was no better variant until `fork()` needed one, and shipping the right
+    /// variant while leaving this on the old one would have been two spellings
+    /// of one fact.
+    ///
+    /// [D-069]: ../../docs/architecture/s13-decision-register.md
+    pub(crate) fn shape(&self, name: &str) -> Result<LineageShape> {
+        let row = self
+            .find(name)
+            .ok_or_else(|| DbError::UnknownBranch(name.to_string()))?;
+        Ok(if self.rows.len() <= 1 {
+            LineageShape::Trunk
+        } else if row.parent.is_none() {
+            LineageShape::TrunkOnForked
+        } else {
+            LineageShape::Resolved
+        })
+    }
+
+    /// The shape a batch takes, given every lineage it names.
+    ///
+    /// Every name is checked, because that is the first thing the caller wants:
+    /// a batch naming a lineage that does not exist is refused **by name**,
+    /// rather than by whatever the guard finds when it looks in the wrong place.
+    ///
+    /// # Why the last answer used to be every answer, and why it is not one now
+    ///
+    /// Before 0.15.2 the shape was a function of the row *count* alone, so
+    /// asking per name and keeping the last was correct and read like a bug —
+    /// review C-24. [`LineageShape::TrunkOnForked`] (D-244) made the shape a
+    /// function of the **name** as well: a root and a fork on one database now
+    /// have different shapes, and the loop went on keeping whichever came last.
+    /// Where the names disagree the resolved form is the one exact for all of
+    /// them, roots included, so the ambiguity is resolved rather than
+    /// tie-broken by iteration order.
+    pub(crate) fn shape_of(&self, names: &[&str]) -> Result<LineageShape> {
+        let mut agreed: Option<LineageShape> = None;
+        for name in names {
+            let shape = self.shape(name)?;
+            agreed = Some(match agreed {
+                None => shape,
+                Some(prev) if prev == shape => prev,
+                Some(_) => LineageShape::Resolved,
+            });
+        }
+        // No names is the trunk: `distinct_branches` never returns empty, and
+        // `write_concepts_atomic` refuses an empty chunk before it gets here.
+        Ok(agreed.unwrap_or(LineageShape::Trunk))
+    }
+
+    /// [`resolve`], against these rows.
+    pub(crate) fn ancestry(&self, start: &str) -> Vec<Ancestor> {
+        resolve(&self.rows, start)
+    }
+}
+
+/// One resolved ancestor: exactly the three columns the recursive
+/// `ancestry_cte` produced until 0.15.17.
+///
+/// Public through [`crate::branch`] as the answer `reconstruct_on` resolves
+/// over, which is review C-10: until 0.15.17 the resolution rule existed only
+/// as SQL, so a caller holding a `Vec<EdgeBelief>` had no function to finish
+/// the question the fold started.
+///
+/// # Usually read, occasionally built (0.15.17, [D-255])
+///
+/// `#[non_exhaustive]`, and [`new`](Ancestor::new) is the way in — a fourth
+/// column is plausible (the fork's own `created_at` has been wanted twice) and
+/// a struct literal outside this crate would make it a major version.
+///
+/// Almost every caller *reads* one: [`Database::ancestry`] resolves it out of
+/// `branches`, refusing an unregistered lineage first, and
+/// [`resolve_beliefs`](crate::temporal::resolve_beliefs) consumes what it
+/// returned. The constructor exists for the caller who is exercising that pure
+/// function rather than a database, which is a real case — it is what this
+/// crate's own test for it does — and is worth naming, because an ancestry
+/// assembled by hand is a distance rule the caller has stated and
+/// `resolve_beliefs` will apply as faithfully as it applies a resolved one.
+///
+/// [D-255]: ../../docs/architecture/s13-decision-register.md#d-255
+/// [`Database::ancestry`]: crate::Database::ancestry
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Ancestor {
+    /// The lineage.
+    pub branch_id: String,
+    /// Steps from the reader: 0 is the reader itself.
+    pub dist: i64,
+    /// The instant past which this ancestor's rows are not visible, or `None`
+    /// for the reader, which has no cutoff.
+    pub cutoff: Option<String>,
+}
+
+impl Ancestor {
+    /// One ancestor at `dist` steps up the parent chain, uncut.
+    ///
+    /// `cutoff` is `None`, which is the reader's own row and the only shape
+    /// with no fork point above it; [`cutoff`](Ancestor::cutoff) sets it for
+    /// the rest. Two arguments and a setter rather than three arguments,
+    /// because the third is an `Option` that is `None` on exactly one row of
+    /// every ancestry and a positional `None` at every call site reads as a
+    /// decision nobody made.
+    ///
+    /// Building one states a distance rule rather than reporting a resolved
+    /// one. [`crate::Database::ancestry`] is what to use against a real ledger.
+    pub fn new(branch_id: impl Into<String>, dist: i64) -> Self {
+        Self {
+            branch_id: branch_id.into(),
+            dist,
+            cutoff: None,
+        }
+    }
+
+    /// Cut this ancestor at `ts`.
+    pub fn cutoff(mut self, ts: impl Into<String>) -> Self {
+        self.cutoff = Some(ts.into());
+        self
+    }
+}
+
+/// Walk `branches` from `start` to its root, carrying the running minimum.
+///
+/// The Rust half of [D-259]: the same relation [`ancestry_cte`] computed with
+/// `WITH RECURSIVE`, computed here instead. Term for term — the reader at
+/// `dist` 0 with no cutoff, then one row per ancestor, each carrying the
+/// **minimum** `forked_at` seen on the path down to it.
+///
+/// See [`ancestry_cte`] for why the cutoff is the *child's* `forked_at` and why
+/// the minimum is running rather than assigned. The property that matters here
+/// is that this is a second implementation of a rule the crate already had, so
+/// it is pinned against the original differentially rather than against a
+/// restatement of the rule (`the_rust_walk_agrees_with_the_cte`, below).
+///
+/// # Termination without trusting the data
+///
+/// `branches.parent_id` is a foreign key into an append-only table whose parent
+/// must exist before its child, so the graph is a forest and the walk is finite.
+/// The loop is bounded by the row count anyway. That bound is not the
+/// termination argument — it is what stops a corrupted file from hanging a read,
+/// which is a different failure from the one the schema rules out, and the walk
+/// returns the prefix it had rather than raising: a caller reading a broken
+/// `branches` gets a narrower answer, not a panic.
+///
+/// [D-259]: ../../docs/architecture/s13-decision-register.md#d-259
+pub(crate) fn resolve(rows: &[BranchRow], start: &str) -> Vec<Ancestor> {
+    let mut out = Vec::new();
+    let mut cur = start.to_string();
+    let mut cutoff: Option<String> = None;
+    for dist in 0..=(rows.len() as i64) {
+        out.push(Ancestor {
+            branch_id: cur.clone(),
+            dist,
+            cutoff: cutoff.clone(),
+        });
+        let Some(node) = rows.iter().find(|b| b.id == cur) else {
+            break;
+        };
+        // The CHECK pairs these two, so a row with one and not the other is a
+        // file that has been edited outside this crate. Treated as the root.
+        let (Some(parent), Some(forked)) = (node.parent.as_ref(), node.forked_at.as_ref()) else {
+            break;
+        };
+        cutoff = Some(match cutoff {
+            Some(c) if c.as_str() <= forked.as_str() => c,
+            _ => forked.clone(),
+        });
+        cur = parent.clone();
+    }
+    out
+}
+
+/// The ancestry as a bound `VALUES` table, replacing the recursive CTE.
+///
+/// `first_slot` is where the block starts; it occupies `3 × rows` placeholders
+/// from there, and every reader puts it **after** its own fixed slots so that no
+/// existing layout moves.
+///
+/// # Bound and not interpolated
+///
+/// A branch id is caller-supplied text. The crate has exactly one arbitrary-SQL
+/// surface ([D-258]) and this is not a second one, so every value binds — the
+/// cutoff too, `NULL` included, which libSQL accepts inside `VALUES`
+/// (`ancestry_resolve_probe.rs` §1 checks it rather than assuming it). The
+/// consequence is that the statement *text* varies with ancestry **depth** and
+/// with nothing else, so a prepared-statement cache keyed on text sees one entry
+/// per distinct fork depth rather than one per lineage.
+///
+/// `dist` binds too, though it is the row's own index and could be a literal.
+/// Measured (`ancestry_resolve_probe.rs` §7) that saves a third of the
+/// placeholders and **1–5%**, inside the noise, so it is spelled the way the
+/// other two columns are rather than differently for a gain that did not
+/// survive being measured.
+///
+/// [D-258]: ../../docs/architecture/s13-decision-register.md#d-258
+pub(crate) fn ancestry_values(rows: usize, first_slot: usize, tag: &str) -> String {
+    let tuples: Vec<String> = (0..rows)
+        .map(|i| {
+            let b = first_slot + i * 3;
+            format!("(?{}, ?{}, ?{})", b, b + 1, b + 2)
+        })
+        .collect();
+    format!(
+        "lineage{tag}(branch_id, dist, cutoff) AS (VALUES {})",
+        tuples.join(", ")
+    )
+}
+
+/// The ancestry's placeholder values, in the order [`ancestry_values`] names
+/// them.
+pub(crate) fn ancestry_params(ancestry: &[Ancestor]) -> Vec<libsql::Value> {
+    let mut v = Vec::with_capacity(ancestry.len() * 3);
+    for a in ancestry {
+        v.push(libsql::Value::Text(a.branch_id.clone()));
+        v.push(libsql::Value::Integer(a.dist));
+        v.push(match &a.cutoff {
+            Some(c) => libsql::Value::Text(c.clone()),
+            None => libsql::Value::Null,
+        });
+    }
+    v
 }
 
 /// The ancestry of the reading branch, nearest first, each with its cutoff.
@@ -314,6 +587,18 @@ impl KeySlots {
     }
 }
 
+/// # Retained as the oracle, not as production SQL (0.15.17, [D-259])
+///
+/// Nothing emits this any more — [`ancestry_values`] does, with the same three
+/// columns computed by [`resolve`] instead of by SQLite. It is compiled for
+/// tests only, and it stays because deleting it would leave
+/// [`resolve`] pinned against a *restatement* of the rule rather than against
+/// the implementation it replaced. `the_rust_walk_agrees_with_the_cte` is the
+/// differential test; this is the half of it that cannot be wrong by the same
+/// mistake.
+///
+/// [D-259]: ../../docs/architecture/s13-decision-register.md#d-259
+#[cfg(test)]
 pub(crate) fn ancestry_cte(slot: usize, tag: &str) -> String {
     format!(
         r#"lineage{tag}(branch_id, dist, cutoff) AS (
@@ -465,17 +750,33 @@ const WRITE_KEY: KeySlots = KeySlots {
 };
 const WRITE_BRANCH_SLOT: usize = 5;
 
+/// Where the guard's ancestry block starts: after the five it already binds.
+///
+/// The two write statements have different layouts, so the slot is passed to
+/// [`write_resolution`] rather than named once here — the guard binds five
+/// (`key`, `valid_from`, `branch`) and the retirement binds seven.
+const GUARD_ANCESTRY_SLOT: usize = 6;
+
+/// Where the retirement's ancestry block starts: after `valid_to` and `stamp`.
+const RETIRE_ANCESTRY_SLOT: usize = 8;
+
 /// What the write path has decided before any SQL exists.
 ///
 /// Current belief always: the guard asks what this lineage believes *now*, and
 /// an assertion is made against now. There is no recorded slot to name.
-fn write_resolution(shape: LineageShape) -> Resolution<'static> {
+fn write_resolution<'a>(
+    shape: LineageShape,
+    ancestry: &'a [Ancestor],
+    ancestry_slot: usize,
+) -> Resolution<'a> {
     Resolution {
         shape,
         branch_slot: WRITE_BRANCH_SLOT,
         recorded_slot: None,
         tag: "",
         key: Some(WRITE_KEY),
+        ancestry,
+        ancestry_slot,
     }
 }
 
@@ -589,8 +890,8 @@ fn write_resolution(shape: LineageShape) -> Resolution<'static> {
 ///
 /// [D-225]: ../../docs/architecture/s13-decision-register.md#d-225
 /// [D-250]: ../../docs/architecture/s13-decision-register.md#d-250
-pub(crate) fn overlap_candidates_resolved(shape: LineageShape) -> String {
-    let l = lower(&write_resolution(shape));
+pub(crate) fn overlap_candidates_resolved(shape: LineageShape, ancestry: &[Ancestor]) -> String {
+    let l = lower(&write_resolution(shape, ancestry, GUARD_ANCESTRY_SLOT));
     format!(
         "{}SELECT l.valid_from, l.valid_to FROM {} l WHERE l.valid_from <> ?4{}",
         l.with_clause(),
@@ -615,8 +916,8 @@ pub(crate) fn overlap_candidates_resolved(shape: LineageShape) -> String {
 /// a retirement rather than a new assertion that happens to be closed — and it
 /// is the reason a keyed resolution carries `properties` at all (see
 /// [`KeySlots`]).
-pub(crate) fn retire_from_resolved(shape: LineageShape) -> String {
-    let l = lower(&write_resolution(shape));
+pub(crate) fn retire_from_resolved(shape: LineageShape, ancestry: &[Ancestor]) -> String {
+    let l = lower(&write_resolution(shape, ancestry, RETIRE_ANCESTRY_SLOT));
     format!(
         "{}INSERT INTO links \
              (source_id, target_id, edge_type, valid_from, valid_to, weight, \
@@ -676,15 +977,22 @@ pub(crate) fn retire_from_resolved(shape: LineageShape) -> String {
 /// Slots: `?1` the lineage being asked about, `?2` the one it is compared to.
 ///
 /// [D-228]: ../../docs/architecture/s13-decision-register.md#d-228
-pub(crate) fn diff_sql() -> String {
+pub(crate) fn diff_sql(a_ancestry: &[Ancestor], b_ancestry: &[Ancestor]) -> String {
     // Two lowerings in one `WITH` list (0.15.1, W13.1): the same prelude
     // the traversal and `query_as_of_edges_on` splice, told apart by tag.
+    //
+    // Two ancestry blocks as well, and they are the reason this function stopped
+    // being a constant in 0.15.17: `?1` and `?2` still name the two lineages,
+    // `a`'s ancestry follows at `?3`, and `b`'s follows that. Both lengths are
+    // read from the database, so the caller resolves before it lowers.
     let a = lower(&Resolution {
         shape: LineageShape::Resolved,
         branch_slot: 1,
         recorded_slot: None,
         tag: "_a",
         key: None,
+        ancestry: a_ancestry,
+        ancestry_slot: 3,
     });
     let b = lower(&Resolution {
         shape: LineageShape::Resolved,
@@ -692,6 +1000,8 @@ pub(crate) fn diff_sql() -> String {
         recorded_slot: None,
         tag: "_b",
         key: None,
+        ancestry: b_ancestry,
+        ancestry_slot: 3 + a_ancestry.len() * 3,
     });
     format!(
         "WITH RECURSIVE {},\n{}\n\
@@ -767,6 +1077,23 @@ pub(crate) fn visible_cte(source: &str, tag: &str, key: Option<KeySlots>) -> Str
 mod tests {
     use super::*;
 
+    /// The reader plus one ancestor: the smallest ancestry that resolves
+    /// anything. An empty one lowers to `VALUES ()`, which SQLite refuses.
+    fn anc() -> Vec<Ancestor> {
+        vec![
+            Ancestor {
+                branch_id: "exp".to_string(),
+                dist: 0,
+                cutoff: None,
+            },
+            Ancestor {
+                branch_id: "main".to_string(),
+                dist: 1,
+                cutoff: Some("2026-01-06T00:00:00.000000Z".to_string()),
+            },
+        ]
+    }
+
     const TS: &str = "2026-01-06T00:00:00.000000Z";
 
     async fn fresh() -> libsql::Connection {
@@ -822,8 +1149,8 @@ mod tests {
             LineageShape::Resolved,
         ] {
             for (what, sql) in [
-                ("overlap", overlap_candidates_resolved(shape)),
-                ("retire", retire_from_resolved(shape)),
+                ("overlap", overlap_candidates_resolved(shape, &anc())),
+                ("retire", retire_from_resolved(shape, &anc())),
             ] {
                 let mut rows = conn
                     .query(&format!("EXPLAIN QUERY PLAN {sql}"), ())
@@ -857,15 +1184,15 @@ mod tests {
     async fn one_lineage_is_the_trunk_shape() {
         let conn = fresh().await;
         assert_eq!(
-            lineage_shape(&conn, None).await.unwrap(),
+            resolve_for(&conn, None).await.unwrap().0,
             LineageShape::Trunk
         );
         assert_eq!(
-            lineage_shape(&conn, Some("main")).await.unwrap(),
+            resolve_for(&conn, Some("main")).await.unwrap().0,
             LineageShape::Trunk
         );
         assert!(matches!(
-            lineage_shape(&conn, Some("ghost")).await,
+            resolve_for(&conn, Some("ghost")).await,
             Err(DbError::UnknownBranch(name)) if name == "ghost"
         ));
     }
@@ -878,26 +1205,229 @@ mod tests {
         fork(&conn, "b1", "main").await;
         fork(&conn, "b2", "b1").await;
         assert_eq!(
-            lineage_shape(&conn, None).await.unwrap(),
+            resolve_for(&conn, None).await.unwrap().0,
             LineageShape::TrunkOnForked,
             "an unbranched read on a forked ledger is the trunk's own read"
         );
         assert_eq!(
-            lineage_shape(&conn, Some("main")).await.unwrap(),
+            resolve_for(&conn, Some("main")).await.unwrap().0,
             LineageShape::TrunkOnForked
         );
         assert_eq!(
-            lineage_shape(&conn, Some("b1")).await.unwrap(),
+            resolve_for(&conn, Some("b1")).await.unwrap().0,
             LineageShape::Resolved
         );
         assert_eq!(
-            lineage_shape(&conn, Some("b2")).await.unwrap(),
+            resolve_for(&conn, Some("b2")).await.unwrap().0,
             LineageShape::Resolved
         );
         assert!(matches!(
-            lineage_shape(&conn, Some("ghost")).await,
+            resolve_for(&conn, Some("ghost")).await,
             Err(DbError::UnknownBranch(_))
         ));
+    }
+
+    /// Read the ancestry back from whichever relation produced it, `dist` first.
+    async fn ancestry_from(conn: &libsql::Connection, sql: &str) -> Vec<Ancestor> {
+        let mut rows = conn.query(sql, ()).await.unwrap();
+        let mut out = Vec::new();
+        while let Some(r) = rows.next().await.unwrap() {
+            out.push(Ancestor {
+                branch_id: r.get::<String>(0).unwrap(),
+                dist: r.get::<i64>(1).unwrap(),
+                cutoff: r.get::<Option<String>>(2).unwrap(),
+            });
+        }
+        out.sort_by_key(|a| a.dist);
+        out
+    }
+
+    /// The CTE's answer for `start`, through the oracle.
+    ///
+    /// The branch is spliced rather than bound because this is test-only code
+    /// reading a name this test wrote; the production form binds, which is what
+    /// [`ancestry_values`] is about.
+    async fn from_the_cte(conn: &libsql::Connection, start: &str) -> Vec<Ancestor> {
+        let sql = format!(
+            "WITH RECURSIVE {} SELECT branch_id, dist, cutoff FROM lineage",
+            ancestry_cte(1, "").replace("?1", &format!("'{start}'"))
+        );
+        ancestry_from(conn, &sql).await
+    }
+
+    /// The Rust walk's answer for `start`, round-tripped through the SQL it
+    /// generates — so this checks [`resolve`] *and* [`ancestry_values`].
+    async fn from_the_values(conn: &libsql::Connection, start: &str) -> Vec<Ancestor> {
+        let lineages = Lineages::load(conn).await.unwrap();
+        let ancestry = lineages.ancestry(start);
+        let sql = format!(
+            "WITH {} SELECT branch_id, dist, cutoff FROM lineage",
+            ancestry_values(ancestry.len(), 1, "")
+        );
+        let mut rows = conn.query(&sql, ancestry_params(&ancestry)).await.unwrap();
+        let mut out = Vec::new();
+        while let Some(r) = rows.next().await.unwrap() {
+            out.push(Ancestor {
+                branch_id: r.get::<String>(0).unwrap(),
+                dist: r.get::<i64>(1).unwrap(),
+                cutoff: r.get::<Option<String>>(2).unwrap(),
+            });
+        }
+        out.sort_by_key(|a| a.dist);
+        out
+    }
+
+    async fn fork_at(conn: &libsql::Connection, name: &str, parent: &str, at: &str) {
+        conn.execute(
+            "INSERT INTO branches (branch_id, parent_id, forked_at, created_at) \
+             VALUES (?1, ?2, ?3, ?3)",
+            libsql::params![name, parent, at],
+        )
+        .await
+        .unwrap();
+    }
+
+    /// **The differential test this release exists to pass** ([D-259]).
+    ///
+    /// [`resolve`] replaced a recursive CTE, and the way that goes wrong is not
+    /// a crash: it is a cutoff that is one step too wide, on a lineage nobody
+    /// reads for a month. So the Rust walk is checked against the SQL it
+    /// replaced rather than against a restatement of the rule — every lineage
+    /// on every shape below, both answers, byte for byte.
+    ///
+    /// Four shapes, and the third is the one that matters. A **chain** with
+    /// increasing fork points never fires the running minimum. A chain with
+    /// *decreasing* ones fires it at every step. Those two are the pair that
+    /// tells a `min` apart from a plain assignment, which is the mistake a
+    /// hand-written walk actually makes.
+    ///
+    /// [D-259]: ../../docs/architecture/s13-decision-register.md#d-259
+    #[tokio::test]
+    async fn the_rust_walk_agrees_with_the_cte() {
+        for (label, forks) in [
+            // A chain whose fork points increase down it: the minimum never bites.
+            (
+                "increasing chain",
+                vec![
+                    ("b1", "main", "2026-01-01T00:00:00.000000Z"),
+                    ("b2", "b1", "2026-02-01T00:00:00.000000Z"),
+                    ("b3", "b2", "2026-03-01T00:00:00.000000Z"),
+                    ("b4", "b3", "2026-04-01T00:00:00.000000Z"),
+                ],
+            ),
+            // The same chain with the fork points running the other way. Every
+            // step must clamp to the earliest seen, and a walk that assigns
+            // instead of taking a minimum widens each ancestor's window.
+            (
+                "decreasing chain",
+                vec![
+                    ("b1", "main", "2026-04-01T00:00:00.000000Z"),
+                    ("b2", "b1", "2026-03-01T00:00:00.000000Z"),
+                    ("b3", "b2", "2026-02-01T00:00:00.000000Z"),
+                    ("b4", "b3", "2026-01-01T00:00:00.000000Z"),
+                ],
+            ),
+            // Siblings: two lineages off one parent, so the walk must not carry
+            // a cutoff sideways.
+            (
+                "siblings",
+                vec![
+                    ("l", "main", "2026-01-01T00:00:00.000000Z"),
+                    ("r", "main", "2026-06-01T00:00:00.000000Z"),
+                    ("ll", "l", "2026-02-01T00:00:00.000000Z"),
+                ],
+            ),
+            // A root with nothing under it: the ancestry is one row, no cutoff.
+            (
+                "lone fork",
+                vec![("only", "main", "2026-01-01T00:00:00.000000Z")],
+            ),
+        ] {
+            let conn = fresh().await;
+            for (name, parent, at) in &forks {
+                fork_at(&conn, name, parent, at).await;
+            }
+            let mut names = vec!["main".to_string()];
+            names.extend(forks.iter().map(|(n, _, _)| n.to_string()));
+
+            for name in &names {
+                let cte = from_the_cte(&conn, name).await;
+                let values = from_the_values(&conn, name).await;
+                assert_eq!(cte, values, "{label}: the two forms disagree for `{name}`");
+                // Not vacuous: the reader is always there, and a lineage that
+                // is not the trunk always has at least one ancestor.
+                assert_eq!(
+                    cte.first().map(|a| a.branch_id.as_str()),
+                    Some(name.as_str())
+                );
+                assert!(cte.first().is_some_and(|a| a.cutoff.is_none()));
+            }
+        }
+    }
+
+    /// The clamp, stated directly, so a failure says which rule broke.
+    ///
+    /// [`the_rust_walk_agrees_with_the_cte`] would catch a dropped minimum, but
+    /// it would report it as "the two forms disagree" — true, and one step away
+    /// from what went wrong. This names it.
+    #[tokio::test]
+    async fn the_cutoff_is_the_earliest_fork_on_the_path_and_not_the_nearest() {
+        let conn = fresh().await;
+        fork_at(&conn, "early", "main", "2026-01-01T00:00:00.000000Z").await;
+        fork_at(&conn, "late", "early", "2026-09-01T00:00:00.000000Z").await;
+
+        let lineages = Lineages::load(&conn).await.unwrap();
+        let ancestry = lineages.ancestry("late");
+
+        // `late` sees `early` up to the point *it* diverged, and `main` up to
+        // the point `early` diverged — the earlier of the two, not the nearer.
+        assert_eq!(ancestry[0].cutoff, None, "the reader has no cutoff");
+        assert_eq!(
+            ancestry[1].cutoff.as_deref(),
+            Some("2026-09-01T00:00:00.000000Z"),
+            "`early` is seen up to where `late` left it"
+        );
+        assert_eq!(
+            ancestry[2].cutoff.as_deref(),
+            Some("2026-01-01T00:00:00.000000Z"),
+            "`main` is clamped to where `early` left it, not to where `late` did"
+        );
+    }
+
+    /// A `branches` table that cannot be walked returns a prefix, not a hang.
+    ///
+    /// The schema makes this unreachable — `parent_id` is a foreign key into an
+    /// append-only table — so this stages it by writing a row the schema would
+    /// refuse, with foreign keys off. The bound in [`resolve`] is what stops a
+    /// corrupted file from hanging a read, and a bound nothing tests is a
+    /// comment.
+    #[tokio::test]
+    async fn a_parent_that_is_not_there_ends_the_walk() {
+        let conn = fresh().await;
+        conn.execute("PRAGMA foreign_keys = OFF", ()).await.unwrap();
+        fork_at(&conn, "orphan", "vanished", "2026-01-01T00:00:00.000000Z").await;
+
+        let lineages = Lineages::load(&conn).await.unwrap();
+        let ancestry = lineages.ancestry("orphan");
+        // The orphan, then the parent it names — which no row describes, so the
+        // walk stops there rather than looking for its parent.
+        assert_eq!(ancestry.len(), 2);
+        assert_eq!(ancestry[1].branch_id, "vanished");
+    }
+
+    /// The `VALUES` text names three placeholders per ancestor, from the slot
+    /// it was given, and nothing before it.
+    #[test]
+    fn the_bound_ancestry_starts_where_the_reader_put_it() {
+        let sql = ancestry_values(2, 6, "");
+        assert!(sql.contains("(?6, ?7, ?8)"), "{sql}");
+        assert!(sql.contains("(?9, ?10, ?11)"), "{sql}");
+        assert!(
+            !sql.contains("?5"),
+            "nothing below the slot it was given: {sql}"
+        );
+        // Tagged, for the diff's two lowerings in one `WITH` list.
+        assert!(ancestry_values(1, 1, "_a").starts_with("lineage_a("));
     }
 
     /// Only `Trunk` leaves the branch unbound; the layouts ask this rather

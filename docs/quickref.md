@@ -450,6 +450,8 @@ impl SnapshotCadence {
 // Standalone functions
 pub async fn query_as_of_edges(conn, ts, filter) -> Result<MaterializedState>
 pub async fn reconstruct(conn, ts, archive_path, snapshots) -> Result<MaterializedState>
+pub async fn reconstruct_on(conn, ts, branch, archive_path, snapshots) -> Result<MaterializedState>
+pub fn resolve_beliefs(beliefs: &[EdgeBelief], ancestry: &[Ancestor]) -> Vec<EdgeBelief>
 pub async fn archive(cutoff: &str) -> Result<ArchiveReport>
 pub async fn archive_windowed(cutoff, window) -> Result<Vec<ArchiveReport>>
 pub async fn save_snapshot(snapshots_dir, state) -> Result<PathBuf>
@@ -465,6 +467,8 @@ pub async fn hydrate_attributes(conn, ids, as_of: &AsOf, mode) -> Result<Vec<Nod
 impl Database {
     pub async fn archive_windowed(&self, cutoff: &str, window: Duration) -> Result<Vec<ArchiveReport>>
     pub async fn shadow_step(&self, step: ShadowStep) -> Result<ShadowOutcome>
+    pub async fn reconstruct_on(&self, ts: &str, branch: &str) -> Result<MaterializedState>
+    pub async fn ancestry(&self, branch: &str) -> Result<Vec<Ancestor>>
 }
 ```
 
@@ -473,6 +477,12 @@ impl Database {
 **`hydrate_attributes()`**: Attributes for a result set, per `AttributeMode`. Under `AtTime` with `as_of.recorded` set it folds the hot `transaction_log`, so it raises `RecordedInstantUnreachable` once rows have been archived out of it (0.13.16, [D-189](architecture/s13-decision-register.md#d-189)) — the same refusal `as_of_recorded` makes, at the surface that fixes the *text* rather than the topology. The other three cells read live `concepts` and are unaffected.
 
 **`reconstruct()`**: Transaction-time replay from `transaction_log`. Composes from newest snapshot at or before `ts` plus anchored fold. Requires `archive_path` if history extends before the archive cutoff.
+
+**`reconstruct_on(ts, branch)`** (0.15.17, [D-259](architecture/s13-decision-register.md#d-259)): the same replay, for **one lineage's view**. `reconstruct` returns every lineage's belief unresolved — the nearest-ancestor rule lived only inside the readers' SQL, so a caller holding a `MaterializedState` on a forked database had rows a reader would never see. This folds with the ancestry joined in, each ancestor cut at its own fork point, and `edges` comes back resolved: one belief per key, held by the nearest lineage that has one. It agrees edge for edge with `db.edges(ReadPlan::new().on(branch)…)`, which is what its test asserts.
+
+**Two things to know before using it.** `concepts` is **narrowed but not resolved** — it is keyed by concept id alone, so an invisible lineage contributes nothing and an ancestor's post-cutoff writes are cut, but where two *visible* lineages wrote the same concept the winner is the later log row, not the nearer lineage. And a forked read **cannot use snapshots at all**: a snapshot has no `recorded_at` left in it for a cutoff to compare against, so this folds from genesis and costs ~3 ms flat whatever the fork depth — about 4× `reconstruct` where snapshots are configured, and ~1.15× where they are not. An **unforked** database pays none of it and delegates to `reconstruct`, snapshots and all.
+
+**`resolve_beliefs(beliefs, ancestry)`** and **`ancestry(branch)`**: the rule and its input, separately, for a caller who already holds beliefs. `resolve_beliefs` is pure and applies the **distance** rule only — an `EdgeBelief` carries no `recorded_at`, so the cutting is the fold's job. `Ancestor` is `#[non_exhaustive]` with `Ancestor::new(branch_id, dist)` and `.cutoff(ts)`; building one by hand states a distance rule of your own, which `resolve_beliefs` will apply as faithfully as it applies a resolved one.
 
 **`archive(cutoff)`**: Moves closed intervals to cold database. One atomic session — copy-then-delete.
 

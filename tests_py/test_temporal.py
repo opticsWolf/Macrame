@@ -20,6 +20,7 @@ UTC = dt.timezone.utc
 T0 = "2026-01-01T00:00:00.000000Z"
 T1 = "2026-03-01T00:00:00.000000Z"
 T2 = "2026-06-01T00:00:00.000000Z"
+NOW_TS = "2030-01-01T00:00:00.000000Z"
 
 
 @pytest.fixture
@@ -72,10 +73,11 @@ def test_a_belief_is_labelled_with_the_lineage_holding_it(db):
     two rows were indistinguishable and one of them was dropped on the way out
     of the fold, with the survivor decided by write order.
 
-    There is no ``fork()`` from Python yet, so what this can reach is the shape
-    and the default: every belief is labelled, and on a database that has never
-    forked every label is the trunk. The two-lineage case is
-    ``branch_storage_tests::a_reconstruction_keeps_both_lineages_beliefs``.
+    What this reaches is the shape and the default: every belief is labelled,
+    and on a database that has never forked every label is the trunk. The
+    two-lineage case is below, in the ``reconstruct_on`` block — which is also
+    where the question this labelling was *for* finally gets answered from
+    Python (0.15.17, D-259).
     """
     edges = db.reconstruct(now()).edges
     assert edges, "the fixture asserts edges"
@@ -149,6 +151,106 @@ def test_as_of_edges_defaults_to_the_handles_clock(db):
 
 def test_as_of_edges_before_the_valid_interval_is_empty(db):
     assert db.query_as_of_edges("2025-01-01T00:00:00.000000Z") == []
+
+
+# --------------------------------------------------------------------------
+# reconstruct_on: one lineage's view of a fold (0.15.17, D-259, review C-10)
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def forked(db):
+    """The trunk, a fork, and both sides moving after the fork point.
+
+    ``reconstruct`` labels each belief with its lineage; until 0.15.17 that was
+    all Python could do with it, because the label alone does not say which
+    lineage a *reader* should take an edge from. Everything below is about the
+    difference.
+    """
+    # The `db` fixture seeds a, b, c and the edges a->b and b->c; `d` is the
+    # endpoint the trunk's post-fork edge needs.
+    db.write_concepts([macrame.ConceptUpsert("d", "D", valid_from=T0)])
+    alt = db.fork("alt")
+    # Both sides diverge: the trunk gains an edge the branch must not see, the
+    # branch gains one of its own, and the branch shadows an inherited key by
+    # re-asserting it with a closed interval.
+    db.assert_edge(macrame.EdgeAssertion("c", "d", "CITES", valid_from=T0))
+    db.assert_edge(macrame.EdgeAssertion("a", "c", "CITES", valid_from=T0, branch=alt.id))
+    db.assert_edge(
+        macrame.EdgeAssertion("b", "c", "CITES", valid_from=T0, valid_to=T1, branch=alt.id)
+    )
+    return db, alt
+
+
+def test_a_lineages_view_of_a_fold_drops_what_it_forked_before(forked):
+    """The cutoff, from Python.
+
+    ``reconstruct`` returns the trunk's post-fork edge because the ledger holds
+    it. ``reconstruct_on`` does not, because ``alt`` forked before it was
+    written — and no filter over the six-tuples could have told the two cases
+    apart, which is the whole of review C-10.
+    """
+    db, alt = forked
+    at = now()
+
+    whole = {(e[0], e[1], e[5]) for e in db.reconstruct(at).edges}
+    view = {(e[0], e[1], e[5]) for e in db.reconstruct_on(at, alt.id).edges}
+
+    assert ("c", "d", "main") in whole, "the ledger holds the trunk's post-fork edge"
+    assert ("c", "d", "main") not in view, f"`alt` forked before it: {view}"
+    assert ("a", "b", "main") in view, "pre-fork, and inherited"
+    assert ("a", "c", "alt") in view, "the branch's own"
+    # `b->c` is held by both lineages. One row comes back, from the nearer one.
+    held = [e for e in db.reconstruct_on(at, alt.id).edges if (e[0], e[1]) == ("b", "c")]
+    assert len(held) == 1, f"one belief per key: {held}"
+    assert held[0][5] == "alt", "the nearest lineage holding the key"
+
+
+def test_the_trunks_view_is_its_own_rows_and_not_the_branches(forked):
+    db, alt = forked
+    view = {(e[0], e[1], e[5]) for e in db.reconstruct_on(now(), "main").edges}
+    assert ("c", "d", "main") in view
+    assert ("a", "c", "alt") not in view, f"a descendant is not an ancestor: {view}"
+
+
+def test_on_an_unforked_ledger_the_two_reconstructions_agree(db):
+    """One lineage, so there is nothing to resolve and nothing to cut."""
+    at = now()
+    assert db.reconstruct(at).edges == db.reconstruct_on(at, "main").edges
+
+
+def test_the_ancestry_is_readable_and_says_where_each_cutoff_is(forked):
+    """The rule ``reconstruct_on`` applies, published rather than only obeyed."""
+    db, alt = forked
+
+    anc = db.ancestry(alt.id)
+    assert [(a[0], a[1]) for a in anc] == [("alt", 0), ("main", 1)]
+    assert anc[0][2] is None, "the reader has no cutoff"
+    assert isinstance(anc[1][2], dt.datetime), "an ancestor is cut at the fork point"
+    assert anc[1][2].tzinfo is not None, "P3: timestamps out are aware"
+
+    # A root is itself and nothing above it, forked ledger or not.
+    assert [(a[0], a[1], a[2]) for a in db.ancestry("main")] == [("main", 0, None)]
+
+
+def test_an_unregistered_lineage_is_refused_by_name_not_answered_for_the_trunk(db):
+    """D-069's failure is a right-looking answer to a question nobody asked."""
+    for call in (
+        lambda: db.reconstruct_on(now(), "ghost"),
+        lambda: db.ancestry("ghost"),
+    ):
+        with pytest.raises(macrame.UnknownBranchError) as e:
+            call()
+        assert "ghost" in str(e.value)
+
+
+def test_reconstruct_on_accepts_a_string_or_a_datetime(forked):
+    """P3 applies to the instant here as it does to ``reconstruct``'s."""
+    db, alt = forked
+    assert (
+        db.reconstruct_on(NOW_TS, alt.id).edges
+        == db.reconstruct_on(dt.datetime(2030, 1, 1, tzinfo=UTC), alt.id).edges
+    )
 
 
 # --------------------------------------------------------------------------

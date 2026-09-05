@@ -24,6 +24,20 @@
 use crate::error::{DbError, Result};
 use crate::schema::ddl;
 
+/// One resolved ancestor of a lineage, nearest first.
+///
+/// Public here rather than in `graph` because it is a fact about the register
+/// this module owns, and because the two functions that take one —
+/// [`crate::temporal::resolve_beliefs`] and
+/// [`crate::temporal::reconstruct_on`] — are read-path answers *about* a
+/// branch. Obtain one from
+/// [`Database::ancestry`](crate::connection::Database::ancestry); the crate
+/// resolves it from `branches` and nothing else can construct it correctly
+/// (0.15.17, [D-259]).
+///
+/// [D-259]: ../docs/architecture/s13-decision-register.md#d-259
+pub use crate::graph::lineage::Ancestor;
+
 /// Longest accepted lineage name.
 ///
 /// A sanity bound rather than a schema limit — `branches.branch_id` is `TEXT`
@@ -666,13 +680,17 @@ pub(crate) async fn diff(
     a: &BranchId,
     b: &BranchId,
 ) -> Result<Vec<Divergence>> {
-    use crate::graph::lineage::{lineage_shape, LineageShape};
+    use crate::graph::lineage::{LineageShape, Lineages};
 
+    // One load, four answers: both shapes and both ancestries (0.15.17,
+    // [D-259](../docs/architecture/s13-decision-register.md#d-259)). This asked
+    // `Lineages::shape` twice until then — two round trips for two of the four.
+    let lineages = Lineages::load(conn).await?;
     // Both names are checked before any work, and each refusal names its own
     // lineage rather than the pair — a caller who mistyped one wants to know
     // which one.
-    let shape = lineage_shape(conn, Some(a.as_str())).await?;
-    lineage_shape(conn, Some(b.as_str())).await?;
+    let shape = lineages.shape(a.as_str())?;
+    lineages.shape(b.as_str())?;
     // `Trunk` only: a forked trunk is `TrunkOnForked` and reaches the
     // statement below, where `diff_sql` lowers both sides `Resolved` — the
     // third shape is a one-lineage read's saving, and a diff is two.
@@ -680,16 +698,19 @@ pub(crate) async fn diff(
         // `Trunk` is `branches` holding one row, and both names were just found
         // in it, so `a` and `b` are the same lineage and their views are equal
         // by construction. Exact rather than an optimisation, for the reason
-        // `lineage_shape` gives about its own sufficient condition — and it is
+        // `Lineages::shape` gives about its own sufficient condition — and it is
         // reached only by `diff(main, main)` on a ledger that never forked.
         return Ok(Vec::new());
     }
 
+    // Both sides lower `Resolved`, so both bind an ancestry: `?1` and `?2` name
+    // the lineages, `a`'s block follows, then `b`'s.
+    let (a_anc, b_anc) = (lineages.ancestry(a.as_str()), lineages.ancestry(b.as_str()));
+    let mut params: Vec<libsql::Value> = vec![a.as_str().into(), b.as_str().into()];
+    params.extend(crate::graph::lineage::ancestry_params(&a_anc));
+    params.extend(crate::graph::lineage::ancestry_params(&b_anc));
     let mut rows = conn
-        .query(
-            &crate::graph::lineage::diff_sql(),
-            libsql::params![a.as_str(), b.as_str()],
-        )
+        .query(&crate::graph::lineage::diff_sql(&a_anc, &b_anc), params)
         .await?;
     let mut out = Vec::new();
     while let Some(row) = rows.next().await? {

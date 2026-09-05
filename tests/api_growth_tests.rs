@@ -192,6 +192,20 @@ const REGISTRY: &[Growable] = &[
               holds one.",
     },
     Growable {
+        name: "Ancestor",
+        entry: Entry::Tuned {
+            ctor: Ctor::Named("new"),
+            at_entry: &["branch_id", "dist"],
+            renamed: &[],
+        },
+        why: "resolved out of `branches` and read, almost always. A fourth \
+              column is plausible — the fork's own `created_at` has been \
+              wanted twice. Registered as built rather than returned because \
+              `resolve_beliefs` is pure and exercising it should not need a \
+              database, which is a caller this release found by having the \
+              compiler reject its own test.",
+    },
+    Growable {
         name: "EdgeBelief",
         entry: Entry::Tuned {
             ctor: Ctor::Named("new"),
@@ -378,6 +392,7 @@ const CRATE_SOURCES: &[&str] = &[
     include_str!("../src/error.rs"),
     include_str!("../src/graph/builder.rs"),
     include_str!("../src/graph/edge.rs"),
+    include_str!("../src/graph/lineage.rs"),
     include_str!("../src/graph/vector_filter.rs"),
     include_str!("../src/integrity/rebuild.rs"),
     // Behind the `metrics` feature in the crate and not behind one here: this

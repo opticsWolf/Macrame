@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 
 use crate::connection::{Annotation, Database};
 use crate::error::{BulkResult, DbError, Result};
-use crate::graph::lineage::lineage_shape;
+use crate::graph::lineage::resolve_for;
 
 /// Edges returned to a caller asking for a node with no edges in that direction.
 const NO_EDGES: &[EdgeRef] = &[];
@@ -892,7 +892,7 @@ impl Database {
         // the builder for the reason `TraversalBuilder::build_sql` gives: an
         // unbranched traversal on a forked ledger that skips the resolution
         // reads every lineage's rows at once, and the extra edges look ordinary.
-        let shape = lineage_shape(conn, traversal.branch.as_deref()).await?;
+        let (shape, ancestry) = resolve_for(conn, traversal.branch.as_deref()).await?;
 
         // Placeholder layout is `TraversalBuilder`'s to decide and
         // `bind_params` to fill; see `edge_type_base` for why it is computed
@@ -913,7 +913,7 @@ impl Database {
         // builder took both.
         let sql = format!(
             "{}{}",
-            traversal.walk_cte(shape),
+            traversal.walk_cte(shape, &ancestry),
             format_args!(
                 r#"
 -- **The `DISTINCT` is why this query is superlinear, and it is not removable.**
@@ -954,7 +954,7 @@ ORDER BY l.source_id, l.target_id, l.edge_type
             )
         );
 
-        let params = traversal.bind_params(now_ts, shape);
+        let params = traversal.bind_params(now_ts, shape, &ancestry);
 
         let mut rows = conn.query(&sql, params).await?;
 

@@ -4,7 +4,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::error::{classify, BulkInterrupted, BulkResult, DbError, Result, WriteOp};
 use crate::graph::edge::EdgeAssertion;
-use crate::graph::lineage::LineageShape;
+use crate::graph::lineage::{Ancestor, LineageShape, Lineages};
 use crate::integrity::{rebuild_current, RebuildReport};
 use crate::plan::ReadPlan;
 use crate::schema::migrations;
@@ -934,86 +934,13 @@ struct ActorState {
     guard: Option<OverlapGuard>,
 }
 
-/// Every lineage the database holds, and which of them are roots.
-///
-/// A `Vec` and a linear scan for [`distinct_branches`]' reason: the bound is the
-/// number of lineages, which is small and human-authored, and a set would
-/// allocate to deduplicate a list of length one.
-struct Lineages {
-    rows: Vec<(String, bool)>,
-}
-
-impl Lineages {
-    async fn load(conn: &libsql::Connection) -> Result<Self> {
-        let mut rows = conn
-            .query("SELECT branch_id, parent_id IS NULL FROM branches", ())
-            .await?;
-        let mut out = Vec::with_capacity(1);
-        while let Some(row) = rows.next().await? {
-            out.push((row.get::<String>(0)?, row.get::<i64>(1)? != 0));
-        }
-        Ok(Self { rows: out })
-    }
-
-    /// The shape for one name, or [`DbError::UnknownBranch`].
-    ///
-    /// Same three facts the `SELECT` this replaces asked for — the total, the
-    /// name's existence, and whether it is a root — read from the same table by
-    /// the only task that writes it.
-    fn shape(&self, name: &str) -> Result<LineageShape> {
-        let root = self
-            .rows
-            .iter()
-            .find(|(id, _)| id == name)
-            .map(|(_, root)| *root)
-            .ok_or_else(|| DbError::UnknownBranch(name.to_string()))?;
-        Ok(if self.rows.len() <= 1 {
-            LineageShape::Trunk
-        } else if root {
-            LineageShape::TrunkOnForked
-        } else {
-            LineageShape::Resolved
-        })
-    }
-
-    /// The shape a batch takes, given every lineage it names.
-    ///
-    /// Every name is checked, because that is the first thing the caller wants:
-    /// a batch naming a lineage that does not exist is refused **by name**,
-    /// rather than by whatever the guard finds when it looks in the wrong place.
-    ///
-    /// # Why the last answer used to be every answer, and why it is not one now
-    ///
-    /// Before 0.15.2 the shape was a function of the row *count* alone, so
-    /// asking per name and keeping the last was correct and read like a bug —
-    /// review C-24, and the docstring on the loop it replaces said as much.
-    /// [`LineageShape::TrunkOnForked`] (D-244) made the shape a function of the
-    /// **name** as well: a root and a fork on one database now have different
-    /// shapes, and the loop went on keeping whichever came last.
-    ///
-    /// That has stayed correct only because [`OverlapGuard`] compiles *one*
-    /// statement for both of those shapes, so the arbitrary choice happens to
-    /// be between two spellings of the same thing. That is a property of the
-    /// guard's current lowering and W13.3 is going to change it. So the
-    /// ambiguity is resolved rather than tie-broken by iteration order: where
-    /// the names disagree, the resolved form is the one exact for all of them,
-    /// roots included — which is the argument [`OverlapGuard::prepare`] already
-    /// makes for giving `TrunkOnForked` the resolved statement.
-    fn shape_of(&self, names: &[&str]) -> Result<LineageShape> {
-        let mut agreed: Option<LineageShape> = None;
-        for name in names {
-            let shape = self.shape(name)?;
-            agreed = Some(match agreed {
-                None => shape,
-                Some(prev) if prev == shape => prev,
-                Some(_) => LineageShape::Resolved,
-            });
-        }
-        // No names is the trunk: `distinct_branches` never returns empty, and
-        // `write_concepts_atomic` refuses an empty chunk before it gets here.
-        Ok(agreed.unwrap_or(LineageShape::Trunk))
-    }
-}
+// `Lineages` moved to `graph::lineage` in 0.15.17 ([D-259]). It held
+// `(branch_id, is_root)` here, because the shape was all the actor needed;
+// resolving ancestry in Rust needs `parent_id` and `forked_at` as well, on
+// both sides of the crate, and two structs answering one question from one
+// table is what D-030 is about.
+//
+// [D-259]: ../docs/architecture/s13-decision-register.md#d-259
 
 impl ActorState {
     fn new() -> Self {
@@ -1080,9 +1007,23 @@ impl ActorState {
         &mut self,
         conn: &libsql::Connection,
         shape: LineageShape,
+        branch: &str,
     ) -> Result<&OverlapGuard> {
-        if self.guard.as_ref().map(|g| g.shape) != Some(shape) {
-            self.guard = Some(OverlapGuard::prepare(conn, shape).await?);
+        // Keyed on the lineage as well as the shape since 0.15.17: the bound
+        // ancestry is one reader's answer, so a guard held for `main` cannot
+        // serve a branch that happens to share its shape. A caller writing to
+        // one lineage — which is every caller this crate has — still prepares
+        // once and keeps it across turns.
+        if !self
+            .guard
+            .as_ref()
+            .is_some_and(|g| g.answers_for(shape, branch))
+        {
+            // Resolved against the actor's own cache, then dropped, so the
+            // borrow ends before the assignment. `lineages` refreshes it when
+            // `Fork` or `ArchiveBranch` forgot it.
+            let lineages = self.lineages(conn).await?.clone();
+            self.guard = Some(OverlapGuard::prepare(conn, shape, &lineages, branch).await?);
         }
         Ok(self
             .guard
@@ -2962,6 +2903,57 @@ impl Database {
         .await
     }
 
+    /// State at `ts` as `branch` saw it (0.15.17, [D-259], review C-10).
+    ///
+    /// [`Self::reconstruct`] with the ancestry resolved: each ancestor bounded
+    /// at its fork point, one belief per edge key from the nearest lineage
+    /// holding it. See [`crate::temporal::reconstruct_on`] for how it is
+    /// assembled, what it costs, and the two things it does **not** do —
+    /// concepts are not resolved by lineage, and the result must not be saved
+    /// as a snapshot.
+    ///
+    /// A read, on `read_conn`, like [`Self::reconstruct`]. The archive path and
+    /// the snapshot directory come from the handle, so snapshot composition is
+    /// on by default for each of the folds this runs.
+    ///
+    /// [D-259]: ../../docs/architecture/s13-decision-register.md#d-259
+    pub async fn reconstruct_on(
+        &self,
+        ts: &str,
+        branch: &str,
+    ) -> Result<crate::temporal::MaterializedState> {
+        let ts = timestamp::normalize(ts)?;
+        crate::temporal::reconstruct_on(
+            &self.read_conn,
+            &ts,
+            branch,
+            Some(&self.archive_path),
+            Some(&self.snapshots_dir),
+        )
+        .await
+    }
+
+    /// `branch`'s ancestry, nearest first, each with its fork-point cutoff.
+    ///
+    /// The input [`crate::temporal::resolve_beliefs`] takes. Resolved from
+    /// `branches` in Rust since 0.15.17 ([D-259]) — the walk is a few
+    /// microseconds and the table is tiny and append-only, so this is a read
+    /// like any other rather than something to cache.
+    ///
+    /// The trunk of an unforked database answers with one row and no cutoff,
+    /// which is its true ancestry. A lineage that is not registered is refused
+    /// by name with [`DbError::UnknownBranch`].
+    ///
+    /// [D-259]: ../../docs/architecture/s13-decision-register.md#d-259
+    pub async fn ancestry(&self, branch: &str) -> Result<Vec<crate::branch::Ancestor>> {
+        let lineages = crate::graph::lineage::Lineages::load(&self.read_conn).await?;
+        // Checked before it is walked: `resolve` answers for a name it has never
+        // seen with a one-row ancestry, which is the right answer for a root and
+        // the D-069 wrong-looking-right answer for a typo.
+        lineages.shape(branch)?;
+        Ok(lineages.ancestry(branch))
+    }
+
     /// Every edge one [`ReadPlan`] names (0.15.9, W13.4, [D-251]).
     ///
     /// The whole projection filtered to the plan's instants and lineage —
@@ -2990,7 +2982,7 @@ impl Database {
     ///
     /// [`DbError::UnknownBranch`](crate::DbError::UnknownBranch) naming a
     /// lineage that was never registered — refused rather than answered for the
-    /// trunk, for `graph::lineage::lineage_shape`'s reason.
+    /// trunk, for `graph::lineage::Lineages::shape`'s reason.
     /// [`DbError::RecordedInstantUnreachable`](crate::DbError::RecordedInstantUnreachable)
     /// when [`ReadPlan::recorded`] is below what the hot log still covers
     /// ([D-247](../../docs/architecture/s13-decision-register.md#d-247)).
@@ -4287,7 +4279,7 @@ fn concept_params<'a>(concept: &'a ConceptUpsert, stamp: &'a str) -> [libsql::Va
 /// Check every lineage a write names, and decide which shape its guard takes.
 ///
 /// **One function, two answers, one query per distinct lineage** — and it is
-/// [`lineage_shape`](crate::graph::lineage::lineage_shape), the same function
+/// [`Lineages::shape`](crate::graph::lineage::Lineages::shape), the same function
 /// the read path calls, for the same reason it calls it. A write naming a
 /// branch that is not in `branches` has asked about something that does not
 /// exist, and answering it by writing to the trunk is [D-069]'s failure in its
@@ -4313,7 +4305,7 @@ fn concept_params<'a>(concept: &'a ConceptUpsert, stamp: &'a str) -> [libsql::Va
 ///
 /// # This was a query per name until 0.15.6
 ///
-/// It ran [`crate::graph::lineage::lineage_shape`] once per name and kept the
+/// It ran [`crate::graph::lineage::Lineages::shape`] once per name and kept the
 /// last answer — one round trip per write, for a table only this task writes.
 /// [`ActorState`] holds `branches` instead, and [`Lineages::shape_of`] carries
 /// what is left of this function's reasoning, including the part about the last
@@ -4326,6 +4318,20 @@ async fn check_lineages(
     names: &[&str],
 ) -> Result<LineageShape> {
     state.shape_of(conn, names).await
+}
+
+/// The shape and the rows, for a caller that also has to resolve an ancestry.
+///
+/// [`check_lineages`] with the table it read handed back rather than dropped
+/// (0.15.17). Both callers need it: the guard compiles a statement per lineage,
+/// and the retirement binds one.
+async fn check_lineages_with<'a>(
+    state: &'a mut ActorState,
+    conn: &libsql::Connection,
+    names: &[&str],
+) -> Result<(LineageShape, &'a Lineages)> {
+    let lineages = state.lineages(conn).await?;
+    Ok((lineages.shape_of(names)?, lineages))
 }
 
 /// The distinct lineages a batch names, in first-seen order.
@@ -4356,24 +4362,62 @@ fn distinct_branches(edges: &[EdgeAssertion]) -> Vec<&str> {
 struct OverlapGuard {
     stmt: libsql::Statement,
     shape: LineageShape,
+    /// The lineage this statement was compiled for. See [`Self::prepare`].
+    branch: String,
+    /// That lineage's ancestry, bound after the statement's own parameters.
+    /// Empty under both trunk shapes, which emit no `lineage` relation.
+    ancestry: Vec<Ancestor>,
 }
 
 impl OverlapGuard {
     /// Prepare once per turn or per chunk, never per row (D-056, §8.8).
-    async fn prepare(conn: &libsql::Connection, shape: LineageShape) -> Result<Self> {
+    ///
+    /// # One statement per *lineage* since 0.15.17 ([D-259])
+    ///
+    /// The statement used to be a function of the shape alone: the recursive
+    /// `lineage` CTE derived the ancestry from the branch bound at `?5`, so one
+    /// compiled form answered for every lineage that shared a shape. A bound
+    /// ancestry is not derived from anything — it *is* the answer for one
+    /// reader — so the guard now carries the lineage it was compiled for and
+    /// the values that lineage binds.
+    ///
+    /// The cost is bounded by [`distinct_branches`], which is a `Vec` because
+    /// every batch this crate has seen names one lineage. A chunk that names
+    /// two prepares two, which is the price of the resolution being correct for
+    /// both; the shape it would otherwise share is `Resolved`, since the two
+    /// trunk shapes each describe a database with exactly one lineage to name.
+    ///
+    /// [D-259]: ../../docs/architecture/s13-decision-register.md#d-259
+    async fn prepare(
+        conn: &libsql::Connection,
+        shape: LineageShape,
+        lineages: &Lineages,
+        branch: &str,
+    ) -> Result<Self> {
         // Three shapes, three statements, one spelling (0.15.8, W13.3,
-        // D-250). Until this release the trunk had a hand-written constant and
+        // D-250). Until that release the trunk had a hand-written constant and
         // the other two shared the resolved form, which was exact for a root
         // only because a root's ancestry is itself — so `Lineages::shape_of`
         // could return either of them and nothing observable changed. It
         // cannot now: the root gets a two-predicate lookup on the projection
         // and a branch gets the four-CTE resolution, and D-248's C-24 repair
         // is what decides which.
-        let sql = crate::graph::lineage::overlap_candidates_resolved(shape);
+        let ancestry = match shape {
+            LineageShape::Resolved => lineages.ancestry(branch),
+            _ => Vec::new(),
+        };
+        let sql = crate::graph::lineage::overlap_candidates_resolved(shape, &ancestry);
         Ok(Self {
             stmt: conn.prepare(&sql).await?,
             shape,
+            branch: branch.to_string(),
+            ancestry,
         })
+    }
+
+    /// Whether this guard answers for `branch` under `shape`.
+    fn answers_for(&self, shape: LineageShape, branch: &str) -> bool {
+        self.shape == shape && self.branch == branch
     }
 }
 
@@ -4477,8 +4521,11 @@ impl HighPriCommand {
                 let name = branch
                     .as_ref()
                     .map_or(crate::schema::ddl::MAIN_BRANCH, |b| b.as_str());
-                let res = match check_lineages(state, conn, &[name]).await {
-                    Ok(shape) => {
+                let resolved = check_lineages_with(state, conn, &[name])
+                    .await
+                    .map(|(shape, l)| (shape, l.ancestry(name)));
+                let res = match resolved {
+                    Ok((shape, ancestry)) => {
                         retire_edge(
                             conn,
                             &source,
@@ -4489,6 +4536,7 @@ impl HighPriCommand {
                             &stamp,
                             name,
                             shape,
+                            &ancestry,
                         )
                         .await
                     }
@@ -4793,6 +4841,7 @@ async fn retire_edge(
     stamp: &str,
     branch: &str,
     shape: LineageShape,
+    ancestry: &[Ancestor],
 ) -> Result<()> {
     // Shadow retirement: the row being closed may belong to an ancestor, and
     // the row written carries *this* lineage's id. See
@@ -4805,10 +4854,21 @@ async fn retire_edge(
     // overruled: a keyed `Trunk` resolution lowers to no CTEs at all, so the
     // statement the lowering emits *is* the one this arm used to hold, with
     // the lineage stamped rather than defaulted.
+    // The ancestry follows the seven, at `RETIRE_ANCESTRY_SLOT`.
+    let mut params: Vec<libsql::Value> = vec![
+        source.into(),
+        target.into(),
+        edge_type.into(),
+        valid_from.into(),
+        branch.into(),
+        valid_to.into(),
+        stamp.into(),
+    ];
+    params.extend(crate::graph::lineage::ancestry_params(ancestry));
     let affected = conn
         .execute(
-            &crate::graph::lineage::retire_from_resolved(shape),
-            libsql::params![source, target, edge_type, valid_from, branch, valid_to, stamp],
+            &crate::graph::lineage::retire_from_resolved(shape, ancestry),
+            params,
         )
         .await
         .map_err(DbError::Engine)?;
@@ -4900,7 +4960,8 @@ async fn reject_overlapping_interval(
     edge: &EdgeAssertion,
     shape: LineageShape,
 ) -> Result<()> {
-    check_prepared(state.guard(conn, shape).await?, edge).await
+    let branch = edge.branch_name().to_string();
+    check_prepared(state.guard(conn, shape, &branch).await?, edge).await
 }
 
 /// The guard's body, against a statement the caller has already prepared.
@@ -4949,16 +5010,17 @@ async fn check_prepared(guard: &OverlapGuard, edge: &EdgeAssertion) -> Result<()
                 .await?
         }
         LineageShape::Resolved | LineageShape::TrunkOnForked => {
-            guard
-                .stmt
-                .query(libsql::params![
-                    edge.source.as_str(),
-                    edge.target.as_str(),
-                    edge.edge_type.as_str(),
-                    edge.valid_from.as_str(),
-                    edge.branch_name()
-                ])
-                .await?
+            // The ancestry follows the five, at `GUARD_ANCESTRY_SLOT`, and is
+            // empty for `TrunkOnForked` — a root emits no `lineage` relation.
+            let mut params: Vec<libsql::Value> = vec![
+                edge.source.as_str().into(),
+                edge.target.as_str().into(),
+                edge.edge_type.as_str().into(),
+                edge.valid_from.as_str().into(),
+                edge.branch_name().into(),
+            ];
+            params.extend(crate::graph::lineage::ancestry_params(&guard.ancestry));
+            guard.stmt.query(params).await?
         }
     };
 
@@ -5188,7 +5250,9 @@ async fn write_edges_atomic(
     // lineage that does not exist is refused before it can take the lock at all
     // (0.14.8).
     reject_overlaps_within(edges)?;
-    let shape = check_lineages(state, conn, &distinct_branches(edges)).await?;
+    let branches = distinct_branches(edges);
+    let (shape, lineages) = check_lineages_with(state, conn, &branches).await?;
+    let lineages = lineages.clone();
 
     let tx = conn
         .transaction_with_behavior(libsql::TransactionBehavior::Immediate)
@@ -5198,17 +5262,28 @@ async fn write_edges_atomic(
     // between the check and the insert.
     // One preparation for the whole chunk, not one per row — see
     // `check_prepared`, and D-056 for the same lesson learned on `INSERT_LINK`.
-    let guard = OverlapGuard::prepare(&tx, shape).await?;
+    // One per lineage the chunk names, not one per row — see
+    // `OverlapGuard::prepare` for why the shape alone stopped being enough, and
+    // `distinct_branches` for why this is a `Vec` of length one in every batch
+    // this crate has seen.
+    let mut guards = Vec::with_capacity(branches.len());
+    for name in &branches {
+        guards.push(OverlapGuard::prepare(&tx, shape, &lineages, name).await?);
+    }
     for edge in edges {
-        if let Err(e) = check_prepared(&guard, edge).await {
+        let guard = guards
+            .iter()
+            .find(|g| g.answers_for(shape, edge.branch_name()))
+            .expect("a guard per distinct branch, and the row names one of them");
+        if let Err(e) = check_prepared(guard, edge).await {
             // Released before the rollback: a live statement on the connection
             // is what makes SQLite refuse to end a transaction.
-            drop(guard);
+            drop(guards);
             let _ = tx.rollback().await;
             return Err(e);
         }
     }
-    drop(guard);
+    drop(guards);
 
     let stmt = tx.prepare(INSERT_LINK).await?;
 
@@ -5390,11 +5465,20 @@ mod lineage_cache {
 
     use super::*;
 
+    /// `(name, is_root)`, kept as the fixture's spelling because that is what
+    /// these tests are about — the shape, not the ancestry. A root is a row
+    /// with no parent and no fork point, which is the pairing the `branches`
+    /// CHECK enforces; a non-root is given both, since a row with one and not
+    /// the other is not a state the schema permits.
     fn lineages(rows: &[(&str, bool)]) -> Lineages {
         Lineages {
             rows: rows
                 .iter()
-                .map(|(id, root)| ((*id).into(), *root))
+                .map(|(id, root)| crate::graph::lineage::BranchRow {
+                    id: (*id).into(),
+                    parent: (!root).then(|| "main".to_string()),
+                    forked_at: (!root).then(|| "2026-01-01T00:00:00.000000Z".to_string()),
+                })
                 .collect(),
         }
     }

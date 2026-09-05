@@ -158,6 +158,12 @@ impl PyMaterializedState {
     /// One entry per lineage per edge, not one per edge: a fork and its ancestor
     /// believing different things about one edge key are two beliefs, and this
     /// is the reader that says so (0.14.5, D-221).
+    ///
+    /// **Do not narrow this by lineage with a filter.** Resolution is
+    /// nearest-ancestor and bounded at each fork point, which no predicate over
+    /// these tuples can express — they carry no `recorded_at`. Ask
+    /// `Database.reconstruct_on(ts, branch)` for one lineage's view of the same
+    /// instant; it is the same fold with the rule applied (0.15.17, D-259).
     #[getter]
     fn edges<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyTuple>>> {
         self.inner

@@ -152,7 +152,7 @@ pub async fn query_as_of_edges(
 ///
 /// [`DbError::UnknownBranch`](crate::DbError::UnknownBranch), naming it, when it
 /// is not registered — refused rather than answered for the trunk, for the
-/// reason `graph::lineage::lineage_shape` gives.
+/// reason `graph::lineage::Lineages::shape` gives.
 ///
 /// [D-223]: ../../docs/architecture/s13-decision-register.md#d-223
 /// [D-227]: ../../docs/architecture/s13-decision-register.md#d-227

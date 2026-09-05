@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use crate::branch::Ancestor;
 use crate::error::{DbError, Result};
 use crate::temporal::as_of::NodeAttributes;
 
@@ -185,6 +186,301 @@ impl MaterializedState {
     }
 }
 
+/// One lineage's view of a fold, from every lineage's beliefs (review C-10).
+///
+/// The nearest lineage holding an edge key wins, and a key no visible lineage
+/// holds is absent. That is `graph::lineage::visible_cte`'s rule — `ROW_NUMBER() OVER
+/// (PARTITION BY the edge key ORDER BY g.dist)`, `rn = 1` — written once more,
+/// in Rust, over a value a caller already has (0.15.17, [D-259]).
+///
+/// # What this is for
+///
+/// Until this release the rule existed **only** as SQL. A caller holding a
+/// [`MaterializedState`] — from [`reconstruct`], or read back from a snapshot —
+/// had every lineage's belief in one `Vec` and no function in the crate that
+/// would finish the question, so the choice was to re-issue the read through
+/// `graph::TraversalBuilder::on_branch` (a different query against the
+/// *projection*, not against the state in hand) or to reimplement the rule.
+/// Reimplementing it is what review C-10 expected someone to do, and the two
+/// copies would have drifted the first time a shape was added.
+///
+/// # Ties, and why there are none to break in practice
+///
+/// A fold emits at most one row per `(edge key, lineage)` and an ancestry names
+/// each lineage once, so no two candidates for a key share a `dist` and the
+/// winner is determined by distance alone. This still breaks ties on the
+/// belief's own ordering rather than on iteration order, because it is a public
+/// pure function: an input the crate did not build should get an answer that is
+/// a function of the input, not of a hash seed.
+///
+/// # The cutoff is not applied here, and cannot be
+///
+/// An ancestor's rows are visible to a descendant only up to
+/// [`Ancestor::cutoff`], and that is a comparison against the row's
+/// `recorded_at` — a column [`EdgeBelief`] does not carry, deliberately, since
+/// a belief is *what was believed* and not *when it was written down*. So the
+/// cutoff belongs to whatever produced the beliefs: [`reconstruct_on`] applies
+/// it by folding each ancestor to its own instant before calling this.
+///
+/// Handing this the unbounded `edges` of a plain [`reconstruct`] therefore
+/// gives the nearest-lineage answer **without** the fork bound — right on a
+/// database whose ancestors have not been written to since the fork, and
+/// quietly wide on one that has. The doc says so rather than the signature,
+/// because a `&[EdgeBelief]` cannot be typed into "already cut".
+///
+/// [D-259]: ../../docs/architecture/s13-decision-register.md#d-259
+pub fn resolve_beliefs(beliefs: &[EdgeBelief], ancestry: &[Ancestor]) -> Vec<EdgeBelief> {
+    let rank: HashMap<&str, i64> = ancestry
+        .iter()
+        .map(|a| (a.branch_id.as_str(), a.dist))
+        .collect();
+
+    let mut best: HashMap<String, (i64, &EdgeBelief)> = HashMap::new();
+    for belief in beliefs {
+        // A lineage outside the ancestry is not an ancestor and not the reader:
+        // a sibling, or a descendant. `visible_cte` drops those by inner-joining
+        // `lineage`, which is the same thing said in SQL.
+        let Some(&dist) = rank.get(belief.branch_id.as_str()) else {
+            continue;
+        };
+        best.entry(belief.entity_id())
+            .and_modify(|held| {
+                if (dist, belief) < (held.0, held.1) {
+                    *held = (dist, belief);
+                }
+            })
+            .or_insert((dist, belief));
+    }
+
+    // Sorted for the same reason `Delta::apply_to` sorts: the answer is a
+    // function of the state, not of hash iteration order.
+    let mut out: Vec<EdgeBelief> = best.into_values().map(|(_, b)| b.clone()).collect();
+    out.sort();
+    out
+}
+
+/// State at `ts` **as one lineage saw it** (0.15.17, [D-259], review C-10).
+///
+/// [`reconstruct`] answers a whole-ledger question — *what did the ledger hold
+/// at `ts`* — and the ledger held every lineage's belief at once. This answers
+/// the narrower one a caller usually means: *what did `branch` hold at `ts`*,
+/// with the ancestry resolved and each ancestor bounded at its fork point.
+///
+/// # How it is assembled
+///
+/// One fold, with the ancestry bound into it: the `JOIN` against the `lineage`
+/// relation drops every lineage the reader cannot see, `recorded_at <=
+/// g.cutoff` bounds each ancestor at its own fork point, and [`resolve_beliefs`]
+/// then picks the nearest holder of each key. The cut is applied to the
+/// window's **input**, which is the part that cannot be done any other way —
+/// see `bounded_hot_fold`.
+///
+/// ## The shape this is not, and the measurement that decided it
+///
+/// The first version folded once per **distinct effective instant** — `min(ts,
+/// cutoff)` for the reader and each ancestor — and kept from each fold the
+/// lineages whose instant it was. That form reuses [`reconstruct`] whole,
+/// snapshot composition included, and the argument for it was that a fork depth
+/// of 1 is two cheap folds where this one is a single expensive one.
+///
+/// Measured (`examples/reconstruct_on_probe.rs`, 400 concepts), the argument
+/// holds at exactly one of the four configurations tried:
+///
+/// | snapshots | fork depth | fold-per-bound | this |
+/// |---|---|---|---|
+/// | off | 1 | 5.6 ms | **2.9 ms** |
+/// | off | 8 | 24.1 ms | **3.2 ms** |
+/// | on | 1 | **2.0 ms** | 2.9 ms |
+/// | on | 8 | 7.5 ms | **3.2 ms** |
+///
+/// Both shapes run in one process against one build, alternating, because the
+/// first version of this comparison ran them in two processes against two
+/// builds and that is thin evidence for reversing a design. The probe also
+/// asserts that the two shapes return the **same edges** before it times them,
+/// and counts the snapshot files on disk rather than trusting that asking for a
+/// cadence produced one — the whole argument for fold-per-bound rests on
+/// composition actually being available.
+///
+/// The per-bound form is linear in fork depth and this one is flat, so the
+/// crossover is at depth 2 with snapshots configured and below depth 1 without
+/// them. Losing about 1 ms at the one point where the other shape wins buys a
+/// cost that does not depend on how deeply a caller has forked, and one code
+/// path instead of two — the same call [D-056]'s guard made earlier in this
+/// release for the same reason.
+///
+/// ## What that costs: no snapshot composition
+///
+/// A snapshot is a materialised state with no `recorded_at` left in it, so
+/// there is nothing for a cutoff to compare against and no way to anchor a
+/// bounded fold on one. This therefore folds from genesis every time, which is
+/// where the flat ~3 ms comes from — and why, on a database with snapshots
+/// configured, this is **4x** [`reconstruct`] rather than 1.2x. The absolute
+/// cost is the same in both configurations; it is `reconstruct` that gets
+/// faster, not this that gets slower.
+///
+/// An unforked database never pays any of it: the shape is `Trunk`, there is
+/// one lineage and nothing to resolve, and this delegates to [`reconstruct`]
+/// unchanged, snapshots and all.
+///
+/// # Concepts are **not** resolved by lineage
+///
+/// [`MaterializedState::concepts`] is keyed by concept id alone, so once a row
+/// is folded there is no lineage left on it to pick a nearest one by. The fold
+/// here *is* narrowed — a lineage outside the ancestry contributes nothing, and
+/// an ancestor's post-cutoff concept writes are cut like its edges — but where
+/// two **visible** lineages both wrote a concept, the winner is the later log
+/// row rather than the nearer lineage.
+///
+/// Only [`MaterializedState::edges`] gets the distance rule, which is the field
+/// review C-10 named and the only one the rule has ever been written for.
+/// Carrying the lineage on a concept is a change to a public field's type and
+/// is its own decision, not a detail of this one.
+///
+/// # This result is not a snapshot
+///
+/// It is one lineage's *view*, so it is missing beliefs the ledger holds. Do not
+/// pass it to [`save_snapshot`](crate::temporal::save_snapshot): a later
+/// [`reconstruct`] anchoring on it would compose a whole-ledger answer on top of
+/// a partial base and return the other lineages' rows only where something
+/// touched them again. [`seq_anchor`](MaterializedState::seq_anchor) is the
+/// highest `seq_id` among the rows this lineage can *see*, which is the honest
+/// number for what was folded and is not a licence to anchor on it.
+///
+/// [D-056]: ../../docs/architecture/s13-decision-register.md#d-056
+///
+/// # Errors
+///
+/// [`DbError::UnknownBranch`](crate::DbError::UnknownBranch), naming it, when
+/// `branch` is not registered — refused rather than answered for the trunk, for
+/// the reason `graph::lineage::Lineages::shape` gives.
+///
+/// Otherwise the same refusals [`reconstruct`] raises at `ts`, and for the same
+/// reasons: reach is decided by `ts` alone, because the cutoffs are a predicate
+/// inside one query rather than instants of their own.
+///
+/// # Where this narrows silently, named rather than left to be found
+///
+/// An ancestor's inherited row is the *last* one it wrote at or before the fork
+/// point, and the fold finds it in the hot log. `LOG_ARCHIVABLE` archives an
+/// entry once a later one supersedes it for the same entity — so a pre-fork
+/// assertion that the ancestor corrected afterwards is archivable, and once the
+/// retention horizon passes the fork point it can be cold. The reader then
+/// loses an edge it should have inherited, and **nothing raises**, because `ts`
+/// is well inside the hot log and reach was asked about `ts`.
+///
+/// That is not new and not this function's: it is the same degradation
+/// `graph::lineage`'s module docs describe for `links_cut`, reached from the
+/// fold side instead of the projection side, and it is bounded to keys an
+/// ancestor churned after forking. Passing `archive_path` closes it — the cold
+/// arm unions both files before it cuts.
+///
+/// [D-259]: ../../docs/architecture/s13-decision-register.md#d-259
+pub async fn reconstruct_on(
+    conn: &libsql::Connection,
+    ts: &str,
+    branch: &str,
+    archive_path: Option<&Path>,
+    snapshots_dir: Option<&Path>,
+) -> Result<MaterializedState> {
+    let (shape, ancestry) = crate::graph::lineage::resolve_for(conn, Some(branch)).await?;
+    if !shape.binds_branch() {
+        // `Trunk`: one lineage, so every belief in the ledger is this one's and
+        // the resolution is the identity. Delegated rather than run through the
+        // machinery below so that an unforked database pays nothing at all for
+        // this function existing.
+        return reconstruct(conn, ts, archive_path, snapshots_dir).await;
+    }
+
+    // `TrunkOnForked` resolves to its own rows and `resolve_for` leaves its
+    // ancestry empty, because the SQL form for that shape emits no `lineage`
+    // relation to fill. Here the one-row ancestry is what expresses "its own
+    // rows", so it is written out rather than special-cased below.
+    let ancestry = if ancestry.is_empty() {
+        vec![Ancestor {
+            branch_id: branch.to_string(),
+            dist: 0,
+            cutoff: None,
+        }]
+    } else {
+        ancestry
+    };
+
+    // `?1` is the instant; the ancestry block follows it, which is the same
+    // "fixed slots first, ancestry last" layout every read path uses.
+    const ANCESTRY_SLOT: usize = 2;
+    let mut params: Vec<libsql::Value> = vec![ts.into()];
+    params.extend(crate::graph::lineage::ancestry_params(&ancestry));
+    let rows = ancestry.len();
+
+    let state = match hot_log_reach(conn, ts, archive_path).await? {
+        HotLogReach::Covers => {
+            let delta =
+                fold_delta(conn, &bounded_hot_fold(rows, ANCESTRY_SLOT), params.clone()).await?;
+            Some(delta.apply_to(MaterializedState::empty(ts), ts))
+        }
+        HotLogReach::PredatesRecordedHistory => {
+            let mut state = MaterializedState::empty(ts);
+            state.predates_recorded_history = true;
+            Some(state)
+        }
+        HotLogReach::NeedsArchive => None,
+    };
+
+    let mut out = match state {
+        Some(s) => s,
+        // The cold arm, spelled the way `reconstruct` spells it: the same
+        // refusals, the same ATTACH/DETACH pairing, and the same reason the
+        // hint is computed inside the error arms rather than before them.
+        None => {
+            let archive = match archive_path {
+                Some(p) => p,
+                None => {
+                    return Err(DbError::ReplayCorrupt {
+                        seq: 0,
+                        reason: format!(
+                            "state at {ts} predates the hot log and no archive path was given; {}",
+                            archive_hint(conn).await
+                        ),
+                    })
+                }
+            };
+            if !archive.exists() {
+                return Err(DbError::ReplayCorrupt {
+                    seq: 0,
+                    reason: format!(
+                        "archive database file {archive:?} does not exist; {}",
+                        archive_hint(conn).await
+                    ),
+                });
+            }
+
+            detach_stale_cold(conn).await;
+            conn.execute(
+                "ATTACH DATABASE ?1 AS cold",
+                libsql::params![archive.to_string_lossy().as_ref()],
+            )
+            .await?;
+            let cold_shape = cold_lineage(conn).await;
+            let result = fold_delta(
+                conn,
+                &bounded_cold_fold(cold_shape, rows, ANCESTRY_SLOT),
+                params,
+            )
+            .await;
+            if let Err(e) = conn.execute("DETACH DATABASE cold", ()).await {
+                tracing::warn!("reconstruct_on: failed to DETACH cold database: {e}");
+            }
+            result?.apply_to(MaterializedState::empty(ts), ts)
+        }
+    };
+
+    // The fold has already dropped invisible lineages and cut the visible ones.
+    // What is left is the distance rule, which is a function of the rows in
+    // hand and is therefore Rust rather than a second window in the SQL.
+    out.edges = resolve_beliefs(&out.edges, &ancestry);
+    Ok(out)
+}
+
 /// The newest log payload shape this build writes and the highest it can read.
 ///
 /// Kept beside the folds because they are the only readers, and bumped in step
@@ -235,6 +531,70 @@ fn cold_fold(cold_lineage: ColdLineage) -> String {
         ) WHERE recorded_at <= ?1
     ) WHERE rn = 1
 "#,
+        cold = cold_lineage.projection()
+    )
+}
+
+/// The hot fold, narrowed to one lineage's view (0.15.17, [D-259]).
+///
+/// [`HOT_FOLD`] with the ancestry joined in: the `JOIN` drops every lineage the
+/// reader cannot see, and `recorded_at <= g.cutoff` bounds each ancestor at its
+/// own fork point. `?1` is the instant, and the ancestry binds from
+/// `first_slot` — three placeholders per ancestor, the same block
+/// [`crate::graph::lineage::ancestry_values`] emits for the read path.
+///
+/// **The cutoff is inside the window's input, not applied to its output**, and
+/// that is the whole reason this is a fold rather than a filter over
+/// [`reconstruct`]'s answer. If an ancestor wrote a row and then superseded it
+/// after the fork, the reader must see the *earlier* row — so the cut has to
+/// happen before `ROW_NUMBER` picks a winner. A predicate over a finished
+/// `MaterializedState` cannot express that, and would return nothing for that
+/// key instead of returning the row the lineage actually inherited.
+fn bounded_hot_fold(rows: usize, first_slot: usize) -> String {
+    format!(
+        r#"WITH {}
+    SELECT seq_id, table_name, entity_id, operation, payload, branch_id
+    FROM (
+        SELECT tl.seq_id, tl.table_name, tl.entity_id, tl.operation, tl.payload, tl.branch_id,
+               ROW_NUMBER() OVER (PARTITION BY tl.table_name, tl.entity_id, tl.branch_id ORDER BY tl.seq_id DESC) as rn
+        FROM transaction_log tl
+        JOIN lineage g ON g.branch_id = tl.branch_id
+        WHERE tl.recorded_at <= ?1 AND (g.cutoff IS NULL OR tl.recorded_at <= g.cutoff)
+    ) WHERE rn = 1
+"#,
+        crate::graph::lineage::ancestry_values(rows, first_slot, "")
+    )
+}
+
+/// [`bounded_hot_fold`] over hot and cold together. Requires `cold` ATTACHed.
+///
+/// The union is inside the cutoff filter rather than outside it, for the same
+/// reason the plain [`cold_fold`] puts `recorded_at <= ?1` there: a row's file
+/// is not a fact about its lineage, and a bound applied to one file and not the
+/// other would give a different answer depending on when the archive ran.
+fn bounded_cold_fold(cold_lineage: ColdLineage, rows: usize, first_slot: usize) -> String {
+    format!(
+        r#"WITH {lineage}
+    SELECT seq_id, table_name, entity_id, operation, payload, branch_id
+    FROM (
+        SELECT u.seq_id, u.table_name, u.entity_id, u.operation, u.payload, u.branch_id,
+               ROW_NUMBER() OVER (PARTITION BY u.table_name, u.entity_id, u.branch_id ORDER BY u.seq_id DESC) as rn
+        FROM (
+            SELECT tl.seq_id, tl.table_name, tl.entity_id, tl.operation, tl.payload, tl.recorded_at, tl.branch_id
+            FROM main.transaction_log tl
+            UNION ALL
+            SELECT tl.seq_id, tl.table_name, tl.entity_id, tl.operation, tl.payload, tl.recorded_at, {cold}
+            FROM cold.transaction_log tl
+        ) u
+        -- Every column qualified: `u` and `lineage` both carry `branch_id`, and
+        -- an unqualified one here is `ambiguous column name` at runtime rather
+        -- than a compile error. The hot fold does not need this because its
+        -- inner projection names one source.
+        JOIN lineage g ON g.branch_id = u.branch_id
+        WHERE u.recorded_at <= ?1 AND (g.cutoff IS NULL OR u.recorded_at <= g.cutoff)
+    ) WHERE rn = 1
+"#,
+        lineage = crate::graph::lineage::ancestry_values(rows, first_slot, ""),
         cold = cold_lineage.projection()
     )
 }
