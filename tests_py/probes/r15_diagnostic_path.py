@@ -15,11 +15,18 @@ hand::
 something a caller is far more likely to do by accident: **many threads sharing
 one already-open handle**, which sounds safe and, on this one method, is not.
 
-``diagnostic_query`` and ``explain`` call ``Database::diagnostic_conn()``, which
-performs a fresh ``libsql::Builder::…build()`` per call — the only method on the
-handle that opens the file after ``open`` returns. ``block_on`` releases the
-GIL, so *N* threads inside it are *N* concurrent opens: R15's shape, reached
-without ever calling ``open`` more than once.
+``diagnostic_query`` and ``explain`` call ``Database::diagnostic_conn()``.
+``block_on`` releases the GIL, so *N* Python threads are inside it at once:
+R15's shape, reached without ever calling ``open`` more than once.
+
+**What this docstring said until 0.15.14, and what W15.4 measured instead.** It
+said the exposure was the fresh ``libsql::Builder::…build()`` per call, "the
+only method on the handle that opens the file after ``open`` returns".
+``build()`` opens nothing — it costs 0.10 us and succeeds against a path that
+does not exist. ``connect()`` is the open, at 51.5 us of an 82.7 us call
+(``examples/diagnostic_conn_probe.rs``). Since 0.15.14 the connection is minted
+once per ``Database`` (W15.4, D-256), so this path opens nothing after the
+first call.
 
 # What it answered
 
@@ -37,6 +44,24 @@ without the mutex    **7 bad**  2 x ``0xC0000005``; 4 x ``database is
 with the mutex       0 bad      --
 ===================  =========  =====================================
 
+Re-measured 2026-09-05 for W15.4 (D-256), same width, 30 runs per arm, with
+the mutex removed in each so the arms differ only in the Rust shape:
+
+=================================================  ========
+arm                                                30 runs
+=================================================  ========
+a connection per call (0.15.13 and before)         **3 bad**
+the ``libsql::Database`` handle cached only        2 bad
+the ``connect()`` behind a mutex (18 runs)         1 bad
+**one connection per Database (0.15.14)**          **0 bad**
+=================================================  ========
+
+The middle two rows are the finding. Caching the handle — the shape that would
+have preserved ``diagnostic_conn``'s "the caller's own" contract — leaves the
+crash, because it leaves the ``connect()``. Serialising the ``connect()``
+against other ``connect()`` calls does not reach zero either: the race is
+between minting a connection and the *use* of the ones already out.
+
 That is the whole justification for the lock, and it is a measurement rather
 than an argument — which, on this repository's history with R15, is the
 difference between a mitigation and a hope.
@@ -50,11 +75,12 @@ both.
 
 # What it does not establish
 
-That R15 is fixed. It is not, upstream or here. This bounds one path in one
-binding to one outstanding open; ``Database.open`` from many threads is still
-the shape ``r15_concurrent_open.py`` measures, and the Rust
-``Database::diagnostic_conn`` is documented rather than locked — see its
-rustdoc for why the crate does not take this lock on the caller's behalf.
+That R15 is fixed. It is not, upstream or here. ``Database.open`` from many
+threads is still the shape ``r15_concurrent_open.py`` measures. What 0.15.14
+establishes is narrower: this particular path no longer opens the file after
+its first call, so it is no longer a way to reach R15 from ordinary Python.
+The binding keeps its mutex as margin rather than as a measured necessity —
+see ``PyDatabase::diagnostic_rows``.
 """
 
 from __future__ import annotations

@@ -228,34 +228,40 @@ impl PyDatabase {
         })
     }
 
-    /// Run `sql` on a fresh diagnostic connection, **one caller at a time**.
+    /// Run `sql` on the diagnostic connection, **one caller at a time**.
     ///
     /// # Why this is serialised when nothing else here is
     ///
-    /// Every other method on this handle runs against connections opened once,
-    /// at `Database::open`. This path is the exception: `diagnostic_conn()`
-    /// performs a *new* `libsql::Builder::…build()` per call
-    /// ([D-091](../../../docs/architecture/s13-decision-register.md)), and
-    /// `with_db` releases the GIL, so two Python threads calling
-    /// `diagnostic_query` reach `build()` concurrently. That is
+    /// Until 0.15.14 this said: `diagnostic_conn()` performs a new
+    /// `libsql::Builder::…build()` per call, `with_db` releases the GIL, so two
+    /// Python threads reach `build()` concurrently, and that is
     /// [R15](../../../README.md)'s shape — the upstream libSQL access violation
-    /// on concurrent opens — reachable from ordinary Python with no `unsafe`
-    /// and no threading the caller would think twice about. Measured at width
-    /// 48: **7 bad runs in 18** without this lock — two `0xC0000005` and five
-    /// returned SQLite errors — and **0 in 18** with it
-    /// (`tests_py/probes/r15_diagnostic_path.py`).
+    /// on concurrent opens — reachable from ordinary Python with no `unsafe`.
+    /// Measured at width 48: **7 bad runs in 18** without this lock.
     ///
-    /// The mutex bounds this path to one outstanding open. It changes no
-    /// semantics: the connection is still opened and dropped per call, still
-    /// read-only, still the caller's own. Two threads that would have opened
-    /// simultaneously now queue, and a diagnostic path is where queueing is
-    /// cheapest.
+    /// The conclusion held and the mechanism did not. `build()` costs 0.10 µs
+    /// and opens nothing; `connect()` is the open, and it is what two threads
+    /// were reaching concurrently (W15.4,
+    /// [D-256](../../../docs/architecture/s13-decision-register.md#d-256),
+    /// `examples/diagnostic_conn_probe.rs`). Since 0.15.14 there is **one
+    /// read-only connection per `Database`**, minted on first use, so this path
+    /// opens nothing after that first call and the unlocked arm measures
+    /// **0 bad runs in 30** where it measured 3 before.
     ///
-    /// **This mitigates the Python symptom, not R15** — the Rust API has the
-    /// same exposure and is documented rather than locked, because a
-    /// `Database::diagnostic_conn` that serialised behind a mutex the caller
-    /// cannot see would be lying about being "the caller's own". See that
-    /// method's rustdoc.
+    /// # So why keep the lock
+    ///
+    /// Because it is no longer paying for a measurement, it is paying for a
+    /// margin, and the margin is against an unfixed upstream memory-safety bug.
+    /// What it now bounds is concurrent *use* of one shared connection — which
+    /// SQLite serialises internally anyway, so the lock costs a diagnostic path
+    /// nothing it was not already paying. Removing it would trade nothing
+    /// measurable for less distance from `0xC0000005`, on the one surface a
+    /// caller reaches for when they already doubt the typed answer.
+    ///
+    /// It does change one thing it did not change before: `diagnostic_conn()`
+    /// no longer hands back the caller's own connection, so per-connection
+    /// state — an `ATTACH`, a `PRAGMA` — persists between `diagnostic_query`
+    /// calls in the same process. See that method's rustdoc.
     ///
     /// `std::sync::Mutex`, not `tokio`'s: the critical section is a
     /// `block_on`, not an await point, so there is no future to hold the guard

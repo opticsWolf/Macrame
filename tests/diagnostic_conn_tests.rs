@@ -136,30 +136,89 @@ async fn turning_the_pragma_off_rescues_the_reader_and_not_the_diagnostic() {
     db.close().await.unwrap();
 }
 
-/// Each call returns the caller's **own** connection.
+/// Every call returns the **same** connection, and per-connection state is
+/// therefore shared between diagnostic callers (0.15.14, W15.4, C-9, D-256).
 ///
-/// The other half of the need `read_conn()` does not serve: it hands back a
-/// shared `&Connection`, so a long reporting query competes with every
-/// traversal and fold in the process. Two diagnostic connections must be able to
-/// hold independent per-connection state.
+/// # What this test used to assert, and why it now asserts the opposite
+///
+/// Until 0.15.14 this was `each_diagnostic_connection_is_the_callers_own`, and
+/// it set `PRAGMA query_only` on one connection to prove the other could not
+/// see it. That was the second half of D-091's argument: `read_conn()` hands
+/// back a shared `&Connection`, so a long reporting query competes with every
+/// traversal and fold, and `diagnostic_conn()` gave each caller their own.
+///
+/// C-9 asked for the file to be opened once per `Database` instead of once per
+/// call, and the measurement behind that ask turned out to be sharper than the
+/// ask (`examples/diagnostic_conn_probe.rs`). `Builder::…build()` — the call
+/// every document in this crate named as *the open* — costs **0.10 µs and
+/// opens nothing**: it succeeds against a path that does not exist. The open
+/// is `connect()`, at **51.5 µs of an 82.7 µs call**, and it is also where R15
+/// lives on this path: 48 threads through the unlocked Python binding gave
+/// **3 bad runs in 30** with a connection per call and **0 in 30** with one
+/// shared connection. Caching the *handle* and minting a connection per call —
+/// the shape that would have preserved this test — removes 0.10 µs of 82.7 and
+/// leaves the crash at 2 in 30.
+///
+/// So the property is given up deliberately, and the half of D-091 that
+/// mattered survives: this is still not `read_conn()`. A reporting query here
+/// still does not compete with the traversals and folds on the shared reader,
+/// and the `SQLITE_OPEN_READ_ONLY` boundary is untouched — see
+/// `turning_the_pragma_off_rescues_the_reader_and_not_the_diagnostic`, which
+/// is the assertion D-091 was actually for.
+///
+/// What is lost is isolation *between diagnostic callers*, and it is asserted
+/// here rather than admitted in prose, because `diagnostic_query` is the one
+/// arbitrary-SQL surface this crate exposes: an `ATTACH` or a `PRAGMA` one
+/// caller runs is visible to the next.
 #[tokio::test]
-async fn each_diagnostic_connection_is_the_callers_own() {
+async fn diagnostic_callers_share_one_connection_and_its_state() {
     let harness = TestHarness::new();
     let db = db(&harness).await;
 
     let a = db.diagnostic_conn().await.unwrap();
     let b = db.diagnostic_conn().await.unwrap();
 
-    // `query_only` is per-connection state; setting it on one must not be
-    // visible on the other. (Neither can write regardless — this is about
-    // whether they are the same handle.)
+    // `query_only` is per-connection state. One connection, so setting it on
+    // `a` is visible on `b` — the inverse of what this asserted before 0.15.14.
     a.execute("PRAGMA query_only = ON", ()).await.unwrap();
     let mut rows = b.query("PRAGMA query_only", ()).await.unwrap();
     let v: i64 = rows.next().await.unwrap().unwrap().get(0).unwrap();
     assert_eq!(
-        v, 0,
-        "the two diagnostic connections share per-connection state"
+        v, 1,
+        "the two diagnostic connections do not share state, so the connection \
+         is being minted per call again — which costs 51.5 us and reopens R15's \
+         shape on this path (D-256)"
     );
+
+    // Restore it, so nothing downstream inherits a connection this test armed.
+    a.execute("PRAGMA query_only = OFF", ()).await.unwrap();
+
+    db.close().await.unwrap();
+}
+
+/// The shared connection is still **not** the shared reader.
+///
+/// The half of D-091 that C-9 does not touch, pinned on its own now that the
+/// test above no longer implies it: `read_conn()` and `diagnostic_conn()` are
+/// two different connections, so a caller holding the diagnostic one cannot
+/// change what the crate's own readers see.
+#[tokio::test]
+async fn the_diagnostic_connection_is_not_the_shared_reader() {
+    let harness = TestHarness::new();
+    let db = db(&harness).await;
+
+    let diag = db.diagnostic_conn().await.unwrap();
+    diag.execute("PRAGMA query_only = OFF", ()).await.unwrap();
+
+    let mut rows = db.read_conn().query("PRAGMA query_only", ()).await.unwrap();
+    let v: i64 = rows.next().await.unwrap().unwrap().get(0).unwrap();
+    assert_eq!(
+        v, 1,
+        "disarming the diagnostic connection disarmed the shared reader, so \
+         they are the same connection and D-091's boundary is gone"
+    );
+
+    diag.execute("PRAGMA query_only = ON", ()).await.unwrap();
 
     db.close().await.unwrap();
 }
@@ -186,7 +245,10 @@ async fn the_handle_reports_the_file_it_opened() {
 /// `Database` fails with OS error 32 (verified), and `close()` consumes the
 /// handle, so no in-process sequence reaches it. It is reachable in the case it
 /// was written for — a file removed by something outside this process between
-/// open and the diagnostic call — which a test cannot stage here.
+/// open and the diagnostic call — which a test cannot stage on Windows, where
+/// the file cannot be unlinked while this process holds it open. It can be
+/// staged on POSIX, and since 0.15.14 it must be: see
+/// [`a_deleted_file_is_refused_rather_than_answered_from_the_cached_connection`].
 ///
 /// What *is* worth pinning is the part D-069 is about: an error that names the
 /// wrong subject. `NotFound` renders "node {0} not found", and a caller handed
@@ -205,6 +267,68 @@ fn the_missing_file_error_names_the_file_and_the_reason() {
         !text.contains("node"),
         "reads as an error about a node, which is D-069's defect: {text}"
     );
+}
+
+/// **A file deleted under a live handle is refused, not answered** (0.15.14,
+/// W15.4, [D-256]).
+///
+/// # Why this exists, and why it is `cfg(unix)`
+///
+/// `diagnostic_conn` runs `path.exists()` on every call and not only the
+/// first. Before 0.15.14 that was a rounding error beside the 51.5 µs
+/// `connect()` it sat in front of; the connection is minted once now, so the
+/// `stat` is **19.9 µs of a 19.9 µs call** — the whole of it. A cost that is
+/// the whole of a call needs an assertion rather than a paragraph, and it did
+/// not have one: a mutation deleting the check passed the entire suite.
+///
+/// What it buys is the worst failure a *diagnostic* surface can have. Delete
+/// the file and put another one in its place, and a cached connection keeps
+/// answering from the unlinked inode — silently, correctly-looking, on the one
+/// method a caller reaches for when they already doubt the typed answer. The
+/// `stat` turns that into [`macrame::DbError::DiagnosticConn`].
+///
+/// The hazard is POSIX's, and so is the staging: Windows refuses to unlink a
+/// file this process holds open. The skip is at **run time rather than behind
+/// `cfg(unix)`**, so the body is compiled on every platform and cannot rot on
+/// the one that does not run it — which is how the sibling test above came to
+/// say a test *cannot* stage this, a claim that was true of the box it was
+/// written on rather than of the crate.
+///
+/// [D-256]: ../docs/architecture/s13-decision-register.md#d-256
+#[tokio::test]
+async fn a_deleted_file_is_refused_rather_than_answered_from_the_cached_connection() {
+    let harness = TestHarness::new();
+    let db = db(&harness).await;
+
+    // Mint the cached connection, so the deletion happens against a handle
+    // that is already open — which is the case the check exists for. Without
+    // this first call the test would only be re-asserting the cold path.
+    let conn = db.diagnostic_conn().await.unwrap();
+    let mut rows = conn.query("SELECT 1", ()).await.unwrap();
+    let _: i64 = rows.next().await.unwrap().unwrap().get(0).unwrap();
+    drop(rows);
+    drop(conn);
+
+    if std::fs::remove_file(&harness.db_path).is_err() {
+        // Windows: the file cannot be unlinked while this process holds it,
+        // so the case this test is about cannot arise on this platform.
+        eprintln!("skipped: this platform will not unlink an open file");
+        db.close().await.unwrap();
+        return;
+    }
+
+    let err = db.diagnostic_conn().await.expect_err(
+        "the file is gone and the call succeeded, so it answered from the \
+         cached connection's unlinked inode -- which is a diagnostic surface \
+         reporting on a database that no longer exists",
+    );
+    assert!(
+        matches!(err, macrame::DbError::DiagnosticConn { .. }),
+        "refused, but not as DiagnosticConn: {err}"
+    );
+
+    // No `close()`: the ledger's file is gone, so the shutdown path has
+    // nothing to write to and its failure is not what this test is about.
 }
 
 /// The actor still owns writes: a diagnostic connection sees them, after.

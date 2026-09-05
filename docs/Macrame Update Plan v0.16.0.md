@@ -229,9 +229,19 @@ Found on the way: the review reports **+38 items and zero removals**, in a relea
 
 Eight mutations and **five survived**, which is the worst ratio of the cycle and lands on the release that was about instruments. Two were setters assigning the wrong field or none — the name was checked against the baseline and the *value* was checked nowhere, and `writer_cache_size` writing into `reader_cache_size` is a failure mode this release created, since a struct literal names each field exactly once. One was `Overlap::new` swapping the two intervals the tuple grouping keeps a *caller* from swapping. One was `NodeAttributes::embedding_model`. And one was deleting `#[non_exhaustive]` from `src/`, which left every assertion in the new pin green: they read the checked-in baseline, and the baseline is honest about a release rather than about a working tree. Three tests bought, all five now caught.
 
-### W15.4 · 0.15.12 — a lazy read-only handle behind `diagnostic_conn` (C-9)
+### W15.4 · 0.15.14 — a lazy read-only handle behind `diagnostic_conn` (C-9)
 
 One `connect()` per call becomes one `OnceCell<Connection>` per `Database`, opened on first use and dropped with the database.
+
+**Shipped as 0.15.14, [D-256](architecture/s13-decision-register.md#d-256).** Three departures, and the first is that the sketch above is right and its reason was not.
+
+*The shape written first was the other one, and the measurement refused it.* `diagnostic_conn` promises **a new, independently owned** connection, so the first attempt cached the `libsql::Database` handle and kept minting a connection per call. `examples/diagnostic_conn_probe.rs`: `Builder::…build()` costs **0.10 µs and opens nothing** — it succeeds against a path that does not exist — while `connect()` is **51.5 µs of an 82.7 µs call** and is where `SQLITE_CANTOPEN` arrives. The handle cache removes a call that does no work. **82.7 µs → 19.9 µs**, and the 19.9 is the `stat`.
+
+*Three documents named `build()` as the open, and as R15's exposure.* The method's rustdoc, the Python binding's justification for its mutex, and `tests_py/probes/r15_diagnostic_path.py`'s own docstring. Each drew the right conclusion — this path was R15's shape, the lock did remove it — from the wrong mechanism, which is a thing that survives exactly until someone optimises against the mechanism. That is [D-255](architecture/s13-decision-register.md#d-255)'s finding one release later and inverted: there four documents disagreed and the majority was made true; here three agreed and all three were wrong.
+
+*R15 was re-measured across four shapes, and the race is not where "concurrent opens" put it.* 48 threads, the binding's mutex removed so the arms differ only in Rust: **3/30** with a connection per call, 2/30 with the handle cached, 1/18 with `connect()` behind a mutex, **0/30** with one connection. Serialising `connect()` against other `connect()` calls does not reach zero, so the race is between minting a connection and the *use* of the ones already outstanding — one level further out than the documents had it.
+
+Found on the way: what this gives up is isolation between diagnostic callers, since `diagnostic_query` is the one arbitrary-SQL surface the crate exposes and an `ATTACH` now outlives the call that made it. The test that pinned "the caller's own" pins the sharing instead, and the half of [D-091](architecture/s13-decision-register.md#d-091) that actually mattered — this is not `read_conn()` — gets its own pin for the first time. Five mutations, one survivor: the `path.exists()` check, which went from a rounding error to **100% of a warm call** in the same commit and had no test. It has one now, and that test skips on Windows at run time, so **CI verifies it and this box does not**.
 
 ---
 
@@ -274,7 +284,7 @@ Merge to `main` after W16.2, tagged. `docs/releases/v0.16.0.md` written before t
 | 11 | 0.15.11 | W15.1 | typed rehydrate refusal — **done** | `error.rs`, `temporal/archive.rs`, `bindings/python` | `rehydrate_lineage_tests`, `test_rehydrate_lineage.py`; nine mutations; numbers in D-253 |
 | 12 | 0.15.12 | W15.2 | schema **v17**, the fold's partition index — **done** | `schema/{ddl,migrations}.rs`, `temporal/archive.rs`, `index_plan_tests.rs` | rung tests; fold plan pinned by absence of sort; four mutations, one survived and bought a test; numbers in D-254 |
 | 13 | 0.15.13 | W15.3 | `#[non_exhaustive]` on all 29, + 18 constructors | `connection.rs`, `builder.rs`, `snapshot.rs`, `as_of.rs`, `error.rs`, `replay.rs` | `api-review-0.16.0.md`, `api_growth_tests.rs` |
-| 14 | 0.15.12 | W15.4 | lazy diagnostic handle | `connection.rs` | — |
+| 14 | 0.15.14 | W15.4 | one diagnostic connection per handle | `connection.rs` | `diagnostic_conn_probe.rs`, `r15_diagnostic_path.py` |
 | 15 | 0.15.13 | W16.1 | ancestry in Rust | `plan.rs`, `branch.rs` | differential test against the CTE |
 | 16 | 0.15.14 | W16.2 | hygiene batch | various | one register row per item |
 | 17 | 0.16.0 | — | release note before merge; merge; tag | `docs/releases/v0.16.0.md` | §8 |

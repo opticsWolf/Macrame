@@ -1171,6 +1171,27 @@ pub struct Database {
     /// mints the same way `open()` configured the internal readers (0.12.16,
     /// W5.5, D-159). Before that split, each one ran with SQLite's defaults.
     reader_cache_size: Option<i32>,
+    /// The `SQLITE_OPEN_READ_ONLY` connection behind
+    /// [`Database::diagnostic_conn`], opened on first use and dropped with this
+    /// handle (0.15.14, W15.4, review C-9, [D-256]).
+    ///
+    /// **The connection, not the `libsql::Database` handle**, and the
+    /// difference is the measurement rather than a preference. The first shape
+    /// written here cached the handle and minted a connection per call, on the
+    /// argument that `diagnostic_conn` promises a connection the *caller* owns.
+    /// `examples/diagnostic_conn_probe.rs` says `Builder::…build()` costs
+    /// **0.10 µs and opens nothing** — it succeeds against a path that does not
+    /// exist — while `connect()` costs **51.5 µs** and is where
+    /// `SQLITE_CANTOPEN` arrives for a missing file. The handle cache removes a
+    /// call that does no work.
+    ///
+    /// `tokio::sync::OnceCell` rather than `std`'s, because the open is
+    /// `async`; a failed first attempt leaves the cell empty, so a database
+    /// whose file appears later is not poisoned by the call that came too
+    /// early.
+    ///
+    /// [D-256]: ../../docs/architecture/s13-decision-register.md#d-256
+    diagnostic_conn: tokio::sync::OnceCell<libsql::Connection>,
     writer: Option<tokio::task::JoinHandle<()>>,
     /// Stops the snapshot cadence. Dropping it stops the task too, which is what
     /// keeps a `Database` that is dropped rather than closed from leaving a task
@@ -1426,11 +1447,16 @@ pub struct Tuning {
     /// Split from the writer's because the profiles are opposite and one number
     /// cannot serve both. There is exactly one writer and it is long-lived, so
     /// its cache is a fixed cost paid once. Read-only connections are plural —
-    /// `diagnostic_conn` mints a new one per call — so a large value here is
-    /// multiplied by however many a caller opens, and the R15 hazard that
-    /// method documents is about concurrent opens. A single shared number
-    /// therefore has to be small enough for the multiplied case, which is the
-    /// wrong size for the one connection that holds the write lock.
+    /// the shared reader and the cadence's — so a large value here is
+    /// multiplied by however many exist, which is the wrong size for the one
+    /// connection that holds the write lock.
+    ///
+    /// **The multiplier used to be unbounded** and is not since 0.15.14
+    /// (W15.4, [D-256]): `diagnostic_conn` minted a connection per call, so a
+    /// caller in a loop multiplied this number by their own call count. There
+    /// is one such connection per `Database` now, so the count is three.
+    ///
+    /// [D-256]: ../../docs/architecture/s13-decision-register.md#d-256
     pub reader_cache_size: Option<i32>,
     /// What to do about a stored `recorded_at` in the future (0.13.5, W7.4,
     /// §3.4).
@@ -1709,6 +1735,7 @@ impl Database {
             snapshots_dir,
             schema_version: migrations::current_version(),
             reader_cache_size,
+            diagnostic_conn: tokio::sync::OnceCell::new(),
             writer: Some(writer),
             cadence_stop,
             cadence,
@@ -1779,8 +1806,8 @@ impl Database {
         &self.path
     }
 
-    /// A **new, independently owned, OS-level read-only** connection to this
-    /// database, for diagnostics (§4.7, T5.1, D-091).
+    /// The **OS-level read-only** connection to this database, for diagnostics
+    /// (§4.7, T5.1, D-091).
     ///
     /// # Why this exists when `read_conn()` already does
     ///
@@ -1789,12 +1816,37 @@ impl Database {
     /// * `read_conn()` returns a shared `&Connection` carrying
     ///   `PRAGMA query_only = ON`. That pragma is **per-connection and
     ///   reversible by its holder in one statement**, so it is a guardrail
-    ///   against accident, not a capability boundary. And because the reference
-    ///   is shared, a caller who runs a long reporting query on it is competing
-    ///   with every traversal and fold in the process.
+    ///   against accident, not a capability boundary. And because it is the
+    ///   connection the crate's own traversals and folds run on, a caller who
+    ///   runs a long reporting query there is competing with all of them.
     /// * This returns a connection opened with `SQLITE_OPEN_READ_ONLY`, which is
-    ///   enforced by the engine below the pragma layer, and it is the caller's
-    ///   own.
+    ///   enforced by the engine below the pragma layer, and which nothing inside
+    ///   the crate runs on.
+    ///
+    /// # One connection per `Database`, shared between callers (0.15.14, W15.4)
+    ///
+    /// Through 0.15.13 this minted a connection per call and the sentence above
+    /// read *"a **new, independently owned** … connection"*. Review item C-9
+    /// asked for the file to be opened once per handle instead, and the
+    /// measurement behind it (`examples/diagnostic_conn_probe.rs`) was sharper
+    /// than the ask: `connect()` is **51.5 µs of an 82.7 µs call**, and
+    /// `Builder::…build()` — which every document in this crate called *the
+    /// open* — is **0.10 µs and opens nothing**, succeeding against a path that
+    /// does not exist. Caching the handle would have removed 0.10 µs. What
+    /// ships caches the connection: **82.7 µs → 19.9 µs**, and what remains is
+    /// the `stat` below, not the connection.
+    ///
+    /// **So per-connection state is shared between diagnostic callers.** An
+    /// `ATTACH`, a `PRAGMA`, a temp table one caller creates is visible to the
+    /// next — which matters here and nowhere else in this API, because
+    /// `diagnostic_query` is the one arbitrary-SQL surface the crate exposes.
+    /// Asserted in `diagnostic_callers_share_one_connection_and_its_state`
+    /// rather than left to this paragraph.
+    ///
+    /// What that costs is isolation between *diagnostic* callers. What it does
+    /// not cost is the thing D-091 was for: this is still not `read_conn()`, a
+    /// reporting query here still does not compete with the crate's traversals
+    /// and folds, and the read-only boundary below is untouched.
     ///
     /// **Measured on libSQL 0.9.30 rather than assumed**
     /// (`examples/readonly_open_probe.rs`), against a live WAL database with the
@@ -1847,33 +1899,38 @@ impl Database {
     /// is recorded, not acted on: D-050 removed the strategy for two reasons and
     /// this addresses one of them.
     ///
-    /// # Calling this concurrently is R15's shape
+    /// # Calling this concurrently was R15's shape, and 0.15.14 is why it is not
     ///
-    /// **This is the one method on `Database` that opens the file.** Everything
-    /// else runs on connections established once, at `open`. Each call here is
-    /// a fresh `libsql::Builder::…build()`, so *N* threads calling it at once
-    /// are *N* concurrent opens — which is exactly the pattern behind
-    /// [R15](https://github.com/opticsWolf/Macrame#known-risks), the upstream
-    /// libSQL access violation (`0xC0000005`) that `examples/r15_soak.rs`
-    /// reproduces and `RUST_TEST_THREADS=1` exists to avoid in the suite.
+    /// Through 0.15.13 this section said *"this is the one method on `Database`
+    /// that opens the file … each call is a fresh `libsql::Builder::…build()`,
+    /// so *N* threads calling it at once are *N* concurrent opens"*. The first
+    /// half was true and the second was wrong about which call does it:
+    /// `build()` opens nothing, and `connect()` is the open. The conclusion
+    /// happened to be right for the wrong reason, which is why it took a
+    /// measurement to move.
     ///
-    /// **This is measured, not inferred.** 48 threads sharing one handle and
-    /// calling only this method: 7 bad runs in 18 — two access violations and
-    /// five *returned* SQLite errors (`database is locked`, `bad parameter or
-    /// other API misuse`). With the calls serialised, 0 in 18
-    /// (`tests_py/probes/r15_diagnostic_path.py`). The returned-error mode is
-    /// the one to watch for: it looks like a fact about the database, on the
-    /// method a caller reaches for when they already doubt the typed answer.
+    /// **Measured through the unlocked Python binding**, 48 threads on a
+    /// barrier, 30 runs per arm (`tests_py/probes/r15_diagnostic_path.py`):
     ///
-    /// **Bound this yourself if you call it from more than one thread.** One
-    /// outstanding open at a time is enough; a mutex around the call costs
-    /// nothing on a diagnostic path. This method does not do it for you on
-    /// purpose: serialising behind a lock the caller cannot see would
-    /// contradict the thing above it — that the connection is *the caller's
-    /// own* — and it would put a hidden queue in front of the one surface whose
-    /// job is to answer questions when the typed path is already suspect. The
-    /// Python binding does bound it, because it wraps this in a method a caller
-    /// cannot see into (`PyDatabase::diagnostic_rows`); a Rust caller can.
+    /// | arm | bad runs |
+    /// |---|---|
+    /// | a connection per call, as before 0.15.14 | **3 / 30** |
+    /// | the `libsql::Database` handle cached, a connection per call | 2 / 30 |
+    /// | the `connect()` serialised behind a mutex | 1 / 18 |
+    /// | **one connection, as shipped** | **0 / 30** |
+    ///
+    /// Rows two and three are why the shape that preserved the old contract was
+    /// not taken: caching the handle leaves the crash because it leaves the
+    /// `connect()`, and serialising the `connect()` alone does not reach zero —
+    /// the race is between minting a connection and the *use* of the others,
+    /// not between two mintings.
+    ///
+    /// **There is nothing left on this path to bound**, because after the first
+    /// call it no longer opens anything. `Database::open` from many threads is
+    /// still R15's shape and `examples/r15_soak.rs` still reproduces it; this
+    /// method is no longer a way to reach it. The Python binding keeps its
+    /// mutex as margin rather than as a measured necessity — see
+    /// `PyDatabase::diagnostic_rows`.
     ///
     /// # Errors
     ///
@@ -1881,31 +1938,60 @@ impl Database {
     /// `SQLITE_OPEN_CREATE` with it, so a missing file is `SQLITE_CANTOPEN`
     /// rather than a fresh empty database — which is the right failure, and is
     /// surfaced as a typed error rather than as libSQL's error 14.
+    ///
+    /// The check is a `stat` on **every** call, not only the first, and since
+    /// 0.15.14 it is the entire measured cost of a warm call (19.9 µs of 19.9).
+    /// It is kept at that price because the alternative is the worst failure a
+    /// *diagnostic* surface can have: a cached connection whose file has been
+    /// deleted and replaced answers from the old inode, silently, on the one
+    /// method a caller reaches for when they already doubt the typed answer.
     pub async fn diagnostic_conn(&self) -> Result<libsql::Connection> {
         let fail = |reason: String| DbError::DiagnosticConn {
             path: self.path.display().to_string(),
             reason,
         };
+        // Checked per call rather than once, because it is the documented
+        // error of *this* method and costs a `stat`. The handle below is
+        // opened once; the question "is the file there" is asked every time,
+        // so a caller who deletes the file still gets the typed refusal on the
+        // next call rather than a connection to an inode nothing can name.
         if !self.path.exists() {
             return Err(fail(
                 "the file does not exist, and a read-only open cannot create it".to_string(),
             ));
         }
-        let db = libsql::Builder::new_local(&self.path)
-            .flags(libsql::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .build()
-            .await
-            .map_err(|e| fail(e.to_string()))?;
-        let conn = db.connect().map_err(|e| fail(e.to_string()))?;
-        // Configured since 0.12.16 (W5.5, D-159). Until then this connection
-        // ran with SQLite's defaults while every other connection in the
-        // process ran with the crate's — most consequentially a `busy_timeout`
-        // of 0 against everyone else's 5 s, on the one surface whose job is to
-        // answer questions when the typed path is already suspect. Only the
-        // common half: `SQLITE_OPEN_READ_ONLY` cannot set `journal_mode`, and
-        // the rest govern writes this connection cannot make.
-        configure_common(&conn, self.reader_cache_size).await?;
-        Ok(conn)
+        let conn = self
+            .diagnostic_conn
+            .get_or_try_init(|| async {
+                let db = libsql::Builder::new_local(&self.path)
+                    .flags(libsql::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                    .build()
+                    .await
+                    .map_err(|e| fail(e.to_string()))?;
+                let conn = db.connect().map_err(|e| fail(e.to_string()))?;
+                // Configured since 0.12.16 (W5.5, D-159). Until then this
+                // connection ran with SQLite's defaults while every other
+                // connection in the process ran with the crate's — most
+                // consequentially a `busy_timeout` of 0 against everyone
+                // else's 5 s, on the one surface whose job is to answer
+                // questions when the typed path is already suspect. Only the
+                // common half: `SQLITE_OPEN_READ_ONLY` cannot set
+                // `journal_mode`, and the rest govern writes this connection
+                // cannot make.
+                //
+                // Once rather than per call since 0.15.14: the pragmas are
+                // per-connection and there is one connection now, so running
+                // them again would re-apply the same values to the same
+                // connection.
+                configure_common(&conn, self.reader_cache_size).await?;
+                // The `libsql::Database` is dropped here and the connection
+                // outlives it, which is the ownership libSQL's own API implies:
+                // `connect()` returns a `Connection` that does not borrow the
+                // builder's handle.
+                Ok::<_, DbError>(conn)
+            })
+            .await?;
+        Ok(conn.clone())
     }
 
     /// Cross-check the snapshot chain against a fold from genesis (§5.5, T5.3,
