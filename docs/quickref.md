@@ -274,6 +274,7 @@ impl Database {
 ```rust
 pub enum AttributeMode { Current, AtTime, Omit }
 
+#[non_exhaustive]                        // 0.15.13, D-255 — build it, do not write it
 pub struct TraversalBuilder {
     pub start_node: String,
     pub max_depth: usize,
@@ -429,9 +430,16 @@ pub struct ChainCheck {
     pub fn diverged(&self) -> bool,
 }
 
+#[non_exhaustive]                        // 0.15.13, D-255
 pub struct SnapshotCadence {
     pub every_entries: i64,
     pub poll_interval: Duration,
+}
+
+impl SnapshotCadence {
+    // `Default` is the way in; each setter takes and returns `self`.
+    pub fn every_entries(mut self, entries: i64) -> Self
+    pub fn poll_interval(mut self, interval: Duration) -> Self
 }
 
 // Standalone functions

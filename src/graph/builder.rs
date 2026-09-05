@@ -64,7 +64,17 @@ impl WalkOutcome {
 }
 
 /// Recursive CTE traversal query builder (§5.2).
+///
+/// `#[non_exhaustive]` since 0.15.13 (W15.3, [C-11],
+/// [D-255](../../docs/architecture/s13-decision-register.md#d-255)), which for
+/// this struct is the attribute alone: every field below already had a setter,
+/// and [`Self::new`] is the only entry a caller ever used. The fields stay
+/// `pub` and stay readable — what is gone is the literal, and with it the
+/// property that the eleventh field breaks whoever wrote the first ten.
+///
+/// [C-11]: ../../docs/Macrame%20Update%20Plan%20v0.16.0.md
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct TraversalBuilder {
     pub start_node: String,
     pub max_depth: usize,
@@ -88,10 +98,13 @@ pub struct TraversalBuilder {
     /// nobody asked for. Those two produce identical behaviour and must not be
     /// stored identically, so the field records which happened.
     ///
-    /// Public for construction-by-struct-literal, which is why it is an `Option`
-    /// here rather than a private `bool` beside the mode: a caller building the
-    /// struct directly should have to write down the same thing the builder
-    /// method records.
+    /// The `Option` outlived the reason it was one. It was public for
+    /// construction-by-struct-literal — a caller building the struct directly
+    /// should have to write down the same thing the setter records — and
+    /// 0.15.13 took the literal away. It stays an `Option` because the
+    /// distinction above is the mechanism and a private `bool` beside the mode
+    /// would say the same thing in two places; what is gone is the argument
+    /// that a *caller* needed to see it.
     pub attribute_mode: Option<AttributeMode>,
     /// The **valid-time** instant to traverse at, if it is not the present.
     ///
@@ -190,9 +203,13 @@ impl TraversalBuilder {
     /// prefer a plan to three calls: a plan is the read, so applying one
     /// answers what the read is instead of amending what it was. A caller who
     /// wants to amend has the three setters and they are not going anywhere —
-    /// [C-11] decides their fate in W15.3, and this release is additive on
-    /// purpose so a caller pinned to `0.15` gets the plan without being broken
-    /// by it.
+    /// this release was additive on purpose so a caller pinned to `0.15` got
+    /// the plan without being broken by it. **W15.3 decided their fate: they
+    /// stay** (0.15.13, [C-11],
+    /// [D-255](../../docs/architecture/s13-decision-register.md#d-255)). C-11
+    /// asked for `#[non_exhaustive]` and a setter per field; this struct had
+    /// the setters already, and a plan that replaces does not make an amend
+    /// that is spelled out wrong.
     ///
     /// The round trip is exact in both directions: `b.plan(p).read_plan() == p`
     /// for every plan, and `b.plan(b.read_plan())` leaves `b` alone.

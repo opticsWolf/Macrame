@@ -28,10 +28,9 @@ const T1: &str = "2026-01-01T00:00:00.000000Z";
 
 /// A cadence that fires on any growth at all, so a short test can observe it.
 fn eager() -> SnapshotCadence {
-    SnapshotCadence {
-        every_entries: 1,
-        poll_interval: std::time::Duration::from_millis(5),
-    }
+    SnapshotCadence::default()
+        .every_entries(1)
+        .poll_interval(std::time::Duration::from_millis(5))
 }
 
 async fn write_one(db: &Database) {
@@ -78,10 +77,7 @@ async fn a_disabled_cadence_leaves_the_snapshot_directory_to_close() {
     let harness = TestHarness::new();
     let db = Database::open_tuned(
         &harness.db_path,
-        Tuning {
-            cadence: CadencePolicy::Disabled,
-            ..Default::default()
-        },
+        Tuning::default().cadence(CadencePolicy::Disabled),
     )
     .await
     .unwrap();
@@ -99,10 +95,7 @@ async fn an_explicit_cadence_anchors_without_being_closed() {
     let harness = TestHarness::new();
     let db = Database::open_tuned(
         &harness.db_path,
-        Tuning {
-            cadence: CadencePolicy::Every(eager()),
-            ..Default::default()
-        },
+        Tuning::default().cadence(CadencePolicy::Every(eager())),
     )
     .await
     .unwrap();
@@ -136,21 +129,20 @@ async fn a_clock_injected_through_tuning_stamps_the_ledger() {
     let expected = clock.peek();
     let db = Database::open_tuned(
         &harness.db_path,
-        Tuning {
-            cadence: CadencePolicy::Disabled,
-            // Every field named, deliberately. D-155 says an exhaustive
-            // literal breaks when a field is added, with a compile error at the
-            // call site rather than a behaviour change — and W5.3 added
-            // `wal_autocheckpoint` one release later, W5.4 the two cache sizes
-            // the release after that, and W7.4 `future_stamps` — breaking
-            // exactly here and nowhere else, three times. Left exhaustive so it
-            // keeps demonstrating that.
-            clock: Some(clock),
-            wal_autocheckpoint: WalCheckpointPolicy::Default,
-            writer_cache_size: None,
-            reader_cache_size: None,
-            future_stamps: FutureStampPolicy::Default,
-        },
+        // This call named every field until 0.15.13, deliberately: D-155
+        // said an exhaustive literal breaks when a field is added, with a
+        // compile error at the call site rather than a behaviour change, and
+        // it duly broke three times — W5.3's `wal_autocheckpoint`, W5.4's two
+        // cache sizes, W7.4's `future_stamps` — here and nowhere else. W15.3
+        // made the literal illegal, so the demonstration is gone with it. The
+        // property it stood for moved to `api_growth_tests.rs`, which asserts
+        // the thing this could only exhibit: every field of a struct a caller
+        // constructs has a way to set it.
+        Tuning::default()
+            .cadence(CadencePolicy::Disabled)
+            .clock(clock)
+            .wal_autocheckpoint(WalCheckpointPolicy::Default)
+            .future_stamps(FutureStampPolicy::Default),
     )
     .await
     .unwrap();
@@ -208,11 +200,9 @@ async fn seed_at(path: &std::path::Path, secs: u64) {
     ));
     let db = Database::open_tuned(
         path,
-        Tuning {
-            cadence: CadencePolicy::Disabled,
-            clock: Some(clock),
-            ..Default::default()
-        },
+        Tuning::default()
+            .cadence(CadencePolicy::Disabled)
+            .clock(clock),
     )
     .await
     .expect("seeding must succeed: an empty database has no floor to refuse");
@@ -269,11 +259,9 @@ async fn allow_opens_a_database_the_default_refuses() {
 
     let db = Database::open_tuned(
         &harness.db_path,
-        Tuning {
-            cadence: CadencePolicy::Disabled,
-            future_stamps: FutureStampPolicy::Allow,
-            ..Default::default()
-        },
+        Tuning::default()
+            .cadence(CadencePolicy::Disabled)
+            .future_stamps(FutureStampPolicy::Allow),
     )
     .await
     .expect("Allow must waive the bound");
@@ -340,11 +328,9 @@ async fn a_zero_tolerance_refuses_a_stamp_that_the_default_would_accept() {
     // And outside a zero one.
     let err = Database::open_tuned(
         &harness.db_path,
-        Tuning {
-            cadence: CadencePolicy::Disabled,
-            future_stamps: FutureStampPolicy::Tolerance(std::time::Duration::ZERO),
-            ..Default::default()
-        },
+        Tuning::default()
+            .cadence(CadencePolicy::Disabled)
+            .future_stamps(FutureStampPolicy::Tolerance(std::time::Duration::ZERO)),
     )
     .await;
     let err = match err {

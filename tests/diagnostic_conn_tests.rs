@@ -286,12 +286,10 @@ async fn a_diagnostic_connection_carries_the_reader_cache_size() {
     let harness = TestHarness::new();
     let db = Database::open_tuned(
         &harness.db_path,
-        Tuning {
-            cadence: CadencePolicy::Disabled,
-            writer_cache_size: Some(-64_000),
-            reader_cache_size: Some(-8_000),
-            ..Default::default()
-        },
+        Tuning::default()
+            .cadence(CadencePolicy::Disabled)
+            .writer_cache_size(-64_000)
+            .reader_cache_size(-8_000),
     )
     .await
     .unwrap();

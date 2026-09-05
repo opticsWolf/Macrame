@@ -7,6 +7,7 @@ use crate::vector::{EmbeddingCodec, ModelName};
 
 /// Search result container for vector similarity or hybrid search (§5.9).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
 pub struct VectorSearchResult {
     pub concept_id: String,
     /// Cosine distance: 0.0 is identical, larger is further. Ascending order.

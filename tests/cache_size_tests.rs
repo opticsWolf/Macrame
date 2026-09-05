@@ -30,10 +30,7 @@ async fn the_default_tuning_leaves_the_cache_where_sqlite_put_it() {
     let harness = TestHarness::new();
     let db = Database::open_tuned(
         &harness.db_path,
-        Tuning {
-            cadence: CadencePolicy::Disabled,
-            ..Default::default()
-        },
+        Tuning::default().cadence(CadencePolicy::Disabled),
     )
     .await
     .unwrap();
@@ -59,12 +56,10 @@ async fn the_reader_gets_the_reader_value_and_not_the_writer_value() {
     let harness = TestHarness::new();
     let db = Database::open_tuned(
         &harness.db_path,
-        Tuning {
-            cadence: CadencePolicy::Disabled,
-            writer_cache_size: Some(-64_000),
-            reader_cache_size: Some(-8_000),
-            ..Default::default()
-        },
+        Tuning::default()
+            .cadence(CadencePolicy::Disabled)
+            .writer_cache_size(-64_000)
+            .reader_cache_size(-8_000),
     )
     .await
     .unwrap();
@@ -89,11 +84,9 @@ async fn a_positive_value_is_passed_through_as_pages() {
     let harness = TestHarness::new();
     let db = Database::open_tuned(
         &harness.db_path,
-        Tuning {
-            cadence: CadencePolicy::Disabled,
-            reader_cache_size: Some(4_000),
-            ..Default::default()
-        },
+        Tuning::default()
+            .cadence(CadencePolicy::Disabled)
+            .reader_cache_size(4_000),
     )
     .await
     .unwrap();
@@ -117,12 +110,10 @@ async fn a_tiny_cache_is_a_performance_choice_and_not_a_correctness_one() {
     let harness = TestHarness::new();
     let db = Database::open_tuned(
         &harness.db_path,
-        Tuning {
-            cadence: CadencePolicy::Disabled,
-            writer_cache_size: Some(10),
-            reader_cache_size: Some(10),
-            ..Default::default()
-        },
+        Tuning::default()
+            .cadence(CadencePolicy::Disabled)
+            .writer_cache_size(10)
+            .reader_cache_size(10),
     )
     .await
     .unwrap();

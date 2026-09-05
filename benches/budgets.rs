@@ -497,10 +497,8 @@ fn chunk_budget(c: &mut Criterion) {
                 },
                 |fx| {
                     let rows: Vec<Annotation> = (0..chunk_rows::ANNOTATIONS)
-                        .map(|i| Annotation {
-                            concept_id: format!("c{i:07}"),
-                            label: "community".into(),
-                            value: format!("{}", i % 7),
+                        .map(|i| {
+                            Annotation::new(format!("c{i:07}"), "community", format!("{}", i % 7))
                         })
                         .collect();
                     rt.block_on(fx.db.write_analytics_annotations(rows))
@@ -641,10 +639,8 @@ fn chunk_scaling(c: &mut Criterion) {
                 },
                 |fx| {
                     let rows: Vec<Annotation> = (0..n)
-                        .map(|i| Annotation {
-                            concept_id: format!("c{i:07}"),
-                            label: "community".into(),
-                            value: format!("{}", i % 7),
+                        .map(|i| {
+                            Annotation::new(format!("c{i:07}"), "community", format!("{}", i % 7))
                         })
                         .collect();
                     rt.block_on(fx.db.write_analytics_annotations(rows))
@@ -751,11 +747,7 @@ fn bulk_chunks(c: &mut Criterion) {
             },
             |fx| {
                 let rows: Vec<Annotation> = (0..500)
-                    .map(|i| Annotation {
-                        concept_id: format!("c{i:07}"),
-                        label: "community".into(),
-                        value: format!("{}", i % 7),
-                    })
+                    .map(|i| Annotation::new(format!("c{i:07}"), "community", format!("{}", i % 7)))
                     .collect();
                 rt.block_on(fx.db.write_analytics_annotations(rows))
                     .unwrap()

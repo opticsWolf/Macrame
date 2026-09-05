@@ -2,6 +2,7 @@ use crate::error::{DbError, Result};
 use crate::integrity::audit::audit_current;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RebuildReport {
     pub rows_rebuilt: usize,
     pub drift_after: usize,

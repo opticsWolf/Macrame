@@ -640,6 +640,7 @@ pub fn cleanup_expired_snapshots(snapshots_dir: &Path) -> Result<usize> {
 /// primary key, so the interval trades a negligible read against how promptly a
 /// burst of writes is noticed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SnapshotCadence {
     /// Write an anchor once the log has grown this many entries past the last.
     pub every_entries: i64,
@@ -653,6 +654,27 @@ impl Default for SnapshotCadence {
             every_entries: 10_000,
             poll_interval: std::time::Duration::from_secs(5),
         }
+    }
+}
+
+impl SnapshotCadence {
+    // `#[non_exhaustive]` since 0.15.13 (W15.3, C-11, D-255), which needs these
+    // two so a caller can still say what they mean: the struct is `Copy`, so
+    // the setters take `self` and the chain costs nothing.
+
+    /// How far the log may grow past the last anchor — the
+    /// [`every_entries`](Self::every_entries) field.
+    pub fn every_entries(mut self, entries: i64) -> Self {
+        self.every_entries = entries;
+        self
+    }
+
+    /// How often to check that distance — the
+    /// [`poll_interval`](Self::poll_interval) field, which is the cost knob
+    /// rather than the policy one.
+    pub fn poll_interval(mut self, interval: std::time::Duration) -> Self {
+        self.poll_interval = interval;
+        self
     }
 }
 

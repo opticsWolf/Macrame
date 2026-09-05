@@ -14,6 +14,7 @@ use crate::temporal::replay::PAYLOAD_VERSION;
 /// cell Jensen and Snodgrass's BCDM defines a bitemporal database as answering,
 /// and which no surface in this crate could express before W7.1.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct AsOf {
     /// *What was true.* Bounds a row against its own `valid_from`/`valid_to`.
     pub valid: Option<String>,
@@ -54,11 +55,46 @@ impl AsOf {
 
 /// Node attribute payload hydrated from concepts table or transaction_log.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct NodeAttributes {
     pub id: String,
     pub title: String,
     pub content: String,
     pub embedding_model: Option<String>,
+}
+
+impl NodeAttributes {
+    /// A node's attributes, with no embedding model recorded.
+    ///
+    /// The crate hydrates these; the constructor exists because callers
+    /// fabricate them — into a [`MaterializedState`](crate::temporal::MaterializedState)
+    /// bound for `save_snapshot`, or as the expected value of an assertion —
+    /// and 0.15.13's `#[non_exhaustive]` (W15.3, [D-255]) took the literal
+    /// away. `embedding_model` is set through
+    /// [`embedding_model()`](Self::embedding_model) rather than here, on the
+    /// crate's usual split: what a value cannot be without goes in `new`, and
+    /// what it can goes in a setter.
+    ///
+    /// [D-255]: ../../docs/architecture/s13-decision-register.md#d-255
+    pub fn new(
+        id: impl Into<String>,
+        title: impl Into<String>,
+        content: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            title: title.into(),
+            content: content.into(),
+            embedding_model: None,
+        }
+    }
+
+    /// Record which model embedded this node — the
+    /// [`embedding_model`](Self::embedding_model) field.
+    pub fn embedding_model(mut self, model: impl Into<String>) -> Self {
+        self.embedding_model = Some(model.into());
+        self
+    }
 }
 
 use crate::util::limits::HYDRATE_CHUNK;

@@ -2,6 +2,7 @@ use crate::util::timestamp::OPEN_SENTINEL;
 
 /// Half-open valid time interval [valid_from, valid_to).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
 pub struct Interval {
     pub valid_from: String,
     pub valid_to: String,

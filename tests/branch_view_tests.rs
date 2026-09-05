@@ -233,6 +233,7 @@ async fn a_view_refuses_a_write_that_names_another_lineage() {
         Err(macrame::error::BulkInterrupted {
             written: 0,
             cause: DbError::BranchMismatch { .. },
+            ..
         })
     ));
     assert!(matches!(

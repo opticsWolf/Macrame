@@ -138,19 +138,15 @@ fn test_snapshot_save_load_roundtrip() {
     let harness = TestHarness::new();
     let snapshots_dir = harness.temp_dir.path().join("snapshots");
 
-    let state = MaterializedState {
-        seq_anchor: 100,
-        timestamp: "2026-01-01T00:00:00.000000Z".to_string(),
-        concepts: std::collections::HashMap::new(),
-        edges: vec![macrame::temporal::EdgeBelief::new(
-            "c1",
-            "c2",
-            "KNOWS",
-            "2026-01-01T00:00:00.000000Z",
-            "9999-12-31T23:59:59.999999Z",
-        )],
-        predates_recorded_history: false,
-    };
+    let mut state = MaterializedState::empty("2026-01-01T00:00:00.000000Z");
+    state.seq_anchor = 100;
+    state.edges = vec![macrame::temporal::EdgeBelief::new(
+        "c1",
+        "c2",
+        "KNOWS",
+        "2026-01-01T00:00:00.000000Z",
+        "9999-12-31T23:59:59.999999Z",
+    )];
 
     let path = save_snapshot(&snapshots_dir, &state).unwrap();
     assert!(path.exists());

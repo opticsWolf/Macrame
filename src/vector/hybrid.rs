@@ -37,6 +37,7 @@ pub const RRF_K: usize = 60;
 /// from keyword" says exactly why a document placed where it did. This is the
 /// same reasoning that makes `FilteredVectorSearch` return its `CostEstimate`.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct HybridHit {
     pub concept_id: String,
     /// Fused RRF score. Higher is better; the scale is not meaningful on its own.

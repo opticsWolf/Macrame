@@ -45,11 +45,9 @@ async fn write_a_lot(db: &Database) {
 async fn open(harness: &TestHarness, wal_autocheckpoint: WalCheckpointPolicy) -> Database {
     Database::open_tuned(
         &harness.db_path,
-        Tuning {
-            cadence: CadencePolicy::Disabled,
-            wal_autocheckpoint,
-            ..Default::default()
-        },
+        Tuning::default()
+            .cadence(CadencePolicy::Disabled)
+            .wal_autocheckpoint(wal_autocheckpoint),
     )
     .await
     .unwrap()
@@ -215,10 +213,7 @@ async fn a_bulk_import_with_the_checkpointer_off_reclaims_and_keeps_its_rows() {
 /// `Debug` dump.
 #[test]
 fn a_zero_threshold_is_kept_as_the_caller_wrote_it() {
-    let tuning = Tuning {
-        wal_autocheckpoint: WalCheckpointPolicy::EveryPages(0),
-        ..Default::default()
-    };
+    let tuning = Tuning::default().wal_autocheckpoint(WalCheckpointPolicy::EveryPages(0));
     assert_eq!(
         tuning.wal_autocheckpoint,
         WalCheckpointPolicy::EveryPages(0),

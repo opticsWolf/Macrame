@@ -7,6 +7,7 @@ use thiserror::Error;
 /// knows what they asserted and not what it collided with, and a message naming
 /// only the other interval reads as though the assertion were the innocent one.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Overlap {
     pub source_id: String,
     pub target_id: String,
@@ -31,6 +32,39 @@ pub struct Overlap {
 }
 
 impl Overlap {
+    /// The collision, as the edge it is about and the two intervals.
+    ///
+    /// Grouped rather than taken as eight strings, because the grouping is the
+    /// struct's actual shape — D-075 boxed it out of the enum precisely
+    /// because it is two intervals — and eight positional `String`s is a
+    /// signature in which `existing_from` and `valid_from` can be swapped
+    /// without the compiler noticing. Added in 0.15.13 with
+    /// `#[non_exhaustive]` (W15.3, [D-255]): the crate raises this error and no
+    /// caller has to build one, but our own binding builds a sample of every
+    /// variant to check its error mapping, and a type nothing outside the crate
+    /// can construct is a type nothing outside the crate can test against.
+    ///
+    /// [D-255]: ../docs/architecture/s13-decision-register.md#d-255
+    pub fn new(
+        source_id: impl Into<String>,
+        target_id: impl Into<String>,
+        edge_type: impl Into<String>,
+        asserted: (impl Into<String>, impl Into<String>),
+        existing: (impl Into<String>, impl Into<String>),
+        within_batch: bool,
+    ) -> Self {
+        Self {
+            source_id: source_id.into(),
+            target_id: target_id.into(),
+            edge_type: edge_type.into(),
+            valid_from: asserted.0.into(),
+            valid_to: asserted.1.into(),
+            existing_from: existing.0.into(),
+            existing_to: existing.1.into(),
+            within_batch,
+        }
+    }
+
     /// The message's closing clause: where the second interval came from.
     ///
     /// A method rather than two `#[error]` strings, because one variant gets
@@ -919,6 +953,7 @@ pub type Result<T> = std::result::Result<T, DbError>;
 /// [`write_analytics_annotations`]: crate::Database::write_analytics_annotations
 /// [D-181]: ../../docs/architecture/s13-decision-register.md#d-181
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct BulkInterrupted {
     /// Rows the chunks that finished before the stop committed, and which are
     /// still committed. Zero is an ordinary value: the first chunk can fail.

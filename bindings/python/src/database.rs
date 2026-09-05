@@ -375,17 +375,24 @@ impl PyDatabase {
         future_stamps: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
         let cadence = to_cadence(snapshot_every_entries, snapshot_poll_seconds)?;
-        let tuning = macrame::Tuning {
-            cadence: match cadence {
+        // The two cache sizes arrive from Python as `Option<i32>` where the
+        // setter takes an `i32`, so they are applied only when present —
+        // which is the same thing `..Default::default()` did for them, said
+        // once per field instead of once for the struct.
+        let mut tuning = macrame::Tuning::default()
+            .cadence(match cadence {
                 Some(c) => macrame::CadencePolicy::Every(c),
                 None => macrame::CadencePolicy::Disabled,
-            },
-            wal_autocheckpoint: to_wal_policy(wal_autocheckpoint)?,
-            writer_cache_size,
-            reader_cache_size,
-            future_stamps: to_future_stamp_policy(future_stamps)?,
-            ..Default::default()
-        };
+            })
+            .wal_autocheckpoint(to_wal_policy(wal_autocheckpoint)?)
+            .future_stamps(to_future_stamp_policy(future_stamps)?);
+        if let Some(size) = writer_cache_size {
+            tuning = tuning.writer_cache_size(size);
+        }
+        if let Some(size) = reader_cache_size {
+            tuning = tuning.reader_cache_size(size);
+        }
+        let tuning = tuning;
 
         let owned = path.clone();
         let db =
@@ -430,14 +437,12 @@ impl PyDatabase {
         snapshot_poll_seconds: f64,
     ) -> PyResult<Self> {
         let cadence = to_cadence(snapshot_every_entries, snapshot_poll_seconds)?;
-        let tuning = macrame::Tuning {
-            cadence: match cadence {
+        let tuning = macrame::Tuning::default()
+            .cadence(match cadence {
                 Some(c) => macrame::CadencePolicy::Every(c),
                 None => macrame::CadencePolicy::Disabled,
-            },
-            clock: Some(clock.inner.clone()),
-            ..Default::default()
-        };
+            })
+            .clock(clock.inner.clone());
 
         let owned = path.clone();
         let db =
@@ -2072,10 +2077,11 @@ fn to_cadence(
              got {snapshot_poll_seconds}"
         )));
     }
-    Ok(Some(SnapshotCadence {
-        every_entries: n,
-        poll_interval: std::time::Duration::from_secs_f64(snapshot_poll_seconds),
-    }))
+    Ok(Some(
+        SnapshotCadence::default()
+            .every_entries(n)
+            .poll_interval(std::time::Duration::from_secs_f64(snapshot_poll_seconds)),
+    ))
 }
 
 /// `None` / `"disabled"` / a positive page count → a [`WalCheckpointPolicy`].

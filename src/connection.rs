@@ -235,6 +235,7 @@ impl CancelToken {
 /// Reported *after* the chunk has committed, so `written` is a count of rows
 /// that are in the database and will stay there even if the next chunk fails.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct BulkProgress {
     /// Rows committed so far, across every chunk including this one.
     pub written: usize,
@@ -671,6 +672,7 @@ impl ConceptUpsert {
 /// other overwrote the concept's `content` with the label and recorded every
 /// analytics rerun as a fresh version of the world.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Annotation {
     pub concept_id: String,
     /// Namespaced by convention, e.g. `louvain.community`, `kcore.shell`.
@@ -770,6 +772,7 @@ pub(crate) enum HighPriCommand {
 /// that did nothing and a checkpoint that reclaimed a 400 MB WAL are the same
 /// `Ok(())`, and the difference is the entire reason a caller asked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct CheckpointReport {
     /// `true` when SQLite could not complete the requested mode because a
     /// reader or writer was in the way.
@@ -1320,32 +1323,44 @@ impl WalCheckpointPolicy {
 /// (`wal_autocheckpoint`, and a page cache each for the writer and the
 /// readers), which is the point at which the naming stops being possible.
 ///
-/// **`Default` plus functional update is the whole design.** They make a new
-/// knob an additive change: callers construct with `..Default::default()` and
-/// keep compiling, and the fields that arrive after them are the ones they did
-/// not ask about. That is not a hypothetical — W5.1 ships this struct with two
-/// fields, and W5.3/W5.4 add the three tuning knobs to it without touching a
-/// caller.
+/// **Setters plus `#[non_exhaustive]` are the whole design** (0.15.13, W15.3,
+/// [C-11], [D-255]). They make a new knob an additive change: callers write
+/// `Tuning::default().cadence(..)`, and the fields that arrive after them are
+/// the ones they did not ask about. That is not a hypothetical — W5.1 shipped
+/// this struct with two fields, and W5.3/W5.4 added three more without
+/// touching a caller.
 ///
-/// # Why this is *not* `#[non_exhaustive]`
+/// # Why the attribute needed the setters, and why 0.5.1's answer was the
+/// other one
 ///
-/// The plan for this wave specified `#[non_exhaustive]` alongside `Default`,
-/// on the usual reasoning that the attribute is what makes a struct growable.
-/// It does not compile: a `#[non_exhaustive]` **struct** cannot be built with
-/// literal syntax outside its own crate *at all*, and the functional-update
-/// form is literal syntax, so `Tuning { cadence, ..Default::default() }` is
-/// `E0639` for every external caller — the exact expression the attribute was
-/// added to protect. (The rule differs from `#[non_exhaustive]` on an enum,
-/// which only forces a wildcard arm; [`CadencePolicy`] keeps it for that
-/// reason.) The two ways to have both are a builder with setters, or plain
-/// `Default` — and `Default` is chosen because the field-literal form is the
-/// legible one, and because the growth this needs to survive is *additive*
-/// fields, which `..Default::default()` already absorbs.
+/// D-155 specified `#[non_exhaustive]` for this struct and then could not
+/// ship it, on a fact that is still true: a `#[non_exhaustive]` **struct**
+/// cannot be built with literal syntax outside its own crate *at all*, and
+/// the functional-update form is literal syntax, so
+/// `Tuning { cadence, ..Default::default() }` is `E0639` for every external
+/// caller — the exact expression the attribute was there to protect. (The rule
+/// differs from `#[non_exhaustive]` on an enum, which only forces a wildcard
+/// arm; [`CadencePolicy`] has kept it for that reason since W4.2.) D-155 named
+/// the two ways to have both — *a builder with setters, or plain `Default`* —
+/// and chose `Default`, because the field-literal form is the legible one.
 ///
-/// The cost is real and worth stating: a caller who writes an exhaustive
-/// literal, with no `..Default::default()`, breaks when a field is added. That
-/// is a compile error at the call site with an obvious fix, not a silent
-/// behaviour change, and it is the price of the readable form.
+/// **What changed is not the argument but the deadline.** `Default` alone
+/// leaves the growth additive only for callers who wrote
+/// `..Default::default()`; a caller who wrote the exhaustive literal breaks on
+/// the next field. Before 1.0 that is a compile error with an obvious fix.
+/// After it, it is a major version — and this struct is the one in the crate
+/// whose whole documented purpose is to keep acquiring fields. So the release
+/// that is still allowed to break callers pays D-155's other price and writes
+/// the setters, which is the half of its own analysis it declined at the time.
+///
+/// **The fields stay `pub` and stay readable**, and on a value you own they
+/// stay assignable: `let mut t = Tuning::default(); t.cadence = ..;` compiles
+/// outside this crate exactly as it did. What the attribute forbids is the
+/// *literal*, which is the one form that enumerates every field and therefore
+/// the one form a new field can break.
+///
+/// [C-11]: ../../docs/Macrame%20Update%20Plan%20v0.16.0.md
+/// [D-255]: ../../docs/architecture/s13-decision-register.md#d-255
 ///
 /// # The three constructors stay
 ///
@@ -1358,15 +1373,13 @@ impl WalCheckpointPolicy {
 /// # async fn f() -> macrame::Result<()> {
 /// let db = Database::open_tuned(
 ///     "graph.db",
-///     Tuning {
-///         cadence: CadencePolicy::Disabled,
-///         ..Default::default()
-///     },
+///     Tuning::default().cadence(CadencePolicy::Disabled),
 /// )
 /// .await?;
 /// # Ok(()) }
 /// ```
 #[derive(Clone, Default)]
+#[non_exhaustive]
 pub struct Tuning {
     /// What the snapshot cadence should do. Defaults to
     /// [`SnapshotCadence::default`], as [`Database::open`] does.
@@ -1436,11 +1449,64 @@ pub struct Tuning {
     pub future_stamps: FutureStampPolicy,
 }
 
-// `Clock` is not `Debug` — it is a behavioural trait with two methods and
-// requiring `Debug` of every implementor to print a handle here would be the
-// tail wagging the dog. So the field is reported as present-or-absent, which is
-// the only part of it a reader of a `Tuning` dump can act on.
 impl Tuning {
+    // The setters below are what make `#[non_exhaustive]` payable (0.15.13,
+    // W15.3, D-255). One per field, named after it, taking `self` — so
+    // `Tuning::default().cadence(x).writer_cache_size(y)` is an expression, and
+    // a field added later is a method added later rather than a break. They are
+    // deliberately not clever: no `Into`, no grouping of two knobs under one
+    // name, nothing that would have to be redesigned the first time a field
+    // does not fit the pattern.
+
+    /// What the snapshot cadence should do — the [`cadence`](Self::cadence)
+    /// field.
+    pub fn cadence(mut self, cadence: CadencePolicy) -> Self {
+        self.cadence = cadence;
+        self
+    }
+
+    /// Inject a clock — the [`clock`](Self::clock) field.
+    ///
+    /// Takes the clock rather than an `Option`, because `None` is what
+    /// [`Tuning::default`] already holds and a setter whose argument can undo
+    /// itself invites `clock(None)` as a way of saying nothing.
+    /// [`Database::open_with_clock`] documents the flooring this is subject to;
+    /// read it before injecting one against a non-empty file.
+    pub fn clock(mut self, clock: Arc<dyn Clock>) -> Self {
+        self.clock = Some(clock);
+        self
+    }
+
+    /// When SQLite checkpoints the WAL on its own — the
+    /// [`wal_autocheckpoint`](Self::wal_autocheckpoint) field.
+    pub fn wal_autocheckpoint(mut self, policy: WalCheckpointPolicy) -> Self {
+        self.wal_autocheckpoint = policy;
+        self
+    }
+
+    /// Page cache for the write connection, in SQLite's units — the
+    /// [`writer_cache_size`](Self::writer_cache_size) field, which documents
+    /// why negative means KiB and positive means pages.
+    pub fn writer_cache_size(mut self, size: i32) -> Self {
+        self.writer_cache_size = Some(size);
+        self
+    }
+
+    /// Page cache for every read-only connection — the
+    /// [`reader_cache_size`](Self::reader_cache_size) field, which documents
+    /// why this is not the same number as the writer's.
+    pub fn reader_cache_size(mut self, size: i32) -> Self {
+        self.reader_cache_size = Some(size);
+        self
+    }
+
+    /// What to do about a stored `recorded_at` in the future — the
+    /// [`future_stamps`](Self::future_stamps) field.
+    pub fn future_stamps(mut self, policy: FutureStampPolicy) -> Self {
+        self.future_stamps = policy;
+        self
+    }
+
     /// The `Option<SnapshotCadence>` the three older constructors take, mapped
     /// onto the tri-state. `None` there means *disabled*, which is why
     /// [`CadencePolicy`] exists — see its docs.
@@ -1459,6 +1525,10 @@ impl Tuning {
     }
 }
 
+// `Clock` is not `Debug` — it is a behavioural trait with two methods and
+// requiring `Debug` of every implementor to print a handle here would be the
+// tail wagging the dog. So the field is reported as present-or-absent, which is
+// the only part of it a reader of a `Tuning` dump can act on.
 impl std::fmt::Debug for Tuning {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Tuning")
@@ -1528,6 +1598,12 @@ impl Database {
     /// grows: every knob 0.13.0 adds arrives as a field here rather than as a
     /// fourth `open_*`. See [`Tuning`] for why the struct is
     /// `#[non_exhaustive]` and why that makes the growth additive.
+    ///
+    /// That sentence was written at 0.12.12 and was false until 0.15.13: the
+    /// struct was *not* `#[non_exhaustive]`, and [`Tuning`]'s own docs carried
+    /// a section arguing at length that it should not be. Two documents in one
+    /// file contradicting each other for eleven releases, which is the shape
+    /// C-16 is about; W15.3 resolved it by making this one true.
     pub async fn open_tuned(path: impl AsRef<Path>, tuning: Tuning) -> Result<Self> {
         Self::open_inner(path.as_ref(), tuning).await
     }

@@ -30,10 +30,7 @@ fn wal_bytes(harness: &TestHarness) -> u64 {
 async fn db(harness: &TestHarness) -> Database {
     Database::open_tuned(
         &harness.db_path,
-        Tuning {
-            cadence: CadencePolicy::Disabled,
-            ..Default::default()
-        },
+        Tuning::default().cadence(CadencePolicy::Disabled),
     )
     .await
     .unwrap()

@@ -7,6 +7,7 @@ use crate::schema::ddl::ARCHIVE_SESSION_MARKER;
 
 /// Outcome of one archive session.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ArchiveReport {
     pub links_archived: usize,
     /// Concepts moved to `cold.concepts` (0.9.0, C2). Always `0` before v9,
@@ -1288,6 +1289,7 @@ async fn archive_branch_concepts(
 
 /// Outcome of one rehydration (0.9.0, C3).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RehydrateReport {
     /// Concepts moved back into the hot table.
     pub concepts_rehydrated: usize,

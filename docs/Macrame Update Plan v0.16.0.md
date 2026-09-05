@@ -211,9 +211,23 @@ The fold partitions on `(entity_id, branch_id)` and orders by `seq_id`; no index
 Found on the way: **two other folds read this table** and the index reached both. `links_at_tx` trades its `recorded_at` seek for the window's order and has a crossing at just under half the log — −22% at the wide bound, +31% at the narrow one — so four plan pins are re-blessed with that table written beside them, and steering it back with a unary `+` is refused because it spends the common case for the rare one. The concept hydrate moves off `idx_txlog_entity` and **gains nothing**: it partitions on `entity_id` alone, so the sort survives, at +8% of a 0.10 ms call. Recorded rather than repaired.
 
 
-### W15.3 · 0.15.11 — builders and `#[non_exhaustive]` (C-11)
+### W15.3 · 0.15.13 — builders and `#[non_exhaustive]` (C-11)
 
 `Tuning`, `TraversalBuilder` and `SnapshotCadence` have public fields, so any field added after 1.0 is a major version. Each gains a builder, the struct gains `#[non_exhaustive]`, and the fields stay readable. Breaking, so it lands in this cycle or not before 1.0. The surface count moves and Appendix D.1 with it. `api-review-0.16.0.md` is written against `api-review-0.14.0.md`'s method ([D-212](architecture/s13-decision-register.md#d-212)).
+
+**Shipped as 0.15.13, [D-255](architecture/s13-decision-register.md#d-255).** Four departures, and the first is the item's scope.
+
+*It is not three structs, it is twenty-nine.* Counted from the checked-in surface, **twenty-one** public structs had public fields and no attribute — eight already had it — and the argument for each is the argument the paragraph above makes for `Tuning`. All of them are in this release. There is one window in which any of them may break a caller, and taking it twice for one decision is the worse trade.
+
+*The attribute has a second failure mode, in the opposite direction, and it is silent.* On a struct nothing else can build, `#[non_exhaustive]` makes the type **unconstructible outside the crate** — and the defining crate keeps compiling, because its own literals stay legal. Three types hit it: `Overlap` (built only by the binding's `DbError` sample), `NodeAttributes` (test fixtures), and `MaterializedState`, which `save_snapshot` takes *as a parameter*. Each gained a constructor, and the general case gained `tests/api_growth_tests.rs` — a registry of all twenty-nine with the reason per entry, asserted against the baseline. Its setter-per-field check caught `ConceptUpsert` and `ReadPlan`, attributed releases ago and never checked for it.
+
+*A deliberate canary had to be killed.* `tuning_tests` carried a call naming every `Tuning` field on purpose, because [D-155](architecture/s13-decision-register.md#d-155) wanted the cost of its choice visible; it broke three times as designed, in W5.3, W5.4 and W7.4. The literal is illegal now, so the registry asserts what the canary could only exhibit — over twenty-nine types instead of one.
+
+*The gate's own document had been unre-runnable for eighteen releases.* `api-review-0.14.0.md` says *"regenerate with the script recorded in D-212"*; D-212 records no script, and the file's header points at `scripts/../`. So the document quoting [D-205](architecture/s13-decision-register.md#d-205)'s *a review nobody can re-run is a review nobody can check* was itself one. `scripts/api_review.py` is the method made executable, and it needs neither a worktree nor a nightly toolchain, because both sides are now `git show <rev>:docs/architecture/public-api.txt`.
+
+Found on the way: the review reports **+38 items and zero removals**, in a release that breaks callers. `#[non_exhaustive]` removes no item, path or signature — it removes a *form a caller may write*, which `cargo-public-api` cannot see. Written into the review with the instrument that sees each kind of movement, so a later reader does not read "nothing removed" as "nothing broke". Surface **1,693 → 1,730**, `#[non_exhaustive]` types **21 → 44**.
+
+Eight mutations and **five survived**, which is the worst ratio of the cycle and lands on the release that was about instruments. Two were setters assigning the wrong field or none — the name was checked against the baseline and the *value* was checked nowhere, and `writer_cache_size` writing into `reader_cache_size` is a failure mode this release created, since a struct literal names each field exactly once. One was `Overlap::new` swapping the two intervals the tuple grouping keeps a *caller* from swapping. One was `NodeAttributes::embedding_model`. And one was deleting `#[non_exhaustive]` from `src/`, which left every assertion in the new pin green: they read the checked-in baseline, and the baseline is honest about a release rather than about a working tree. Three tests bought, all five now caught.
 
 ### W15.4 · 0.15.12 — a lazy read-only handle behind `diagnostic_conn` (C-9)
 
@@ -259,7 +273,7 @@ Merge to `main` after W16.2, tagged. `docs/releases/v0.16.0.md` written before t
 | 10 | 0.15.7 | W14.5 | hot-log verdict kept by the log (C-5) — **done** | `ddl.rs`, `migrations.rs`, `replay.rs` | schema v16; `log_integrity_probe`; numbers in D-249 |
 | 11 | 0.15.11 | W15.1 | typed rehydrate refusal — **done** | `error.rs`, `temporal/archive.rs`, `bindings/python` | `rehydrate_lineage_tests`, `test_rehydrate_lineage.py`; nine mutations; numbers in D-253 |
 | 12 | 0.15.12 | W15.2 | schema **v17**, the fold's partition index — **done** | `schema/{ddl,migrations}.rs`, `temporal/archive.rs`, `index_plan_tests.rs` | rung tests; fold plan pinned by absence of sort; four mutations, one survived and bought a test; numbers in D-254 |
-| 13 | 0.15.11 | W15.3 | builders + `#[non_exhaustive]` | `tuning.rs`, `builder.rs`, `snapshot.rs` | `api-review-0.16.0.md` |
+| 13 | 0.15.13 | W15.3 | `#[non_exhaustive]` on all 29, + 18 constructors | `connection.rs`, `builder.rs`, `snapshot.rs`, `as_of.rs`, `error.rs`, `replay.rs` | `api-review-0.16.0.md`, `api_growth_tests.rs` |
 | 14 | 0.15.12 | W15.4 | lazy diagnostic handle | `connection.rs` | — |
 | 15 | 0.15.13 | W16.1 | ancestry in Rust | `plan.rs`, `branch.rs` | differential test against the CTE |
 | 16 | 0.15.14 | W16.2 | hygiene batch | various | one register row per item |

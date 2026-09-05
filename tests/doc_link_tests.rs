@@ -47,6 +47,10 @@ const DOCS: &[(&str, &str)] = &[
         include_str!("../docs/architecture/api-review-0.14.0.md"),
     ),
     (
+        "api-review-0.16.0.md",
+        include_str!("../docs/architecture/api-review-0.16.0.md"),
+    ),
+    (
         "appendices.md",
         include_str!("../docs/architecture/appendices.md"),
     ),
@@ -221,15 +225,15 @@ fn every_document_in_the_directory_is_checked() {
 /// the third and the chain still *looks* right from either end while skipping
 /// the new document entirely.
 ///
-/// Two documents are deliberately outside the chain, and the list is here
+/// Three documents are deliberately outside the chain, and the list is here
 /// rather than inline so that adding to it is a decision someone has to write
 /// down. `REJOIN.md` links to the index and nothing links to it.
-/// `api-review-0.14.0.md` is **generated** (D-212): it is evidence a reader is
-/// sent to from the register, not a section of the architecture document, and
-/// giving it a `previous`/`next` would put a generated file in the middle of a
-/// narrative that has to be read in order.
+/// The two API reviews are **generated** (D-212, D-255): each is evidence a
+/// reader is sent to from the register, not a section of the architecture
+/// document, and giving one a `previous`/`next` would put a generated file in
+/// the middle of a narrative that has to be read in order.
 /// The documents that are in `DOCS` but not in the narrative chain.
-const OUTSIDE_THE_CHAIN: &[&str] = &["REJOIN.md", "api-review-0.14.0.md"];
+const OUTSIDE_THE_CHAIN: &[&str] = &["REJOIN.md", "api-review-0.14.0.md", "api-review-0.16.0.md"];
 
 #[test]
 fn the_navigation_footers_form_a_single_chain() {

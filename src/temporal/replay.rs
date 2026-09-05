@@ -124,6 +124,7 @@ impl EdgeBelief {
 
 /// Full materialized state reconstructed from transaction_log replay (§5.5).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct MaterializedState {
     pub seq_anchor: i64,
     pub timestamp: String,
@@ -163,8 +164,17 @@ pub struct MaterializedState {
 }
 
 impl MaterializedState {
-    /// The state before any log row has been applied.
-    fn empty(ts: &str) -> Self {
+    /// The state before any log row has been applied, at `ts`.
+    ///
+    /// Public since 0.15.13 (W15.3, [D-255]) because the struct became
+    /// `#[non_exhaustive]` in that release and [`save_snapshot`] takes one:
+    /// a caller who writes a snapshot of a state they assembled needs a way in
+    /// that is not the field literal. Assemble from here — the fields are
+    /// `pub` and stay assignable on a value you own.
+    ///
+    /// [`save_snapshot`]: crate::temporal::save_snapshot
+    /// [D-255]: ../../docs/architecture/s13-decision-register.md#d-255
+    pub fn empty(ts: &str) -> Self {
         Self {
             seq_anchor: 0,
             timestamp: ts.to_string(),
@@ -559,6 +569,7 @@ pub async fn verify_snapshot_chain(
 /// a chain that went wrong early can disagree about every row, and a report that
 /// is the size of the database is one nobody reads.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ChainCheck {
     pub timestamp: String,
     /// `seq_anchor` of the composed answer and of the genesis fold. These

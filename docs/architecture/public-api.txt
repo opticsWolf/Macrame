@@ -67,7 +67,7 @@ pub macrame::connection::CadencePolicy::Every(macrame::temporal::SnapshotCadence
 pub macrame::connection::WalCheckpointPolicy::Default
 pub macrame::connection::WalCheckpointPolicy::Disabled
 pub macrame::connection::WalCheckpointPolicy::EveryPages(u32)
-pub struct macrame::connection::Annotation
+#[non_exhaustive] pub struct macrame::connection::Annotation
 pub macrame::connection::Annotation::concept_id: alloc::string::String
 pub macrame::connection::Annotation::label: alloc::string::String
 pub macrame::connection::Annotation::value: alloc::string::String
@@ -80,7 +80,7 @@ pub fn macrame::connection::BulkControl::new() -> Self
 pub fn macrame::connection::BulkControl::on_progress(self, impl core::ops::function::Fn(macrame::connection::BulkProgress) + core::marker::Send + core::marker::Sync + 'static) -> Self
 impl core::fmt::Debug for macrame::connection::BulkControl
 pub fn macrame::connection::BulkControl::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-pub struct macrame::connection::BulkProgress
+#[non_exhaustive] pub struct macrame::connection::BulkProgress
 pub macrame::connection::BulkProgress::held: core::time::Duration
 pub macrame::connection::BulkProgress::rows: usize
 pub macrame::connection::BulkProgress::total: usize
@@ -90,7 +90,7 @@ impl macrame::connection::CancelToken
 pub fn macrame::connection::CancelToken::cancel(&self)
 pub fn macrame::connection::CancelToken::is_cancelled(&self) -> bool
 pub fn macrame::connection::CancelToken::new() -> Self
-pub struct macrame::connection::CheckpointReport
+#[non_exhaustive] pub struct macrame::connection::CheckpointReport
 pub macrame::connection::CheckpointReport::busy: bool
 pub macrame::connection::CheckpointReport::checkpointed_frames: u64
 pub macrame::connection::CheckpointReport::log_frames: u64
@@ -166,13 +166,20 @@ pub async fn macrame::connection::Database::load_subgraph(&self, &str, u32, &str
 pub async fn macrame::connection::Database::load_subgraph_with(&self, &macrame::graph::TraversalBuilder, &str, usize) -> macrame::error::Result<macrame::graph::Subgraph>
 impl core::ops::drop::Drop for macrame::connection::Database
 pub fn macrame::connection::Database::drop(&mut self)
-pub struct macrame::connection::Tuning
+#[non_exhaustive] pub struct macrame::connection::Tuning
 pub macrame::connection::Tuning::cadence: macrame::connection::CadencePolicy
 pub macrame::connection::Tuning::clock: core::option::Option<alloc::sync::Arc<dyn macrame::util::Clock>>
 pub macrame::connection::Tuning::future_stamps: macrame::FutureStampPolicy
 pub macrame::connection::Tuning::reader_cache_size: core::option::Option<i32>
 pub macrame::connection::Tuning::wal_autocheckpoint: macrame::connection::WalCheckpointPolicy
 pub macrame::connection::Tuning::writer_cache_size: core::option::Option<i32>
+impl macrame::connection::Tuning
+pub fn macrame::connection::Tuning::cadence(self, macrame::connection::CadencePolicy) -> Self
+pub fn macrame::connection::Tuning::clock(self, alloc::sync::Arc<dyn macrame::util::Clock>) -> Self
+pub fn macrame::connection::Tuning::future_stamps(self, macrame::FutureStampPolicy) -> Self
+pub fn macrame::connection::Tuning::reader_cache_size(self, i32) -> Self
+pub fn macrame::connection::Tuning::wal_autocheckpoint(self, macrame::connection::WalCheckpointPolicy) -> Self
+pub fn macrame::connection::Tuning::writer_cache_size(self, i32) -> Self
 impl core::fmt::Debug for macrame::connection::Tuning
 pub fn macrame::connection::Tuning::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub const macrame::connection::BULK_ATOMIC_WARN_HOLD: core::time::Duration
@@ -335,7 +342,7 @@ pub macrame::error::WriteOp::Edge
 pub macrame::error::WriteOp::Edge::edge_type: &'a str
 pub macrame::error::WriteOp::Edge::source_id: &'a str
 pub macrame::error::WriteOp::Edge::target_id: &'a str
-pub struct macrame::error::BulkInterrupted
+#[non_exhaustive] pub struct macrame::error::BulkInterrupted
 pub macrame::error::BulkInterrupted::cause: macrame::error::DbError
 pub macrame::error::BulkInterrupted::written: usize
 impl macrame::error::BulkInterrupted
@@ -346,7 +353,7 @@ impl core::error::Error for macrame::error::BulkInterrupted
 pub fn macrame::error::BulkInterrupted::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
 impl core::fmt::Display for macrame::error::BulkInterrupted
 pub fn macrame::error::BulkInterrupted::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-pub struct macrame::error::Overlap
+#[non_exhaustive] pub struct macrame::error::Overlap
 pub macrame::error::Overlap::edge_type: alloc::string::String
 pub macrame::error::Overlap::existing_from: alloc::string::String
 pub macrame::error::Overlap::existing_to: alloc::string::String
@@ -356,6 +363,7 @@ pub macrame::error::Overlap::valid_from: alloc::string::String
 pub macrame::error::Overlap::valid_to: alloc::string::String
 pub macrame::error::Overlap::within_batch: bool
 impl macrame::error::Overlap
+pub fn macrame::error::Overlap::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, (impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>), (impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>), bool) -> Self
 pub fn macrame::error::Overlap::provenance(&self) -> &'static str
 pub fn macrame::error::abort_kind(&libsql::errors::Error) -> macrame::error::AbortKind
 pub async fn macrame::error::classify(&libsql::connection::Connection, libsql::errors::Error, macrame::error::WriteOp<'_>) -> macrame::error::DbError
@@ -380,13 +388,13 @@ pub macrame::graph::WalkOutcome::Complete
 pub macrame::graph::WalkOutcome::LimitReached
 impl macrame::graph::WalkOutcome
 pub fn macrame::graph::WalkOutcome::hit_limit(self) -> bool
-pub struct macrame::graph::CostEstimate
+#[non_exhaustive] pub struct macrame::graph::CostEstimate
 pub macrame::graph::CostEstimate::candidates: macrame::graph::CandidateCount
 pub macrame::graph::CostEstimate::k_prime: usize
 pub macrame::graph::CostEstimate::post_filter_bytes: usize
 pub macrame::graph::CostEstimate::pre_filter_bytes: usize
 pub macrame::graph::CostEstimate::strategy: macrame::graph::VectorFilterStrategy
-pub struct macrame::graph::CostEstimator
+#[non_exhaustive] pub struct macrame::graph::CostEstimator
 pub macrame::graph::CostEstimator::byte_budget: usize
 pub macrame::graph::CostEstimator::corpus: usize
 pub macrame::graph::CostEstimator::vector_bytes: usize
@@ -459,7 +467,7 @@ pub fn macrame::graph::Subgraph::out_edges(&self, &str) -> &[macrame::graph::Edg
 pub fn macrame::graph::Subgraph::total_weight(&self) -> f64
 pub fn macrame::graph::Subgraph::weighted_degree(&self, &str) -> f64
 pub async fn macrame::graph::Subgraph::write_back_annotations(&self, &macrame::connection::Database, &str, &alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::string::String>) -> macrame::error::BulkResult<usize>
-pub struct macrame::graph::TraversalBuilder
+#[non_exhaustive] pub struct macrame::graph::TraversalBuilder
 pub macrame::graph::TraversalBuilder::as_of_recorded: core::option::Option<alloc::string::String>
 pub macrame::graph::TraversalBuilder::as_of_valid: core::option::Option<alloc::string::String>
 pub macrame::graph::TraversalBuilder::attribute_mode: core::option::Option<macrame::graph::AttributeMode>
@@ -512,7 +520,7 @@ pub macrame::integrity::ShadowStep::Fill::after: core::option::Option<alloc::str
 pub macrame::integrity::ShadowStep::Swap
 pub macrame::integrity::ShadowStep::Swap::build_start: alloc::string::String
 pub macrame::integrity::ShadowStep::Swap::epoch: u64
-pub struct macrame::integrity::RebuildReport
+#[non_exhaustive] pub struct macrame::integrity::RebuildReport
 pub macrame::integrity::RebuildReport::drift_after: usize
 pub macrame::integrity::RebuildReport::rows_rebuilt: usize
 pub async fn macrame::integrity::audit_current(&libsql::connection::Connection) -> macrame::error::Result<usize>
@@ -789,13 +797,13 @@ pub macrame::prelude::WalkOutcome::Complete
 pub macrame::prelude::WalkOutcome::LimitReached
 impl macrame::graph::WalkOutcome
 pub fn macrame::graph::WalkOutcome::hit_limit(self) -> bool
-pub struct macrame::prelude::Annotation
+#[non_exhaustive] pub struct macrame::prelude::Annotation
 pub macrame::prelude::Annotation::concept_id: alloc::string::String
 pub macrame::prelude::Annotation::label: alloc::string::String
 pub macrame::prelude::Annotation::value: alloc::string::String
 impl macrame::connection::Annotation
 pub fn macrame::connection::Annotation::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
-pub struct macrame::prelude::ArchiveReport
+#[non_exhaustive] pub struct macrame::prelude::ArchiveReport
 pub macrame::prelude::ArchiveReport::concepts_archived: usize
 pub macrame::prelude::ArchiveReport::horizon: core::option::Option<i64>
 pub macrame::prelude::ArchiveReport::links_archived: usize
@@ -824,7 +832,7 @@ pub fn macrame::connection::BulkControl::new() -> Self
 pub fn macrame::connection::BulkControl::on_progress(self, impl core::ops::function::Fn(macrame::connection::BulkProgress) + core::marker::Send + core::marker::Sync + 'static) -> Self
 impl core::fmt::Debug for macrame::connection::BulkControl
 pub fn macrame::connection::BulkControl::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-pub struct macrame::prelude::BulkInterrupted
+#[non_exhaustive] pub struct macrame::prelude::BulkInterrupted
 pub macrame::prelude::BulkInterrupted::cause: macrame::error::DbError
 pub macrame::prelude::BulkInterrupted::written: usize
 impl macrame::error::BulkInterrupted
@@ -835,7 +843,7 @@ impl core::error::Error for macrame::error::BulkInterrupted
 pub fn macrame::error::BulkInterrupted::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
 impl core::fmt::Display for macrame::error::BulkInterrupted
 pub fn macrame::error::BulkInterrupted::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-pub struct macrame::prelude::BulkProgress
+#[non_exhaustive] pub struct macrame::prelude::BulkProgress
 pub macrame::prelude::BulkProgress::held: core::time::Duration
 pub macrame::prelude::BulkProgress::rows: usize
 pub macrame::prelude::BulkProgress::total: usize
@@ -845,7 +853,7 @@ impl macrame::connection::CancelToken
 pub fn macrame::connection::CancelToken::cancel(&self)
 pub fn macrame::connection::CancelToken::is_cancelled(&self) -> bool
 pub fn macrame::connection::CancelToken::new() -> Self
-pub struct macrame::prelude::CheckpointReport
+#[non_exhaustive] pub struct macrame::prelude::CheckpointReport
 pub macrame::prelude::CheckpointReport::busy: bool
 pub macrame::prelude::CheckpointReport::checkpointed_frames: u64
 pub macrame::prelude::CheckpointReport::log_frames: u64
@@ -869,13 +877,13 @@ pub fn macrame::connection::ConceptUpsert::on_branch(self, macrame::branch::Bran
 pub fn macrame::connection::ConceptUpsert::retired(self, bool) -> Self
 pub fn macrame::connection::ConceptUpsert::valid_from(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn macrame::connection::ConceptUpsert::valid_to(self, impl core::convert::Into<alloc::string::String>) -> Self
-pub struct macrame::prelude::CostEstimate
+#[non_exhaustive] pub struct macrame::prelude::CostEstimate
 pub macrame::prelude::CostEstimate::candidates: macrame::graph::CandidateCount
 pub macrame::prelude::CostEstimate::k_prime: usize
 pub macrame::prelude::CostEstimate::post_filter_bytes: usize
 pub macrame::prelude::CostEstimate::pre_filter_bytes: usize
 pub macrame::prelude::CostEstimate::strategy: macrame::graph::VectorFilterStrategy
-pub struct macrame::prelude::CostEstimator
+#[non_exhaustive] pub struct macrame::prelude::CostEstimator
 pub macrame::prelude::CostEstimator::byte_budget: usize
 pub macrame::prelude::CostEstimator::corpus: usize
 pub macrame::prelude::CostEstimator::vector_bytes: usize
@@ -985,7 +993,7 @@ pub fn macrame::graph::FilteredVectorSearch::new(macrame::vector::ModelName, all
 pub fn macrame::graph::FilteredVectorSearch::probe_cap(self, usize) -> Self
 pub fn macrame::graph::FilteredVectorSearch::strategy(self, macrame::graph::VectorFilterStrategy) -> Self
 pub fn macrame::graph::FilteredVectorSearch::top_k(self, usize) -> Self
-pub struct macrame::prelude::HybridHit
+#[non_exhaustive] pub struct macrame::prelude::HybridHit
 pub macrame::prelude::HybridHit::concept_id: alloc::string::String
 pub macrame::prelude::HybridHit::keyword_rank: core::option::Option<usize>
 pub macrame::prelude::HybridHit::score: f64
@@ -1000,7 +1008,7 @@ pub fn macrame::vector::HybridSearch::new(macrame::vector::ModelName, impl core:
 pub fn macrame::vector::HybridSearch::raw_match(self, bool) -> Self
 pub fn macrame::vector::HybridSearch::rrf_k(self, usize) -> Self
 pub fn macrame::vector::HybridSearch::top_k(self, usize) -> Self
-pub struct macrame::prelude::Interval
+#[non_exhaustive] pub struct macrame::prelude::Interval
 pub macrame::prelude::Interval::valid_from: alloc::string::String
 pub macrame::prelude::Interval::valid_to: alloc::string::String
 impl macrame::temporal::Interval
@@ -1016,12 +1024,14 @@ pub macrame::prelude::KindSnapshot::over_budget: u64
 pub macrame::prelude::KindSnapshot::turns: u64
 impl macrame::metrics::KindSnapshot
 pub fn macrame::metrics::KindSnapshot::buckets(&self) -> &[u64]
-pub struct macrame::prelude::MaterializedState
+#[non_exhaustive] pub struct macrame::prelude::MaterializedState
 pub macrame::prelude::MaterializedState::concepts: std::collections::hash::map::HashMap<alloc::string::String, macrame::temporal::NodeAttributes>
 pub macrame::prelude::MaterializedState::edges: alloc::vec::Vec<macrame::temporal::EdgeBelief>
 pub macrame::prelude::MaterializedState::predates_recorded_history: bool
 pub macrame::prelude::MaterializedState::seq_anchor: i64
 pub macrame::prelude::MaterializedState::timestamp: alloc::string::String
+impl macrame::temporal::MaterializedState
+pub fn macrame::temporal::MaterializedState::empty(&str) -> Self
 #[non_exhaustive] pub struct macrame::prelude::MetricsSnapshot
 pub macrame::prelude::MetricsSnapshot::depth_samples: u64
 pub macrame::prelude::MetricsSnapshot::high_depth_max: u64
@@ -1043,7 +1053,7 @@ pub fn macrame::vector::ModelName::new(impl core::convert::AsRef<str>) -> macram
 pub fn macrame::vector::ModelName::table(&self) -> alloc::string::String
 impl core::fmt::Display for macrame::vector::ModelName
 pub fn macrame::vector::ModelName::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-pub struct macrame::prelude::Overlap
+#[non_exhaustive] pub struct macrame::prelude::Overlap
 pub macrame::prelude::Overlap::edge_type: alloc::string::String
 pub macrame::prelude::Overlap::existing_from: alloc::string::String
 pub macrame::prelude::Overlap::existing_to: alloc::string::String
@@ -1053,6 +1063,7 @@ pub macrame::prelude::Overlap::valid_from: alloc::string::String
 pub macrame::prelude::Overlap::valid_to: alloc::string::String
 pub macrame::prelude::Overlap::within_batch: bool
 impl macrame::error::Overlap
+pub fn macrame::error::Overlap::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, (impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>), (impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>), bool) -> Self
 pub fn macrame::error::Overlap::provenance(&self) -> &'static str
 #[non_exhaustive] pub struct macrame::prelude::ReadPlan
 pub macrame::prelude::ReadPlan::branch: core::option::Option<macrame::branch::BranchId>
@@ -1065,12 +1076,15 @@ pub fn macrame::plan::ReadPlan::new() -> Self
 pub fn macrame::plan::ReadPlan::on(self, macrame::branch::BranchId) -> Self
 pub fn macrame::plan::ReadPlan::recorded_at(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn macrame::plan::ReadPlan::valid_at(self, impl core::convert::Into<alloc::string::String>) -> Self
-pub struct macrame::prelude::RebuildReport
+#[non_exhaustive] pub struct macrame::prelude::RebuildReport
 pub macrame::prelude::RebuildReport::drift_after: usize
 pub macrame::prelude::RebuildReport::rows_rebuilt: usize
-pub struct macrame::prelude::SnapshotCadence
+#[non_exhaustive] pub struct macrame::prelude::SnapshotCadence
 pub macrame::prelude::SnapshotCadence::every_entries: i64
 pub macrame::prelude::SnapshotCadence::poll_interval: core::time::Duration
+impl macrame::temporal::SnapshotCadence
+pub fn macrame::temporal::SnapshotCadence::every_entries(self, i64) -> Self
+pub fn macrame::temporal::SnapshotCadence::poll_interval(self, core::time::Duration) -> Self
 impl core::default::Default for macrame::temporal::SnapshotCadence
 pub fn macrame::temporal::SnapshotCadence::default() -> Self
 pub struct macrame::prelude::SystemClock
@@ -1079,7 +1093,7 @@ pub async fn macrame::util::SystemClock::new(&libsql::connection::Connection, ma
 impl macrame::util::Clock for macrame::util::SystemClock
 pub fn macrame::util::SystemClock::now(&self) -> alloc::string::String
 pub fn macrame::util::SystemClock::raise_floor(&self, std::time::SystemTime)
-pub struct macrame::prelude::TraversalBuilder
+#[non_exhaustive] pub struct macrame::prelude::TraversalBuilder
 pub macrame::prelude::TraversalBuilder::as_of_recorded: core::option::Option<alloc::string::String>
 pub macrame::prelude::TraversalBuilder::as_of_valid: core::option::Option<alloc::string::String>
 pub macrame::prelude::TraversalBuilder::attribute_mode: core::option::Option<macrame::graph::AttributeMode>
@@ -1107,16 +1121,23 @@ pub fn macrame::graph::TraversalBuilder::new(impl core::convert::Into<alloc::str
 pub fn macrame::graph::TraversalBuilder::on_branch(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn macrame::graph::TraversalBuilder::plan(self, macrame::plan::ReadPlan) -> Self
 pub fn macrame::graph::TraversalBuilder::read_plan(&self) -> macrame::error::Result<macrame::plan::ReadPlan>
-pub struct macrame::prelude::Tuning
+#[non_exhaustive] pub struct macrame::prelude::Tuning
 pub macrame::prelude::Tuning::cadence: macrame::connection::CadencePolicy
 pub macrame::prelude::Tuning::clock: core::option::Option<alloc::sync::Arc<dyn macrame::util::Clock>>
 pub macrame::prelude::Tuning::future_stamps: macrame::FutureStampPolicy
 pub macrame::prelude::Tuning::reader_cache_size: core::option::Option<i32>
 pub macrame::prelude::Tuning::wal_autocheckpoint: macrame::connection::WalCheckpointPolicy
 pub macrame::prelude::Tuning::writer_cache_size: core::option::Option<i32>
+impl macrame::connection::Tuning
+pub fn macrame::connection::Tuning::cadence(self, macrame::connection::CadencePolicy) -> Self
+pub fn macrame::connection::Tuning::clock(self, alloc::sync::Arc<dyn macrame::util::Clock>) -> Self
+pub fn macrame::connection::Tuning::future_stamps(self, macrame::FutureStampPolicy) -> Self
+pub fn macrame::connection::Tuning::reader_cache_size(self, i32) -> Self
+pub fn macrame::connection::Tuning::wal_autocheckpoint(self, macrame::connection::WalCheckpointPolicy) -> Self
+pub fn macrame::connection::Tuning::writer_cache_size(self, i32) -> Self
 impl core::fmt::Debug for macrame::connection::Tuning
 pub fn macrame::connection::Tuning::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-pub struct macrame::prelude::VectorSearchResult
+#[non_exhaustive] pub struct macrame::prelude::VectorSearchResult
 pub macrame::prelude::VectorSearchResult::concept_id: alloc::string::String
 pub macrame::prelude::VectorSearchResult::score: f32
 pub const macrame::prelude::BULK_ATOMIC_WARN_HOLD: core::time::Duration
@@ -1192,7 +1213,7 @@ pub const macrame::schema::ddl::VERIFY_CONCEPTS_FTS: &str
 pub const macrame::schema::ddl::WEIGHT_CHECK: &str
 pub fn macrame::schema::ddl::create_embeddings_index(&macrame::vector::ModelName) -> alloc::string::String
 pub fn macrame::schema::ddl::create_embeddings_table(&macrame::vector::ModelName, usize) -> alloc::string::String
-pub struct macrame::schema::MigrationOutcome
+#[non_exhaustive] pub struct macrame::schema::MigrationOutcome
 pub macrame::schema::MigrationOutcome::from: u32
 pub macrame::schema::MigrationOutcome::to: u32
 impl macrame::schema::MigrationOutcome
@@ -1202,12 +1223,12 @@ pub fn macrame::schema::current_version() -> u32
 pub async fn macrame::schema::run_migrations(&libsql::connection::Connection) -> macrame::error::Result<macrame::schema::MigrationOutcome>
 pub async fn macrame::schema::seed_bootstrap(&libsql::connection::Connection) -> macrame::error::Result<()>
 pub mod macrame::temporal
-pub struct macrame::temporal::ArchiveReport
+#[non_exhaustive] pub struct macrame::temporal::ArchiveReport
 pub macrame::temporal::ArchiveReport::concepts_archived: usize
 pub macrame::temporal::ArchiveReport::horizon: core::option::Option<i64>
 pub macrame::temporal::ArchiveReport::links_archived: usize
 pub macrame::temporal::ArchiveReport::log_entries_archived: usize
-pub struct macrame::temporal::AsOf
+#[non_exhaustive] pub struct macrame::temporal::AsOf
 pub macrame::temporal::AsOf::recorded: core::option::Option<alloc::string::String>
 pub macrame::temporal::AsOf::valid: core::option::Option<alloc::string::String>
 impl macrame::temporal::AsOf
@@ -1215,7 +1236,7 @@ pub fn macrame::temporal::AsOf::bitemporal(impl core::convert::Into<alloc::strin
 pub fn macrame::temporal::AsOf::now() -> Self
 pub fn macrame::temporal::AsOf::recorded_at(impl core::convert::Into<alloc::string::String>) -> Self
 pub fn macrame::temporal::AsOf::valid_at(impl core::convert::Into<alloc::string::String>) -> Self
-pub struct macrame::temporal::ChainCheck
+#[non_exhaustive] pub struct macrame::temporal::ChainCheck
 pub macrame::temporal::ChainCheck::composed_anchor: i64
 pub macrame::temporal::ChainCheck::composed_concepts: usize
 pub macrame::temporal::ChainCheck::composed_edges: usize
@@ -1243,7 +1264,7 @@ pub fn macrame::temporal::EdgeBelief::belief_key(&self) -> alloc::string::String
 pub fn macrame::temporal::EdgeBelief::entity_id(&self) -> alloc::string::String
 pub fn macrame::temporal::EdgeBelief::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn macrame::temporal::EdgeBelief::on_branch(self, impl core::convert::Into<alloc::string::String>) -> Self
-pub struct macrame::temporal::Interval
+#[non_exhaustive] pub struct macrame::temporal::Interval
 pub macrame::temporal::Interval::valid_from: alloc::string::String
 pub macrame::temporal::Interval::valid_to: alloc::string::String
 impl macrame::temporal::Interval
@@ -1251,23 +1272,31 @@ pub fn macrame::temporal::Interval::contains(&self, &str) -> bool
 pub fn macrame::temporal::Interval::is_open(&self) -> bool
 pub fn macrame::temporal::Interval::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn macrame::temporal::Interval::overlaps(&self, &macrame::temporal::Interval) -> bool
-pub struct macrame::temporal::MaterializedState
+#[non_exhaustive] pub struct macrame::temporal::MaterializedState
 pub macrame::temporal::MaterializedState::concepts: std::collections::hash::map::HashMap<alloc::string::String, macrame::temporal::NodeAttributes>
 pub macrame::temporal::MaterializedState::edges: alloc::vec::Vec<macrame::temporal::EdgeBelief>
 pub macrame::temporal::MaterializedState::predates_recorded_history: bool
 pub macrame::temporal::MaterializedState::seq_anchor: i64
 pub macrame::temporal::MaterializedState::timestamp: alloc::string::String
-pub struct macrame::temporal::NodeAttributes
+impl macrame::temporal::MaterializedState
+pub fn macrame::temporal::MaterializedState::empty(&str) -> Self
+#[non_exhaustive] pub struct macrame::temporal::NodeAttributes
 pub macrame::temporal::NodeAttributes::content: alloc::string::String
 pub macrame::temporal::NodeAttributes::embedding_model: core::option::Option<alloc::string::String>
 pub macrame::temporal::NodeAttributes::id: alloc::string::String
 pub macrame::temporal::NodeAttributes::title: alloc::string::String
-pub struct macrame::temporal::RehydrateReport
+impl macrame::temporal::NodeAttributes
+pub fn macrame::temporal::NodeAttributes::embedding_model(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn macrame::temporal::NodeAttributes::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
+#[non_exhaustive] pub struct macrame::temporal::RehydrateReport
 pub macrame::temporal::RehydrateReport::concepts_rehydrated: usize
 pub macrame::temporal::RehydrateReport::rowids_reassigned: usize
-pub struct macrame::temporal::SnapshotCadence
+#[non_exhaustive] pub struct macrame::temporal::SnapshotCadence
 pub macrame::temporal::SnapshotCadence::every_entries: i64
 pub macrame::temporal::SnapshotCadence::poll_interval: core::time::Duration
+impl macrame::temporal::SnapshotCadence
+pub fn macrame::temporal::SnapshotCadence::every_entries(self, i64) -> Self
+pub fn macrame::temporal::SnapshotCadence::poll_interval(self, core::time::Duration) -> Self
 impl core::default::Default for macrame::temporal::SnapshotCadence
 pub fn macrame::temporal::SnapshotCadence::default() -> Self
 pub async fn macrame::temporal::archivable_concepts(&libsql::connection::Connection, &str) -> macrame::error::Result<alloc::vec::Vec<alloc::string::String>>
@@ -1332,7 +1361,7 @@ pub struct macrame::vector::EmbeddingCodec
 impl macrame::vector::EmbeddingCodec
 pub fn macrame::vector::EmbeddingCodec::decode(&[u8]) -> macrame::error::Result<alloc::vec::Vec<f32>>
 pub fn macrame::vector::EmbeddingCodec::encode(&[f32], usize, &str) -> macrame::error::Result<alloc::vec::Vec<u8>>
-pub struct macrame::vector::HybridHit
+#[non_exhaustive] pub struct macrame::vector::HybridHit
 pub macrame::vector::HybridHit::concept_id: alloc::string::String
 pub macrame::vector::HybridHit::keyword_rank: core::option::Option<usize>
 pub macrame::vector::HybridHit::score: f64
@@ -1355,7 +1384,7 @@ pub fn macrame::vector::ModelName::new(impl core::convert::AsRef<str>) -> macram
 pub fn macrame::vector::ModelName::table(&self) -> alloc::string::String
 impl core::fmt::Display for macrame::vector::ModelName
 pub fn macrame::vector::ModelName::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-pub struct macrame::vector::VectorSearchResult
+#[non_exhaustive] pub struct macrame::vector::VectorSearchResult
 pub macrame::vector::VectorSearchResult::concept_id: alloc::string::String
 pub macrame::vector::VectorSearchResult::score: f32
 pub const macrame::vector::RRF_K: usize
@@ -1511,7 +1540,7 @@ pub fn macrame::error::StatedInstants::fmt(&self, &mut core::fmt::Formatter<'_>)
 pub macrame::WalCheckpointPolicy::Default
 pub macrame::WalCheckpointPolicy::Disabled
 pub macrame::WalCheckpointPolicy::EveryPages(u32)
-pub struct macrame::Annotation
+#[non_exhaustive] pub struct macrame::Annotation
 pub macrame::Annotation::concept_id: alloc::string::String
 pub macrame::Annotation::label: alloc::string::String
 pub macrame::Annotation::value: alloc::string::String
@@ -1559,7 +1588,7 @@ pub fn macrame::connection::BulkControl::new() -> Self
 pub fn macrame::connection::BulkControl::on_progress(self, impl core::ops::function::Fn(macrame::connection::BulkProgress) + core::marker::Send + core::marker::Sync + 'static) -> Self
 impl core::fmt::Debug for macrame::connection::BulkControl
 pub fn macrame::connection::BulkControl::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-pub struct macrame::BulkInterrupted
+#[non_exhaustive] pub struct macrame::BulkInterrupted
 pub macrame::BulkInterrupted::cause: macrame::error::DbError
 pub macrame::BulkInterrupted::written: usize
 impl macrame::error::BulkInterrupted
@@ -1570,7 +1599,7 @@ impl core::error::Error for macrame::error::BulkInterrupted
 pub fn macrame::error::BulkInterrupted::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
 impl core::fmt::Display for macrame::error::BulkInterrupted
 pub fn macrame::error::BulkInterrupted::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-pub struct macrame::BulkProgress
+#[non_exhaustive] pub struct macrame::BulkProgress
 pub macrame::BulkProgress::held: core::time::Duration
 pub macrame::BulkProgress::rows: usize
 pub macrame::BulkProgress::total: usize
@@ -1580,7 +1609,7 @@ impl macrame::connection::CancelToken
 pub fn macrame::connection::CancelToken::cancel(&self)
 pub fn macrame::connection::CancelToken::is_cancelled(&self) -> bool
 pub fn macrame::connection::CancelToken::new() -> Self
-pub struct macrame::CheckpointReport
+#[non_exhaustive] pub struct macrame::CheckpointReport
 pub macrame::CheckpointReport::busy: bool
 pub macrame::CheckpointReport::checkpointed_frames: u64
 pub macrame::CheckpointReport::log_frames: u64
@@ -1664,7 +1693,7 @@ pub macrame::Divergence::target_id: alloc::string::String
 pub macrame::Divergence::valid_from: alloc::string::String
 pub macrame::Divergence::valid_to: alloc::string::String
 pub macrame::Divergence::weight: f64
-pub struct macrame::Overlap
+#[non_exhaustive] pub struct macrame::Overlap
 pub macrame::Overlap::edge_type: alloc::string::String
 pub macrame::Overlap::existing_from: alloc::string::String
 pub macrame::Overlap::existing_to: alloc::string::String
@@ -1674,6 +1703,7 @@ pub macrame::Overlap::valid_from: alloc::string::String
 pub macrame::Overlap::valid_to: alloc::string::String
 pub macrame::Overlap::within_batch: bool
 impl macrame::error::Overlap
+pub fn macrame::error::Overlap::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, (impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>), (impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>), bool) -> Self
 pub fn macrame::error::Overlap::provenance(&self) -> &'static str
 #[non_exhaustive] pub struct macrame::ReadPlan
 pub macrame::ReadPlan::branch: core::option::Option<macrame::branch::BranchId>
@@ -1686,13 +1716,20 @@ pub fn macrame::plan::ReadPlan::new() -> Self
 pub fn macrame::plan::ReadPlan::on(self, macrame::branch::BranchId) -> Self
 pub fn macrame::plan::ReadPlan::recorded_at(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn macrame::plan::ReadPlan::valid_at(self, impl core::convert::Into<alloc::string::String>) -> Self
-pub struct macrame::Tuning
+#[non_exhaustive] pub struct macrame::Tuning
 pub macrame::Tuning::cadence: macrame::connection::CadencePolicy
 pub macrame::Tuning::clock: core::option::Option<alloc::sync::Arc<dyn macrame::util::Clock>>
 pub macrame::Tuning::future_stamps: macrame::FutureStampPolicy
 pub macrame::Tuning::reader_cache_size: core::option::Option<i32>
 pub macrame::Tuning::wal_autocheckpoint: macrame::connection::WalCheckpointPolicy
 pub macrame::Tuning::writer_cache_size: core::option::Option<i32>
+impl macrame::connection::Tuning
+pub fn macrame::connection::Tuning::cadence(self, macrame::connection::CadencePolicy) -> Self
+pub fn macrame::connection::Tuning::clock(self, alloc::sync::Arc<dyn macrame::util::Clock>) -> Self
+pub fn macrame::connection::Tuning::future_stamps(self, macrame::FutureStampPolicy) -> Self
+pub fn macrame::connection::Tuning::reader_cache_size(self, i32) -> Self
+pub fn macrame::connection::Tuning::wal_autocheckpoint(self, macrame::connection::WalCheckpointPolicy) -> Self
+pub fn macrame::connection::Tuning::writer_cache_size(self, i32) -> Self
 impl core::fmt::Debug for macrame::connection::Tuning
 pub fn macrame::connection::Tuning::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub const macrame::CHUNK_BUDGET: core::time::Duration

@@ -125,6 +125,7 @@ impl CandidateCount {
 /// Returned rather than only logged, so a caller — and more importantly a test —
 /// can assert on the choice instead of scraping `tracing` output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct CostEstimate {
     pub strategy: VectorFilterStrategy,
     pub candidates: CandidateCount,
@@ -155,6 +156,7 @@ const ROW_BYTES: usize = ID_BYTES + std::mem::size_of::<f32>();
 /// both strategies in bytes and takes the minimum, and `byte_budget` is a hard
 /// ceiling on the candidate set rather than an unused field.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct CostEstimator {
     pub byte_budget: usize,
     /// Corpus size: how many vectors the model holds. Sets selectivity, and so

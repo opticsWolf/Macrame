@@ -259,10 +259,8 @@ async fn main() {
             let mut rows = Vec::new();
             for n in [100usize, 300, 600] {
                 let batch: Vec<Annotation> = (0..n)
-                    .map(|i| Annotation {
-                        concept_id: fixtures::node_id(i),
-                        label: "community".into(),
-                        value: format!("{}", i % 7),
+                    .map(|i| {
+                        Annotation::new(fixtures::node_id(i), "community", format!("{}", i % 7))
                     })
                     .collect();
                 let t = Instant::now();

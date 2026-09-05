@@ -27,25 +27,37 @@ let db = Database::open_with_cadence(path, Some(SnapshotCadence::default())).awa
 let db = Database::open_with_clock(path, None, Arc::new(FakeClock::new(t0))).await?;
 
 // The consolidated form (0.12.12, D-155). The three above stay and delegate
-// here; this is where every knob 0.13.0 adds arrives, because `#[non_exhaustive]`
-// plus `Default` make a new field additive for callers who wrote
-// `..Default::default()`. Note `CadencePolicy` rather than `Option<SnapshotCadence>`:
-// `None` in the older constructors means *disabled*, and a `Default`-derived
-// struct whose default silently stops writing anchors is a trap.
-let db = Database::open_tuned(path, Tuning {
-    cadence: CadencePolicy::Disabled,
+// here; this is where every knob 0.13.0 adds arrives. Since 0.15.13 the struct
+// is `#[non_exhaustive]` with a setter per field (W15.3, C-11, D-255), so a
+// field added later is a method added later. This paragraph claimed the
+// attribute from the day it was written and the struct did not carry it until
+// then -- one of three places that did, against `Tuning`'s own docs arguing at
+// length that it should not. Note `CadencePolicy` rather than
+// `Option<SnapshotCadence>`: `None` in the older constructors means *disabled*,
+// and a `Default`-derived struct whose default silently stops writing anchors
+// is a trap.
+let db = Database::open_tuned(path, Tuning::default()
+    .cadence(CadencePolicy::Disabled)
     // Applied to the write connection, the only one that commits (0.12.14,
     // D-157). Disabled is only correct paired with an explicit checkpoint();
     // the default stays at SQLite's 1,000 pages.
-    wal_autocheckpoint: WalCheckpointPolicy::Disabled,
+    .wal_autocheckpoint(WalCheckpointPolicy::Disabled)
     // Two knobs, not one (0.12.15, D-158): one long-lived writer holding the
     // lock, against read-only connections that are plural. SQLite's units --
-    // negative is KiB, positive is pages. None runs no pragma, so the default
+    // negative is KiB, positive is pages. Unset runs no pragma, so the default
     // stays SQLite's -2000.
-    writer_cache_size: Some(-64_000),
-    reader_cache_size: Some(-8_000),
-    ..Default::default()
-}).await?;
+    .writer_cache_size(-64_000)
+    .reader_cache_size(-8_000)
+    // What to do about a stored recorded_at in the future (0.13.5, D-178).
+    // Default refuses beyond a day; Allow opens the file to be read and does
+    // not repair it.
+    .future_stamps(FutureStampPolicy::Default)
+).await?;
+
+// The cadence is the same shape (0.15.13): two setters over a Default.
+let cadence = SnapshotCadence::default()
+    .every_entries(50_000)
+    .poll_interval(Duration::from_secs(30));
 
 // Accessors on the handle. There is no public write connection: the sole
 // write-capable connection lives inside the actor and cannot be named.
@@ -634,7 +646,7 @@ New in 0.13.38 ([D-211](s13-decision-register.md#d-211)). [Appendix A](appendice
 
 *Frozen* means a change requires a **major version**.
 
-**1. The public Rust API, item for item and path for path.** [`docs/architecture/public-api.txt`](public-api.txt) is the surface — **1,693 items**. No item is removed, no path stops resolving, and no signature narrows. Each item is reachable at exactly one canonical path, plus flat aliases at the crate root and in `macrame::prelude` ([D-208](s13-decision-register.md#d-208)). Held by `scripts/check_public_api.py` in CI and by `tests/public_path_tests.rs` in `cargo test`. The cycle that produced this surface was reviewed against 0.13.0 item by item before it was frozen — [`api-review-0.14.0.md`](api-review-0.14.0.md), [D-212](s13-decision-register.md#d-212) — which is the last release where that review is cheap.
+**1. The public Rust API, item for item and path for path.** [`docs/architecture/public-api.txt`](public-api.txt) is the surface — **1,730 items**. No item is removed, no path stops resolving, and no signature narrows. Each item is reachable at exactly one canonical path, plus flat aliases at the crate root and in `macrame::prelude` ([D-208](s13-decision-register.md#d-208)). Held by `scripts/check_public_api.py` in CI and by `tests/public_path_tests.rs` in `cargo test`. The cycle that produced this surface was reviewed against 0.13.0 item by item before it was frozen — [`api-review-0.14.0.md`](api-review-0.14.0.md), [D-212](s13-decision-register.md#d-212) — which is the last release where that review is cheap.
 
 **2. The ledger tables** — `concepts`, `links`, `transaction_log`. Additive only: `ALTER TABLE ADD COLUMN` and new indexes. A changed primary key, a dropped column or altered bitemporal semantics is a major version with an explicit ETL path, because bitemporal data is the hardest data to migrate: a rebuild means replaying history and recomputing transaction-time boundaries, which is rewriting the past ([D-036](s13-decision-register.md#d-036), [Doctrine III](s0-s3-foundations.md#doctrine-iii)).
 

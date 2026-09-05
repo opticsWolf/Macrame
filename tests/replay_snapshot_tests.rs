@@ -166,13 +166,9 @@ async fn an_empty_database_reconstructs_to_nothing() {
 }
 
 fn empty_state(seq_anchor: i64) -> MaterializedState {
-    MaterializedState {
-        seq_anchor,
-        timestamp: "2026-01-01T00:00:00.000000Z".to_string(),
-        concepts: Default::default(),
-        edges: Vec::new(),
-        predates_recorded_history: false,
-    }
+    let mut state = MaterializedState::empty("2026-01-01T00:00:00.000000Z");
+    state.seq_anchor = seq_anchor;
+    state
 }
 
 fn surviving_anchors(dir: &Path) -> Vec<i64> {
@@ -881,12 +877,7 @@ async fn an_archive_no_longer_disables_composition() {
     let mut planted = reconstruct(db.read_conn(), &now, None, None).await.unwrap();
     planted.concepts.insert(
         "GHOST".to_string(),
-        NodeAttributes {
-            id: "GHOST".to_string(),
-            title: "not in the ledger".to_string(),
-            content: String::new(),
-            embedding_model: None,
-        },
+        NodeAttributes::new("GHOST", "not in the ledger", ""),
     );
     save_snapshot(&snaps, &planted).unwrap();
 
@@ -1147,10 +1138,9 @@ fn snapshot_count(dir: &Path) -> usize {
 }
 
 fn fast_cadence(every: i64) -> macrame::temporal::SnapshotCadence {
-    macrame::temporal::SnapshotCadence {
-        every_entries: every,
-        poll_interval: std::time::Duration::from_millis(20),
-    }
+    macrame::temporal::SnapshotCadence::default()
+        .every_entries(every)
+        .poll_interval(std::time::Duration::from_millis(20))
 }
 
 /// **The cadence writes an anchor without anyone asking.**
@@ -1386,13 +1376,9 @@ async fn a_disabled_cadence_writes_nothing_until_close() {
 /// one of them passed for the wrong reason.
 fn state_on_day(seq: i64, day: u64) -> MaterializedState {
     let at = std::time::UNIX_EPOCH + std::time::Duration::from_secs(day * 86_400 + 12 * 3_600);
-    MaterializedState {
-        seq_anchor: seq,
-        timestamp: macrame::util::timestamp::format(at),
-        concepts: Default::default(),
-        edges: Vec::new(),
-        predates_recorded_history: false,
-    }
+    let mut state = MaterializedState::empty(&macrame::util::timestamp::format(at));
+    state.seq_anchor = seq;
+    state
 }
 
 /// **The daily tier keeps history the flat rule threw away.**

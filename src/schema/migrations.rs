@@ -258,6 +258,7 @@ const STEPS: &[Step] = &[
 /// incompatible and folded from genesis, correctly and expensively, with the
 /// only trace a `warn!` per skipped file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct MigrationOutcome {
     /// The version the file carried on the way in.
     pub from: u32,
