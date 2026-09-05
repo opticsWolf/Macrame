@@ -266,6 +266,14 @@ Found on the way: what this gives up is isolation between diagnostic callers, si
 
 Found on the way: nine mutations, seven caught, two survived. One is the code above, deleted rather than tested. The other treats a connection whose own pragma reads fail as clean rather than as suspect — a defensive default with no way to stage it, kept and written down rather than rounded to "caught".
 
+### W15.5b · 0.15.16 — the flag bounds writes, and one pragma bounds nothing (D-257 follow-up)
+
+**Shipped as 0.15.16, [D-258](architecture/s13-decision-register.md#d-258).** Doc-only. Not planned: it exists because a question about W15.5 — *can the residue still backfire in normal use?* — was answered by measuring rather than by re-reading the claim, and the claim was wrong for one pragma in seven.
+
+D-257 said the residue it could not scrub "cannot change any typed answer". `PRAGMA hard_heap_limit = 1` through `diagnostic_query` leaves the process unable to write, read, `checkpoint()`, `close()`, or open **any** database, permanently, with `out of memory`. It is a ceiling in the SQLite library, not on a connection: the read-only flag does not stop it and the scrub cannot reach it. Re-measured against the 0.15.13 per-call shape the result is identical, so it is not a cost of D-256 and no further hygiene addresses it — it belongs with the `ATTACH` warning as a property of arbitrary SQL.
+
+Written down in `src/connection.rs`, `bindings/python/src/database.rs`, §5.1.9 and the quick reference, with `tests_py/probes/diagnostic_global_pragmas.py` as the measurement. A probe rather than a test, because one arm ends its process. Not blocked: refusing statements by matching their text would not survive whitespace or a comment, would be invisible to a Rust caller holding the connection, and would read as a guarantee it is not.
+
 ### W16.1 · 0.15.13 — resolve ancestry once, in Rust (C-10, A-2)
 
 The `lineage` CTE becomes a bound `VALUES` table produced from W14.3's cache: `(branch_id, dist, cutoff)` per ancestor. The lowering emits it instead of the recursive CTE, differentially tested against the CTE it replaces on the branch fixture generator. `reconstruct_on(branch)` and a pure `resolve(&[Branch], id) -> Vec<Ancestor>` come with it. This is the form Turso can run, which is the Jacquard argument for doing it here first.
@@ -305,6 +313,7 @@ Merge to `main` after W16.2, tagged. `docs/releases/v0.16.0.md` written before t
 | 13 | 0.15.13 | W15.3 | `#[non_exhaustive]` on all 29, + 18 constructors | `connection.rs`, `builder.rs`, `snapshot.rs`, `as_of.rs`, `error.rs`, `replay.rs` | `api-review-0.16.0.md`, `api_growth_tests.rs` |
 | 14 | 0.15.14 | W15.4 | one diagnostic connection per handle | `connection.rs` | `diagnostic_conn_probe.rs`, `r15_diagnostic_path.py` |
 | 15 | 0.15.15 | W15.5 | the shared connection is scrubbed between callers | `connection.rs`, `database.rs` | `diagnostic_hygiene_probe.rs`, `diagnostic_conn_tests.rs`, `test_maintenance.py` |
+| 15b | 0.15.16 | W15.5b | `hard_heap_limit` through the side door ends the process — **done** | — (doc-only) | `diagnostic_global_pragmas.py` (probe, not a test) |
 | 15 | 0.15.13 | W16.1 | ancestry in Rust | `plan.rs`, `branch.rs` | differential test against the CTE |
 | 16 | 0.15.14 | W16.2 | hygiene batch | various | one register row per item |
 | 17 | 0.16.0 | — | release note before merge; merge; tag | `docs/releases/v0.16.0.md` | §8 |

@@ -204,6 +204,8 @@ impl Database {
 
 **`diagnostic_conn()`**: An OS-level read-only connection. Stronger than `read_conn()` because `PRAGMA query_only` can be reversed; `diagnostic_conn()` cannot. **One connection per handle since 0.15.14** ([D-256](architecture/s13-decision-register.md#d-256)) — opened on first use, not per call, because `connect()` was 51.5 µs of an 82.7 µs call and was this path's exposure to R15. Scrubbed on entry since 0.15.15 ([D-257](architecture/s13-decision-register.md#d-257)): an open transaction is rolled back, a connection carrying temp objects or an `ATTACH` is replaced, and `busy_timeout` and the cache size are restated. A pragma the crate does not set is still inherited by the next caller.
 
+**Do not feed it strings from elsewhere.** Read-only bounds writes to the file and nothing else. `ATTACH` reads any file the process can open, and `PRAGMA hard_heap_limit = 1` leaves the **entire process** unable to use SQLite — every later read, write, `checkpoint()`, `close()` and `open()` fails with `out of memory` until restart ([D-258](architecture/s13-decision-register.md#d-258)). Both are properties of arbitrary SQL, not of the connection, and neither is affected by the hygiene above.
+
 **`scrub_diagnostic_conn()`**: Runs that scrub without handing a connection out, for a caller who is done with the clone they were given. `diagnostic_conn()` can only scrub on the way *in* — it is never told a caller is finished — so a leaked `BEGIN` pins a WAL read snapshot until the next call, which makes `checkpoint()` a no-op and diagnostic reads stale.
 
 **`raw()`**: `#[doc(hidden)]` — exposes the raw `libsql::Database` handle. Left public to provoke a guard (§4.7 invariant 2).

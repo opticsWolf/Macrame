@@ -1897,6 +1897,12 @@ impl Database {
     /// blast radius than 0.15.14 had and a larger one than zero, and it is
     /// written down rather than rounded off.
     ///
+    /// That paragraph is about pragmas that belong to a *connection*, which is
+    /// what "residue" means and what the scrub is for. **Not every pragma
+    /// reachable here is one**, and the section below is the exception —
+    /// measured after D-257 claimed this one "cannot change any typed answer"
+    /// without checking (0.15.16, [D-258]).
+    ///
     /// **Scrubbed on entry, not on exit**, because there is no exit: this
     /// returns a `Connection` clone the caller keeps for as long as it likes,
     /// and the crate is never told they are done. Entry is the one place that
@@ -1943,6 +1949,42 @@ impl Database {
     /// process can open, so this connection is a read surface over the
     /// filesystem, not over this database. That is a property of arbitrary SQL
     /// rather than of the flags, and it is unchanged by them.
+    ///
+    /// # One pragma here can end the process, and sharing is not why
+    ///
+    /// `PRAGMA hard_heap_limit = 1` through this connection leaves the whole
+    /// **process** unable to use SQLite. Not this connection, not this handle:
+    /// measured (`tests_py/probes/diagnostic_global_pragmas.py`), the next
+    /// ordinary write, the next read, `checkpoint()`, `close()`, and opening a
+    /// *different* database file all fail with `out of memory`, permanently.
+    ///
+    /// `SQLITE_OPEN_READ_ONLY` does not stand in the way because setting it is
+    /// not a write to the database file, and the scrub above does not help
+    /// because there is nothing left on the connection to scrub: the limit
+    /// lives in the SQLite library, one per process. **Re-measured with a
+    /// connection minted per call — the 0.15.13 shape, before any of the
+    /// sharing this method now does — the outcome is identical.** So this is
+    /// not a cost of [D-256]'s shared connection and no amount of hygiene
+    /// addresses it.
+    ///
+    /// Six other candidates were measured and are harmless: `soft_heap_limit`
+    /// (a hint, not a wall), `locking_mode = EXCLUSIVE` (accepted; the writer
+    /// kept working), `temp_store_directory`, `max_page_count` (clamped, and
+    /// per-connection), `case_sensitive_like` (the control), and
+    /// `wal_checkpoint`, which is refused outright because this connection is
+    /// read-only.
+    ///
+    /// It belongs with the `ATTACH` note above rather than with the scrub: both
+    /// are properties of handing a caller **arbitrary SQL**, not of the flags
+    /// the connection was opened with. The practical form is one sentence —
+    /// *`diagnostic_query` is not a safe place to put a string that came from
+    /// somewhere else* — which `ATTACH` already made true and this makes
+    /// sharper. Not blocked by refusing statements that look like this one,
+    /// because matching SQL text is guesswork wearing the costume of a
+    /// guarantee, and it would do nothing for a Rust caller holding the
+    /// connection directly ([D-258]).
+    ///
+    /// [D-258]: ../../docs/architecture/s13-decision-register.md#d-258
     ///
     /// # One way this is *more* permissive, which is worth knowing
     ///

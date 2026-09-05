@@ -1933,6 +1933,23 @@ impl PyDatabase {
     /// and `explain` take a mutex the rest of the surface does not. Reads on
     /// the typed surface stay concurrent. See `PyDatabase::diagnostic_rows`.
     #[pyo3(signature = (sql, params = None))]
+    /// # This is not a safe place for a string from somewhere else
+    ///
+    /// Two reasons, and neither is about writes — the connection is opened
+    /// `SQLITE_OPEN_READ_ONLY` and cannot modify the ledger. `ATTACH` names any
+    /// file the process can open, so this is a read window onto the filesystem
+    /// rather than onto this database. And `PRAGMA hard_heap_limit = 1` leaves
+    /// the **whole process** unable to use SQLite at all — every later write,
+    /// read, `checkpoint()` and `close()`, and opening any other database,
+    /// fails with `out of memory` until the process restarts (0.15.16,
+    /// [D-258](../../../docs/architecture/s13-decision-register.md#d-258),
+    /// `tests_py/probes/diagnostic_global_pragmas.py`).
+    ///
+    /// Both are properties of arbitrary SQL rather than of this binding, and
+    /// neither is affected by the connection hygiene D-257 added. Fine for a
+    /// developer at a REPL; not fine for a debug console that runs what a user
+    /// typed.
+    ///
     /// # One statement per call
     ///
     /// Only the **first** statement of `sql` runs; the rest are discarded
