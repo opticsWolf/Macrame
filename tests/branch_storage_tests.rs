@@ -943,6 +943,19 @@ async fn a_pre_v12_cold_file_is_upgraded_by_the_archive_that_meets_it() {
     {
         let conn = connect(&harness).await;
         attach_cold(&conn, &cold).await;
+        // The fold index goes before the column it names (0.15.12, W15.2,
+        // D-254). SQLite validates every index on a table across `DROP COLUMN`
+        // and refuses with `error in index idx_cold_txlog_fold_partition after
+        // drop column: no such column: branch_id`. Dropping it first is also
+        // what the wind-back *means*: a pre-v12 cold file has no index over a
+        // column v12 introduced, and `upgrade_cold_lineage` is what puts it
+        // back — which is half of what this test is here to check.
+        conn.execute(
+            "DROP INDEX IF EXISTS cold.idx_cold_txlog_fold_partition",
+            (),
+        )
+        .await
+        .unwrap();
         for table in ["concepts", "transaction_log"] {
             conn.execute(
                 &format!("ALTER TABLE cold.{table} DROP COLUMN branch_id"),
@@ -1029,6 +1042,94 @@ async fn a_pre_v12_cold_file_is_upgraded_by_the_archive_that_meets_it() {
     );
 }
 
+/// The cold file gets the fold's partition index, including when it arrives
+/// pre-v12 and the column has to be added first (0.15.12, W15.2, D-254).
+///
+/// # Why this is a test and not a line of DDL nobody checks
+///
+/// The cold index is a *measured* claim — `reconstruct` across the boundary
+/// compiles the `UNION ALL` as a `MERGE` that sorts each side independently, so
+/// the hot index alone leaves half the sort in place: 127.2 ms with neither,
+/// 110.1 with hot only, 96.3 with both
+/// (`examples/txlog_fold_index_probe.rs`). A claim like that is worth exactly
+/// as much as the guarantee that the index is there, and a mutation removing
+/// its creation outright was survived by all sixty-eight tests on the archive
+/// path before this one existed.
+///
+/// # The pre-v12 arm is the ordering, not symmetry
+///
+/// `COLD_SCHEMA` runs before the session's transaction and against a file of
+/// any vintage; `upgrade_cold_lineage` runs inside it and is what adds
+/// `branch_id`. The index names that column, so shipping it in the first list
+/// makes `archive` refuse a pre-v12 cold file with `no such column: branch_id`
+/// — an operation that worked in the previous release failing on a file nothing
+/// else complains about. The second half of this test is what holds the two
+/// apart: it winds a cold file back past v12 and requires the *next* archive to
+/// put both the column and the index in place.
+#[tokio::test]
+async fn an_archived_file_carries_the_folds_partition_index_at_every_vintage() {
+    let harness = TestHarness::new();
+    let cold = archived_pair(&harness).await;
+
+    assert!(
+        cold_has_fold_index(&harness, &cold).await,
+        "a freshly archived file has no idx_cold_txlog_fold_partition, so the \
+         cold half of the union sorts and the measured 96.3 ms is 110.1"
+    );
+
+    // Back to pre-v12: the index goes first, because `DROP COLUMN` validates
+    // every index on the table and would otherwise refuse.
+    {
+        let conn = connect(&harness).await;
+        attach_cold(&conn, &cold).await;
+        conn.execute("DROP INDEX cold.idx_cold_txlog_fold_partition", ())
+            .await
+            .unwrap();
+        conn.execute("ALTER TABLE cold.transaction_log DROP COLUMN branch_id", ())
+            .await
+            .unwrap();
+    }
+    assert!(
+        !cold_has_fold_index(&harness, &cold).await,
+        "the wind-back did not take, so the arm below would pass on a file \
+         that never lost the index"
+    );
+
+    // A second archive with nothing to move still runs the session.
+    let db = Database::open(&harness.db_path).await.unwrap();
+    db.upsert_concept(ConceptUpsert::new("c", "C").valid_from(TS))
+        .await
+        .unwrap();
+    db.archive(CUTOFF).await.unwrap();
+    db.close().await.unwrap();
+
+    assert!(
+        cold_has_fold_index(&harness, &cold).await,
+        "the archive that upgraded the file did not give it the index. If it \
+         failed instead, the index is being created before the column it \
+         names — see `COLD_LINEAGE_INDICES` for why the two are separate lists"
+    );
+}
+
+/// Whether the cold file holds the fold's partition index, by name.
+///
+/// Asked of `cold.sqlite_master` rather than of a plan: what the previous test
+/// needs to know is whether the object exists, and a plan assertion would also
+/// be asserting the planner's preference, which is `index_plan_tests`' job on
+/// the hot side and is pinned there.
+async fn cold_has_fold_index(harness: &TestHarness, cold: &std::path::Path) -> bool {
+    let conn = connect(harness).await;
+    attach_cold(&conn, cold).await;
+    count(
+        &conn,
+        "SELECT COUNT(*) FROM cold.sqlite_master \
+         WHERE type = 'index' AND name = 'idx_cold_txlog_fold_partition'",
+        (),
+    )
+    .await
+        == 1
+}
+
 /// The fold spans a hot database that knows about lineage and a cold file that
 /// does not, and answers per lineage on both sides.
 ///
@@ -1071,6 +1172,19 @@ async fn a_reconstruction_spans_a_v11_cold_file_and_a_v12_hot_one() {
     {
         let conn = connect(&harness).await;
         attach_cold(&conn, &cold).await;
+        // The fold index goes before the column it names (0.15.12, W15.2,
+        // D-254). SQLite validates every index on a table across `DROP COLUMN`
+        // and refuses with `error in index idx_cold_txlog_fold_partition after
+        // drop column: no such column: branch_id`. Dropping it first is also
+        // what the wind-back *means*: a pre-v12 cold file has no index over a
+        // column v12 introduced, and `upgrade_cold_lineage` is what puts it
+        // back — which is half of what this test is here to check.
+        conn.execute(
+            "DROP INDEX IF EXISTS cold.idx_cold_txlog_fold_partition",
+            (),
+        )
+        .await
+        .unwrap();
         conn.execute("ALTER TABLE cold.transaction_log DROP COLUMN branch_id", ())
             .await
             .unwrap();

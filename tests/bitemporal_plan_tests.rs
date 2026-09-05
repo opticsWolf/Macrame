@@ -120,6 +120,27 @@ fn walk() -> TraversalBuilder {
 /// domain". For the transaction-time domain there already is one, it is chosen,
 /// and the guard on the fixture is that the log is not empty — an empty table
 /// is seekable in a way that proves nothing.
+///
+/// # Which index, and why it changed at 0.15.12 (W15.2, [D-254])
+///
+/// Through 0.15.11 this was `idx_txlog_time (recorded_at<?)`. It is now
+/// `idx_txlog_fold_partition (table_name=?)`, and F-33's answer is unchanged
+/// by that: the claim being pinned is that the transaction-time arm reaches an
+/// index rather than scanning the log, not which of the two it reaches.
+///
+/// What moved is *why* an index is worth reaching. `links_at_tx` is a window
+/// function over `WHERE table_name = 'links'`, and binding that leading column
+/// leaves `(entity_id, branch_id, seq_id DESC)` — this fold's partition and
+/// order exactly. The planner takes the ordering over the range because the
+/// ordering removes a sort of the whole selected set, which the plan shows by
+/// no longer listing `USE TEMP B-TREE FOR ORDER BY`.
+///
+/// It is a trade and it was measured as one before it was accepted; the table
+/// is in `graph::builder`'s three-shape pin, and the crossing is at just under
+/// half the log. `idx_txlog_time` keeps its own readers — the log's stamp
+/// aggregates and the reach guard's counts — which `index_plan_tests` records.
+///
+/// [D-254]: ../docs/architecture/s13-decision-register.md#d-254
 #[tokio::test]
 async fn a_transaction_time_read_seeks_rather_than_scans() {
     let harness = TestHarness::new();
@@ -138,9 +159,15 @@ async fn a_transaction_time_read_seeks_rather_than_scans() {
 
     let plan = plan_of(&conn, &walk().as_of_recorded(RECORDED_AT).build_sql()).await;
     assert!(
-        plan.contains("SEARCH transaction_log USING INDEX idx_txlog_time"),
+        plan.contains("SEARCH transaction_log USING INDEX idx_txlog_fold_partition"),
         "the transaction-time bound stopped seeking, which is the one arm of \
          F-33 that was already answered: {plan}"
+    );
+    assert!(
+        !plan.contains("USE TEMP B-TREE FOR ORDER BY"),
+        "the fold sorts its input again. That is not an F-33 finding — it is \
+         0.15.12's index having stopped supplying the window's order, which is \
+         the only reason it was preferred to the range seek: {plan}"
     );
 }
 
@@ -189,16 +216,31 @@ async fn adding_the_valid_instant_does_not_reach_the_plan() {
     );
 }
 
-/// **A two-dimensional index is picked and used on its leading column only**
-/// (0.13.23, W10.6, D-196).
+/// **A two-dimensional index is not even reached for** (0.13.23, W10.6,
+/// D-196; restated at 0.15.12, W15.2, [D-254]).
 ///
 /// This is the option F-33 names — a covering composite over the two temporal
-/// bounds — built here rather than argued about. The planner does take it, in
-/// preference to `idx_txlog_time`, and the plan says `(recorded_at<?)`: the
-/// valid-time column is never consulted, because the predicate that would use
-/// it is evaluated against a derived relation. So the composite is a wider
-/// `idx_txlog_time` that costs an index write per log row, forever, and returns
+/// bounds — built here rather than argued about.
+///
+/// Through 0.15.11 the planner *did* take it, in preference to
+/// `idx_txlog_time`, and used it on `(recorded_at<?)` alone: the valid-time
+/// column was never consulted, because the predicate that would use it is
+/// evaluated against a derived relation. The composite was therefore a wider
+/// `idx_txlog_time` that cost an index write per log row, forever, and returned
 /// nothing.
+///
+/// Since `idx_txlog_fold_partition` exists the candidate is not chosen at all,
+/// and the assertion is correspondingly stronger: **creating it changes the
+/// plan not at all**. D-196's conclusion is the same one and it is now reached
+/// without arithmetic — a candidate the planner declines cannot be paying for
+/// itself.
+///
+/// The reason it is declined is the reason the fold moved: this walk's window
+/// wants `(entity_id, branch_id, seq_id DESC)` under `table_name = 'links'`,
+/// and a composite leading on `recorded_at` supplies a range and no order.
+/// Every row it selected would still have to be sorted.
+///
+/// [D-254]: ../docs/architecture/s13-decision-register.md#d-254
 ///
 /// The R\*Tree option needs no test to reject: `rtree` coordinates are float32
 /// and `rtree_i32` is int32, so neither holds a microsecond epoch, and the
@@ -225,17 +267,16 @@ async fn a_two_dimensional_candidate_is_used_as_a_one_dimensional_one() {
 
     let after = plan_of(&conn, &sql).await;
     assert!(
-        after.contains("USING INDEX probe_txlog_two_d (recorded_at<?)"),
-        "the candidate index is either unused or used on more than its leading \
-         column. Either way D-196's arithmetic changes and F-33 wants \
-         re-opening: {after}"
+        !after.contains("probe_txlog_two_d"),
+        "the candidate index is being reached for again. That is not a \
+         regression, but it re-opens D-196's arithmetic — measure what it \
+         costs on the write path before leaving it out: {after}"
     );
     assert_eq!(
-        after.replace("probe_txlog_two_d", "idx_txlog_time"),
-        before,
-        "the two-dimensional candidate changed the shape of the plan and not \
-         just the name of the index it seeks on, which is the outcome D-196 \
-         measured as not happening"
+        after, before,
+        "the two-dimensional candidate reached the plan without appearing in \
+         it, which means it displaced something else. D-196 concluded there \
+         was nothing to build; that conclusion is due for review"
     );
 }
 
@@ -261,6 +302,15 @@ async fn a_two_dimensional_candidate_is_used_as_a_one_dimensional_one() {
 /// on and prints these same three triples. When this goes red on a dependency
 /// bump it is a plan review and not a bug: re-run the probe, read the sweep, and
 /// change the numbers deliberately ([D-195]).
+///
+/// **The transaction-time triple moved at 0.15.12** (W15.2, D-254), from
+/// `(4, 2, 6)` to `(4, 3, 5)`: one more seek and one fewer rewind. That is the
+/// sort going away — the rewind that disappeared is the sorter's, and the seek
+/// that arrived is the one into `idx_txlog_fold_partition`. The opens are
+/// unchanged, which is the part of the triple that would have said a cursor had
+/// been added. The valid-time-only control did not move, and neither did the
+/// equality between the transaction-time and cross-axis arms, so what this test
+/// exists to say is what it still says.
 ///
 /// [D-195]: ../docs/architecture/s13-decision-register.md
 /// [D-196]: ../docs/architecture/s13-decision-register.md
@@ -289,7 +339,7 @@ async fn a_cross_axis_read_costs_what_the_transaction_time_read_costs() {
     );
     assert_eq!(
         recorded_only,
-        counts(4, 2, 6),
+        counts(4, 3, 5),
         "the transaction-time read's cost moved. Re-run \
          `cargo run --example bitemporal_index_probe` and read the sweep \
          before changing this number (D-195)"

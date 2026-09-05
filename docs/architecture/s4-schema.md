@@ -299,6 +299,25 @@ CREATE TABLE transaction_log (
 --     rowid scan with a filter: because seq_id is INTEGER PRIMARY KEY
 --     AUTOINCREMENT, it IS the rowid, so SQLite walks it in order and applies
 --     the recorded_at predicate per row. No secondary index is needed.
+--
+-- Corrected at 0.15.12 (W15.2, D-254), schema v17. Both sentences above
+-- describe how a fold FINDS its rows and neither describes what it does with
+-- them: every fold here is a window function partitioned on
+-- (table_name, entity_id, branch_id) and ordered by seq_id DESC, so whichever
+-- index supplied the starting point, SQLite then sorted the whole selected set
+-- into that sequence. idx_txlog_fold_partition is those four columns in that
+-- order, DESC included, and the DESC is the whole of the effect -- the
+-- ascending form is used and still sorts. Measured: reconstruct() 99.5 -> 72.6
+-- ms at 30,000 log rows, +8.2% file, +5.0% on single-edge assertions.
+--
+--   idx_txlog_time keeps the log's stamp aggregates and the reach guard's
+--     counts; it no longer serves the fold, and its registry entry in
+--     tests/index_plan_tests.rs says so.
+--   idx_txlog_entity keeps the archive's supersession probe. The AtTime
+--     hydration above moved to the new index and gained nothing by it: that
+--     fold partitions on entity_id alone, so branch_id sits between its
+--     partition and its order and the sort survives. Recorded rather than
+--     repaired -- see D-254 for the arithmetic that declined a third index.
 ```
 
 **The trigger set (restored 0.5.4, from `schema::ddl` — see the note below).**

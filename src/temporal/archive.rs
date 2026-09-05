@@ -121,6 +121,9 @@ const COLD_SCHEMA: &[&str] = &[
     )"#,
     "CREATE INDEX IF NOT EXISTS cold.idx_cold_txlog_entity ON transaction_log (entity_id)",
     "CREATE INDEX IF NOT EXISTS cold.idx_cold_txlog_time ON transaction_log (recorded_at)",
+    // The fold's partition index is **not** here; see [`COLD_LINEAGE_INDICES`].
+    // It names `branch_id`, this list runs before the column exists, and the
+    // two indexes above name only columns a v11 cold file already had.
     // Lineages, as of 0.14.13 (§15.4, D-230). The one cold table that is not a
     // mirror of a hot one: `branches` carries no `archived_at` and this needs
     // one, because the hot row's `created_at` says when the lineage began and
@@ -405,6 +408,52 @@ pub async fn archive(
     result
 }
 
+/// Cold indexes that name a column [`upgrade_cold_lineage`] may still be about
+/// to add, so they run *after* it rather than in [`COLD_SCHEMA`] (0.15.12,
+/// W15.2, [D-254]).
+///
+/// # Why the split exists at all
+///
+/// `COLD_SCHEMA` runs before the transaction opens, against a file that may
+/// have been written by any version — including one that predates `branch_id`.
+/// Its two existing `transaction_log` indexes name `entity_id` and
+/// `recorded_at`, which a v11 cold file already had, so the question never came
+/// up. This one names `branch_id`, and `CREATE INDEX` over a column that is not
+/// there yet is `no such column: branch_id` — an archive that refuses a cold
+/// file the previous release accepted, which is the failure this ordering
+/// exists to prevent. Both archive arms upgrade before they insert; running the
+/// index with the upgrade puts it on the far side of that boundary.
+///
+/// # Why the cold file earns an index of its own
+///
+/// Not symmetry with the hot side. Once a database has been archived,
+/// `reconstruct` folds a `UNION ALL` of the two logs — and SQLite compiles that
+/// union as a `MERGE`, which sorts **each side independently**. The two indexes
+/// therefore remove two different sorts, which the probe measured across all
+/// three states (`examples/txlog_fold_index_probe.rs`, 30,000 rows a side):
+///
+/// ```text
+/// neither side indexed   127.2 ms
+/// hot side only          110.1 ms
+/// both sides              96.3 ms
+/// ```
+///
+/// A cold index shipped on the strength of the hot one's numbers would be the
+/// unread index [D-089] exists to refuse. With the union's shape measured, it
+/// has a named reader and is the second half of one improvement.
+///
+/// No cold-side rung is needed and none exists: this runs on every archive
+/// session, so an existing cold database picks the index up the next time
+/// anything is archived into it. A *table* change could not be made that way,
+/// which is the distinction `upgrade_cold_lineage` draws.
+///
+/// [D-089]: ../../docs/architecture/s13-decision-register.md#d-089
+/// [D-254]: ../../docs/architecture/s13-decision-register.md#d-254
+const COLD_LINEAGE_INDICES: &[&str] = &[
+    "CREATE INDEX IF NOT EXISTS cold.idx_cold_txlog_fold_partition ON transaction_log \
+     (table_name, entity_id, branch_id, seq_id DESC)",
+];
+
 /// Bring an existing cold file up to the v12 shape, inside the session's own
 /// transaction (§15.2, D-217).
 ///
@@ -476,6 +525,13 @@ async fn upgrade_cold_lineage(tx: &libsql::Transaction) -> Result<()> {
         tx.execute("DROP TABLE cold.links", ()).await?;
         tx.execute("ALTER TABLE cold.links_v15 RENAME TO links", ())
             .await?;
+    }
+
+    // Last, when every column these name is certainly present whatever vintage
+    // the file arrived as. See `COLD_LINEAGE_INDICES` for why they are not in
+    // `COLD_SCHEMA` with the rest of the schema pass.
+    for ddl in COLD_LINEAGE_INDICES {
+        tx.execute(ddl, ()).await?;
     }
 
     Ok(())

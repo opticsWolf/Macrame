@@ -1475,10 +1475,43 @@ mod tests {
             // been since 0.10.0, measured at 121 ms against the trunk's 59 ms
             // on the same fixture, and it is not this release's to change —
             // the point pinned here is that no shape re-runs the fold per row.
+            // **The seek moved off `recorded_at` at 0.15.12** (W15.2,
+            // D-254). `idx_txlog_fold_partition` leads on `table_name`, and
+            // this fold's `WHERE table_name = 'links'` binds it — which leaves
+            // the index's remaining order, `(entity_id, branch_id, seq_id
+            // DESC)`, as exactly this window's `PARTITION BY entity_id,
+            // branch_id ORDER BY seq_id DESC`. So the plan trades a seek on
+            // the `recorded_at` bound for the whole ordering, and the temp
+            // B-tree asserted absent below is what it buys.
+            //
+            // Measured before it was accepted, because it is a *trade* and
+            // not a win everywhere (`examples/txlog_fold_index_probe.rs
+            // --arm other-folds`, chain of 4,000, best of 21). The number in
+            // the columns is how much of the log the transaction-time bound
+            // admits:
+            //
+            //   bound   v16 plan   v17 plan
+            //    25%      1.91 ms    2.49 ms   +31%
+            //    50%      4.84       4.74       -2%
+            //    75%      9.76       8.39      -14%
+            //   100%     15.24      11.85      -22%
+            //
+            // The crossing is just under half the log. A transaction-time
+            // read is normally asked about a recent instant and therefore
+            // admits most of it, so the common case is the improving side;
+            // the deep-history read pays 0.6 ms on this fixture. Steering the
+            // planner back with a unary `+` on `table_name` — the technique
+            // this CTE already uses on `branch_id` — was available and
+            // refused: it would spend the common case to buy the rare one.
             if shape != LineageShape::Resolved {
                 assert!(
-                    text.contains("SEARCH transaction_log USING INDEX idx_txlog_time"),
+                    text.contains("SEARCH transaction_log USING INDEX idx_txlog_fold_partition"),
                     "{shape:?}: the transaction-time bound stopped seeking:\n{text}"
+                );
+                assert!(
+                    !text.contains("USE TEMP B-TREE FOR ORDER BY"),
+                    "{shape:?}: the fold is sorting its input again, which is \
+                     the whole of what the partition index buys it:\n{text}"
                 );
             }
         }

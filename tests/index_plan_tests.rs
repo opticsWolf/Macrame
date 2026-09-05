@@ -116,18 +116,72 @@ const REGISTRY: &[(&str, Justification)] = &[
     (
         "idx_txlog_time",
         Query {
-            label: "the fold's recorded_at window",
-            sql: "SELECT seq_id, table_name, entity_id, operation, payload \
-                  FROM transaction_log WHERE recorded_at <= ?1",
+            // **Was "the fold's recorded_at window" through 0.15.11, and the
+            // fold has left.** `idx_txlog_fold_partition` (0.15.12, W15.2)
+            // supplies the window function's partition *and* its order, which
+            // the planner prefers to a seek on this one followed by a sort. An
+            // index whose recorded justification is a query that no longer
+            // reads it is precisely the shape D-089 was written about, so the
+            // entry moves to the readers that remain rather than the entry
+            // staying and quietly becoming false.
+            //
+            // Both are aggregates over `recorded_at` and both are served as an
+            // index scan without touching the table: `newest_hot_stamp` /
+            // `oldest_hot_stamp` in `temporal::replay`, and the reach guard's
+            // four-value count beside them. The probe checked this index's
+            // plan before and after the new one and it did not move.
+            label: "the hot log's stamp aggregates",
+            sql: "SELECT MAX(recorded_at) FROM transaction_log",
             source: Some((
                 include_str!("../src/temporal/replay.rs"),
-                "FROM transaction_log\n        WHERE recorded_at <= ?1",
+                "(recorded_at) FROM transaction_log",
+            )),
+        },
+    ),
+    (
+        "idx_txlog_fold_partition",
+        Query {
+            // The whole fold, not its `WHERE`: the index is for the window
+            // function, and a reproduction that dropped the `OVER` clause would
+            // be asking about the filter — which is the *other* index's
+            // question and is how this entry's predecessor came to name a
+            // reader it did not have.
+            label: "the log fold's partition and order",
+            sql: "SELECT seq_id, table_name, entity_id, operation, payload, branch_id \
+                  FROM ( \
+                    SELECT seq_id, table_name, entity_id, operation, payload, branch_id, \
+                           ROW_NUMBER() OVER (PARTITION BY table_name, entity_id, branch_id \
+                                              ORDER BY seq_id DESC) as rn \
+                    FROM transaction_log WHERE recorded_at <= ?1) WHERE rn = 1",
+            source: Some((
+                include_str!("../src/temporal/replay.rs"),
+                "PARTITION BY table_name, entity_id, branch_id ORDER BY seq_id DESC",
             )),
         },
     ),
     (
         "idx_txlog_entity",
         Query {
+            // **The concept hydrate left this index at 0.15.12** and the
+            // supersession test did not, which is the whole reason this entry
+            // is unchanged. `hydrate_at_time` folds
+            // `WHERE table_name = 'concepts' AND entity_id IN (…)` and used to
+            // seek here on `(entity_id=?)`; `idx_txlog_fold_partition` binds
+            // both of those columns, so the planner prefers it and this index
+            // lost a reader it was not registered for.
+            //
+            // It gained nothing by moving. That fold partitions on `entity_id`
+            // **alone** — see `temporal::as_of` for why, and it is correct —
+            // so the new index's `branch_id` sits between the partition and
+            // the order, and `USE TEMP B-TREE FOR RIGHT PART OF ORDER BY` is
+            // in the plan before and after. Measured at +8% on a 0.10 ms call
+            // (`examples/txlog_fold_index_probe.rs --arm other-folds`), which
+            // is the honest cost of the rung and is recorded here rather than
+            // rounded away.
+            //
+            // The entry stays because the archive's supersession test still
+            // seeks here — the probe checked its plan across the change and it
+            // did not move — so this is a reader leaving, not D-089's failure.
             label: "the archive's supersession test",
             sql: "SELECT seq_id FROM transaction_log WHERE recorded_at < ?1 AND EXISTS ( \
                     SELECT 1 FROM transaction_log newer \
@@ -289,6 +343,7 @@ const QUERY_REGISTRY: &[(&str, &str, Expect)] = &[
             // which was true before and after and therefore proved nothing, and
             // onto the plan shape that is actually the fix.
             fragment: "MULTI-INDEX OR",
+            forbidden: "",
             note: "Review §2.2, closed in 0.12.6 by `idx_links_target`. If this                    reverts to a bare `SCAN links` inside the subquery, concept                    archival is O(concepts × links) again.",
         },
     ),
@@ -308,6 +363,7 @@ const QUERY_REGISTRY: &[(&str, &str, Expect)] = &[
             // prefix. It was the OUTER `recorded_at <` that had nothing to seek
             // on, because the primary key leads on `source_id`.
             fragment: "SEARCH links USING INDEX idx_links_recorded_at",
+            forbidden: "",
             note: "Review §2.1, closed in 0.12.6 by `idx_links_recorded_at`.                    The outer `recorded_at <` filter used to scan every row of                    `links`; it now seeks. The inner probe was always served by                    the primary key and was never the problem.",
         },
     ),
@@ -338,7 +394,63 @@ const QUERY_REGISTRY: &[(&str, &str, Expect)] = &[
             // index write per insert forever; this is the belief being checked
             // before the purchase rather than after it.
             fragment: "SEARCH links USING COVERING INDEX",
+            forbidden: "",
             note: "Served from a covering index before and after W3.1 — no                    traversal of the table either way. Contradicts review                    §2.1's claim that this is a full scan closed by                    `idx_links_recorded_at`; that index is justified on the                    archive path alone (D-150, D-151).",
+        },
+    ),
+    (
+        "the log fold does not sort",
+        "SELECT seq_id, table_name, entity_id, operation, payload, branch_id           FROM (            SELECT seq_id, table_name, entity_id, operation, payload, branch_id,                   ROW_NUMBER() OVER (PARTITION BY table_name, entity_id, branch_id                                      ORDER BY seq_id DESC) as rn            FROM transaction_log WHERE recorded_at <= ?1) WHERE rn = 1",
+        Expect {
+            // Was, through 0.15.11:
+            //   SEARCH transaction_log USING INDEX idx_txlog_time (recorded_at<?)
+            //     | USE TEMP B-TREE FOR ORDER BY
+            //
+            // Now, with idx_txlog_fold_partition (0.15.12, W15.2, D-254):
+            //   SCAN transaction_log USING INDEX idx_txlog_fold_partition
+            //
+            // The entry above pins that the index is *used*. This pins the
+            // property it was bought for, which is not the same claim: the
+            // **ascending** form of the identical columns is also used, and
+            // still sorts — `USE TEMP B-TREE FOR RIGHT PART OF ORDER BY` — at
+            // 60.2 ms against 46.2, for the same file and the same write cost.
+            // An edit that drops the `DESC` would keep the entry above green
+            // and give back most of the improvement, and this is the assertion
+            // that would notice.
+            fragment: "SCAN transaction_log USING INDEX idx_txlog_fold_partition",
+            forbidden: "TEMP B-TREE",
+            note: "0.15.12, W15.2, D-254. The fold is a window function and                    wants its input in partition-then-order sequence. If a temp                    B-tree comes back, every reconstruction is sorting the whole                    log again — 64 ms against 46 at 30,000 rows.",
+        },
+    ),
+    (
+        "the concept hydrate still seeks",
+        "SELECT entity_id, seq_id, payload FROM (              SELECT entity_id, seq_id, payload,                     ROW_NUMBER() OVER (PARTITION BY entity_id ORDER BY seq_id DESC) as rn              FROM transaction_log              WHERE table_name = 'concepts'                AND recorded_at <= ?1                AND entity_id IN ('a', 'b', 'c')) WHERE rn = 1",
+        Expect {
+            // Was, through 0.15.11:
+            //   SEARCH transaction_log USING INDEX idx_txlog_entity (entity_id=?)
+            //     | USE TEMP B-TREE FOR RIGHT PART OF ORDER BY
+            //
+            // Now, with idx_txlog_fold_partition (0.15.12, W15.2, D-254):
+            //   SEARCH transaction_log USING INDEX idx_txlog_fold_partition
+            //     (table_name=? AND entity_id=?)
+            //     | USE TEMP B-TREE FOR RIGHT PART OF ORDER BY
+            //
+            // **The sort survives on purpose and the entry does not forbid
+            // it.** This fold partitions on `entity_id` alone, so `branch_id`
+            // sits between the partition and the order in every index the
+            // table has, and no index the crate declares can supply it. What
+            // is worth pinning is that the `IN` list still *seeks* — a
+            // `SCAN transaction_log` here would make attribute hydration
+            // O(log) per read — and that is what the forbidden half says.
+            //
+            // Recorded rather than fixed: an index on
+            // `(table_name, entity_id, seq_id DESC)` would remove this sort
+            // and would be a third index on the hottest write path in the
+            // crate, bought for 8% of a 0.10 ms call. Measure it before
+            // building it (D-089).
+            fragment: "SEARCH transaction_log USING INDEX idx_txlog_fold_partition",
+            forbidden: "SCAN transaction_log",
+            note: "0.15.12, W15.2, D-254. The concept hydrate reads the log by                    entity for AttributeMode::AtTime. It moved off idx_txlog_entity                    when the fold index arrived; what must not change is that it                    seeks at all.",
         },
     ),
 ];
@@ -350,6 +462,14 @@ const QUERY_REGISTRY: &[(&str, &str, Expect)] = &[
 /// wording change and teach people to re-bless it without reading.
 struct Expect {
     fragment: &'static str,
+    /// A substring the plan must **not** contain, or `""` for no such claim.
+    ///
+    /// Added for `idx_txlog_fold_partition` (0.15.12), where the property being
+    /// defended is the absence of a step rather than the presence of one. Every
+    /// other entry here asserts that a query reaches an index; that one asserts
+    /// it reaches it *in the right order*, and the only evidence of the
+    /// difference in `EXPLAIN QUERY PLAN` is whether a sort is listed.
+    forbidden: &'static str,
     note: &'static str,
 }
 
@@ -372,6 +492,14 @@ async fn every_registered_query_gets_the_plan_it_is_recorded_as_getting() {
 
              If an index you just added changed this, that is the point of this              test — update the entry and say what the new plan is.",
             expect.fragment,
+            expect.note
+        );
+        assert!(
+            expect.forbidden.is_empty() || !plan.contains(expect.forbidden),
+            "{label}: the plan must not contain {:?}
+             note: {}
+             planner chose: {plan}",
+            expect.forbidden,
             expect.note
         );
     }

@@ -442,7 +442,7 @@ async fn plan_string(conn: &libsql::Connection, sql: &str) -> String {
 #[test]
 fn a_version_bump_must_bring_its_own_rung_test() {
     assert_eq!(
-        SCHEMA_VERSION, 16,
+        SCHEMA_VERSION, 17,
         "SCHEMA_VERSION moved. Add a test for the new rung — one that starts \
          from a database at the previous version and asserts what the rung is \
          *for*, not merely that `run` reached the top."
@@ -2115,5 +2115,116 @@ async fn an_insert_inside_a_session_writes_no_log_row_and_outside_one_still_does
         1,
         "an insert inside an archive session wrote a transaction_log row; \
          rehydration is a move back and mints no transaction-time facts"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// v16 → v17 — the fold gets its partition in an index (0.15.12, W15.2, D-254)
+// ---------------------------------------------------------------------------
+
+/// The fold is a window function, and the rung is what stops it sorting.
+///
+/// Index-only, so *what it is for* is a plan rather than a row count — the same
+/// shape as v13 → v14 above, and the fixture is built the same way: a real
+/// database wound back by `DROP INDEX` plus a stamp, which is exactly what a
+/// v16 database is, because this rung changes nothing else.
+///
+/// Three assertions, and the second is the one that makes the rung worth a
+/// version.
+///
+/// 1. **Before**, the plan carries a temp B-tree. Every reconstruction sorted
+///    the whole log to put it in partition-then-order sequence.
+/// 2. **After**, that step is *gone* — not merely that the index appears. The
+///    ascending form of the identical columns also appears in the plan and
+///    still sorts (`USE TEMP B-TREE FOR RIGHT PART OF ORDER BY`), at 60.2 ms
+///    against this shape's 46.2 and the same cost on the write path — so "the
+///    index is used" is not the property this rung buys. The sort's absence
+///    is.
+/// 3. **`idx_txlog_time` keeps the readers it has left.** The fold was the
+///    reader `index_plan_tests` recorded for it, and the fold has moved off it;
+///    what remains is the pair of aggregates over `recorded_at`, and they must
+///    still be served without touching the table. An index whose last reader
+///    leaves is D-089's failure, and this is where that would show.
+#[tokio::test]
+async fn a_v16_database_climbs_to_v17_and_the_log_fold_stops_sorting() {
+    // The fold's shape, copied — the original is a private `const` in
+    // `temporal::replay` and `EXPLAIN QUERY PLAN` cannot reach it.
+    // `index_plan_tests` bounds the same copy against its source with an
+    // `include_str!` fragment, so a divergence is caught there rather than
+    // here, where it would look like a passing test.
+    const FOLD: &str = "SELECT seq_id, table_name, entity_id, operation, payload, branch_id \
+         FROM ( \
+           SELECT seq_id, table_name, entity_id, operation, payload, branch_id, \
+                  ROW_NUMBER() OVER (PARTITION BY table_name, entity_id, branch_id \
+                                     ORDER BY seq_id DESC) as rn \
+           FROM transaction_log WHERE recorded_at <= ?1) WHERE rn = 1";
+
+    let harness = TestHarness::new();
+    let conn = connect(&harness).await;
+    macrame::schema::run_migrations(&conn).await.unwrap();
+
+    conn.execute("DROP INDEX idx_txlog_fold_partition", ())
+        .await
+        .unwrap();
+    conn.execute("PRAGMA user_version = 16", ()).await.unwrap();
+
+    let before = plan_string(&conn, FOLD).await;
+    assert!(
+        before.contains("TEMP B-TREE"),
+        "the fixture is not starting from the v16 plan — expected the window \
+         function to be sorting its input, got: {before}"
+    );
+
+    macrame::schema::run_migrations(&conn).await.unwrap();
+    assert_eq!(user_version(&conn).await, SCHEMA_VERSION);
+
+    let after = plan_string(&conn, FOLD).await;
+    assert!(
+        after.contains("idx_txlog_fold_partition"),
+        "the rung created the index and the fold did not take it — an index \
+         nothing seeks on is D-089's failure, not a schema change: {after}"
+    );
+    assert!(
+        !after.contains("TEMP B-TREE"),
+        "the fold still sorts. The index is being used and is not supplying \
+         the order, which is what the ascending form of these same columns \
+         does — 60.2 ms against 46.2, for the same file and the same writes: \
+         {after}"
+    );
+
+    // The half the rung could take away by accident.
+    let aggregate = plan_string(&conn, "SELECT MAX(recorded_at) FROM transaction_log").await;
+    assert!(
+        aggregate.contains("idx_txlog_time"),
+        "the new index displaced the stamp aggregates from idx_txlog_time, \
+         which would leave that index with no reader at all: {aggregate}"
+    );
+}
+
+/// A v17 stamp over a database that never ran the rung is refused at open.
+///
+/// The counterpart of `a_v14_stamp_over_a_v13_index_set_is_refused_at_open`,
+/// and pinned for the same reason: `verify` compares declared index names
+/// against what the file holds, so this needs no new list — and the guarantee
+/// worth having is that a mis-stamped database is a sentence at open time
+/// rather than a reconstruction that is quietly a third slower with nothing to
+/// say about it.
+#[tokio::test]
+async fn a_v17_stamp_over_a_v16_index_set_is_refused_at_open() {
+    let harness = TestHarness::new();
+    let conn = connect(&harness).await;
+    macrame::schema::run_migrations(&conn).await.unwrap();
+
+    conn.execute("DROP INDEX idx_txlog_fold_partition", ())
+        .await
+        .unwrap();
+
+    let err = macrame::schema::run_migrations(&conn)
+        .await
+        .expect_err("a v17 stamp over a missing index was accepted");
+    let message = err.to_string();
+    assert!(
+        message.contains("idx_txlog_fold_partition"),
+        "the refusal does not name the missing index: {message}"
     );
 }

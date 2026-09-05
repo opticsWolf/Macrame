@@ -13,7 +13,7 @@ use crate::schema::ddl::*;
 /// guarantee D-029 buys would be void on it while `user_version` insisted all
 /// was well. Reserving 1 as a value this build refuses by name is what makes
 /// "no legacy support" an enforced property instead of a README sentence.
-pub const SCHEMA_VERSION: u32 = 16;
+pub const SCHEMA_VERSION: u32 = 17;
 
 type StepFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
 
@@ -185,6 +185,14 @@ const STEPS: &[Step] = &[
         // v5 -> v6 and v10 -> v11 rungs stood on.
         suspends_foreign_keys: false,
         apply: |conn| Box::pin(add_lineage_cut_index(conn)),
+    },
+    Step {
+        from: 16,
+        to: 17,
+        name: "txlog-fold-partition-index",
+        // An index on one table, referencing no other. Nothing to defer.
+        suspends_foreign_keys: false,
+        apply: |conn| Box::pin(add_fold_partition_index(conn)),
     },
     Step {
         from: 15,
@@ -932,6 +940,29 @@ async fn add_links_archive_indices(conn: &libsql::Connection) -> Result<()> {
 /// [D-036]: ../../docs/architecture/s13-decision-register.md#d-036
 async fn add_lineage_cut_index(conn: &libsql::Connection) -> Result<()> {
     create_indices(conn, &["idx_lc_lineage_cut"]).await
+}
+
+/// v16 → v17: the fold gets its partition in an index (0.15.12, W15.2, [D-254]).
+///
+/// Index-only, on a derivative table in the sense [D-036] means it, and the
+/// cheapest kind of rung there is: one `CREATE INDEX` inside the ladder's own
+/// transaction, no data movement and no shape change.
+///
+/// **It is a rung rather than a line in `CREATE_INDICES` alone** because an
+/// existing database would otherwise never get it. `CREATE_INDICES` runs on the
+/// baseline; a file created by an earlier build is brought forward only by the
+/// ladder, and a fold that is 1.39x faster on new databases and unchanged on
+/// every database anyone already has is not the improvement the measurement
+/// describes.
+///
+/// The cost is what any index rung costs on a large log: SQLite sorts the table
+/// once to build it. That is bounded by the log's size and paid once, against a
+/// sort of the same size paid by **every reconstruction** until now.
+///
+/// [D-036]: ../../docs/architecture/s13-decision-register.md#d-036
+/// [D-254]: ../../docs/architecture/s13-decision-register.md#d-254
+async fn add_fold_partition_index(conn: &libsql::Connection) -> Result<()> {
+    create_indices(conn, &["idx_txlog_fold_partition"]).await
 }
 
 /// The v15 shape of `links`, pinned as text (0.14.15, [D-232]).

@@ -192,9 +192,24 @@ The write actor is stateless between turns and pays for it three times: `hot_log
 
 The classification gate from [D-242](architecture/s13-decision-register.md#d-242) did what it was built for on both sides of the boundary — the variant failed to compile until `kind()` and the binding's own `match` had each been given a decision.
 
-### W15.2 · 0.15.10 — schema v16: `idx_txlog_entity_lineage` (C-4)
+### W15.2 · 0.15.12 — schema v17: the fold's partition index (C-4)
 
 The fold partitions on `(entity_id, branch_id)` and orders by `seq_id`; no index covers that. One rung adding the composite index, the fold's plan pinned in `index_plan_tests.rs` through the lowering (so the pin is written once for every reader), and the write cost measured by the existing bulk-import bench before and after. The ladder's rung tests from [D-231](architecture/s13-decision-register.md#d-231) cover the climb.
+
+**Shipped as 0.15.12, [D-254](architecture/s13-decision-register.md#d-254).** Five departures, and the first is the whole item.
+
+*The index is not the one C-4 names, and C-4's was measured **worse than no index**.* The four folds in `temporal::replay` partition on `(table_name, entity_id, branch_id)`, not `(entity_id, branch_id)`: `table_name` leads deliberately, because a concept's `entity_id` is its id and a link's is the synthetic `source|target|type|valid_from`, and the namespaces are not disjoint. `(entity_id, branch_id)` is wide enough that the planner takes it, drops `idx_txlog_time`'s `recorded_at` seek, and then cannot supply the window's order either, so the plan becomes a full scan plus the same sort — **73.1 ms against the unindexed 64.2**, and 64.6 against 63.6 on a second run. It never measured faster than having no index. What ships is `(table_name, entity_id, branch_id, seq_id DESC)` at **46.2 ms**, with `reconstruct()` **99.5 → 72.6**.
+
+*The `DESC` is the entire effect, so the pin is a negative one.* The ascending form of the identical columns is used and still sorts (`USE TEMP B-TREE FOR RIGHT PART OF ORDER BY`, 60.2 ms). "The index is used" would therefore stay green through the edit that loses the improvement, so `Expect` in `index_plan_tests` gains a `forbidden` field and the fold's entry refuses any plan mentioning a temp B-tree — as does the rung test, across the climb.
+
+*The covering form is 1.18× faster again and is refused on storage.* 39.3 ms and `reconstruct` at 64.0, for a **51% larger file** — it duplicates `payload`, the widest column in the log — and +10.5% on writes against the shipped shape's +5.0%. Recorded with its numbers so a later budget can reopen it.
+
+*The cold file gets an index too, and it earned it by measurement rather than by symmetry.* `reconstruct` across the boundary folds a `UNION ALL`, which SQLite compiles as a `MERGE` that sorts **each side independently**: 127.2 ms with neither side indexed, 110.1 with the hot side only, **96.3** with both. It ships in a second list applied with `upgrade_cold_lineage` rather than in `COLD_SCHEMA`, because it names `branch_id` and that list runs before the column may exist.
+
+*The rung is **v17**, not the v16 the row below says.* The row was written when the ladder's top was 15; [D-249](architecture/s13-decision-register.md#d-249) took it to 16 at 0.15.7.
+
+Found on the way: **two other folds read this table** and the index reached both. `links_at_tx` trades its `recorded_at` seek for the window's order and has a crossing at just under half the log — −22% at the wide bound, +31% at the narrow one — so four plan pins are re-blessed with that table written beside them, and steering it back with a unary `+` is refused because it spends the common case for the rare one. The concept hydrate moves off `idx_txlog_entity` and **gains nothing**: it partitions on `entity_id` alone, so the sort survives, at +8% of a 0.10 ms call. Recorded rather than repaired.
+
 
 ### W15.3 · 0.15.11 — builders and `#[non_exhaustive]` (C-11)
 
@@ -243,7 +258,7 @@ Merge to `main` after W16.2, tagged. `docs/releases/v0.16.0.md` written before t
 | 9 | 0.15.6 | W14.3 | `ActorState` — **done** | `connection.rs` | `actor_state_tests`, `lineage_cache`; five mutations; numbers in D-248 |
 | 10 | 0.15.7 | W14.5 | hot-log verdict kept by the log (C-5) — **done** | `ddl.rs`, `migrations.rs`, `replay.rs` | schema v16; `log_integrity_probe`; numbers in D-249 |
 | 11 | 0.15.11 | W15.1 | typed rehydrate refusal — **done** | `error.rs`, `temporal/archive.rs`, `bindings/python` | `rehydrate_lineage_tests`, `test_rehydrate_lineage.py`; nine mutations; numbers in D-253 |
-| 12 | 0.15.10 | W15.2 | schema v16, composite index | `schema.rs`, `migrations`, `index_plan_tests.rs` | rung tests; fold plan pinned |
+| 12 | 0.15.12 | W15.2 | schema **v17**, the fold's partition index — **done** | `schema/{ddl,migrations}.rs`, `temporal/archive.rs`, `index_plan_tests.rs` | rung tests; fold plan pinned by absence of sort; four mutations, one survived and bought a test; numbers in D-254 |
 | 13 | 0.15.11 | W15.3 | builders + `#[non_exhaustive]` | `tuning.rs`, `builder.rs`, `snapshot.rs` | `api-review-0.16.0.md` |
 | 14 | 0.15.12 | W15.4 | lazy diagnostic handle | `connection.rs` | — |
 | 15 | 0.15.13 | W16.1 | ancestry in Rust | `plan.rs`, `branch.rs` | differential test against the CTE |

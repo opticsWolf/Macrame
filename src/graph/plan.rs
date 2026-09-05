@@ -316,10 +316,22 @@ pub(crate) fn lower(r: &Resolution<'_>) -> Lowered {
 /// is inside for the cost rather than for the answer: the partition is per
 /// lineage already, so a filter after the window would rank the other
 /// lineages' entries and then discard them. The unary `+` is planner
-/// steering, not arithmetic: without it SQLite takes the equality as an
-/// access path, walks `idx_txlog_entity` for the window's order, and gives up
-/// the `recorded_at` seek that `bitemporal_plan_tests` pins. The predicate is
-/// a filter and the `+` says so.
+/// steering, not arithmetic: without it SQLite took the equality as an access
+/// path, walked `idx_txlog_entity` for the window's order, and gave up the
+/// `recorded_at` seek that `bitemporal_plan_tests` pinned. The predicate is a
+/// filter and the `+` says so.
+///
+/// **That seek is gone as of 0.15.12 and the `+` stays**
+/// ([D-254](../../docs/architecture/s13-decision-register.md#d-254)). This
+/// fold now reaches `idx_txlog_fold_partition (table_name=?)`, whose remaining
+/// columns are this window's partition and order once the leading equality is
+/// bound, so what the plan pins is the *absence of a sort* rather than a range
+/// seek. Removing the `+` was measured against that index and changes nothing
+/// on the fixture the pin uses — `branch_id` is the index's third column and
+/// cannot be an access-path prefix — which is an argument for leaving it
+/// alone, not for taking it out: it costs nothing, it is what stops the
+/// predicate being read as an access path on some other distribution, and the
+/// index that made it necessary is still declared.
 ///
 /// # `MATERIALIZED`, and the 180× it is worth (0.15.2, D-244)
 ///

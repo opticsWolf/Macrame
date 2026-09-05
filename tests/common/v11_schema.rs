@@ -266,7 +266,7 @@ pub fn tables_v11() -> Vec<String> {
 /// nothing.
 ///
 /// The indices that existed at v11, which is every one `ddl` declares except
-/// the v14 addition (0.14.14, D-231).
+/// the v14 and v17 additions (0.14.14, D-231; 0.15.12, D-254).
 ///
 /// Three fixtures build a pre-v12 database — v2 and v7 in `migration_tests`,
 /// v11 here — and all three used to scan `CREATE_INDICES` whole. That was
@@ -284,11 +284,20 @@ pub fn tables_v11() -> Vec<String> {
 ///
 /// The exclusion is by name and not by position, so a v15 index appended after
 /// this one does not silently rejoin the v11 set.
+///
+/// **`idx_txlog_fold_partition` is the second exclusion and it is the same
+/// case, one table over.** It is declared over `transaction_log.branch_id`, and
+/// that column also arrives at v12 — `wind_back_to_v11` drops it by name a few
+/// dozen lines below. The failure without the exclusion is identical and just
+/// as legible: eleven rung tests dying in the fixture with `no such column:
+/// branch_id` before the rung they name has run.
 pub fn indices_v11() -> Vec<&'static str> {
     ddl::CREATE_INDICES
         .iter()
         .copied()
-        .filter(|sql| !sql.contains("idx_lc_lineage_cut"))
+        .filter(|sql| {
+            !sql.contains("idx_lc_lineage_cut") && !sql.contains("idx_txlog_fold_partition")
+        })
         .collect()
 }
 
@@ -346,6 +355,17 @@ pub async fn wind_back_to_v11(conn: &libsql::Connection) {
     // failure, since a v11 database does not have this table and a fixture
     // claiming otherwise is describing v16 with a v11 stamp on it.
     conn.execute("DROP TABLE IF EXISTS log_integrity", ())
+        .await
+        .unwrap();
+
+    // v17's index goes before v12's column, because it names it (0.15.12,
+    // W15.2, D-254). SQLite validates every index on a table across
+    // `DROP COLUMN` and refuses the drop with `error in index
+    // idx_txlog_fold_partition after drop column: no such column: branch_id` —
+    // a good error, and one that arrives in the fixture rather than in the rung
+    // the test is about. Dropping the index first is also what the wind-back
+    // *means*: a v11 database has no index over a column v12 introduced.
+    conn.execute("DROP INDEX IF EXISTS idx_txlog_fold_partition", ())
         .await
         .unwrap();
 

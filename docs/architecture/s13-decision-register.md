@@ -5044,4 +5044,67 @@ The check runs **before** the insert, and the ordering is load-bearing rather th
 
 Rejected: *reinstating the `branches` row inside the rehydrate* (the review's second answer; it decides for the caller what D-230 left to them). *A pre-pass over the ids so nothing is attempted* (buys what the rollback already gives, for a second read per id or every payload in memory). *`UnknownBranch` for this case* (true, and it names only the branch — a caller with a list still has to bisect for the id, which is half of what C-3 complains about). *An `archived_at` field on the variant* (readable from `cold.branches`, unknowable when that table predates v13, and a field that is sometimes a guess is worse than one a caller looks up). *Refusing the whole call before reading anything* — see the pre-pass above.
 
+<a id="d-254"></a>D-254 — the fold's partition, in an index that is not the one the review asked for (0.15.12, W15.2, schema **v17**). [D-042](s13-decision-register.md#d-042), [D-059](s13-decision-register.md#d-059), [D-089](s13-decision-register.md#d-089), [D-149](s13-decision-register.md#d-149), [D-196](s13-decision-register.md#d-196), [D-216](s13-decision-register.md#d-216), [D-217](s13-decision-register.md#d-217), [D-231](s13-decision-register.md#d-231), [D-244](s13-decision-register.md#d-244). Evidence: `src/schema/{ddl,migrations}.rs`, `src/temporal/archive.rs`, `src/graph/{plan,builder}.rs`, `examples/txlog_fold_index_probe.rs`, `tests/{index_plan_tests,migration_tests,bitemporal_plan_tests,branch_storage_tests}.rs`, `tests/common/v11_schema.rs`.
+
+**The review named a partition the code does not use.** C-4 is one sentence — *the fold partitions on `(entity_id, branch_id)`, orders by `seq_id`, and no index covers that* — and the first half is wrong. The four folds in `temporal::replay` partition on **`(table_name, entity_id, branch_id)`**, and `table_name` leads deliberately: a concept's `entity_id` is its id, a link's is the synthetic `source|target|type|valid_from`, and the two namespaces are not disjoint, so a partition keyed on the id alone silently merges a concept with an edge. `idx_txlog_entity_lineage` as named therefore cannot serve the window at all — its leading column is not the partition's.
+
+**Measured, C-4's index is worse than no index.** 30,000 log rows, 12,000 partitions, 2.5 rows each; best of 7 through `Database::reconstruct`, which is the public call the fold serves. `examples/txlog_fold_index_probe.rs`:
+
+| shape | the fold's SQL | `reconstruct()` | file |
+|---|---|---|---|
+| **no index (v16)** | 64.2 ms | 99.5 ms | — |
+| `(entity_id, branch_id)` — C-4 as written | **73.1** | 99.4 | +5.7% |
+| `(table_name, entity_id, branch_id, seq_id)` | 60.2 | 90.2 | +8.2% |
+| `(table_name, entity_id, branch_id, seq_id, recorded_at)` | 66.7 | 95.7 | +14.2% |
+| `(recorded_at, table_name, entity_id, branch_id, seq_id)` | 73.3 | 93.9 | +14.2% |
+| **`(table_name, entity_id, branch_id, seq_id DESC)`** | **46.2** | **72.6** | **+8.2%** |
+| covering, `seq_id DESC` | 39.3 | 64.0 | +51.0% |
+
+C-4's shape is not merely useless; it is *attractive*. It is wide enough that the planner takes it and drops `idx_txlog_time`'s `recorded_at` seek, and then cannot supply the window's order either — `SCAN transaction_log | USE TEMP B-TREE FOR ORDER BY`: a **full scan plus the same sort**, where v16 had a range seek plus the sort. An index that costs a write per log row to take a seek away is exactly what [D-089](s13-decision-register.md#d-089) exists to catch, and the rule caught it: this is a review item, measured, that ships as something else.
+
+**On the magnitudes above.** The sweep was run three times on this box across the release and only the *ordering* is stable — the winner and the plans are the same every time, the milliseconds are not. C-4's penalty in particular ranged from 14% to 1.5% (73.1 against 64.2 on the run tabulated here; 64.6 against 63.6 on a second), which is why the claim made about it is the plan and not the number: **it never measured faster than having no index**, and it loses the seek in every run. The table is one run reported whole rather than a best-of-three assembled column by column, on [D-195](s13-decision-register.md#d-195)'s rule — a row that mixes runs is a row nobody can reproduce.
+
+**`DESC` is the entire effect, which is why the pin is a negative one.** The ascending form of the identical columns is used, and still sorts — `USE TEMP B-TREE FOR RIGHT PART OF ORDER BY` — at 60.2 ms against the descending form's 46.2. So *"the index is used"* is not the property being bought, and an entry asserting it would stay green through the edit that loses the whole improvement. `Expect` gains a `forbidden` field for this, and `index_plan_tests` refuses any plan for the fold that mentions `TEMP B-TREE`; the rung test asserts the same absence across the climb rather than merely that the index appeared.
+
+**The covering form is refused on storage, and the refusal is the trade written down.** It is 1.18× faster again — 39.3 ms against 46.2, 64.0 against 72.6 end to end — for a **51%** larger file, because it duplicates `payload`, the widest column in the log, into the index. It is also the more expensive of the two on the write path (+10.5% against +5.0%). A ledger's log is the table that only grows, and half again its size, forever, is not what a 1.18× on reconstruction is worth. Stated here rather than left implicit so that a later reader with a different budget can reopen it with the numbers already taken.
+
+**The write side, which is what an index on this table actually costs.** `transaction_log` takes a row per concept and per edge write, so the hottest path in the crate pays for this. 400 single-edge assertions on a fresh database, best of 5 fresh databases per shape: **82.2 → 86.3 ms, +5.0%** — the cheapest of the seven shapes measured, and the covering form's +10.5% is a second reason it is not the one that ships.
+
+**The cold file earns an index of its own by measurement, not by symmetry.** Once a database has been archived, `reconstruct` folds a `UNION ALL` of the hot and cold logs — and SQLite compiles that union as a **`MERGE`, which sorts each side independently**. So the hot index alone leaves half the sort standing, and the two indexes remove two different sorts. 30,000 rows a side:
+
+| | fold |
+|---|---|
+| neither side indexed | 127.2 ms |
+| hot side only — what the rung would have shipped | 110.1 ms |
+| both sides | **96.3 ms** |
+
+An index on the cold file shipped on the strength of the hot one's numbers would have been [D-089](s13-decision-register.md#d-089)'s failure with a plausible cover story. With the union's shape measured it has a named reader.
+
+**And the cold index arrived with an ordering hazard that the pre-v12 tests caught.** `COLD_SCHEMA` runs *before* the archive session's transaction, against a file this crate may not have written; `upgrade_cold_lineage` runs *inside* it and is what adds `branch_id` to a pre-v12 file ([D-217](s13-decision-register.md#d-217)). The new index names that column. Shipped in the first list it makes `archive` refuse a cold file the previous release accepted, with `no such column: branch_id` — so it moves to `COLD_LINEAGE_INDICES`, applied with the upgrade. **It also had no test**: a mutation deleting its creation outright was survived by all sixty-eight tests on the archive path, and `an_archived_file_carries_the_folds_partition_index_at_every_vintage` is what that mutation bought.
+
+**`idx_txlog_time` lost the reader its registry entry named, and the entry moves rather than staying and becoming false.** Its recorded justification was *"the fold's `recorded_at` window"*, and the fold has left. What remains are the log's stamp aggregates — `newest_hot_stamp`, `oldest_hot_stamp`, and the reach guard's counts beside them — all served as an index scan without touching the table, all checked across the change and unmoved. An index whose recorded reader has quietly gone elsewhere is the shape [D-089](s13-decision-register.md#d-089) is about, and it is caught here by rewriting the entry, not by deleting the index.
+
+**Two other folds read this table, they are not the four in `replay.rs`, and the index reached both.** This is the collateral [D-042](s13-decision-register.md#d-042)/[D-059](s13-decision-register.md#d-059) category: an index captures a query because it *contains* the columns, and capturing is not helping.
+
+*`links_at_tx` (`graph::plan`) partitions on `(entity_id, branch_id)` under `WHERE table_name = 'links'`* — which is, after that equality is bound, precisely what the new index's remaining columns supply. It moves off `idx_txlog_time (recorded_at<?)` onto `idx_txlog_fold_partition (table_name=?)` and stops sorting. **It is a trade and it has a crossing**, because what it gives up is a seek on the transaction-time bound (chain of 4,000, best of 21, by how much of the log the bound admits):
+
+| bound admits | v16 plan | v17 plan | |
+|---|---|---|---|
+| 25% | 1.91 ms | 2.49 ms | +31% |
+| 50% | 4.84 | 4.74 | −2% |
+| 75% | 9.76 | 8.39 | −14% |
+| 100% | 15.24 | 11.85 | **−22%** |
+
+The crossing is just under half the log, and a transaction-time read is normally asked about a recent instant. The common case improves; the deep-history read pays 0.6 ms on this fixture. Steering the planner back with a unary `+` on `table_name` was available — the technique this same CTE already uses on `branch_id` ([D-244](s13-decision-register.md#d-244)) — and is refused: it spends the common case to buy the rare one. Four plan pins re-blessed with the table above beside them, one of them ([D-196](s13-decision-register.md#d-196)'s two-dimensional candidate) now *stronger*, because the composite it builds is no longer chosen at all.
+
+*`hydrate_at_time` (`temporal::as_of`) partitions on `entity_id` alone* — correctly, for a reason its own comment gives — and it moves off `idx_txlog_entity` and **gains nothing**. `branch_id` sits between its partition and its order in every index the table declares, so `USE TEMP B-TREE FOR RIGHT PART OF ORDER BY` is in the plan before and after; measured at **+8% of a 0.10 ms call**. Recorded rather than repaired: removing that sort means a third index on the hottest write path in the crate, and 8% of a tenth of a millisecond does not buy one. `idx_txlog_entity` keeps the archive's supersession test, which the probe checked and which did not move, so this is a reader leaving rather than an index stranded.
+
+**The rung is v17 and the plan said v16**, which is bookkeeping rather than a departure: the plan's row was written when the ladder's top was 15, and [D-249](s13-decision-register.md#d-249) took it to 16 at 0.15.7. Index-only, `suspends_foreign_keys: false`, and `verify` needs no new list because it checks declared names against the file. It is a rung rather than a bare DDL line for [D-231](s13-decision-register.md#d-231)'s reason: an existing database that never runs it is a third slower at reconstruction with nothing to say about why, and `a_v17_stamp_over_a_v16_index_set_is_refused_at_open` is what makes that a sentence at open time.
+
+**Four mutations, three caught, and the fourth is why the cold arm has a test.** Dropping the `DESC` (caught by both the registry's `forbidden` and the rung test's absence assertion, each naming the ascending form's own measurement). Making the rung a no-op (nine migration tests). Steering `links_at_tx` off the index with the unary `+` (all four re-blessed pins). Deleting the cold index's creation — **survived**, by every test on the archive path, and closed by the test named above.
+
+**Public surface unchanged at 1,693.** Suites **708** and **689** Rust, **584** Python. Schema **v16 → v17**.
+
+Rejected: *`idx_txlog_entity_lineage` as C-4 names it* (never measured faster than no index, costs the fold its `recorded_at` seek, and the partition it cites is not the one the code uses). *The covering form* (1.18× for +51% file and +10.5% writes, on the one table that only grows). *The ascending form of the winning columns* (still sorts; 60.2 ms against 46.2, and it is the mutation the negative pin exists to catch). *A unary `+` on `table_name` to keep `links_at_tx` where it was* (buys the deep-history read with the common one). *An index for the concept hydrate's partition* (a third index on the write path for 8% of a 0.10 ms call — measured, and left as a note rather than a build). *Shipping the cold index in `COLD_SCHEMA`* (it names a column `upgrade_cold_lineage` may be about to add, and the order is not negotiable).
+
 [C-11]: ../Macrame%20Update%20Plan%20v0.16.0.md

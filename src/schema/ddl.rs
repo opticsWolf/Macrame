@@ -1162,6 +1162,75 @@ pub const CREATE_INDICES: &[&str] = &[
     LC_LINEAGE_CUT,
     "CREATE INDEX IF NOT EXISTS idx_txlog_time ON transaction_log (recorded_at);",
     "CREATE INDEX IF NOT EXISTS idx_txlog_entity ON transaction_log (entity_id);",
+    // The fold's partition and its order (0.15.12, W15.2, review C-4, shipped
+    // v16 -> v17).
+    //
+    // The four folds in `temporal::replay` are one window function:
+    //
+    //   ROW_NUMBER() OVER (PARTITION BY table_name, entity_id, branch_id
+    //                      ORDER BY seq_id DESC)
+    //
+    // and a window function needs its input in partition-then-order sequence.
+    // Nothing supplied that, so every reconstruction sorted the whole log in a
+    // temp B-tree: `SEARCH transaction_log USING INDEX idx_txlog_time
+    // (recorded_at<?)` followed by `USE TEMP B-TREE FOR ORDER BY`. This index
+    // is that sequence, so the sort disappears from the plan entirely.
+    //
+    // Measured (`examples/txlog_fold_index_probe.rs`, 30,000 log rows in 12,000
+    // partitions across three lineages, best of 7):
+    //
+    //   the fold's SQL          64.2 -> 46.2 ms   1.39x
+    //   reconstruct() end to end 99.5 -> 72.6 ms   1.37x
+    //   the file                            +8.2%
+    //   400 single-edge writes              +5.0%
+    //
+    // **`DESC` on the last column is most of the effect and is not
+    // decoration.** The ascending form of exactly these columns supplies the
+    // partition and then has to re-sort inside each one — `USE TEMP B-TREE FOR
+    // RIGHT PART OF ORDER BY` — and that residue is worth 1.30x: 60.2 ms
+    // against this shape's 46.2, and 90.2 against 72.6 end to end. It is not
+    // *slower* than having no index; it is a plausible-looking two thirds of
+    // the improvement, chosen by the planner, at the same file and write cost
+    // as the whole of it. That is the shape an edit could drift into and keep
+    // green, which is why the pin is the sort's **absence** rather than the
+    // index's presence.
+    //
+    // **This is not the index review C-4 asked for, and C-4's was measured.**
+    // The finding names `idx_txlog_entity_lineage` on `(entity_id, branch_id)`,
+    // on the stated grounds that the fold partitions on those two columns. It
+    // partitions on three: `table_name` leads, because a concept's `entity_id`
+    // is its unvalidated id and a link's is the synthetic
+    // `source|target|type|valid_from`, and the two namespaces are not disjoint
+    // — `temporal::replay`'s own note explains what partitioning on the id
+    // alone silently drops. An index whose leading column is not the
+    // partition's first column cannot serve the window, and the probe measured
+    // that: **it never came out faster than having no index** — 73.1 ms
+    // against 64.2 on the run tabulated above, 64.6 against 63.6 on a second —
+    // because it is attractive enough to take the fold off `idx_txlog_time`
+    // and then cannot supply the order it was taken for.
+    //
+    // The durable half of that finding is the plan, not the millisecond. With
+    // C-4's index the fold reads `SCAN transaction_log | USE TEMP B-TREE FOR
+    // ORDER BY`: a **full scan** plus the sort, where v16 had a range seek plus
+    // the sort. The magnitude of the penalty moves with the machine; the loss
+    // of the seek does not.
+    //
+    // **What it deliberately does not carry.** Adding `recorded_at, operation,
+    // payload` makes it covering and takes the fold to 39.3 ms — another 1.18x
+    // — for a file **51% larger**, because `payload` is the widest column in
+    // the ledger and this would store a second copy of all of it. Refused on
+    // that trade, and recorded here so the next reader does not re-derive it:
+    // the fold is not the crate's hottest path and the log is not the place to
+    // double.
+    //
+    // The other readers of this table were checked before and after and none of
+    // them moved: the archive's log predicate keeps `idx_txlog_entity`, and the
+    // two aggregates keep `idx_txlog_time` as a covering scan. `idx_txlog_time`
+    // does lose the fold, which was the reader `index_plan_tests` recorded for
+    // it — its entry there now names the aggregates that remain, because an
+    // index justified by a query that has left it is D-089 waiting to happen.
+    "CREATE INDEX IF NOT EXISTS idx_txlog_fold_partition ON transaction_log \
+     (table_name, entity_id, branch_id, seq_id DESC);",
     // The archive cutoff's seek column on the ledger table (0.12.6, W3.1,
     // D-151, review §2.1, shipped v10 -> v11).
     //
