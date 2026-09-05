@@ -70,6 +70,40 @@ def test_the_wheel_version_matches_the_binding_crate():
     assert macrame.__version__ == declared.group(1)
 
 
+def test_the_in_tree_extension_was_built_after_the_sources_it_compiles():
+    """The stale-binary hole the version check above cannot see.
+
+    That check compares the extension to the manifest, and both are read from
+    the same installed copy. When the copy is old, both are old **and they
+    agree**: the suite goes green while measuring code that is not in the tree.
+    That is the 0.12.17 incident, where a ``site-packages`` build five releases
+    behind won over the editable path entry and nothing said so.
+
+    So this asks a question the artifact cannot answer about itself — is it
+    newer than the sources it was compiled from — by looking at the two on
+    disk. The same predicate gates ``tests_py/run_suite.py``; it is repeated
+    here so that a bare ``pytest tests_py/test_x.py``, which skips that gate,
+    still cannot be quietly wrong.
+
+    Only in the dev layout, where ``python/macrame/`` holds a hand-built
+    extension that no installer maintains. An installed package was built by
+    pip from these sources in one step and has no second copy to drift, so
+    there is nothing here to ask.
+    """
+    extension = Path(macrame._macrame.__file__)
+    if extension.parent != REPO / "python" / "macrame":
+        pytest.skip(f"installed package at {extension}, not the dev layout")
+
+    sys.path.insert(0, str(REPO / "scripts"))
+    try:
+        from build_python_ext import staleness
+    finally:
+        sys.path.pop(0)
+
+    reason = staleness()
+    assert reason is None, reason
+
+
 def test_the_binding_tracks_the_ledger_version():
     """The wheel and the crate underneath it report the same version.
 

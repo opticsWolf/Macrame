@@ -70,4 +70,12 @@ testpaths = ["tests_py"]
 # sufficient for both.
 #
 # Gate on `python tests_py/run_suite.py`, not on bare pytest.
+#
+# `pythonpath = ["python"]` would spare the dev loop its `PYTHONPATH=python`,
+# and is deliberately absent: pytest prepends it, so CI -- which installs the
+# wheel with `pip install .` and has no extension in the source tree -- would
+# import the in-tree package, find no `_macrame` beside it, and fail at
+# collection. The setting cannot tell the two layouts apart. The dev loop keeps
+# `PYTHONPATH` explicit and `scripts/build_python_ext.py` keeps the extension
+# beside the package; `run_suite.py` refuses to start if it is stale.
 addopts = "-p no:randomly --strict-markers"
