@@ -225,6 +225,25 @@ let same: ReadPlan = walk.read_plan()?;              // and reads them back
 // A plan validates its branch and nothing else. UnknownBranch,
 // RecordedInstantUnreachable and InvalidTimestamp all belong to the read.
 
+// -- A concept can outlive its lineage (0.15.11, D-253, review C-3) --
+// `archive_branch` takes the lineage's `branches` row with it; a cold concept
+// keeps the `branch_id` it was minted on. Asking for one back after the other
+// is the single input where the two arms disagree.
+match db.rehydrate(&["c1"]).await {
+    Err(DbError::BranchArchived { branch, concept }) => {
+        // Was: ErrorKind::Engine, "FOREIGN KEY constraint failed" -- naming
+        // neither, and blaming the table being written rather than the one
+        // with the missing row. Now ErrorKind::Branch, naming both.
+        db.fork(BranchId::new(&branch)?, BranchId::main()).await?;
+        db.rehydrate(&[concept.as_str()]).await?;   // and now it succeeds
+    }
+    other => { other?; }
+}
+// Nothing is written when it refuses -- the whole rehydrate is one
+// transaction, ids ahead of the refused one included. `cold.branches` still
+// holds the lineage's parent, fork point and the instant it left, so the
+// re-registration can be faithful rather than a guess.
+
 // -- A ceiling that bounds work, not the answer (0.15.10, D-252, review C-8) --
 let bounded = TraversalBuilder::new(root).max_depth(4).limit(500);
 let (ids, outcome) = bounded.execute_ids_explained(db.read_conn(), ts).await?;
@@ -615,7 +634,7 @@ New in 0.13.38 ([D-211](s13-decision-register.md#d-211)). [Appendix A](appendice
 
 *Frozen* means a change requires a **major version**.
 
-**1. The public Rust API, item for item and path for path.** [`docs/architecture/public-api.txt`](public-api.txt) is the surface — **1,684 items**. No item is removed, no path stops resolving, and no signature narrows. Each item is reachable at exactly one canonical path, plus flat aliases at the crate root and in `macrame::prelude` ([D-208](s13-decision-register.md#d-208)). Held by `scripts/check_public_api.py` in CI and by `tests/public_path_tests.rs` in `cargo test`. The cycle that produced this surface was reviewed against 0.13.0 item by item before it was frozen — [`api-review-0.14.0.md`](api-review-0.14.0.md), [D-212](s13-decision-register.md#d-212) — which is the last release where that review is cheap.
+**1. The public Rust API, item for item and path for path.** [`docs/architecture/public-api.txt`](public-api.txt) is the surface — **1,693 items**. No item is removed, no path stops resolving, and no signature narrows. Each item is reachable at exactly one canonical path, plus flat aliases at the crate root and in `macrame::prelude` ([D-208](s13-decision-register.md#d-208)). Held by `scripts/check_public_api.py` in CI and by `tests/public_path_tests.rs` in `cargo test`. The cycle that produced this surface was reviewed against 0.13.0 item by item before it was frozen — [`api-review-0.14.0.md`](api-review-0.14.0.md), [D-212](s13-decision-register.md#d-212) — which is the last release where that review is cheap.
 
 **2. The ledger tables** — `concepts`, `links`, `transaction_log`. Additive only: `ALTER TABLE ADD COLUMN` and new indexes. A changed primary key, a dropped column or altered bitemporal semantics is a major version with an explicit ETL path, because bitemporal data is the hardest data to migrate: a rebuild means replaying history and recomputing transaction-time boundaries, which is rewriting the past ([D-036](s13-decision-register.md#d-036), [Doctrine III](s0-s3-foundations.md#doctrine-iii)).
 

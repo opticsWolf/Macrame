@@ -48,6 +48,7 @@ pub(crate) const DB_ERROR_VARIANTS: &[&str] = &[
     "UnknownBranch",
     "BranchExists",
     "BranchNotArchivable",
+    "BranchArchived",
     "ForkPrecedesParent",
     "CrossLineage",
     "BranchMismatch",
@@ -130,6 +131,13 @@ fn sample(name: &str) -> Option<DbError> {
         "BranchNotArchivable" => DbError::BranchNotArchivable {
             branch: "abandoned".into(),
             reason: "concept c1 was minted here and a hot edge on another lineage names it".into(),
+        },
+        // The other side of the same bargain: `archive_branch` refused to
+        // forget this lineage above, and here it did, and a concept minted on
+        // it is being asked back.
+        "BranchArchived" => DbError::BranchArchived {
+            branch: "abandoned".into(),
+            concept: "c1".into(),
         },
         "ForkPrecedesParent" => DbError::ForkPrecedesParent {
             branch: "behind".into(),

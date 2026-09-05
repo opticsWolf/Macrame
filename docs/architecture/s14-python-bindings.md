@@ -918,6 +918,18 @@ The sixth holding of W6's convention, and the release that keeps a promise [§14
 
 **Two surfaces refuse the keyword and a third takes it without being able to report, each for its own reason.** `load_subgraph` has `byte_budget`, which *refuses* with `SubgraphTooLargeError` rather than truncating, and a `Subgraph` has nowhere to record that its walk was cut — a second, weaker ceiling there would return a sample that looks like a neighbourhood. `search_filtered` has `probe_cap`, which *is* this ceiling under the name that surface already had; a `limit=` beside it would be two spellings of one knob in one signature, which is what §14.21 refused for `plan=`. `traverse` does take it, and cannot report it: hydrated nodes leave no room for the answer, so the keyword is offered and the docstring names `traverse_ids_explained` as where the question is asked. That last one is a judgement rather than a rule — refusing it would leave the surface a caller reaches for topology *and* attributes unable to bound its own cost, which is the worse of the two gaps.
 
+### 14.23 <a id="w151-branch-archived"></a>`BranchArchivedError`, and a type for a refusal the engine was already making (0.15.11, W15.1, [D-253](s13-decision-register.md#d-253))
+
+Nothing about this release is a new capability on the Python side, which is what makes it worth writing down. `rehydrate()` refused this input before and refuses it now; what changed is that the refusal has a name.
+
+`EngineError: FOREIGN KEY constraint failed` is what a caller used to catch, and there is nothing to do with it. It does not say which of the ids was the problem, so a caller with a list has to bisect. It does not say the problem is a lineage, so the obvious guesses are all wrong — the concept is missing, the cold file is stale, the database is corrupt. And it sits under `EngineError`, which is the class a caller treats as *the database is unwell*: retried, alerted on, escalated. The ledger was never unwell. A lineage was forgotten on purpose, some time ago, probably by the same caller.
+
+So `BranchArchivedError` carries `branch` and `concept` as attributes and hangs off `BranchError` beside `UnknownBranchError` and `BranchNotArchivableError`, which is where the family of *you asked about a lineage and the answer is no* already lives.
+
+**The attributes are the interesting half, not the message.** A caller handling this in a loop wants `e.concept` to drop from its list and `e.branch` to feed the `fork()` that fixes it — the message is for the log. That is the reasoning [§14.3](s14-python-bindings.md#143-errors)'s one-class-per-variant rule rests on, and the sample table in `testing.rs` plus `test_errors.py`'s `EXPECTED` both carry the new variant, so the class, its base and its two attribute names are asserted from outside the code that sets them.
+
+**Nothing is written when it raises, ids ahead of the refused one included.** `rehydrate()` was already one transaction — the Rust documentation calls a half-happened rehydration impossible — and the refusal returns from inside it, so the rollback covers the ids the call had already moved. `test_a_refused_call_writes_nothing` pins that from Python rather than trusting the Rust test, because the binding is free to loop over ids itself and a version that called through once per id would pass every other assertion in the file.
+
 <!--nav-->
 ← [previous](s13-decision-register.md) · [index](README.md) · [next](appendices.md) →
 <!--/nav-->

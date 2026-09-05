@@ -206,6 +206,41 @@ pub enum DbError {
     #[error("branch {branch} cannot be archived: {reason}")]
     BranchNotArchivable { branch: String, reason: String },
 
+    /// A rehydrate needs a lineage [`crate::Database::archive_branch`] forgot
+    /// (0.15.11, W15.1, review C-3, [D-230]).
+    ///
+    /// The two halves were built two waves apart and neither knew about the
+    /// other. `archive_branch` moves a lineage's `branches` row into the cold
+    /// file; [`crate::Database::rehydrate`] reinstates a concept row still
+    /// carrying the `branch_id` it was minted on. `concepts.branch_id`
+    /// references `branches(branch_id)` and foreign keys are on, so the insert
+    /// cannot land — and until this variant existed it did not land as
+    /// [`ErrorKind::Engine`], reading `FOREIGN KEY constraint failed`. That
+    /// message names neither the lineage, nor the concept, nor the remedy, and
+    /// attributes the refusal to `concepts` when the missing row is a branch's.
+    ///
+    /// # The other half of D-230's bargain
+    ///
+    /// The alternative was to reinstate the `branches` row inside the same
+    /// session, which would make the rehydrate succeed. It is refused because
+    /// [D-230]'s stance is that an archived lineage is *forgotten*: bringing
+    /// the name back here would register a lineage with none of its links —
+    /// known again, and answering differently than it did before it left,
+    /// without the caller having asked for either.
+    ///
+    /// The remedy is therefore the caller's, and the cold file holds what it
+    /// needs: `cold.branches` keeps the row's `parent_id`, `forked_at` and the
+    /// instant it was archived, so [`crate::Database::fork`] can re-register
+    /// the lineage on its original terms, after which the rehydrate succeeds.
+    /// Doing that deliberately is the difference this variant exists to make.
+    ///
+    /// [D-230]: ../../docs/architecture/s13-decision-register.md#d-230
+    #[error(
+        "concept {concept} was minted on branch {branch}, which the ledger has \
+         forgotten; re-register the lineage before rehydrating the concept"
+    )]
+    BranchArchived { branch: String, concept: String },
+
     /// The cross-row half of the fork-point invariant, which no `CHECK` can see
     /// (§15.2): fork points must not decrease down a root path.
     ///
@@ -847,7 +882,8 @@ impl DbError {
 
             Self::SubgraphTooLarge { .. } => ErrorKind::Budget,
 
-            Self::BranchExists { .. }
+            Self::BranchArchived { .. }
+            | Self::BranchExists { .. }
             | Self::BranchMismatch { .. }
             | Self::BranchNotArchivable { .. }
             | Self::CrossLineage { .. }

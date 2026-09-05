@@ -1090,6 +1090,12 @@ class Database:
         while archived, and after rehydration. Ids not in the cold file are
         skipped rather than refused.
 
+        Raises `BranchArchivedError` for a concept minted on a lineage
+        `archive_branch()` has since forgotten (0.15.11) — the one id a
+        rehydrate cannot satisfy, because the row it would write references a
+        `branches` row that left with the lineage. The call writes nothing when
+        it refuses, ids ahead of the refused one included.
+
         A write, so it queues through the actor and waits out any transaction in
         flight — a channel wait `busy_timeout` does not bound.
         """
@@ -1386,6 +1392,25 @@ class BranchNotArchivableError(BranchError):
 
     branch: str
     reason: str
+
+class BranchArchivedError(BranchError):
+    """A rehydrate that needs a lineage `archive_branch()` forgot.
+
+    A concept keeps the lineage it was minted on, and `archive_branch()` takes
+    that lineage's row with it, so asking for such a concept back names a branch
+    the ledger no longer has. Until 0.15.11 this arrived as `EngineError`
+    carrying `FOREIGN KEY constraint failed` — it named neither the concept nor
+    the branch, and blamed `concepts`, the table being written, rather than
+    `branches`, the one with the missing row.
+
+    Nothing is written when it is raised, ids ahead of the refused one included.
+    The remedy is `fork()`: re-register the lineage — the archive file's
+    `cold.branches` still carries its parent, fork point and the instant it left
+    — and ask again.
+    """
+
+    branch: str
+    concept: str
 
 class ForkPrecedesParentError(BranchError):
     """A fork point earlier than its parent's own.

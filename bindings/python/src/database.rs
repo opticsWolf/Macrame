@@ -1283,6 +1283,11 @@ impl PyDatabase {
     /// because the search index dominates there (§9, D-132). It is one
     /// transaction with no window boundaries, deliberately: a rehydration cannot
     /// half-happen.
+    ///
+    /// `BranchArchivedError` when a named concept was minted on a lineage
+    /// `archive_branch()` has since forgotten (0.15.11, W15.1). Nothing is
+    /// written when it refuses, ids ahead of the refused one included; `fork()`
+    /// re-registers the lineage and the call then succeeds.
     fn rehydrate(&self, py: Python<'_>, ids: Vec<String>) -> PyResult<temporal::PyRehydrateReport> {
         let inner = self.with_db(py, move |db| {
             let refs: Vec<&str> = ids.iter().map(String::as_str).collect();

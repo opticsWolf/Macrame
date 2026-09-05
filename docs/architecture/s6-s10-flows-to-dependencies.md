@@ -114,6 +114,17 @@ pub enum DbError {
     #[error("branch {branch} cannot be archived: {reason}")]
     BranchNotArchivable { branch: String, reason: String },
 
+    // A rehydrate that needs a lineage `archive_branch` forgot: the concept
+    // carries the `branch_id` it was minted on and the row it references left
+    // with the lineage. Refused before the insert, because after it the
+    // foreign key answers first — as an engine fault naming the table being
+    // written rather than the one that is missing (0.15.11, D-253).
+    #[error(
+        "concept {concept} was minted on branch {branch}, which the ledger has \
+         forgotten; re-register the lineage before rehydrating the concept"
+    )]
+    BranchArchived { branch: String, concept: String },
+
     #[error(
         "branch {branch} would fork from {parent} at {forked_at}, \
          before {parent} itself was cut at {parent_forked_at}"

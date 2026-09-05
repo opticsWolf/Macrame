@@ -349,6 +349,24 @@ create_exception!(
 );
 create_exception!(
     macrame,
+    BranchArchivedError,
+    BranchError,
+    "A rehydrate that needs a lineage `archive_branch()` forgot. Attributes: \
+     `branch`, `concept`.\n\n\
+     A concept keeps the lineage it was minted on, and `archive_branch()` takes \
+     that lineage's row with it — so a concept archived on a branch and \
+     rehydrated after the branch was forgotten names a lineage the ledger no \
+     longer has. Before this type it surfaced as `EngineError` carrying \
+     `FOREIGN KEY constraint failed`, which named neither the concept nor the \
+     branch and blamed the table being written rather than the one that was \
+     missing.\n\n\
+     Nothing is written when it is raised, including for ids ahead of the \
+     refused one in the same call. The remedy is `fork()`: re-register the \
+     lineage — `cold.branches` in the archive file still carries its parent, \
+     fork point and the instant it left — and ask again."
+);
+create_exception!(
+    macrame,
     ForkPrecedesParentError,
     BranchError,
     "A fork point earlier than its parent's own. Attributes: `branch`, \
@@ -694,6 +712,13 @@ fn build(py: Python<'_>, err: DbError) -> PyErr {
             })
         }
 
+        DbError::BranchArchived { branch, concept } => {
+            raise::<BranchArchivedError, _>(py, m, |e| {
+                e.setattr("branch", branch)?;
+                e.setattr("concept", concept)
+            })
+        }
+
         DbError::ForkPrecedesParent {
             branch,
             parent,
@@ -978,6 +1003,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
         UnknownBranchError,
         BranchExistsError,
         BranchNotArchivableError,
+        BranchArchivedError,
         ForkPrecedesParentError,
         CrossLineageError,
         BranchMismatchError,

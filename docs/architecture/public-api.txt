@@ -198,6 +198,9 @@ pub macrame::error::DbError::ArchiveWindow::reason: alloc::string::String
 pub macrame::error::DbError::ArchiveWindow::window: core::time::Duration
 pub macrame::error::DbError::AttributeModeUnstated
 pub macrame::error::DbError::AttributeModeUnstated::instants: macrame::error::StatedInstants
+pub macrame::error::DbError::BranchArchived
+pub macrame::error::DbError::BranchArchived::branch: alloc::string::String
+pub macrame::error::DbError::BranchArchived::concept: alloc::string::String
 pub macrame::error::DbError::BranchExists(alloc::string::String)
 pub macrame::error::DbError::BranchMismatch
 pub macrame::error::DbError::BranchMismatch::named: alloc::string::String
@@ -646,6 +649,9 @@ pub macrame::prelude::DbError::ArchiveWindow::reason: alloc::string::String
 pub macrame::prelude::DbError::ArchiveWindow::window: core::time::Duration
 pub macrame::prelude::DbError::AttributeModeUnstated
 pub macrame::prelude::DbError::AttributeModeUnstated::instants: macrame::error::StatedInstants
+pub macrame::prelude::DbError::BranchArchived
+pub macrame::prelude::DbError::BranchArchived::branch: alloc::string::String
+pub macrame::prelude::DbError::BranchArchived::concept: alloc::string::String
 pub macrame::prelude::DbError::BranchExists(alloc::string::String)
 pub macrame::prelude::DbError::BranchMismatch
 pub macrame::prelude::DbError::BranchMismatch::named: alloc::string::String
@@ -1373,6 +1379,9 @@ pub macrame::DbError::ArchiveWindow::reason: alloc::string::String
 pub macrame::DbError::ArchiveWindow::window: core::time::Duration
 pub macrame::DbError::AttributeModeUnstated
 pub macrame::DbError::AttributeModeUnstated::instants: macrame::error::StatedInstants
+pub macrame::DbError::BranchArchived
+pub macrame::DbError::BranchArchived::branch: alloc::string::String
+pub macrame::DbError::BranchArchived::concept: alloc::string::String
 pub macrame::DbError::BranchExists(alloc::string::String)
 pub macrame::DbError::BranchMismatch
 pub macrame::DbError::BranchMismatch::named: alloc::string::String

@@ -178,9 +178,19 @@ The write actor is stateless between turns and pays for it three times: `hot_log
 
 ## 4. W15 — correctness and the API before 1.0
 
-### W15.1 · 0.15.9 — typed refusal for a rehydrate that needs an archived lineage (C-3)
+### W15.1 · 0.15.11 — typed refusal for a rehydrate that needs an archived lineage (C-3)
 
 `rehydrate` after `archive_branch` currently fails with whatever the cold file's `branches` absence produces. It refuses with a `DbError` variant naming the lineage, classified under `ErrorKind::Branch`, so the gate from [D-242](architecture/s13-decision-register.md#d-242) fails to compile until the classification exists.
+
+**Shipped as 0.15.11, [D-253](architecture/s13-decision-register.md#d-253).** Three departures from the sketch above.
+
+*The variant is `BranchArchived { branch, concept }`, not a `DbError` naming only the lineage.* Half of C-3's complaint is that a caller passing a list cannot tell which id was refused, and a refusal naming the branch alone leaves them bisecting.
+
+*The check is a set read once, and the refusal happens inside the loop rather than before it.* One `SELECT branch_id FROM branches` into a `HashSet` costs one query for the whole call, where a per-id membership check would add a query to a loop that already runs one. The tidier shape — a pre-pass so that nothing is attempted before the refusal — buys what the transaction already gives, at a second read per id or every payload held in memory, and is rejected on those terms rather than on taste.
+
+*The remedy is measured rather than stated.* "Re-register the lineage" is advice, and advice in an error message is a claim about the crate. `fork`, then the same call, and the concept comes back **on its own lineage**: a test asserts it end to end, because every other assertion in the file holds just as well if the refusal is a dead end.
+
+The classification gate from [D-242](architecture/s13-decision-register.md#d-242) did what it was built for on both sides of the boundary — the variant failed to compile until `kind()` and the binding's own `match` had each been given a decision.
 
 ### W15.2 · 0.15.10 — schema v16: `idx_txlog_entity_lineage` (C-4)
 
@@ -232,7 +242,7 @@ Merge to `main` after W16.2, tagged. `docs/releases/v0.16.0.md` written before t
 | 8 | 0.15.5 | W14.4 | reach guard, cheap arm first — **done** | `temporal/replay.rs`, `graph/builder.rs` | `reach_table`; four mutations; numbers in D-247 |
 | 9 | 0.15.6 | W14.3 | `ActorState` — **done** | `connection.rs` | `actor_state_tests`, `lineage_cache`; five mutations; numbers in D-248 |
 | 10 | 0.15.7 | W14.5 | hot-log verdict kept by the log (C-5) — **done** | `ddl.rs`, `migrations.rs`, `replay.rs` | schema v16; `log_integrity_probe`; numbers in D-249 |
-| 11 | 0.15.9 | W15.1 | typed rehydrate refusal | `errors.rs`, `branch.rs` | kind gate |
+| 11 | 0.15.11 | W15.1 | typed rehydrate refusal — **done** | `error.rs`, `temporal/archive.rs`, `bindings/python` | `rehydrate_lineage_tests`, `test_rehydrate_lineage.py`; nine mutations; numbers in D-253 |
 | 12 | 0.15.10 | W15.2 | schema v16, composite index | `schema.rs`, `migrations`, `index_plan_tests.rs` | rung tests; fold plan pinned |
 | 13 | 0.15.11 | W15.3 | builders + `#[non_exhaustive]` | `tuning.rs`, `builder.rs`, `snapshot.rs` | `api-review-0.16.0.md` |
 | 14 | 0.15.12 | W15.4 | lazy diagnostic handle | `connection.rs` | — |

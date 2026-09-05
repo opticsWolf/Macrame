@@ -116,6 +116,13 @@ EXPECTED: dict[str, tuple[str, str, dict]] = {
             ),
         },
     ),
+    # The other half of D-230's bargain: `archive_branch` refuses to forget a
+    # lineage above, and this is what a rehydrate says once it has.
+    "BranchArchived": (
+        "BranchArchivedError",
+        "BranchError",
+        {"branch": "abandoned", "concept": "c1"},
+    ),
     "ForkPrecedesParent": (
         "ForkPrecedesParentError",
         "BranchError",

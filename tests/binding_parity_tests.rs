@@ -58,7 +58,7 @@ use std::path::PathBuf;
 /// this constant, `tests_py/test_errors.py`, `python/macrame/_macrame.pyi`,
 /// `python/macrame/__init__.py`, `docs/architecture/s6-s10-flows-to-dependencies.md`,
 /// and the blessed `docs/architecture/public-api.txt`.
-const DB_ERROR_VARIANTS: usize = 41;
+const DB_ERROR_VARIANTS: usize = 42;
 
 fn repo() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

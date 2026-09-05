@@ -1268,6 +1268,27 @@ pub struct RehydrateReport {
 /// index describing the wrong row, silently. Both exits are taken here rather
 /// than one being assumed, and [`RehydrateReport::rowids_reassigned`] reports
 /// which was used.
+///
+/// # A concept outlives its lineage, and is refused (0.15.11, W15.1, C-3)
+///
+/// [`archive_branch`] takes a lineage's `branches` row with it, and a cold
+/// concept keeps the `branch_id` it was minted on. Rehydrating one after the
+/// other therefore reinstates a row whose lineage no longer exists — which
+/// `concepts.branch_id REFERENCES branches(branch_id)` refuses, with foreign
+/// keys on. It is refused *here* instead, as
+/// [`DbError::BranchArchived`] naming both the concept and the lineage, for
+/// the reason that variant's own documentation gives: the engine's message
+/// names neither, and blames the table that was being written rather than the
+/// one that is missing.
+///
+/// Ids whose lineage is intact are unaffected — the refusal names one concept,
+/// not the batch.
+///
+/// # Errors
+///
+/// [`DbError::BranchArchived`] when a requested concept's lineage has no row in
+/// `branches`. Nothing is written: the whole rehydrate runs in one transaction
+/// and the refusal leaves it uncommitted.
 pub async fn rehydrate(
     conn: &libsql::Connection,
     ids: &[&str],
@@ -1317,6 +1338,21 @@ async fn rehydrate_session(conn: &libsql::Connection, ids: &[&str]) -> Result<Re
         "'main' AS branch_id"
     };
 
+    // Every lineage the hot ledger still registers, read once (0.15.11, W15.1,
+    // C-3). One query for the whole call rather than one per id: the set is
+    // bounded by how many lineages exist, not by how many concepts are being
+    // moved, and the loop below is already one query per id without adding a
+    // second. A cold file that predates the lineage column reads the literal
+    // `'main'` above, which is in this set on every ledger — `archive_branch`
+    // refuses the trunk, so the one name the fallback can produce is the one
+    // name that cannot be missing.
+    let mut live_lineages = std::collections::HashSet::new();
+    let mut rows = tx.query("SELECT branch_id FROM branches", ()).await?;
+    while let Some(row) = rows.next().await? {
+        live_lineages.insert(row.get::<String>(0)?);
+    }
+    drop(rows);
+
     let mut rehydrated = 0usize;
     let mut reassigned = 0usize;
 
@@ -1346,6 +1382,26 @@ async fn rehydrate_session(conn: &libsql::Connection, ids: &[&str]) -> Result<Re
         let recorded_at: String = row.get(7)?;
         let retired: i64 = row.get(8)?;
         let branch_id: String = row.get(9)?;
+
+        // The lineage has to exist before the row that names it can go back
+        // (0.15.11, W15.1, C-3). Checked against the set read above rather than
+        // left to `concepts.branch_id REFERENCES branches(branch_id)`, which
+        // would refuse this same insert as `FOREIGN KEY constraint failed` —
+        // an engine-kind error naming the concepts table, when what is missing
+        // is a branch.
+        //
+        // Refused here rather than in a pass over every requested id first: the
+        // transaction has not committed, so the ids ahead of this one are not
+        // written either way, and hoisting the reads would hold every payload
+        // in memory to gain what the rollback already gives. What that costs is
+        // stated rather than hidden — the work done for the earlier ids is
+        // spent and discarded.
+        if !live_lineages.contains(&branch_id) {
+            return Err(DbError::BranchArchived {
+                branch: branch_id,
+                concept: (*id).to_string(),
+            });
+        }
 
         let taken: i64 = tx
             .query(
