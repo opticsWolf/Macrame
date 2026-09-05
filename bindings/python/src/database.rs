@@ -260,8 +260,15 @@ impl PyDatabase {
     ///
     /// It does change one thing it did not change before: `diagnostic_conn()`
     /// no longer hands back the caller's own connection, so per-connection
-    /// state — an `ATTACH`, a `PRAGMA` — persists between `diagnostic_query`
-    /// calls in the same process. See that method's rustdoc.
+    /// state persists between `diagnostic_query` calls on the same handle. Since
+    /// 0.15.15 that is bounded — an open transaction is rolled back and a
+    /// connection carrying temp objects or an `ATTACH` is replaced, on the way
+    /// in to every call — with one documented residue: a
+    /// pragma the crate does not itself set is still inherited by the next
+    /// caller. See `Database::diagnostic_conn`'s rustdoc for the table, and
+    /// [D-257](../../../docs/architecture/s13-decision-register.md#d-257) for
+    /// what it cost to find out that a leaked `BEGIN` also made
+    /// `Database.checkpoint()` a no-op.
     ///
     /// `std::sync::Mutex`, not `tokio`'s: the critical section is a
     /// `block_on`, not an await point, so there is no future to hold the guard
@@ -287,6 +294,18 @@ impl PyDatabase {
                 .unwrap_or_else(|e| e.into_inner());
             rows::map_err(runtime().block_on(async {
                 let conn = db.diagnostic_conn().await?;
+                // No scrub on the way out, and it was written before it was
+                // measured (0.15.15, W15.5, D-257). The argument for one was
+                // that a caller who sends `BEGIN` and never calls again pins a
+                // WAL snapshot until the handle drops. Deleting the call left
+                // the whole Python suite green, and the reason is that the
+                // sequence does not exist: a bare `BEGIN` pins nothing — the
+                // snapshot is taken by the first *read* inside the transaction
+                // — and any statement that would take it arrives through this
+                // method, whose entry scrub has already rolled the transaction
+                // back. `Database::scrub_diagnostic_conn` stays for the Rust
+                // caller who holds a clone across both, which is a sequence
+                // that does exist.
                 rows::collect(&conn, &sql, bound).await
             }))
         })
@@ -1914,6 +1933,19 @@ impl PyDatabase {
     /// and `explain` take a mutex the rest of the surface does not. Reads on
     /// the typed surface stay concurrent. See `PyDatabase::diagnostic_rows`.
     #[pyo3(signature = (sql, params = None))]
+    /// # One statement per call
+    ///
+    /// Only the **first** statement of `sql` runs; the rest are discarded
+    /// without an error. `"SELECT 1; SELECT 2"` returns the rows of `SELECT 1`
+    /// and nothing else — libSQL prepares one statement and this method steps
+    /// that one. Worth knowing before pasting a script in, and worth knowing
+    /// because of what the discarded half can leave behind: `"BEGIN; SELECT 1"`
+    /// executes the `BEGIN` and nothing else, which is one of the ways the
+    /// connection ends up carrying a transaction nobody meant to open (0.15.15,
+    /// W15.5,
+    /// [D-257](../../../docs/architecture/s13-decision-register.md#d-257)).
+    /// That one is scrubbed rather than merely documented — see
+    /// [`PyDatabase::diagnostic_rows`].
     fn diagnostic_query<'py>(
         &self,
         py: Python<'py>,

@@ -247,6 +247,25 @@ Found on the way: what this gives up is isolation between diagnostic callers, si
 
 ## 5. W16 — ancestry in Rust, and the hygiene batch
 
+
+### W15.5 · 0.15.15 — the shared diagnostic connection is scrubbed between callers (D-256 follow-up)
+
+0.15.14 made every diagnostic caller on a handle share one connection and documented the isolation that cost. `diagnostic_query` is the one arbitrary-SQL surface the crate exposes, so the documented residue is reachable from ordinary Python. Measure what the sharing actually admits, scrub what can be scrubbed for what it costs, and pin the rest.
+
+**Shipped as 0.15.15, [D-257](architecture/s13-decision-register.md#d-257).** Five departures, and the first is that the hazard this milestone was written for was not the worst one.
+
+*The list [D-256] wrote down was incomplete, and the missing item is the only one that leaves this surface.* It named an `ATTACH`, a `PRAGMA` and a temp table outliving their call. It did not name a transaction. A `BEGIN` on a read-only WAL connection opens a read transaction whose first read pins a snapshot, and measured with 200 writes in between, the diagnostic surface answered **1 row where the database held 201** while `Database.checkpoint()` — nothing to do with diagnostics — moved no frames and left the WAL at **8.5 MB**. Stale answers on the surface a caller reaches for when they already distrust the typed one.
+
+*The dirt check the design called for was three times the price of the one that shipped.* `SELECT count(*) FROM temp.sqlite_master` plus `pragma_database_list` costs **7.8 µs**; `PRAGMA temp.schema_version` plus `PRAGMA database_list` answers the same two questions for **2.4 µs** (`examples/diagnostic_hygiene_probe.rs`). `is_autocommit()` is free at 0.04 µs and gates a 2.4 µs `ROLLBACK`. And **no dirt check can see a pragma** — both counters sit still while one is set — so the crate restates the two it sets for 1.0 µs instead of detecting that they moved, and the rest is documented residue confined to later diagnostic reads on the same handle.
+
+*The parts do not add, and quoting the sum would have understated the release threefold.* The scrub's statements measure 3.5 µs in a loop of their own and the `stat` 18.3 in a loop of its own; together in one loop they are 27.6, and the shipped call is **29.8 µs against 18.6**. The first explanation — that the cold open's state machine was being carried by the warm path — was tested by `Box::pin`ning it and changed nothing at all.
+
+*The Python binding did not need the exit-side scrub the design gave it.* A mutation deleted the call and the whole suite stayed green, because the sequence it guards is unreachable there: a bare `BEGIN` pins nothing, and every statement that would take the pin arrives through the same method, whose entry scrub has already rolled the transaction back. The call came out; `Database::scrub_diagnostic_conn()` stays public for the Rust caller who holds a clone across both, which is a sequence that does exist. Surface **1,730 → 1,733**.
+
+*[D-256] corrected three documents about this method and missed two.* It searched for the claim it had just disproved — that `build()` is the open — and rewrote every document making it. `s5-modules.md` §5.1.9 and `docs/quickref.md` were making the *other* stale claim, the one D-256 itself created: that the connection is the caller's own, and that opening happens per call. No search for the first finds the second, and the doc gates check that a public method is listed rather than that what is said about it is true. Both corrected here.
+
+Found on the way: nine mutations, seven caught, two survived. One is the code above, deleted rather than tested. The other treats a connection whose own pragma reads fail as clean rather than as suspect — a defensive default with no way to stage it, kept and written down rather than rounded to "caught".
+
 ### W16.1 · 0.15.13 — resolve ancestry once, in Rust (C-10, A-2)
 
 The `lineage` CTE becomes a bound `VALUES` table produced from W14.3's cache: `(branch_id, dist, cutoff)` per ancestor. The lowering emits it instead of the recursive CTE, differentially tested against the CTE it replaces on the branch fixture generator. `reconstruct_on(branch)` and a pure `resolve(&[Branch], id) -> Vec<Ancestor>` come with it. This is the form Turso can run, which is the Jacquard argument for doing it here first.
@@ -285,6 +304,7 @@ Merge to `main` after W16.2, tagged. `docs/releases/v0.16.0.md` written before t
 | 12 | 0.15.12 | W15.2 | schema **v17**, the fold's partition index — **done** | `schema/{ddl,migrations}.rs`, `temporal/archive.rs`, `index_plan_tests.rs` | rung tests; fold plan pinned by absence of sort; four mutations, one survived and bought a test; numbers in D-254 |
 | 13 | 0.15.13 | W15.3 | `#[non_exhaustive]` on all 29, + 18 constructors | `connection.rs`, `builder.rs`, `snapshot.rs`, `as_of.rs`, `error.rs`, `replay.rs` | `api-review-0.16.0.md`, `api_growth_tests.rs` |
 | 14 | 0.15.14 | W15.4 | one diagnostic connection per handle | `connection.rs` | `diagnostic_conn_probe.rs`, `r15_diagnostic_path.py` |
+| 15 | 0.15.15 | W15.5 | the shared connection is scrubbed between callers | `connection.rs`, `database.rs` | `diagnostic_hygiene_probe.rs`, `diagnostic_conn_tests.rs`, `test_maintenance.py` |
 | 15 | 0.15.13 | W16.1 | ancestry in Rust | `plan.rs`, `branch.rs` | differential test against the CTE |
 | 16 | 0.15.14 | W16.2 | hygiene batch | various | one register row per item |
 | 17 | 0.16.0 | — | release note before merge; merge; tag | `docs/releases/v0.16.0.md` | §8 |

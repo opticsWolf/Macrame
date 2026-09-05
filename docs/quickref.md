@@ -190,7 +190,8 @@ impl Database {
     pub async fn close(self) -> Result<()>
     pub fn read_conn(&self) -> &libsql::Connection       // WAL reader
     pub fn path(&self) -> &Path                           // File path
-    pub fn diagnostic_conn(&self) -> Result<Connection>   // OS-level read-only
+    pub async fn diagnostic_conn(&self) -> Result<Connection>  // OS-level read-only
+    pub async fn scrub_diagnostic_conn(&self)             // Reset it between callers
     pub fn raw(&self) -> &libsql::Database                // #[doc(hidden)]
     pub fn clock(&self) -> &Arc<dyn Clock>                // Clock reference
     pub fn schema_version(&self) -> u32                   // Current schema version
@@ -201,7 +202,9 @@ impl Database {
 }
 ```
 
-**`diagnostic_conn()`**: Opens an OS-level read-only connection. Stronger than `read_conn()` because `PRAGMA query_only` can be reversed; `diagnostic_conn()` cannot.
+**`diagnostic_conn()`**: An OS-level read-only connection. Stronger than `read_conn()` because `PRAGMA query_only` can be reversed; `diagnostic_conn()` cannot. **One connection per handle since 0.15.14** ([D-256](architecture/s13-decision-register.md#d-256)) — opened on first use, not per call, because `connect()` was 51.5 µs of an 82.7 µs call and was this path's exposure to R15. Scrubbed on entry since 0.15.15 ([D-257](architecture/s13-decision-register.md#d-257)): an open transaction is rolled back, a connection carrying temp objects or an `ATTACH` is replaced, and `busy_timeout` and the cache size are restated. A pragma the crate does not set is still inherited by the next caller.
+
+**`scrub_diagnostic_conn()`**: Runs that scrub without handing a connection out, for a caller who is done with the clone they were given. `diagnostic_conn()` can only scrub on the way *in* — it is never told a caller is finished — so a leaked `BEGIN` pins a WAL read snapshot until the next call, which makes `checkpoint()` a no-op and diagnostic reads stale.
 
 **`raw()`**: `#[doc(hidden)]` — exposes the raw `libsql::Database` handle. Left public to provoke a guard (§4.7 invariant 2).
 
@@ -826,7 +829,7 @@ A synchronous Python binding built on pyo3 0.29 and maturin, delivered as a whee
 
 **Value types and coercion.** Timestamps accept both `str` (passes through) and aware `datetime` (converted); naive datetimes and bare `date` objects are rejected rather than assumed UTC. Outbound timestamps are always `datetime` with `tzinfo=utc`. An open interval (`9999-12-31T23:59:59.999999Z`) crosses as `None`, not as a sentinel datetime — `datetime.max` cannot survive `.astimezone()` east of UTC. `macrame.OPEN` is the stored string for callers who need to name it. Embeddings accept `bytes` (fast path, 60.8 µs for 768 dims) or any sequence of floats (94.9 µs). Absent `content` also crosses as `None`: `load_subgraph` does not fetch document text unless `content=True` is passed, and `""` cannot mark *not loaded* because it is a valid value of the type (D-116, D-123). `Subgraph` stays opaque — a `#[pyclass]` with forwarded accessors, with an explicit `.to_dict()` for callers who want the copy, whose node values are `NodeData` objects rather than nested dicts. Opacity paid for itself in 0.8.0: the crate interned `EdgeRef` and no binding signature moved. Value types validate in their constructor (not at the point of use), so a `write_bulk_atomic` failure points at the line that built the offending value.
 
-**What is not exposed.** `Database::raw()`, `Database::read_conn()`, the bare-connection `register_model`/`upsert_embedding`, and `open_with_clock` are all deliberately unexposed. `diagnostic_conn()` *is* exposed, but as methods that run a query and return rows — `db.explain(sql)` and `db.diagnostic_query(sql, params)` — not as a connection object. Opening per call measured clean at 500 sequential opens — which D-148 now reads as *under the threshold* rather than as *safe by shape*, since the fault counts cumulative `connect()` and faults sequentially at ~10,000. A caller who opens diagnostic connections in a loop is in the exposed regime; one who opens a few is not. `FakeClock` is available only in a separate `macrame.testing` submodule, gated and documented as unsupported.
+**What is not exposed.** `Database::raw()`, `Database::read_conn()`, the bare-connection `register_model`/`upsert_embedding`, and `open_with_clock` are all deliberately unexposed. `diagnostic_conn()` *is* exposed, but as methods that run a query and return rows — `db.explain(sql)` and `db.diagnostic_query(sql, params)` — not as a connection object. **This paragraph described opening per call, which stopped happening in 0.15.14** ([D-256](architecture/s13-decision-register.md#d-256)): the connection is minted once per handle, so a caller who runs diagnostic queries in a loop no longer accumulates `connect()` calls at all and D-148's cumulative fault threshold is not reachable this way. `diagnostic_query` runs **only the first statement** of what it is given — `"SELECT 1; SELECT 2"` returns the rows of the first and drops the rest without an error. `FakeClock` is available only in a separate `macrame.testing` submodule, gated and documented as unsupported.
 
 **Lifecycle.** `__enter__`/`__exit__` are the supported path because Python's GC is non-deterministic and `close()` (which takes `self` by value in Rust) cannot be called from `#[pymethods]`. A dropped-without-close handle emits a `ResourceWarning` via `__del__`.
 

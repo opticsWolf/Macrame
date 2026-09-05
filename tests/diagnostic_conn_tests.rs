@@ -168,8 +168,18 @@ async fn turning_the_pragma_off_rescues_the_reader_and_not_the_diagnostic() {
 ///
 /// What is lost is isolation *between diagnostic callers*, and it is asserted
 /// here rather than admitted in prose, because `diagnostic_query` is the one
-/// arbitrary-SQL surface this crate exposes: an `ATTACH` or a `PRAGMA` one
-/// caller runs is visible to the next.
+/// arbitrary-SQL surface this crate exposes.
+///
+/// **Narrowed by 0.15.15 to exactly this** (W15.5, [D-257]). An open
+/// transaction, a temp table and an `ATTACH` are scrubbed on entry now; what
+/// is still shared is a pragma the crate does not itself set, which
+/// `query_only` is. So this test went on asserting the same thing while the
+/// three sharper cases stopped being true — which is why the residue has a
+/// test of its own next door
+/// (`a_pragma_the_crate_does_not_set_is_still_inherited`) rather than
+/// resting on this one, whose subject is connection *identity*.
+///
+/// [D-257]: ../docs/architecture/s13-decision-register.md#d-257
 #[tokio::test]
 async fn diagnostic_callers_share_one_connection_and_its_state() {
     let harness = TestHarness::new();
@@ -193,6 +203,340 @@ async fn diagnostic_callers_share_one_connection_and_its_state() {
     // Restore it, so nothing downstream inherits a connection this test armed.
     a.execute("PRAGMA query_only = OFF", ()).await.unwrap();
 
+    db.close().await.unwrap();
+}
+
+/// **A transaction one caller leaves open does not reach the next** (0.15.15,
+/// W15.5, [D-257]).
+///
+/// The sharpest thing [D-256]'s shared connection admitted, and the only one
+/// whose damage leaves this surface. `BEGIN` on a read-only WAL connection opens
+/// a read transaction, and its first read pins a snapshot. Held across calls,
+/// that made later diagnostic reads answer from the pinned snapshot — measured
+/// at **1 row where the database held 201** — on the one method a caller reaches
+/// for when they already distrust the typed answer.
+///
+/// Scrubbed on *entry* rather than on exit because there is no exit: the method
+/// returns a `Connection` clone and is never told the caller is done. So the
+/// assertion is what the *next* call sees, which is the thing that matters.
+///
+/// [D-256]: ../docs/architecture/s13-decision-register.md#d-256
+/// [D-257]: ../docs/architecture/s13-decision-register.md#d-257
+#[tokio::test]
+async fn a_leaked_transaction_does_not_reach_the_next_caller() {
+    let harness = TestHarness::new();
+    let db = db(&harness).await;
+    db.write_concepts(vec![ConceptUpsert::new("a", "A").valid_from(TS)])
+        .await
+        .unwrap();
+
+    let leaked = db.diagnostic_conn().await.unwrap();
+    leaked.execute("BEGIN", ()).await.unwrap();
+    // The pin is taken on the first read inside the transaction, not by `BEGIN`
+    // itself, so a test that skipped this would assert against an unpinned
+    // connection and pass without the scrub.
+    let mut rows = leaked
+        .query("SELECT count(*) FROM concepts", ())
+        .await
+        .unwrap();
+    let before: i64 = rows.next().await.unwrap().unwrap().get(0).unwrap();
+    assert_eq!(before, 1);
+    drop(rows);
+    assert!(!leaked.is_autocommit(), "BEGIN did not open a transaction");
+
+    db.write_concepts(vec![ConceptUpsert::new("b", "B").valid_from(TS)])
+        .await
+        .unwrap();
+
+    let next = db.diagnostic_conn().await.unwrap();
+    assert!(
+        next.is_autocommit(),
+        "the next caller inherited an open transaction"
+    );
+    let mut rows = next
+        .query("SELECT count(*) FROM concepts", ())
+        .await
+        .unwrap();
+    let after: i64 = rows.next().await.unwrap().unwrap().get(0).unwrap();
+    assert_eq!(
+        after, 2,
+        "the next caller read {after} rows where the database holds 2, so it is \
+         answering from the snapshot the leaked transaction pinned"
+    );
+
+    drop(rows);
+    drop(next);
+    drop(leaked);
+    db.close().await.unwrap();
+}
+
+/// **A leaked transaction no longer defeats `checkpoint()`** (0.15.15, W15.5,
+/// [D-257]).
+///
+/// The half of the leak that has nothing to do with diagnostics. A pinned WAL
+/// read snapshot is a floor the checkpointer cannot truncate past, so one
+/// forgotten `BEGIN` on the diagnostic connection made
+/// [`Database::checkpoint`] — a typed public method — a no-op for the life of
+/// the handle, with the WAL measured stuck at 8.5 MB until the transaction was
+/// rolled back.
+///
+/// Asserted on the file rather than on the report because the report says what
+/// the checkpointer attempted and the file says what it achieved, and it was the
+/// second that was wrong.
+///
+/// [D-257]: ../docs/architecture/s13-decision-register.md#d-257
+#[tokio::test]
+async fn a_leaked_transaction_no_longer_pins_the_wal() {
+    let harness = TestHarness::new();
+    let db = db(&harness).await;
+    let wal = harness.db_path.with_extension("db-wal");
+
+    let leaked = db.diagnostic_conn().await.unwrap();
+    leaked.execute("BEGIN", ()).await.unwrap();
+    let mut rows = leaked
+        .query("SELECT count(*) FROM concepts", ())
+        .await
+        .unwrap();
+    let _: i64 = rows.next().await.unwrap().unwrap().get(0).unwrap();
+    drop(rows);
+
+    for i in 0..40 {
+        db.write_concepts(vec![ConceptUpsert::new(format!("c{i}"), "C")
+            .content("padding, so the WAL is worth truncating")
+            .valid_from(TS)])
+            .await
+            .unwrap();
+    }
+
+    // The scrub runs here, on the way in — this call is what releases the pin.
+    let next = db.diagnostic_conn().await.unwrap();
+    drop(next);
+
+    db.checkpoint().await.unwrap();
+    let after = std::fs::metadata(&wal).map(|m| m.len()).unwrap_or(0);
+    assert_eq!(
+        after, 0,
+        "the WAL is {after} bytes after a checkpoint, so a diagnostic caller's \
+         leaked read transaction is still pinning it and checkpoint() cannot \
+         truncate past it"
+    );
+
+    drop(leaked);
+    db.close().await.unwrap();
+}
+
+/// **`scrub_diagnostic_conn()` releases the pin without handing anything out**
+/// (0.15.15, W15.5, [D-257]).
+///
+/// The exit-side half. `diagnostic_conn()` scrubs on the way in, which is all
+/// the crate can do for a caller who keeps the clone; it leaves the case of
+/// somebody who leaks a transaction and then never calls again, holding the WAL
+/// snapshot until the handle drops. This is what the Python binding calls after
+/// each `diagnostic_query` to close that gap, and it is asserted here rather
+/// than only through the binding because it is public Rust API.
+///
+/// The distinguishing assertion is that **no `diagnostic_conn()` call happens
+/// between the leak and the check** — otherwise the entry-side scrub would be
+/// doing the work and this method could be a no-op and still pass.
+///
+/// [D-257]: ../docs/architecture/s13-decision-register.md#d-257
+#[tokio::test]
+async fn scrubbing_releases_the_pin_without_handing_out_a_connection() {
+    let harness = TestHarness::new();
+    let db = db(&harness).await;
+    let wal = harness.db_path.with_extension("db-wal");
+
+    let leaked = db.diagnostic_conn().await.unwrap();
+    leaked.execute("BEGIN", ()).await.unwrap();
+    let mut rows = leaked
+        .query("SELECT count(*) FROM concepts", ())
+        .await
+        .unwrap();
+    let _: i64 = rows.next().await.unwrap().unwrap().get(0).unwrap();
+    drop(rows);
+
+    for i in 0..40 {
+        db.write_concepts(vec![ConceptUpsert::new(format!("c{i}"), "C")
+            .content("padding, so the WAL is worth truncating")
+            .valid_from(TS)])
+            .await
+            .unwrap();
+    }
+
+    db.scrub_diagnostic_conn().await;
+
+    db.checkpoint().await.unwrap();
+    let after = std::fs::metadata(&wal).map(|m| m.len()).unwrap_or(0);
+    assert_eq!(
+        after, 0,
+        "the WAL is {after} bytes after scrubbing and checkpointing, so the          scrub did not release the leaked read transaction"
+    );
+
+    drop(leaked);
+    db.close().await.unwrap();
+}
+
+/// **A temp table one caller creates does not reach the next** (0.15.15, W15.5,
+/// [D-257]).
+///
+/// `CREATE TEMP TABLE` succeeds on this connection — the temp database is
+/// writable however `main` was opened, which is the section above headed *One
+/// way this is more permissive*. Shared, that turned into two callers colliding
+/// on a name (`table foo already exists`) and one reading the other's rows.
+///
+/// The connection is discarded rather than cleaned: dropping the objects one by
+/// one would be a second guess at what SQLite considers state, and a fresh
+/// connection costs 56.5 µs on the call that dirtied it and nothing on any
+/// other.
+///
+/// [D-257]: ../docs/architecture/s13-decision-register.md#d-257
+#[tokio::test]
+async fn a_temp_table_does_not_reach_the_next_caller() {
+    let harness = TestHarness::new();
+    let db = db(&harness).await;
+
+    let first = db.diagnostic_conn().await.unwrap();
+    first
+        .execute("CREATE TEMP TABLE leftover(x)", ())
+        .await
+        .unwrap();
+    first
+        .execute("INSERT INTO leftover VALUES (42)", ())
+        .await
+        .unwrap();
+
+    let next = db.diagnostic_conn().await.unwrap();
+    let err = next
+        .query("SELECT x FROM leftover", ())
+        .await
+        .expect_err("the next caller can see a temp table the previous one left");
+    assert!(
+        err.to_string().contains("no such table"),
+        "refused, but not because the table is gone: {err}"
+    );
+
+    drop(first);
+    db.close().await.unwrap();
+}
+
+/// **An `ATTACH` one caller makes does not reach the next** (0.15.15, W15.5,
+/// [D-257]).
+///
+/// An attachment is a schema name on the connection, so a shared connection
+/// meant the second caller to want `aux` got `database aux is already in use`
+/// and, worse, that a caller who did not attach anything could read through
+/// someone else's attachment. The read-only boundary is not what is at stake —
+/// an attachment inherits the flags — the *namespace* is.
+///
+/// [D-257]: ../docs/architecture/s13-decision-register.md#d-257
+#[tokio::test]
+async fn an_attachment_does_not_reach_the_next_caller() {
+    let harness = TestHarness::new();
+    let db = db(&harness).await;
+
+    // A second real database to attach: the harness's own file, named again.
+    let aux = harness.db_path.display().to_string().replace('\\', "/");
+
+    let first = db.diagnostic_conn().await.unwrap();
+    first
+        .execute(&format!("ATTACH DATABASE '{aux}' AS aux"), ())
+        .await
+        .unwrap();
+
+    let next = db.diagnostic_conn().await.unwrap();
+    let err = next
+        .query("SELECT count(*) FROM aux.concepts", ())
+        .await
+        .expect_err("the next caller can read through an attachment it did not make");
+    assert!(
+        err.to_string().contains("no such table"),
+        "refused, but not because the attachment is gone: {err}"
+    );
+
+    drop(first);
+    db.close().await.unwrap();
+}
+
+/// **The crate's own pragmas are restored, not merely set once** (0.15.15,
+/// W15.5, [D-257]).
+///
+/// No dirt check can see a pragma — `temp.schema_version` and `database_list`
+/// both sit still while one is set — so the crate restates the two it sets
+/// rather than detecting that they moved. `busy_timeout` is the one that
+/// matters: [D-159] put 5 s on this connection precisely because it is the
+/// surface that answers when the typed path is already suspect, and a caller
+/// who set it to 0 was, before 0.15.15, setting it to 0 for everyone after them.
+///
+/// [D-159]: ../docs/architecture/s13-decision-register.md#d-159
+/// [D-257]: ../docs/architecture/s13-decision-register.md#d-257
+#[tokio::test]
+async fn the_crates_busy_timeout_is_restored_after_a_caller_moves_it() {
+    let harness = TestHarness::new();
+    let db = db(&harness).await;
+
+    let first = db.diagnostic_conn().await.unwrap();
+    let mut rows = first.query("PRAGMA busy_timeout = 0", ()).await.unwrap();
+    let set: i64 = rows.next().await.unwrap().unwrap().get(0).unwrap();
+    assert_eq!(
+        set, 0,
+        "the pragma did not take, so the test proves nothing"
+    );
+    drop(rows);
+
+    let next = db.diagnostic_conn().await.unwrap();
+    let mut rows = next.query("PRAGMA busy_timeout", ()).await.unwrap();
+    let v: i64 = rows.next().await.unwrap().unwrap().get(0).unwrap();
+    assert_eq!(
+        v, 5000,
+        "the next caller inherited a busy_timeout of {v} ms, so D-159's 5 s \
+         margin lasts only until someone runs one pragma"
+    );
+
+    drop(rows);
+    drop(first);
+    db.close().await.unwrap();
+}
+
+/// **A pragma the crate does not set is still inherited, and that is the
+/// documented residue** (0.15.15, W15.5, [D-257]).
+///
+/// The limit of the scrub, pinned so that it stays a known quantity rather than
+/// drifting into a claim the docs no longer make. SQLite offers no cheap
+/// enumeration of connection-scoped pragma state, so the crate restores what it
+/// set and nothing else. `case_sensitive_like` is the sharp instance: it changes
+/// what `LIKE` *means* for every later diagnostic query on this handle, and no
+/// dirt check can see it.
+///
+/// What bounds it is scope rather than detection: the crate's readers and writer
+/// are different connections, so nothing here can move a typed answer. If this
+/// test ever fails because the value no longer carries, the scrub grew — which
+/// is welcome, and this test and the rustdoc's table both need rewriting rather
+/// than deleting.
+///
+/// [D-257]: ../docs/architecture/s13-decision-register.md#d-257
+#[tokio::test]
+async fn a_pragma_the_crate_does_not_set_is_still_inherited() {
+    let harness = TestHarness::new();
+    let db = db(&harness).await;
+
+    let first = db.diagnostic_conn().await.unwrap();
+    first
+        .execute("PRAGMA case_sensitive_like = ON", ())
+        .await
+        .unwrap();
+
+    let next = db.diagnostic_conn().await.unwrap();
+    let mut rows = next.query("SELECT 'A' LIKE 'a'", ()).await.unwrap();
+    let v: i64 = rows.next().await.unwrap().unwrap().get(0).unwrap();
+    assert_eq!(
+        v, 0,
+        "the pragma no longer carries between callers, so the scrub covers more \
+         than D-257 says it does -- rewrite the residue row in diagnostic_conn's \
+         rustdoc, do not delete this test"
+    );
+
+    drop(rows);
+    drop(first);
     db.close().await.unwrap();
 }
 

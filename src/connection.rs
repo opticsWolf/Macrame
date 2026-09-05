@@ -1185,13 +1185,23 @@ pub struct Database {
     /// `SQLITE_CANTOPEN` arrives for a missing file. The handle cache removes a
     /// call that does no work.
     ///
-    /// `tokio::sync::OnceCell` rather than `std`'s, because the open is
-    /// `async`; a failed first attempt leaves the cell empty, so a database
-    /// whose file appears later is not poisoned by the call that came too
-    /// early.
+    /// **`Mutex<Option<_>>` rather than the `OnceCell` 0.15.14 shipped**
+    /// (0.15.15, W15.5, [D-257]). A `OnceCell` can be filled and never
+    /// emptied, and this connection is handed to arbitrary SQL, so it acquires
+    /// state that the *next* caller must not inherit — a leaked `BEGIN` above
+    /// all, which pins a WAL read snapshot and makes both this surface's reads
+    /// stale and [`Database::checkpoint`] a no-op. The slot has to be
+    /// clearable for the dirty ones to be replaced, and clearable is what a
+    /// `OnceCell` is not. `tokio`'s mutex rather than `std`'s because it is
+    /// held across the open.
+    ///
+    /// A failed first attempt leaves the slot empty, so a database whose file
+    /// appears later is not poisoned by the call that came too early — the
+    /// property the `OnceCell` had, kept.
     ///
     /// [D-256]: ../../docs/architecture/s13-decision-register.md#d-256
-    diagnostic_conn: tokio::sync::OnceCell<libsql::Connection>,
+    /// [D-257]: ../../docs/architecture/s13-decision-register.md#d-257
+    diagnostic_conn: tokio::sync::Mutex<Option<libsql::Connection>>,
     writer: Option<tokio::task::JoinHandle<()>>,
     /// Stops the snapshot cadence. Dropping it stops the task too, which is what
     /// keeps a `Database` that is dropped rather than closed from leaving a task
@@ -1735,7 +1745,7 @@ impl Database {
             snapshots_dir,
             schema_version: migrations::current_version(),
             reader_cache_size,
-            diagnostic_conn: tokio::sync::OnceCell::new(),
+            diagnostic_conn: tokio::sync::Mutex::new(None),
             writer: Some(writer),
             cadence_stop,
             cadence,
@@ -1848,6 +1858,53 @@ impl Database {
     /// reporting query here still does not compete with the crate's traversals
     /// and folds, and the read-only boundary below is untouched.
     ///
+    /// # What is scrubbed before you get it, and what is not (0.15.15, W15.5)
+    ///
+    /// 0.15.14 shipped the sharing and documented it. [D-257] measured what it
+    /// actually admits, and one of the four is not an isolation nuisance but a
+    /// correctness hole that leaves this surface entirely: **a leaked `BEGIN`
+    /// pins a WAL read snapshot.** Measured — 200 writes through the typed
+    /// surface while a diagnostic caller held an unclosed read transaction —
+    /// later diagnostic reads answered **1 row instead of 201**, silently, and
+    /// [`Database::checkpoint`] became a no-op with the WAL stuck at 8.5 MB
+    /// until the transaction was rolled back. Stale answers on the surface a
+    /// caller reaches for when they already distrust the typed one, and an
+    /// unbounded WAL on a method that has nothing to do with diagnostics.
+    ///
+    /// So this method scrubs on entry rather than trusting the caller, and the
+    /// prices are from `examples/diagnostic_hygiene_probe.rs`:
+    ///
+    /// | left behind | how it is found | what happens |
+    /// |---|---|---|
+    /// | an open transaction | `is_autocommit()`, **0.04 µs** | `ROLLBACK`, 2.4 µs |
+    /// | a temp table or view | `PRAGMA temp.schema_version` | connection dropped, re-minted at 56.6 µs |
+    /// | an `ATTACH` | `PRAGMA database_list` | connection dropped, re-minted |
+    /// | `busy_timeout`, `cache_size` | not detected — restated, 1.0 µs | reset to the crate's values |
+    /// | any other pragma | **not detected** | **inherited by the next caller** |
+    ///
+    /// The two dirt questions are asked as pragmas because the same two asked
+    /// over `temp.sqlite_master` and `pragma_database_list` cost **7.8 µs**
+    /// against **2.4 µs**, on a call whose entire warm cost is the `stat`.
+    ///
+    /// The last row is the honest residue. SQLite has no cheap enumeration of
+    /// connection-scoped pragma state, so the crate restates the two pragmas
+    /// *it* set (D-159's `busy_timeout` above all — a caller who sets it to 0
+    /// would otherwise remove the 5 s margin from every later diagnostic call)
+    /// and leaves the rest. A caller who sets `case_sensitive_like` or
+    /// `recursive_triggers` changes what **later diagnostic queries on this
+    /// handle** see, and nothing else: the crate's own readers and writer are
+    /// different connections, so no typed answer can move. That is a smaller
+    /// blast radius than 0.15.14 had and a larger one than zero, and it is
+    /// written down rather than rounded off.
+    ///
+    /// **Scrubbed on entry, not on exit**, because there is no exit: this
+    /// returns a `Connection` clone the caller keeps for as long as it likes,
+    /// and the crate is never told they are done. Entry is the one place that
+    /// covers both this method and `diagnostic_query`. The consequence is that
+    /// a caller who leaks a transaction and never calls again holds the pin
+    /// until the handle drops — so the Python binding, which *does* know when
+    /// a query is over, scrubs on exit as well.
+    ///
     /// **Measured on libSQL 0.9.30 rather than assumed**
     /// (`examples/readonly_open_probe.rs`), against a live WAL database with the
     /// write actor running:
@@ -1939,12 +1996,13 @@ impl Database {
     /// rather than a fresh empty database — which is the right failure, and is
     /// surfaced as a typed error rather than as libSQL's error 14.
     ///
-    /// The check is a `stat` on **every** call, not only the first, and since
-    /// 0.15.14 it is the entire measured cost of a warm call (19.9 µs of 19.9).
-    /// It is kept at that price because the alternative is the worst failure a
-    /// *diagnostic* surface can have: a cached connection whose file has been
-    /// deleted and replaced answers from the old inode, silently, on the one
-    /// method a caller reaches for when they already doubt the typed answer.
+    /// The check is a `stat` on **every** call, not only the first, and it is
+    /// still most of what a warm call costs (18.6 µs of the 22 µs a clean one
+    /// takes since 0.15.15). It is kept at that price because the alternative
+    /// is the worst failure a *diagnostic* surface can have: a cached
+    /// connection whose file has been deleted and replaced answers from the old
+    /// inode, silently, on the one method a caller reaches for when they
+    /// already doubt the typed answer.
     pub async fn diagnostic_conn(&self) -> Result<libsql::Connection> {
         let fail = |reason: String| DbError::DiagnosticConn {
             path: self.path.display().to_string(),
@@ -1960,38 +2018,102 @@ impl Database {
                 "the file does not exist, and a read-only open cannot create it".to_string(),
             ));
         }
-        let conn = self
-            .diagnostic_conn
-            .get_or_try_init(|| async {
-                let db = libsql::Builder::new_local(&self.path)
-                    .flags(libsql::OpenFlags::SQLITE_OPEN_READ_ONLY)
-                    .build()
-                    .await
-                    .map_err(|e| fail(e.to_string()))?;
-                let conn = db.connect().map_err(|e| fail(e.to_string()))?;
-                // Configured since 0.12.16 (W5.5, D-159). Until then this
-                // connection ran with SQLite's defaults while every other
-                // connection in the process ran with the crate's — most
-                // consequentially a `busy_timeout` of 0 against everyone
-                // else's 5 s, on the one surface whose job is to answer
-                // questions when the typed path is already suspect. Only the
-                // common half: `SQLITE_OPEN_READ_ONLY` cannot set
-                // `journal_mode`, and the rest govern writes this connection
-                // cannot make.
-                //
-                // Once rather than per call since 0.15.14: the pragmas are
-                // per-connection and there is one connection now, so running
-                // them again would re-apply the same values to the same
-                // connection.
-                configure_common(&conn, self.reader_cache_size).await?;
-                // The `libsql::Database` is dropped here and the connection
-                // outlives it, which is the ownership libSQL's own API implies:
-                // `connect()` returns a `Connection` that does not borrow the
-                // builder's handle.
-                Ok::<_, DbError>(conn)
-            })
-            .await?;
-        Ok(conn.clone())
+        let mut slot = self.diagnostic_conn.lock().await;
+
+        // Scrub what the last caller left, before this one can inherit it
+        // (0.15.15, W15.5, D-257). Free on a clean connection: the transaction
+        // check is a C call at 0.04 us and the two dirt pragmas are 2.4 us,
+        // against a `stat` of 18.6 that has already happened above.
+        scrub(&mut slot).await;
+
+        match slot.as_ref() {
+            // Restated per call since 0.15.15 rather than once at mint. The
+            // pragmas are per-connection, and there is one connection now, so
+            // 0.15.14 set them once — which was right until the shared
+            // connection was also something a caller could move them on. No
+            // dirt check can see a pragma, so the crate restores its own
+            // instead of detecting that they went: 1.0 us, against a
+            // `busy_timeout` of 0 outliving the call that set it.
+            Some(conn) => configure_common(conn, self.reader_cache_size).await?,
+            None => {
+                *slot = Some(self.open_diagnostic_conn(&fail).await?);
+            }
+        }
+
+        Ok(slot
+            .as_ref()
+            .expect("the slot was filled above or the open returned Err")
+            .clone())
+    }
+
+    /// Roll back and discard whatever the last diagnostic caller left behind,
+    /// without handing a connection out (0.15.15, W15.5, [D-257]).
+    ///
+    /// [`Database::diagnostic_conn`] does this on the way *in*, which is the
+    /// only place the crate can do it: the method returns a `Connection` clone
+    /// and is never told the caller is finished with it. That covers every
+    /// caller and leaves one gap — somebody who leaks a transaction and then
+    /// never calls again holds the WAL read snapshot until the handle drops,
+    /// which makes [`Database::checkpoint`] a no-op for that whole time.
+    ///
+    /// This is for the callers that *do* know when they are done. It costs the
+    /// scrub and not the `stat` — around 3.5 µs on a clean connection — because
+    /// it hands nothing back and so has nothing to promise about the file still
+    /// being there.
+    ///
+    /// **The Python binding does not call it**, though the first draft did. A
+    /// mutation deleting that call left the whole suite green, and the reason is
+    /// that the gap is not reachable from there: `diagnostic_query` runs one
+    /// statement, a bare `BEGIN` pins nothing — the snapshot is taken by the
+    /// first *read* inside the transaction — and any statement that would take
+    /// it arrives through the same method, whose entry scrub has already rolled
+    /// the transaction back. The gap is real for a Rust caller holding a clone
+    /// across both, which is what this method and
+    /// `scrubbing_releases_the_pin_without_handing_out_a_connection` are for.
+    ///
+    /// Infallible by construction: everything it might have reported is
+    /// something it responds to by discarding the connection, and the next
+    /// [`Database::diagnostic_conn`] opens a fresh one.
+    ///
+    /// [D-257]: ../../docs/architecture/s13-decision-register.md#d-257
+    pub async fn scrub_diagnostic_conn(&self) {
+        let mut slot = self.diagnostic_conn.lock().await;
+        scrub(&mut slot).await;
+    }
+
+    /// The cold half of [`Database::diagnostic_conn`]: the actual open.
+    ///
+    /// Reached on the first call and on any call whose predecessor left the
+    /// connection dirty enough to discard. It costs 56.5 µs against the warm
+    /// path's scrub, and it is split out for reading rather than for speed:
+    /// `Box::pin`ning it here — on the theory that carrying `Builder::build()`'s
+    /// state machine inside the warm path's was what made a clean call 29.8 µs
+    /// rather than the 21.8 its parts measure — changed nothing at all
+    /// (0.15.15, W15.5, [D-257]).
+    ///
+    /// [D-257]: ../../docs/architecture/s13-decision-register.md#d-257
+    async fn open_diagnostic_conn(
+        &self,
+        fail: &dyn Fn(String) -> DbError,
+    ) -> Result<libsql::Connection> {
+        let db = libsql::Builder::new_local(&self.path)
+            .flags(libsql::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .build()
+            .await
+            .map_err(|e| fail(e.to_string()))?;
+        let conn = db.connect().map_err(|e| fail(e.to_string()))?;
+        // Configured since 0.12.16 (W5.5, D-159). Until then this connection
+        // ran with SQLite's defaults while every other connection in the
+        // process ran with the crate's — most consequentially a `busy_timeout`
+        // of 0 against everyone else's 5 s, on the one surface whose job is to
+        // answer questions when the typed path is already suspect. Only the
+        // common half: `SQLITE_OPEN_READ_ONLY` cannot set `journal_mode`, and
+        // the rest govern writes this connection cannot make.
+        configure_common(&conn, self.reader_cache_size).await?;
+        // The `libsql::Database` is dropped here and the connection outlives
+        // it, which is the ownership libSQL's own API implies: `connect()`
+        // returns a `Connection` that does not borrow the builder's handle.
+        Ok(conn)
     }
 
     /// Cross-check the snapshot chain against a fold from genesis (§5.5, T5.3,
@@ -3716,6 +3838,72 @@ async fn run_checkpoint(conn: &libsql::Connection) -> Result<CheckpointReport> {
 /// typed path is already suspect was also the one most likely to fail with
 /// "database is locked" under exactly the contention that prompted the
 /// question.
+/// Empty the slot unless what is in it is fit to hand to the next caller
+/// (0.15.15, W15.5, [D-257]).
+///
+/// Shared by [`Database::diagnostic_conn`], which runs it on the way in, and
+/// [`Database::scrub_diagnostic_conn`], which the Python binding runs on the way
+/// out. One implementation because the two must agree: a connection the entry
+/// path would have discarded is one the exit path must not leave sitting there.
+async fn scrub(slot: &mut Option<libsql::Connection>) {
+    let Some(conn) = slot.as_ref() else {
+        return;
+    };
+    // A leaked `BEGIN` is the one that leaves this surface: it pins a WAL read
+    // snapshot, so later diagnostic reads answer from it and `checkpoint()`
+    // cannot truncate past it. Rolled back rather than reported, because the
+    // caller who would read the report is the one who did not do it.
+    let recovered = conn.is_autocommit() || conn.execute("ROLLBACK", ()).await.is_ok();
+    // A connection that will not roll back is not one to hand on, and neither
+    // is one whose own state cannot be read: either way the answer is a fresh
+    // connection, which costs 56.5 us on the call that dirtied it and nothing
+    // on any other.
+    if !recovered || diagnostic_is_dirty(conn).await.unwrap_or(true) {
+        *slot = None;
+    }
+}
+
+/// Is this cached diagnostic connection carrying state from an earlier caller
+/// (0.15.15, W15.5, [D-257])?
+///
+/// Two questions — are there temp objects, is anything attached beyond `main`
+/// and `temp` — asked as pragmas rather than as a query over
+/// `temp.sqlite_master` and `pragma_database_list`. Same answers, and
+/// `examples/diagnostic_hygiene_probe.rs` measures the pragma form at
+/// **2.4 µs** against the query form's **7.8 µs**, on a call whose whole warm
+/// cost is the `stat` in front of it. Detection is measured rather than
+/// assumed: `temp.schema_version` goes 0 → 1 on `CREATE TEMP TABLE`, and
+/// `database_list` 2 → 3 on `ATTACH`.
+///
+/// **What it cannot see is a `PRAGMA`**, and neither can any other cheap check:
+/// SQLite does not enumerate connection-scoped pragma state. The crate restates
+/// the two it sets instead — see the call to `configure_common` in
+/// [`Database::diagnostic_conn`].
+///
+/// An `Err` here is not propagated by the caller: a connection whose own state
+/// cannot be read is replaced rather than reported on.
+///
+/// [D-257]: ../../docs/architecture/s13-decision-register.md#d-257
+async fn diagnostic_is_dirty(conn: &libsql::Connection) -> Result<bool> {
+    let mut rows = conn.query("PRAGMA temp.schema_version", ()).await?;
+    let temp_schema: i64 = match rows.next().await? {
+        Some(row) => row.get(0)?,
+        // No row at all is not a clean connection, it is an answer this
+        // function did not understand.
+        None => return Ok(true),
+    };
+    if temp_schema != 0 {
+        return Ok(true);
+    }
+    let mut rows = conn.query("PRAGMA database_list", ()).await?;
+    let mut databases = 0_usize;
+    while rows.next().await?.is_some() {
+        databases += 1;
+    }
+    // `main` and `temp`, always both, on a connection nobody has attached to.
+    Ok(databases > 2)
+}
+
 async fn configure_common(conn: &libsql::Connection, cache_size: Option<i32>) -> Result<()> {
     // NOTE: `busy_timeout` returns its resulting value as a row, and libsql's
     // `execute()` rejects any statement that yields rows ("Execute returned

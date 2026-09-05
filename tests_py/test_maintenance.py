@@ -15,6 +15,8 @@ out, and that the tri-state knobs keep their meanings — particularly that the
 
 from __future__ import annotations
 
+import pathlib
+
 import pytest
 
 import macrame
@@ -121,6 +123,57 @@ def test_the_report_does_not_transpose_its_two_frame_counts(db):
     report = db.checkpoint()
     assert report.log_frames == 0
     assert report.checkpointed_frames > 0
+
+
+def test_a_diagnostic_begin_does_not_defeat_the_next_checkpoint(db_path):
+    """A transaction left open by `diagnostic_query` is not the checkpoint's problem.
+
+    0.15.14 gave every diagnostic caller on a handle the same connection, and
+    `diagnostic_query` is the one place this library takes arbitrary SQL. A
+    ``BEGIN`` that arrives through it — on its own, or as the only surviving
+    statement of a multi-statement string — opens a read transaction on a WAL
+    database, and a WAL read snapshot is a floor the checkpointer cannot
+    truncate past. Measured before the fix: 200 writes later, `checkpoint()`
+    moved the WAL not at all and left it at 8.5 MB, and `diagnostic_query`
+    itself answered 1 row where the database held 201.
+
+    0.15.15 rolls the transaction back on the way *in* to every diagnostic call
+    (W15.5, D-257), which is what this asserts through the binding. It asserts
+    the *file* rather than the checkpoint report, because the report says what
+    the checkpointer attempted and the file says what it achieved, and it was
+    the second that was wrong.
+    """
+    wal = pathlib.Path(str(db_path) + "-wal")
+    with macrame.Database.open(db_path, snapshot_every_entries=None) as handle:
+        handle.write_concepts(
+            [
+                macrame.ConceptUpsert(f"c{i:03}", f"C{i}", valid_from=T0)
+                for i in range(60)
+            ]
+        )
+        handle.diagnostic_query("BEGIN")
+        handle.diagnostic_query("SELECT count(*) FROM concepts")
+        handle.write_concepts([macrame.ConceptUpsert("late", "L", valid_from=T0)])
+
+        handle.checkpoint()
+        left = wal.stat().st_size if wal.exists() else 0
+
+    assert left == 0, (
+        f"the WAL is {left} bytes after a checkpoint, so a BEGIN sent through "
+        "diagnostic_query is still pinning a read snapshot the checkpointer "
+        "cannot truncate past"
+    )
+
+
+def test_only_the_first_statement_of_a_multi_statement_query_runs(db):
+    """Documented because it is invisible: the rest are dropped, not refused.
+
+    Worth an assertion rather than a sentence because of what the dropped half
+    can leave behind — ``"BEGIN; SELECT 1"`` runs the ``BEGIN`` and nothing
+    else, which is one of the two ways the shared diagnostic connection ends up
+    carrying a transaction nobody meant to open (W15.5, D-257).
+    """
+    assert db.diagnostic_query("SELECT 1; SELECT 2") == [(1,)]
 
 
 def test_checkpoint_is_counted_as_its_own_command_kind(db):

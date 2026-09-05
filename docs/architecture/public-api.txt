@@ -149,6 +149,7 @@ pub async fn macrame::connection::Database::rehydrate(&self, &[&str]) -> macrame
 pub async fn macrame::connection::Database::retire_edge(&self, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, &str, &str) -> macrame::error::Result<()>
 pub async fn macrame::connection::Database::retire_edge_on(&self, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, &str, &str, macrame::branch::BranchId) -> macrame::error::Result<()>
 pub fn macrame::connection::Database::schema_version(&self) -> u32
+pub async fn macrame::connection::Database::scrub_diagnostic_conn(&self)
 pub async fn macrame::connection::Database::shadow_step(&self, macrame::integrity::ShadowStep) -> macrame::error::Result<macrame::integrity::ShadowOutcome>
 pub fn macrame::connection::Database::snapshots_dir(&self) -> &std::path::Path
 pub async fn macrame::connection::Database::upsert_concept(&self, macrame::connection::ConceptUpsert) -> macrame::error::Result<()>
@@ -926,6 +927,7 @@ pub async fn macrame::connection::Database::rehydrate(&self, &[&str]) -> macrame
 pub async fn macrame::connection::Database::retire_edge(&self, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, &str, &str) -> macrame::error::Result<()>
 pub async fn macrame::connection::Database::retire_edge_on(&self, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, &str, &str, macrame::branch::BranchId) -> macrame::error::Result<()>
 pub fn macrame::connection::Database::schema_version(&self) -> u32
+pub async fn macrame::connection::Database::scrub_diagnostic_conn(&self)
 pub async fn macrame::connection::Database::shadow_step(&self, macrame::integrity::ShadowStep) -> macrame::error::Result<macrame::integrity::ShadowOutcome>
 pub fn macrame::connection::Database::snapshots_dir(&self) -> &std::path::Path
 pub async fn macrame::connection::Database::upsert_concept(&self, macrame::connection::ConceptUpsert) -> macrame::error::Result<()>
@@ -1668,6 +1670,7 @@ pub async fn macrame::connection::Database::rehydrate(&self, &[&str]) -> macrame
 pub async fn macrame::connection::Database::retire_edge(&self, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, &str, &str) -> macrame::error::Result<()>
 pub async fn macrame::connection::Database::retire_edge_on(&self, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, &str, &str, macrame::branch::BranchId) -> macrame::error::Result<()>
 pub fn macrame::connection::Database::schema_version(&self) -> u32
+pub async fn macrame::connection::Database::scrub_diagnostic_conn(&self)
 pub async fn macrame::connection::Database::shadow_step(&self, macrame::integrity::ShadowStep) -> macrame::error::Result<macrame::integrity::ShadowOutcome>
 pub fn macrame::connection::Database::snapshots_dir(&self) -> &std::path::Path
 pub async fn macrame::connection::Database::upsert_concept(&self, macrame::connection::ConceptUpsert) -> macrame::error::Result<()>

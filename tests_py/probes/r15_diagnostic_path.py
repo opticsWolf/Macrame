@@ -62,6 +62,14 @@ crash, because it leaves the ``connect()``. Serialising the ``connect()``
 against other ``connect()`` calls does not reach zero either: the race is
 between minting a connection and the *use* of the ones already out.
 
+Re-measured 2026-09-05 for W15.5 (D-257), same width and 30 runs, mutex again
+removed: **0 bad in 30**. W15.5 gave the shared connection a scrub on entry and
+on exit, which puts a ``connect()`` back on any call whose predecessor left temp
+objects or an ``ATTACH`` behind. This arm says that the clean traffic this probe
+generates does not reach it, and so does not reopen what 0.15.14 closed. It says
+nothing about a workload that dirties the connection on every call: that one
+re-mints every time and is, by construction, the 3-in-30 arm again.
+
 That is the whole justification for the lock, and it is a measurement rather
 than an argument — which, on this repository's history with R15, is the
 difference between a mitigation and a hope.
