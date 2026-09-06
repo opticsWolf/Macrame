@@ -3789,6 +3789,16 @@ byte-identical; the surface follows in its own release. The cycle's plan is
     wider trigger — branches live under pull requests, push triggers stay
     main-only.
 
+    **That last sentence is superseded by**
+    [D-262](architecture/s13-decision-register.md#d-262) **(0.16.0)**, and not
+    because it was wrong. The remedy is correct and it is cheaper; it also has a
+    manual step, nobody opened a pull request for `dev/0.16.0`, and **nineteen
+    further releases went unreplicated** — the same defect this item exists to
+    record, arriving through the remedy's one dependence on someone remembering.
+    `ci.yml` and `python.yml` now also trigger on `push` to `dev/**`. The
+    diagnosis above is unchanged and the draft pull request is still worth
+    opening.
+
     Separately, the fuzz gate bounded whole-process RSS with `-rss_limit_mb`
     while its stated assertion — "never an allocation storm" — is about a single
     allocation, which is `-malloc_limit_mb`'s job. It failed on

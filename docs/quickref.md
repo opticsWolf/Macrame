@@ -1,6 +1,6 @@
 # Macrame — Architecture Quick Reference
 
-**v0.12.0 · A Bitemporal Graph Ledger on libSQL**
+**v0.16.0 · A Bitemporal Graph Ledger on libSQL**
 
 ---
 
@@ -172,6 +172,15 @@ Every temporal column is exactly 27 characters: `YYYY-MM-DDTHH:MM:SS.ffffffZ`
 | v8 | `concepts.rowid_pk INTEGER PRIMARY KEY` + `id TEXT NOT NULL UNIQUE`; `concepts_fts` re-keyed to `content_rowid='rowid_pk'`; `trg_concepts_fts_delete` installed **inert**; `idx_annotations_label` and `idx_lc_tgt_active` dropped. Sets `suspends_foreign_keys` — the only rung that does (D-117, D-118, D-119) |
 | v9 | `trg_concepts_guard_delete` becomes conditional on the archive-session marker, which is what lets a concept leave the hot table at all — and makes v8's inert FTS delete trigger fire. Trigger-only; no table touched (D-129) |
 | v10 | `trg_concepts_log_insert` becomes conditional on the same marker, so a rehydration mints no transaction-time facts. Trigger-only. Required because the fold resolves by `seq_id`, not `recorded_at` (D-131) |
+| v11 | `idx_links_recorded_at` and `idx_links_target` on the `links` ledger, so neither archive predicate scans it ([D-151](architecture/s13-decision-register.md#d-151)) |
+| v12 | The `branches` register; `branch_id` on all four ledger tables with a real foreign key; `links_current` re-keyed per lineage; three log triggers redefined and four guards added ([D-214](architecture/s13-decision-register.md#d-214)…[D-217](architecture/s13-decision-register.md#d-217)) |
+| v13 | `trg_branches_frozen_delete` becomes conditional on an archive session, so a lineage can be abandoned, and `cold.branches` arrives with it ([D-230](architecture/s13-decision-register.md#d-230)) |
+| v14 | `idx_lc_lineage_cut` on `links_current` — the index the branched read seeks and the trunk walk does not ([D-231](architecture/s13-decision-register.md#d-231)) |
+| v15 | `links`' primary key gains `branch_id`, and `cold.links` takes the same key ([D-232](architecture/s13-decision-register.md#d-232)). The **last rung to change a primary key** before the 1.0 freeze |
+| v16 | `log_integrity` — one row, one bit: *has anything ever been deleted from `transaction_log`?* Seeded from the log, maintained by `trg_txlog_mark_gap`, so the reach guard reads a bit instead of counting the log on every recorded-time read ([D-249](architecture/s13-decision-register.md#d-249)) |
+| v17 | `idx_txlog_fold_partition` — the fold's own partition, and **not** the index review item C-4 asked for, which was never measured faster than no index at all ([D-254](architecture/s13-decision-register.md#d-254)) |
+
+**This table stopped at v10 for seven rungs and fourteen releases** (corrected at 0.16.0). `tests/doc_currency_tests.rs` gates `docs/architecture/README.md`'s revision history and the register's `D-001…D-NNN` line; it does not read this file, which is why the drift here ran longer than anywhere the gate looks. The authority on the ladder is `src/schema/migrations.rs`'s `STEPS`, and `SCHEMA_VERSION` is the number to trust over this table.
 
 ---
 

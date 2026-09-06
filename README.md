@@ -60,7 +60,7 @@ folds the same log for the *text* and raises the same error for the same reason 
 
 ```toml
 [dependencies]
-macrame-db = "0.15"
+macrame-db = "0.16"
 ```
 
 ```rust
@@ -183,9 +183,11 @@ constant, `Optimize`'s is rare and therefore the informative one
 | v12 | The `branches` register, `branch_id` on all four ledger tables with a real foreign key, `links_current` re-keyed per lineage, three log triggers redefined and four guards added ([D-214](docs/architecture/s13-decision-register.md#d-214)…[D-217](docs/architecture/s13-decision-register.md#d-217)) |
 | v13 | `trg_branches_frozen_delete` becomes conditional on an archive session, so a lineage can be abandoned, and `cold.branches` arrives with it ([D-230](docs/architecture/s13-decision-register.md#d-230)) |
 | v14 | `idx_lc_lineage_cut` on `links_current`, the index the branched read seeks and the trunk walk does not ([D-231](docs/architecture/s13-decision-register.md#d-231)) |
-| v15 | `links`' primary key gains `branch_id`, last, and `cold.links` takes the same key ([D-232](docs/architecture/s13-decision-register.md#d-232)) — **current** |
+| v15 | `links`' primary key gains `branch_id`, last, and `cold.links` takes the same key ([D-232](docs/architecture/s13-decision-register.md#d-232)) |
+| v16 | `log_integrity` — one row, one bit: *has anything ever been deleted from `transaction_log`?* — seeded from the log it describes and maintained by `trg_txlog_mark_gap`, so the reach guard reads a bit instead of scanning the log on every recorded-time read ([D-249](docs/architecture/s13-decision-register.md#d-249)) |
+| v17 | `idx_txlog_fold_partition`, the index the fold's own partition asks for and **not** the one the review asked for ([D-254](docs/architecture/s13-decision-register.md#d-254)) — **current** |
 
-**v15 is the last rung that changed a *primary key* before the 1.0 freeze, and v8 was the one before it.** D-036 forbids a primary-key diff after 1.0, and D-032 is what reserves the pre-1.0 window for exactly this: v15 widens `links` because two lineages are *allowed* to believe different things about one edge, and the old key refused that pair with a bare `UNIQUE` error naming a storage key the caller has never seen. `branch_id` goes **last**, so the five-column covering seek the archive sweep runs per candidate row survives the change. On v8: `rowid_pk INTEGER PRIMARY KEY` costs `id` the primary key, and D-036 forbids a primary-key change after 1.0 (D-119). It also drops `idx_annotations_label` and `idx_lc_tgt_active`, which shipped in the v7 baseline with no query that seeks on them — measured at −7.9% off `assert_edge` (D-089, D-118).
+**v15 is the last rung that changed a *primary key* before the 1.0 freeze, and v8 was the one before it** — v16 adds a table and v17 an index, and neither touches a key. D-036 forbids a primary-key diff after 1.0, and D-032 is what reserves the pre-1.0 window for exactly this: v15 widens `links` because two lineages are *allowed* to believe different things about one edge, and the old key refused that pair with a bare `UNIQUE` error naming a storage key the caller has never seen. `branch_id` goes **last**, so the five-column covering seek the archive sweep runs per candidate row survives the change. On v8: `rowid_pk INTEGER PRIMARY KEY` costs `id` the primary key, and D-036 forbids a primary-key change after 1.0 (D-119). It also drops `idx_annotations_label` and `idx_lc_tgt_active`, which shipped in the v7 baseline with no query that seeks on them — measured at −7.9% off `assert_edge` (D-089, D-118).
 
 ---
 
@@ -197,8 +199,8 @@ constant, `Optimize`'s is rare and therefore the informative one
 | MSRV | **1.88** (verified, not declared) |
 | Runtime | tokio async, single process |
 | Engine | libSQL 0.9.30 (MIT, unmodified) |
-| Schema version | **15** |
-| Test suite | 745 Rust · 726 with `--no-default-features` · 592 Python (2 skipped) — all green (measured 2026-09-06, 0.15.21, one Windows box; the branch's CI history is [D-234](docs/architecture/s13-decision-register.md#d-234) and worth reading before quoting this line as replicated). `metrics` is a **default** feature since 0.12.11, so the first figure is a plain `cargo test`; the second is the same suite with the counters compiled out, and the 19-test gap is `actor_metrics_tests` (12, the whole target), `src/metrics.rs`'s five unit tests, one gated test in `checkpoint_tests`, and the doc-test on `Database::metrics` — enumerated at 0.14.23 by diffing `cargo test -- --list` against the same list under `--no-default-features`, which is the only way this sentence stays true as the metrics target grows. It read *16* for two releases while the subtraction said 19. **That second figure was published for two releases against a configuration that did not build** — three examples called `Database::metrics()` with no `required-features` entry, which is [D-169](docs/architecture/s13-decision-register.md#d-169) recurring and is fixed in 0.13.36 ([D-209](docs/architecture/s13-decision-register.md#d-209)). The three `property-tests` binaries (23 tests) are **run as their own step** — see below. **`--all-features` is not a supported configuration**, see below. **The second figure is a CI gate since 0.14.24** ([D-241](docs/architecture/s13-decision-register.md#d-241)): the feature-off suite is *run* on ubuntu, not merely compiled, because until then nothing could falsify the number this line publishes. Regenerate rather than trust this line: `python scripts/run_rust_suite.py`, and `python scripts/run_rust_suite.py --no-default-features` for the second — a bare `cargo test --no-default-features` stops at the first R15 crash and reports the partial count as the total |
+| Schema version | **17** |
+| Test suite | 745 Rust · 726 with `--no-default-features` · 592 Python (2 skipped) — all green (measured 2026-09-06, 0.16.0, one Windows box **and replicated on three CI runners** — run `34026632327`, [D-263](docs/architecture/s13-decision-register.md#d-263): 745 on ubuntu and macOS at attempt 1/3, 745 on Windows at attempt 7/8, 726 feature-off on ubuntu at attempt 1/3. Read [D-234](docs/architecture/s13-decision-register.md#d-234) and [D-262](docs/architecture/s13-decision-register.md#d-262) before quoting *any earlier* release's version of this line as replicated: D-243 … D-261 shipped with no CI run of any kind, because the branch filter did not reach `dev/**` and the draft pull request the policy relies on was never opened). `metrics` is a **default** feature since 0.12.11, so the first figure is a plain `cargo test`; the second is the same suite with the counters compiled out, and the 19-test gap is `actor_metrics_tests` (12, the whole target), `src/metrics.rs`'s five unit tests, one gated test in `checkpoint_tests`, and the doc-test on `Database::metrics` — enumerated at 0.14.23 by diffing `cargo test -- --list` against the same list under `--no-default-features`, which is the only way this sentence stays true as the metrics target grows. It read *16* for two releases while the subtraction said 19. **That second figure was published for two releases against a configuration that did not build** — three examples called `Database::metrics()` with no `required-features` entry, which is [D-169](docs/architecture/s13-decision-register.md#d-169) recurring and is fixed in 0.13.36 ([D-209](docs/architecture/s13-decision-register.md#d-209)). The three `property-tests` binaries (23 tests) are **run as their own step** — see below. **`--all-features` is not a supported configuration**, see below. **The second figure is a CI gate since 0.14.24** ([D-241](docs/architecture/s13-decision-register.md#d-241)): the feature-off suite is *run* on ubuntu, not merely compiled, because until then nothing could falsify the number this line publishes. Regenerate rather than trust this line: `python scripts/run_rust_suite.py`, and `python scripts/run_rust_suite.py --no-default-features` for the second — a bare `cargo test --no-default-features` stops at the first R15 crash and reports the partial count as the total |
 | Dependencies | tokio, serde, bincode, zstd, thiserror, tracing, ulid |
 
 ### Module Map
@@ -216,7 +218,7 @@ constant, `Optimize`'s is rare and therefore the informative one
 
 ---
 
-## Python Bindings (v0.15.0)
+## Python Bindings (v0.16.0)
 
 | Detail | Value |
 |---|---|
@@ -388,7 +390,7 @@ criterion baselines, machine against itself. See [§9 of the architecture docs](
 - [Architecture Quick Reference](docs/quickref.md) — API, schema, decisions, performance. Marked **v0.12.0** and current to [D-148](docs/architecture/s13-decision-register.md#d-148); it does not yet carry the 0.13.0 wave (D-149…D-169) the 0.13.x series toward 1.0 (D-170…[D-212](docs/architecture/s13-decision-register.md#d-212)), which includes the public-surface changes of D-205…D-208, or the branching wave (D-213…[D-242](docs/architecture/s13-decision-register.md#d-242)) — so its API section names paths this crate no longer offers. **Refreshing it is not scheduled**, and that is recorded rather than glossed: it is a derived document, and the architecture set below is the one kept true by gates. This README said "v0.9.0 reference" until 0.12.25, which was wrong about its own pointer. Where it disagrees with the architecture set, the architecture set wins — it is the normative one.
 - [Python bindings](docs/architecture/s14-python-bindings.md) — §14: async→sync boundary, error tree, stubs
 - [Decision register](docs/architecture/s13-decision-register.md) — D-001…D-263 with rationale
-- [Release notes](docs/releases) — one document per minor, most recently [v0.15.0](docs/releases/v0.15.0.md) (branching) and [v0.14.0](docs/releases/v0.14.0.md)
+- [Release notes](docs/releases) — one document per minor, most recently [v0.16.0](docs/releases/v0.16.0.md) (the lineage read as a value, and the review that was right about *what* far more often than *why*) and [v0.15.0](docs/releases/v0.15.0.md) (branching)
 
 ---
 
