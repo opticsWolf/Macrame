@@ -4,6 +4,7 @@ use libsql::TransactionBehavior;
 
 use crate::error::{DbError, Result, WriteOp};
 use crate::schema::ddl::ARCHIVE_SESSION_MARKER;
+use crate::util::limits::HYDRATE_CHUNK;
 
 /// Outcome of one archive session.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -220,7 +221,35 @@ const COLD_SCHEMA: &[&str] = &[
 /// exactly one lineage — every key on a ledger that has never forked — is
 /// unaffected, which the tests measure rather than argue from a column default.
 ///
+/// ## What being conservative costs, stated (0.15.19, review C-21)
+///
+/// "Never wrong" was the whole of what this said, and the cost has a shape a
+/// deployment is better off knowing before it meets it. The `NOT EXISTS` runs
+/// against `links`, not against `cold`, so a closed row is held hot by **any**
+/// other lineage's hot row at the same interval key — the trunk's own included,
+/// and including rows that have nothing to do with the shadow retirement this
+/// arm exists for.
+///
+/// * On a ledger that has never forked, nothing is held: every key belongs to
+///   one lineage and the sub-select is empty. This is the common case and it
+///   pays nothing at all.
+/// * With live branches, every key **any** of them has written stays hot on
+///   **every** lineage that shares it. The bound is the number of distinct
+///   interval keys live branches have touched — not the size of the ledger, and
+///   not a function of how long the branch has been open.
+/// * It clears itself, with no operator step. [`archive_branch`] takes a
+///   lineage's hot rows cold, which removes them from the table this guard
+///   consults, so the very next ordinary `archive` session finds the
+///   `NOT EXISTS` satisfied and takes the rows that were being held. Nothing
+///   accumulates across that boundary.
+///
+/// The alternative's failure mode is the one measured above — an edge a branch
+/// had stopped believing coming back because a maintenance operation ran — so
+/// the trade is disk against a wrong answer. Long-lived branches writing at
+/// keys the trunk also holds are the only shape where the disk side is visible.
+///
 /// [Doctrine III]: ../../docs/architecture/README.md
+/// [`archive_branch`]: crate::temporal::archive_branch
 const LINKS_ARCHIVABLE: &str = r#"
     recorded_at < :cutoff AND (
         EXISTS (
@@ -358,6 +387,39 @@ pub async fn archivable_concepts(conn: &libsql::Connection, cutoff: &str) -> Res
         ids.push(row.get::<String>(0)?);
     }
     Ok(ids)
+}
+
+/// Whether there is an archive at `path`, as opposed to a file (0.15.19, C-13).
+///
+/// # An empty file is not an archive, and saying otherwise broke reads
+///
+/// Every reader used to ask `path.exists()`. `ATTACH DATABASE` **creates the
+/// file** — before any DDL, and whether or not the session that attached it
+/// ever writes a row — so `exists()` answers "an archive session once began
+/// here", which is not the question any of them is asking.
+///
+/// The gap is reachable through the public API with nothing failing
+/// unexpectedly. [`rehydrate`] on a ledger that has never been archived used to
+/// ATTACH, ask `cold.concepts` a question, be told the table does not exist,
+/// and return that error — leaving a **0-byte file** behind. From then on every
+/// `reconstruct` at an instant below the newest hot stamp took the cold arm and
+/// failed with a raw `no such table: cold.transaction_log`: a database whose
+/// entire history became unreadable because a caller asked to rehydrate
+/// something that was never archived. Measured in
+/// `examples/cold_file_reach_probe.rs`, before and after.
+///
+/// A zero-length file is an empty SQLite database with no tables in it, which
+/// is exactly "no archive". The check is one metadata stat, so it costs what
+/// `exists()` cost, and it is the *healing* half of this repair: a database
+/// already carrying a stray file starts reading correctly again the next time
+/// it is opened, with no operator step and nothing to delete by hand.
+///
+/// It does not open the file. A file that is non-empty but not a cold ledger is
+/// a different failure and belongs to whoever wrote it; what makes that case
+/// narrow is that [`archive_session`] now writes the schema **inside** its own
+/// transaction, so a schema pass cannot half-survive.
+pub(crate) fn archive_present(path: &Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|m| m.len() > 0)
 }
 
 /// Move closed edge intervals and superseded log rows older than `cutoff` into
@@ -645,13 +707,21 @@ async fn archive_session(
     cutoff: &str,
     archived_at: &str,
 ) -> Result<ArchiveReport> {
-    for ddl in COLD_SCHEMA {
-        conn.execute(ddl, ()).await?;
-    }
-
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .await?;
+
+    // **Inside the transaction, not before it** (0.15.19, review C-13). Cold
+    // DDL is transactional on libSQL — probe §12–13, which `upgrade_cold_lineage`
+    // below already relies on — so a session that fails partway through the
+    // schema pass now leaves the cold file exactly as it found it, instead of
+    // committing a half-declared schema that the next reader would meet as a
+    // missing table. It is not what puts the file on disk (`ATTACH` does that,
+    // and `archive_present` is the answer to it), but it is what makes
+    // "the file is non-empty" mean "the schema is all there".
+    for ddl in COLD_SCHEMA {
+        tx.execute(ddl, ()).await?;
+    }
 
     // Before the marker, before any insert: an existing cold file may predate
     // the lineage column, and `IF NOT EXISTS` above will not have added it.
@@ -1081,13 +1151,21 @@ async fn archive_branch_session(
     branch: &str,
     archived_at: &str,
 ) -> Result<ArchiveReport> {
-    for ddl in COLD_SCHEMA {
-        conn.execute(ddl, ()).await?;
-    }
-
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .await?;
+
+    // **Inside the transaction, not before it** (0.15.19, review C-13). Cold
+    // DDL is transactional on libSQL — probe §12–13, which `upgrade_cold_lineage`
+    // below already relies on — so a session that fails partway through the
+    // schema pass now leaves the cold file exactly as it found it, instead of
+    // committing a half-declared schema that the next reader would meet as a
+    // missing table. It is not what puts the file on disk (`ATTACH` does that,
+    // and `archive_present` is the answer to it), but it is what makes
+    // "the file is non-empty" mean "the schema is all there".
+    for ddl in COLD_SCHEMA {
+        tx.execute(ddl, ()).await?;
+    }
 
     upgrade_cold_lineage(&tx).await?;
 
@@ -1287,6 +1365,26 @@ async fn archive_branch_concepts(
     Ok(deleted)
 }
 
+/// One cold concept row, read as part of a chunk (0.15.19, review C-22).
+///
+/// A named struct rather than a tuple because the insert below binds ten
+/// columns in an order the reader has to be able to check against the DDL, and
+/// `row.4` is not checkable. `Clone` is one row's worth of strings, taken so
+/// the loop can destructure by value while the map keeps the chunk alive for
+/// the ids after it.
+#[derive(Clone)]
+struct ColdConcept {
+    old_rowid: i64,
+    title: String,
+    content: String,
+    model: Option<String>,
+    valid_from: String,
+    valid_to: String,
+    recorded_at: String,
+    retired: i64,
+    branch_id: String,
+}
+
 /// Outcome of one rehydration (0.9.0, C3).
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -1359,6 +1457,20 @@ pub async fn rehydrate(
         });
     }
 
+    // No archive, nothing to move back — and **no ATTACH**, which is the point
+    // (0.15.19, review C-13). `ATTACH` creates the file, so asking this question
+    // by attaching used to leave a 0-byte cold file behind on every ledger that
+    // had never been archived, which then broke every historical read. Reported
+    // as "nothing was rehydrated" rather than as an error, because that is
+    // already this function's answer for an id the cold file does not hold: a
+    // missing archive holds none of them.
+    if !archive_present(archive_path) {
+        return Ok(RehydrateReport {
+            concepts_rehydrated: 0,
+            rowids_reassigned: 0,
+        });
+    }
+
     crate::temporal::replay::detach_stale_cold(conn).await;
     conn.execute(
         "ATTACH DATABASE ?1 AS cold",
@@ -1414,123 +1526,186 @@ async fn rehydrate_session(conn: &libsql::Connection, ids: &[&str]) -> Result<Re
     let mut rehydrated = 0usize;
     let mut reassigned = 0usize;
 
-    for id in ids {
-        let Some(row) = tx
+    // **One `SELECT` per chunk of [`HYDRATE_CHUNK`] ids, not one per id**
+    // (0.15.19, review C-22). This was a `SELECT`, a `COUNT(*)`, an `INSERT`
+    // and a `DELETE` for every id — four round trips each, on a path that holds
+    // `BEGIN IMMEDIATE` for the whole call. Rehydration is rare, so what this
+    // buys is the length of that hold rather than throughput: the write lock is
+    // what the rest of the database is waiting on, and two of the four trips
+    // per id are reads that a chunk answers at once.
+    //
+    // What stays per row is what is genuinely conditional — the rowid
+    // reinstatement and its FTS repair, which depend on whether something has
+    // claimed the old rowid in the meantime.
+    //
+    // **The caller's order is preserved**, and that is not incidental. The
+    // refusal below names *one* concept, and `IN (…)` returns rows in whatever
+    // order the engine likes, so reading a chunk and folding it in arrival
+    // order would make which concept gets named depend on the query plan. The
+    // chunk is indexed by id and then walked in the order the caller gave, so
+    // the same call refuses the same concept every time.
+    for chunk in ids.chunks(HYDRATE_CHUNK) {
+        let placeholders = std::iter::repeat_n("?", chunk.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        // Collected rather than passed as a borrowing iterator: an iterator
+        // that captures `chunk` makes this future's `Send` bound
+        // higher-ranked, and the actor that spawns it then fails to prove
+        // `Send` for half a dozen unrelated types. Owned values, one small
+        // `Vec` per chunk.
+        let bind: Vec<libsql::Value> = chunk.iter().map(|id| libsql::Value::from(*id)).collect();
+        let mut rows = tx
             .query(
                 &format!(
                     "SELECT rowid_pk, id, title, content, embedding_model, \
                      valid_from, valid_to, recorded_at, retired, {lineage} \
-                     FROM cold.concepts WHERE id = ?1"
+                     FROM cold.concepts WHERE id IN ({placeholders})"
                 ),
-                libsql::params![*id],
+                libsql::params_from_iter(bind),
             )
-            .await?
-            .next()
-            .await?
-        else {
-            continue;
-        };
+            .await?;
 
-        let old_rowid: i64 = row.get(0)?;
-        let title: String = row.get(2)?;
-        let content: String = row.get(3)?;
-        let model: Option<String> = row.get(4)?;
-        let valid_from: String = row.get(5)?;
-        let valid_to: String = row.get(6)?;
-        let recorded_at: String = row.get(7)?;
-        let retired: i64 = row.get(8)?;
-        let branch_id: String = row.get(9)?;
-
-        // The lineage has to exist before the row that names it can go back
-        // (0.15.11, W15.1, C-3). Checked against the set read above rather than
-        // left to `concepts.branch_id REFERENCES branches(branch_id)`, which
-        // would refuse this same insert as `FOREIGN KEY constraint failed` —
-        // an engine-kind error naming the concepts table, when what is missing
-        // is a branch.
-        //
-        // Refused here rather than in a pass over every requested id first: the
-        // transaction has not committed, so the ids ahead of this one are not
-        // written either way, and hoisting the reads would hold every payload
-        // in memory to gain what the rollback already gives. What that costs is
-        // stated rather than hidden — the work done for the earlier ids is
-        // spent and discarded.
-        if !live_lineages.contains(&branch_id) {
-            return Err(DbError::BranchArchived {
-                branch: branch_id,
-                concept: (*id).to_string(),
-            });
+        let mut found: std::collections::HashMap<String, ColdConcept> =
+            std::collections::HashMap::with_capacity(chunk.len());
+        while let Some(row) = rows.next().await? {
+            let id: String = row.get(1)?;
+            found.insert(
+                id,
+                ColdConcept {
+                    old_rowid: row.get(0)?,
+                    title: row.get(2)?,
+                    content: row.get(3)?,
+                    model: row.get(4)?,
+                    valid_from: row.get(5)?,
+                    valid_to: row.get(6)?,
+                    recorded_at: row.get(7)?,
+                    retired: row.get(8)?,
+                    branch_id: row.get(9)?,
+                },
+            );
         }
+        drop(rows);
 
-        let taken: i64 = tx
-            .query(
-                "SELECT COUNT(*) FROM concepts WHERE rowid_pk = ?1",
-                libsql::params![old_rowid],
-            )
-            .await?
-            .next()
-            .await?
-            .expect("COUNT(*) always returns a row")
-            .get(0)?;
+        // The ids of this chunk the cold file actually held, in the caller's
+        // order, so the one `DELETE` at the end names exactly what was moved.
+        let mut moved: Vec<&str> = Vec::with_capacity(found.len());
 
-        if taken == 0 {
-            // The clean move back: same row, same rowid, no side effects.
-            tx.execute(
-                "INSERT INTO concepts (rowid_pk, id, title, content, embedding_model, \
+        for id in chunk {
+            let Some(cold) = found.get(*id) else {
+                continue;
+            };
+            let ColdConcept {
+                old_rowid,
+                title,
+                content,
+                model,
+                valid_from,
+                valid_to,
+                recorded_at,
+                retired,
+                branch_id,
+            } = cold.clone();
+
+            // The lineage has to exist before the row that names it can go back
+            // (0.15.11, W15.1, C-3). Checked against the set read above rather than
+            // left to `concepts.branch_id REFERENCES branches(branch_id)`, which
+            // would refuse this same insert as `FOREIGN KEY constraint failed` —
+            // an engine-kind error naming the concepts table, when what is missing
+            // is a branch.
+            //
+            // Refused here rather than in a pass over every requested id first: the
+            // transaction has not committed, so the ids ahead of this one are not
+            // written either way, and hoisting the reads would hold every payload
+            // in memory to gain what the rollback already gives. What that costs is
+            // stated rather than hidden — the work done for the earlier ids is
+            // spent and discarded.
+            if !live_lineages.contains(&branch_id) {
+                return Err(DbError::BranchArchived {
+                    branch: branch_id,
+                    concept: (*id).to_string(),
+                });
+            }
+
+            let taken: i64 = tx
+                .query(
+                    "SELECT COUNT(*) FROM concepts WHERE rowid_pk = ?1",
+                    libsql::params![old_rowid],
+                )
+                .await?
+                .next()
+                .await?
+                .expect("COUNT(*) always returns a row")
+                .get(0)?;
+
+            if taken == 0 {
+                // The clean move back: same row, same rowid, no side effects.
+                tx.execute(
+                    "INSERT INTO concepts (rowid_pk, id, title, content, embedding_model, \
                  valid_from, valid_to, recorded_at, retired, branch_id) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                libsql::params![
-                    old_rowid,
-                    *id,
-                    title.clone(),
-                    content.clone(),
-                    model,
-                    valid_from,
-                    valid_to,
-                    recorded_at,
-                    retired,
-                    branch_id
-                ],
-            )
-            .await?;
-        } else {
-            // Something claimed the rowid while this concept was cold. Take a
-            // fresh one, then correct the index: `concepts_fts` is
-            // external-content keyed on `rowid_pk`, and its insert trigger will
-            // have written an entry at the *new* rowid — what has to be undone
-            // is the stale entry still sitting at the old one, which the archive
-            // could not remove because the row it described had already gone.
-            tx.execute(
-                "INSERT INTO concepts (id, title, content, embedding_model, \
+                    libsql::params![
+                        old_rowid,
+                        *id,
+                        title.clone(),
+                        content.clone(),
+                        model,
+                        valid_from,
+                        valid_to,
+                        recorded_at,
+                        retired,
+                        branch_id
+                    ],
+                )
+                .await?;
+            } else {
+                // Something claimed the rowid while this concept was cold. Take a
+                // fresh one, then correct the index: `concepts_fts` is
+                // external-content keyed on `rowid_pk`, and its insert trigger will
+                // have written an entry at the *new* rowid — what has to be undone
+                // is the stale entry still sitting at the old one, which the archive
+                // could not remove because the row it described had already gone.
+                tx.execute(
+                    "INSERT INTO concepts (id, title, content, embedding_model, \
                  valid_from, valid_to, recorded_at, retired, branch_id) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                libsql::params![
-                    *id,
-                    title.clone(),
-                    content.clone(),
-                    model,
-                    valid_from,
-                    valid_to,
-                    recorded_at,
-                    retired,
-                    branch_id
-                ],
-            )
-            .await?;
-            tx.execute(
-                "INSERT INTO concepts_fts (concepts_fts, rowid, title, content) \
+                    libsql::params![
+                        *id,
+                        title.clone(),
+                        content.clone(),
+                        model,
+                        valid_from,
+                        valid_to,
+                        recorded_at,
+                        retired,
+                        branch_id
+                    ],
+                )
+                .await?;
+                tx.execute(
+                    "INSERT INTO concepts_fts (concepts_fts, rowid, title, content) \
                  VALUES ('delete', ?1, ?2, ?3)",
-                libsql::params![old_rowid, title, content],
-            )
-            .await?;
-            reassigned += 1;
+                    libsql::params![old_rowid, title, content],
+                )
+                .await?;
+                reassigned += 1;
+            }
+
+            moved.push(*id);
+            rehydrated += 1;
         }
 
-        tx.execute(
-            "DELETE FROM cold.concepts WHERE id = ?1",
-            libsql::params![*id],
-        )
-        .await?;
-        rehydrated += 1;
+        if !moved.is_empty() {
+            let placeholders = std::iter::repeat_n("?", moved.len())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let bind: Vec<libsql::Value> =
+                moved.iter().map(|id| libsql::Value::from(*id)).collect();
+            tx.execute(
+                &format!("DELETE FROM cold.concepts WHERE id IN ({placeholders})"),
+                libsql::params_from_iter(bind),
+            )
+            .await?;
+        }
     }
 
     tx.execute(&format!("DROP TABLE {ARCHIVE_SESSION_MARKER}"), ())

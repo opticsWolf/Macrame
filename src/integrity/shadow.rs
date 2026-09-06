@@ -264,13 +264,20 @@ pub(crate) async fn swap(
     .await?;
 
     // --- the swap, in the one order that works ---
-    for stmt in [
-        "DROP TRIGGER IF EXISTS trg_links_current_sync",
-        "DROP TRIGGER IF EXISTS trg_links_single_open",
-        "DROP TABLE links_current",
-    ] {
-        tx.execute(stmt, ()).await?;
+    //
+    // The drop list and the create list below are the same list read twice
+    // (0.15.19, review C-12). This used to filter `CREATE_INDICES` and
+    // `CREATE_TRIGGERS` on `contains("links_current")`, which is a substring
+    // test standing in for a name: correct for every statement declared so far,
+    // and quietly wrong for the first index on `links` whose text mentions the
+    // projection. `ddl::LINKS_CURRENT_INDICES` and
+    // `ddl::LINKS_CURRENT_TRIGGERS` say which, and two tests in that module
+    // fail the build if the schema grows one this swap would not put back.
+    for (name, _) in ddl::LINKS_CURRENT_TRIGGERS {
+        tx.execute(&format!("DROP TRIGGER IF EXISTS {name}"), ())
+            .await?;
     }
+    tx.execute("DROP TABLE links_current", ()).await?;
     tx.execute(
         &format!("ALTER TABLE {SHADOW_TABLE} RENAME TO links_current"),
         (),
@@ -280,15 +287,11 @@ pub(crate) async fn swap(
     // The names are free now that the old table is gone, and reusable in this
     // same transaction (probed). Taken from the crate's own DDL so the rebuilt
     // indexes cannot differ from the declared ones.
-    for stmt in ddl::CREATE_INDICES {
-        if stmt.contains("links_current") {
-            tx.execute(stmt, ()).await?;
-        }
+    for stmt in ddl::LINKS_CURRENT_INDICES {
+        tx.execute(stmt, ()).await?;
     }
-    for trigger in ddl::CREATE_TRIGGERS {
-        if trigger.contains("trg_links_current_sync") || trigger.contains("trg_links_single_open") {
-            tx.execute(trigger, ()).await?;
-        }
+    for (_, trigger) in ddl::LINKS_CURRENT_TRIGGERS {
+        tx.execute(trigger, ()).await?;
     }
 
     let rows: i64 = tx

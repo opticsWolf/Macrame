@@ -473,7 +473,7 @@ pub async fn reconstruct_on(
                     })
                 }
             };
-            if !archive.exists() {
+            if !crate::temporal::archive::archive_present(archive) {
                 return Err(DbError::ReplayCorrupt {
                     seq: 0,
                     reason: format!(
@@ -628,14 +628,28 @@ fn bounded_cold_fold(cold_lineage: ColdLineage, rows: usize, first_slot: usize) 
     )
 }
 
-/// Fold over the hot log *above a snapshot anchor* (§5.5, D-049).
+/// Fold over the hot log *above a snapshot anchor* (§5.5, [D-049]).
 ///
-/// `seq_id > ?2` is an inequality, and deliberately so: `AUTOINCREMENT` leaves
-/// gaps whenever a transaction rolls back, so successor arithmetic
-/// (`seq_id = :anchor + 1`) would stop at the first gap and silently truncate
-/// the delta. This is the first anchored fold in the crate, which makes it the
-/// first code D-024's rule has ever bound — before this the rule was vacuous,
-/// not satisfied.
+/// `seq_id > ?2` is an inequality, and deliberately so: the hot log's ids have
+/// gaps, so successor arithmetic (`seq_id = :anchor + 1`) would stop at the
+/// first one and silently truncate the delta. This is the first anchored fold
+/// in the crate, which makes it the first code [D-024]'s rule has ever bound —
+/// before this the rule was vacuous, not satisfied.
+///
+/// **The gaps come from the archive, not from rollbacks** (0.15.19, review
+/// C-17). This comment used to name a rolled-back transaction as the source,
+/// which is [D-024]'s stated mechanism and is the one thing [D-049] measured
+/// and disproved: `sqlite_sequence` is written *inside* the transaction, so a
+/// rollback takes the allocation with it and the number is reused. What does
+/// leave gaps is `temporal::archive`, which deletes superseded rows from
+/// `transaction_log` — scattered through the sequence rather than forming a
+/// prefix, which is exactly the shape successor arithmetic cannot walk. Same
+/// inequality, and now the same reason the register gives for it; the
+/// gap-tolerance test builds its state by deleting a log row inside a session
+/// marker, which is the real mechanism and not the retracted one.
+///
+/// [D-049]: ../../docs/architecture/s13-decision-register.md#d-049
+/// [D-024]: ../../docs/architecture/s13-decision-register.md#d-024
 const ANCHORED_HOT_FOLD: &str = r#"
     SELECT seq_id, table_name, entity_id, operation, payload, branch_id
     FROM (
@@ -808,9 +822,32 @@ pub async fn reconstruct(
     archive_path: Option<&Path>,
     snapshots_dir: Option<&Path>,
 ) -> Result<MaterializedState> {
+    let base = snapshot_anchor(snapshots_dir, ts).await;
+    reconstruct_from(conn, ts, archive_path, base).await
+}
+
+/// [`reconstruct`] with the anchor chosen by the caller (0.15.19, review C-18).
+///
+/// The whole of `reconstruct` except the one line that picks a base, split out
+/// because [`verify_last_link`] needs to compose onto a **named** snapshot
+/// rather than onto whichever one is newest at `ts` — and picking it is the
+/// only thing the two do differently. Written as a split rather than as a
+/// second copy of the ATTACH bracket for the reason the module keeps
+/// re-learning: a read spelled twice drifts, and the half nobody calls is the
+/// half that drifts first ([D-227]).
+///
+/// `base` of `None` is a fold from genesis.
+///
+/// [D-227]: ../../docs/architecture/s13-decision-register.md#d-227
+async fn reconstruct_from(
+    conn: &libsql::Connection,
+    ts: &str,
+    archive_path: Option<&Path>,
+    base: Option<MaterializedState>,
+) -> Result<MaterializedState> {
     match hot_log_reach(conn, ts, archive_path).await? {
         HotLogReach::Covers => {
-            if let Some(base) = snapshot_anchor(snapshots_dir, ts).await {
+            if let Some(base) = base {
                 let anchor = base.seq_anchor;
                 let delta =
                     fold_delta(conn, ANCHORED_HOT_FOLD, libsql::params![ts, anchor]).await?;
@@ -851,7 +888,7 @@ pub async fn reconstruct(
             })
         }
     };
-    if !archive.exists() {
+    if !crate::temporal::archive::archive_present(archive) {
         return Err(DbError::ReplayCorrupt {
             seq: 0,
             reason: format!(
@@ -878,7 +915,7 @@ pub async fn reconstruct(
     // Composition works across the archive boundary because the anchored fold
     // unions both files; before 0.5.5 it was refused here rather than made to
     // work, and the refusal was the only thing keeping the answer right.
-    let result = match snapshot_anchor(snapshots_dir, ts).await {
+    let result = match base {
         Some(base) => {
             let anchor = base.seq_anchor;
             fold_delta(
@@ -948,6 +985,64 @@ pub async fn verify_snapshot_chain(
     // call to the thing under test.
     let folded = reconstruct(conn, ts, archive_path, None).await?;
     Ok(ChainCheck::compare(ts, &composed, &folded))
+}
+
+/// Check the **newest link** of the snapshot chain (0.15.19, review C-18).
+///
+/// # What it is for
+///
+/// [`verify_snapshot_chain`] is right and unaffordable: two folds, one of them
+/// from genesis over the whole log. Its own rustdoc calls scheduling it the
+/// open problem, and nothing schedules it, so in practice a composition defect
+/// is copied forward with nothing looking. This is the cheap half of the same
+/// idea — re-derive snapshot *n* from snapshot *n−1* and compare — which costs
+/// one anchored delta and can therefore run whenever a snapshot is written.
+/// The snapshot cadence does exactly that and logs a divergence.
+///
+/// `Ok(None)` when there are not two snapshots to compare, which is a young
+/// database and not a fault.
+///
+/// # What it catches, and what it does not
+///
+/// It catches a defect **as it is introduced**: a snapshot that does not
+/// survive its own serialize/load round trip, an `apply_to` that composes
+/// differently from how it was composed, or a delta that has stopped covering
+/// the window between the two anchors. That last one is the practical case —
+/// rows archived out of the hot log between the two writes, with no archive
+/// path given here to fold them back in.
+///
+/// It does **not** catch a defect inherited from further back. If the chain
+/// went wrong at link three and every link since has composed faithfully onto
+/// it, this agrees at every one of them, because both sides descend from the
+/// same wrong state. Only a genesis fold answers that, which is what
+/// [`verify_snapshot_chain`] is and why it stays.
+///
+/// Pass `archive_path` whenever there is an archive. Without it the delta is
+/// folded from the hot log alone, and a link spanning an archive session will
+/// disagree for a reason that is not a defect.
+///
+/// # It reports; it does not repair
+///
+/// [`verify_snapshot_chain`]'s reasoning, unchanged: under [Doctrine VI] a
+/// snapshot is derivative, so the repair is *delete the snapshots*, which is
+/// one line and the caller's to run. Rewriting the file here would destroy the
+/// only evidence that composition has a bug.
+///
+/// [Doctrine VI]: ../../../docs/architecture/s0-s3-foundations.md#doctrine-vi
+pub async fn verify_last_link(
+    conn: &libsql::Connection,
+    archive_path: Option<&Path>,
+    snapshots_dir: &Path,
+) -> Result<Option<ChainCheck>> {
+    let Some((base, newest)) = two_newest_snapshots(snapshots_dir).await else {
+        return Ok(None);
+    };
+    let ts = newest.timestamp.clone();
+    let redone = reconstruct_from(conn, &ts, archive_path, Some(base)).await?;
+    // `newest` is the composed answer — the file a reader would be handed —
+    // and `redone` is the independent one, which is the way round
+    // `ChainCheck`'s two families of field are named.
+    Ok(Some(ChainCheck::compare(&ts, &newest, &redone)))
 }
 
 /// The result of a [`verify_snapshot_chain`] cross-check.
@@ -1163,6 +1258,57 @@ fn newest_usable_snapshot(dir: &Path, ts: &str) -> Option<MaterializedState> {
     None
 }
 
+/// The two newest snapshots on disk, oldest first (0.15.19, review C-18).
+///
+/// `None` when there are not two loadable ones with distinct anchors, which is
+/// the ordinary state of a young database and not a failure. Unreadable and
+/// incompatible files are skipped with a warning, exactly as
+/// [`newest_usable_snapshot`] skips them: this is a check, and a check that
+/// cannot run should not be the thing that raises.
+///
+/// Distinct `seq_anchor`s rather than distinct paths, because two files at one
+/// anchor describe the same instant and comparing them would test the writer's
+/// determinism, not the chain's composition.
+async fn two_newest_snapshots(dir: &Path) -> Option<(MaterializedState, MaterializedState)> {
+    let dir = dir.to_path_buf();
+    match tokio::task::spawn_blocking(move || {
+        let mut candidates: Vec<(i64, PathBuf)> = std::fs::read_dir(&dir)
+            .ok()?
+            .flatten()
+            .map(|e| e.path())
+            .filter_map(|p| super::snapshot::seq_from_filename(&p).map(|s| (s, p)))
+            .collect();
+        candidates.sort_by_key(|(seq, _)| std::cmp::Reverse(*seq));
+
+        let mut loaded: Vec<MaterializedState> = Vec::with_capacity(2);
+        for (_, path) in candidates {
+            match super::snapshot::load_snapshot(&path) {
+                Ok(state) => {
+                    if loaded.iter().any(|s| s.seq_anchor == state.seq_anchor) {
+                        continue;
+                    }
+                    loaded.push(state);
+                    if loaded.len() == 2 {
+                        break;
+                    }
+                }
+                Err(e) => tracing::warn!("skipping snapshot {path:?} for the link check: {e}"),
+            }
+        }
+        let older = loaded.pop()?;
+        let newer = loaded.pop()?;
+        Some((older, newer))
+    })
+    .await
+    {
+        Ok(found) => found,
+        Err(e) => {
+            tracing::warn!("the snapshot scan for the link check did not finish ({e})");
+            None
+        }
+    }
+}
+
 /// Where the answer for `ts` lives.
 ///
 /// Three cases, not two (0.8.0, B5, D-121). This used to be a `bool`, and the
@@ -1216,7 +1362,7 @@ async fn hot_log_reach(
     ts: &str,
     archive_path: Option<&Path>,
 ) -> Result<HotLogReach> {
-    if archive_path.is_some_and(|p| p.exists()) {
+    if archive_path.is_some_and(crate::temporal::archive::archive_present) {
         // An archive file beside the log is direct evidence that rows may have
         // gone, and it is *stronger* evidence than [`hot_log_is_intact`] on one
         // case: an empty hot log passes the seq_id test vacuously, so the

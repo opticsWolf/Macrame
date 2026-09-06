@@ -1458,6 +1458,31 @@ impl PyDatabase {
         Ok(temporal::PyChainCheck { inner })
     }
 
+    /// Check the **newest link** of the snapshot chain (0.15.19, review C-18).
+    ///
+    /// The affordable half of `verify_snapshot_chain`: it re-derives the newest
+    /// snapshot from the one before it, which is one anchored delta instead of
+    /// a fold from the whole log. `None` when there are not two snapshots yet,
+    /// which is a young database and not a fault.
+    ///
+    /// It catches a defect as it is introduced — a snapshot that does not
+    /// survive its own round trip, or a delta that has stopped covering the
+    /// window between two anchors. It does **not** catch one inherited from
+    /// further back, because both sides descend from the same wrong state. Only
+    /// `verify_snapshot_chain` answers that.
+    ///
+    /// The snapshot cadence already runs this after every anchor it writes and
+    /// logs a divergence, so reach for it directly when you want the
+    /// `ChainCheck` itself rather than a yes or no.
+    ///
+    /// Reports; does not repair.
+    fn verify_last_link(&self, py: Python<'_>) -> PyResult<Option<temporal::PyChainCheck>> {
+        let found = self.with_db(py, move |db| {
+            runtime().block_on(db.verify_last_link()).map_err(to_py)
+        })?;
+        Ok(found.map(|inner| temporal::PyChainCheck { inner }))
+    }
+
     // -- lineage surface (W12.7) ---------------------------------------------
 
     /// Cut a new lineage from an existing one, and return it.

@@ -460,15 +460,34 @@ pub(crate) fn parse_snapshot(label: &str, raw: &[u8]) -> Result<MaterializedStat
 /// A `spawn_blocking` task cannot be cancelled once it has started, so the only
 /// way `await` yields a [`tokio::task::JoinError`] here is that the closure
 /// panicked. That closure is the code that writes the file `close()` promises
-/// to have written, so the panic becomes [`DbError::ReplayCorrupt`] carrying
-/// the anchor — the same class every other failure of `save_snapshot` reports,
-/// which is the point: a caller handling "the snapshot did not get written"
-/// should not need a second arm for the case where it failed by panicking.
+/// to have written, so the panic is an error rather than a warning.
+///
+/// **It is [`DbError::SnapshotWriteFailed`], not `ReplayCorrupt`** (0.15.19,
+/// review C-14). This arm was the last one [D-240] did not reach. That entry
+/// took every failure inside `save_snapshot` off `ReplayCorrupt` — *"the worst
+/// thing this system can say about itself"* — because nothing in that function
+/// can damage the log: it reads a materialized state and writes a file. A panic
+/// on the thread doing exactly that work is the same fact arriving by a
+/// different route, and the argument that used to stand here, that the join arm
+/// should match *"the same class every other failure of `save_snapshot`
+/// reports"*, is now an argument for the opposite variant — because the class
+/// it names changed underneath it and the join arm was not moved with it.
+///
+/// The subject a caller has to go and look at is the snapshot directory, which
+/// is what `SnapshotWriteFailed` names and what the anchor alone never did. The
+/// anchor is not lost: it goes into `reason`, where it is diagnosis rather than
+/// a claim about the ledger.
 ///
 /// This is the opposite call from the read side, where a failed load costs
 /// speed and nothing else — see `snapshot_anchor`.
+///
+/// [D-240]: ../../docs/architecture/s13-decision-register.md#d-240
 async fn save_and_prune(snapshots_dir: PathBuf, state: MaterializedState) -> Result<PathBuf> {
     let seq = state.seq_anchor;
+    // Cloned before the closure takes the original, so the failure can name the
+    // directory it failed in. A `PathBuf` per snapshot write, against a fold of
+    // the whole ledger — see `SnapshotCadence` for how often this runs.
+    let named = snapshots_dir.clone();
     tokio::task::spawn_blocking(move || {
         let path = save_snapshot(&snapshots_dir, &state)?;
         cleanup_expired_snapshots(&snapshots_dir)?;
@@ -476,9 +495,9 @@ async fn save_and_prune(snapshots_dir: PathBuf, state: MaterializedState) -> Res
     })
     .await
     .unwrap_or_else(|e| {
-        Err(DbError::ReplayCorrupt {
-            seq,
-            reason: format!("the thread writing the snapshot did not finish: {e}"),
+        Err(DbError::SnapshotWriteFailed {
+            path: named.to_string_lossy().into_owned(),
+            reason: format!("the thread writing the snapshot at seq {seq} did not finish: {e}"),
         })
     })
 }
@@ -742,8 +761,10 @@ pub(crate) async fn run_cadence(
     archive_path: PathBuf,
     cadence: SnapshotCadence,
     mut stop: tokio::sync::watch::Receiver<bool>,
+    writer: std::sync::Arc<dyn CommittedTurns>,
 ) {
     let mut anchored = newest_anchor_on_disk(&snapshots_dir);
+    let mut seen_turns = writer.committed_turns();
 
     loop {
         tokio::select! {
@@ -754,6 +775,23 @@ pub(crate) async fn run_cadence(
             _ = stop.changed() => return,
             _ = tokio::time::sleep(cadence.poll_interval) => {}
         }
+
+        // **Nothing committed, nothing to ask** (0.15.19, review C-19). This
+        // used to run the two aggregates below on every tick, five seconds
+        // apart by default, on databases where nothing had happened since the
+        // last one — a query for a fact the actor already had. One relaxed
+        // atomic load answers it instead.
+        //
+        // Sound because a growing log implies a committed turn, never the other
+        // way round: if `MAX(seq_id)` moved, some command answered `Ok`, so this
+        // number moved. A turn that answered `Ok` without writing a log row
+        // simply makes this tick do what every tick used to, which is why no
+        // snapshot can be deferred by it.
+        let turns = writer.committed_turns();
+        if turns == seen_turns {
+            continue;
+        }
+        seen_turns = turns;
 
         let head = match log_head(&conn).await {
             Ok(Some(head)) => head,
@@ -769,11 +807,46 @@ pub(crate) async fn run_cadence(
             continue;
         }
 
-        let archive = archive_path.exists().then_some(archive_path.as_path());
+        let archive = crate::temporal::archive::archive_present(&archive_path)
+            .then_some(archive_path.as_path());
         match write_final(&conn, &snapshots_dir, &ts, archive).await {
             Ok(path) => {
                 anchored = seq_from_filename(&path).unwrap_or(max_seq);
                 tracing::debug!("snapshot cadence: anchored at seq {anchored} ({path:?})");
+
+                // **The chain is checked where it is extended** (0.15.19,
+                // review C-18). `write_final` composes onto the previous
+                // anchor and never re-folds from genesis, so before this
+                // nothing looked at a link until a caller thought to run
+                // `verify_snapshot_chain` — which nothing schedules, because
+                // it costs the whole log. One link costs one anchored delta,
+                // which is the same order as the write that just happened.
+                //
+                // Logged, not raised and not repaired: a divergence is a wrong
+                // *cache*, the repair is to delete the snapshots (Doctrine VI),
+                // and a maintenance task that deletes the evidence of a
+                // composition bug is worse than one that reports it. A failure
+                // of the check itself is also only logged, for the reason this
+                // whole loop is: a snapshot is a cache and this task exists to
+                // keep working.
+                match crate::temporal::verify_last_link(&conn, archive, &snapshots_dir).await {
+                    Ok(Some(check)) if check.diverged() => tracing::warn!(
+                        "snapshot cadence: the newest chain link DIVERGED at {}: \
+                         {} concepts against {}, {} edges against {}; disagreements {:?} {:?}. \
+                         The snapshots are a cache and can be deleted; the ledger is not \
+                         implicated. Run Database::verify_snapshot_chain to find how far back \
+                         it goes.",
+                        check.timestamp,
+                        check.composed_concepts,
+                        check.folded_concepts,
+                        check.composed_edges,
+                        check.folded_edges,
+                        check.concept_disagreements,
+                        check.edge_disagreements,
+                    ),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!("snapshot cadence: the link check did not run: {e}"),
+                }
             }
             Err(e) => {
                 // Deliberately does not advance `anchored`: the next tick
@@ -783,6 +856,21 @@ pub(crate) async fn run_cadence(
             }
         }
     }
+}
+
+/// What the cadence needs to know about the write actor (0.15.19, review C-19).
+///
+/// A trait rather than the actor's own type, because `temporal::snapshot` sits
+/// under `connection` in the dependency order and `ActorShared` is that
+/// module's private state. One method, one `u64`, and the cadence's tests can
+/// supply their own.
+pub(crate) trait CommittedTurns: Send + Sync {
+    /// Commands the actor has answered `Ok` to since it started.
+    ///
+    /// Monotonic and never reset. The cadence compares it with the value it saw
+    /// last tick and does nothing else with it, so the units are irrelevant as
+    /// long as it moves whenever the log does.
+    fn committed_turns(&self) -> u64;
 }
 
 /// Wrap arbitrary plaintext in a container that passes every check the checksum

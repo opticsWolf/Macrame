@@ -225,6 +225,156 @@ async fn deleting_the_snapshots_restores_agreement() {
     db.close().await.unwrap();
 }
 
+/// Grow the log past the newest snapshot, so the next anchor is a new link.
+async fn extend(db: &Database, from: usize, n: usize) {
+    db.write_concepts(
+        (from..from + n)
+            .map(|i| {
+                ConceptUpsert::new(format!("x{i:03}"), format!("Extra {i}"))
+                    .content(format!("more {i}"))
+                    .valid_from(TS)
+            })
+            .collect(),
+    )
+    .await
+    .unwrap();
+}
+
+/// One snapshot is not a link, and saying so is not a failure.
+///
+/// The young-database case. `verify_last_link` needs a *pair* to compare, and
+/// the honest answer before there is one is "nothing to check" rather than an
+/// error or a vacuous pass — the second of which is how D-030's audit and
+/// D-071's integrity check both managed to certify damage as clean.
+#[tokio::test]
+async fn the_link_check_has_nothing_to_say_until_there_are_two_snapshots() {
+    let harness = TestHarness::new();
+    let db = seeded(&harness).await;
+
+    assert!(db.verify_last_link().await.unwrap().is_none());
+
+    macrame::temporal::write_final(db.read_conn(), db.snapshots_dir(), LATER, None)
+        .await
+        .unwrap();
+    assert!(
+        db.verify_last_link().await.unwrap().is_none(),
+        "one snapshot is not a link"
+    );
+
+    db.close().await.unwrap();
+}
+
+/// A faithfully composed link agrees, and the comparator adds no difference.
+///
+/// The counterpart to `an_empty_snapshot_directory_agrees_with_itself`: if this
+/// failed, a divergence reported by the test below would be an artifact of
+/// re-deriving rather than of the chain.
+#[tokio::test]
+async fn a_faithful_link_agrees() {
+    let harness = TestHarness::new();
+    let db = seeded(&harness).await;
+
+    macrame::temporal::write_final(db.read_conn(), db.snapshots_dir(), LATER, None)
+        .await
+        .unwrap();
+    extend(&db, 0, 5).await;
+    macrame::temporal::write_final(db.read_conn(), db.snapshots_dir(), LATER, None)
+        .await
+        .unwrap();
+
+    let check = db
+        .verify_last_link()
+        .await
+        .unwrap()
+        .expect("two snapshots are a link");
+    assert!(!check.diverged(), "{check}");
+    assert_eq!(check.composed_concepts, check.folded_concepts);
+    assert_eq!(check.composed_edges, check.folded_edges);
+
+    db.close().await.unwrap();
+}
+
+/// A tampered newest snapshot is caught, and named.
+///
+/// The load-bearing one, for `a_tampered_snapshot_is_caught`'s reason: a
+/// checker only ever seen to pass is the shape this project keeps finding
+/// defects in. The damage is introduced *at the link this looks at*, which is
+/// precisely the class the cheap check exists for.
+#[tokio::test]
+async fn the_link_check_catches_a_tampered_newest_snapshot() {
+    let harness = TestHarness::new();
+    let db = seeded(&harness).await;
+
+    macrame::temporal::write_final(db.read_conn(), db.snapshots_dir(), LATER, None)
+        .await
+        .unwrap();
+    extend(&db, 0, 5).await;
+    macrame::temporal::write_final(db.read_conn(), db.snapshots_dir(), LATER, None)
+        .await
+        .unwrap();
+
+    // Rewrite the newest file with a concept missing. `save_snapshot` names the
+    // file from the anchor, so this replaces snapshot n rather than adding one.
+    let mut newest: MaterializedState = reconstruct(db.read_conn(), LATER, None, None)
+        .await
+        .unwrap();
+    assert!(newest.concepts.remove("c003").is_some());
+    save_snapshot(db.snapshots_dir(), &newest).unwrap();
+
+    let check = db.verify_last_link().await.unwrap().expect("a link exists");
+    assert!(check.diverged(), "the tampering was not caught: {check}");
+    assert_eq!(check.concept_disagreements, vec!["c003".to_string()]);
+
+    db.close().await.unwrap();
+}
+
+/// **The documented limit, pinned**: a defect older than one link is invisible
+/// here, and the genesis check is what sees it.
+///
+/// The rustdoc says this check agrees whenever both sides descend from the same
+/// wrong state, and that this is why `verify_snapshot_chain` stays. Both halves
+/// are asserted rather than argued. Snapshot *n−1* is damaged first, and *n* is
+/// then written the way the cadence writes it — by composing onto whatever is
+/// newest — so *n* inherits the damage faithfully. The link is intact; the
+/// chain is not.
+#[tokio::test]
+async fn the_link_check_does_not_see_a_defect_older_than_one_link() {
+    let harness = TestHarness::new();
+    let db = seeded(&harness).await;
+
+    macrame::temporal::write_final(db.read_conn(), db.snapshots_dir(), LATER, None)
+        .await
+        .unwrap();
+
+    // Damage n−1, before n exists.
+    let mut base: MaterializedState = reconstruct(db.read_conn(), LATER, None, None)
+        .await
+        .unwrap();
+    assert!(base.concepts.remove("c003").is_some());
+    save_snapshot(db.snapshots_dir(), &base).unwrap();
+
+    // n is composed onto it, so it carries the same loss.
+    extend(&db, 0, 5).await;
+    macrame::temporal::write_final(db.read_conn(), db.snapshots_dir(), LATER, None)
+        .await
+        .unwrap();
+
+    let link = db.verify_last_link().await.unwrap().expect("a link exists");
+    assert!(
+        !link.diverged(),
+        "the link check saw a defect it does not claim to see: {link}"
+    );
+
+    let full = db.verify_snapshot_chain(LATER).await.unwrap();
+    assert!(
+        full.diverged(),
+        "the genesis check missed what the link check cannot see: {full}"
+    );
+    assert!(full.concept_disagreements.contains(&"c003".to_string()));
+
+    db.close().await.unwrap();
+}
+
 /// The report is bounded, so a chain that went wrong early is still readable.
 #[tokio::test]
 async fn the_report_is_bounded() {

@@ -10,8 +10,8 @@ pub use as_of::{
 };
 pub use interval::Interval;
 pub use replay::{
-    reconstruct, reconstruct_on, resolve_beliefs, verify_snapshot_chain, ChainCheck, EdgeBelief,
-    MaterializedState,
+    reconstruct, reconstruct_on, resolve_beliefs, verify_last_link, verify_snapshot_chain,
+    ChainCheck, EdgeBelief, MaterializedState,
 };
 pub use snapshot::{
     cleanup_expired_snapshots, load_snapshot, save_snapshot, write_final, SnapshotCadence,

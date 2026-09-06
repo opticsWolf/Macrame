@@ -1145,6 +1145,7 @@ class Database:
         """
 
     def verify_snapshot_chain(self, ts: Timestamp) -> ChainCheck: ...
+    def verify_last_link(self) -> ChainCheck | None: ...
 
     # -- maintenance -----------------------------------------------------------
     def analyze(self) -> None:

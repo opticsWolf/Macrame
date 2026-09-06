@@ -293,3 +293,59 @@ async fn re_registering_the_lineage_makes_the_rehydrate_succeed() {
          foreign key by changing the row's meaning"
     );
 }
+
+/// **Rehydrating a never-archived ledger must not leave an archive behind**
+/// (0.15.19, review C-13).
+///
+/// The defect this pins was reachable through the public API with nothing
+/// failing unexpectedly, and it cost the database its whole history.
+/// `rehydrate` used to `ATTACH` before asking whether there was anything to
+/// attach — and `ATTACH` **creates the file**. The query then failed with `no
+/// such table: cold.concepts`, the error was returned, and a **0-byte cold
+/// file** stayed on disk. From then on every reader that asks
+/// `archive_path.exists()` believed rows had been archived, so every
+/// `reconstruct` below the newest hot stamp took the cold arm and failed with a
+/// raw `no such table: cold.transaction_log`.
+///
+/// Three assertions, because the repair has three parts and each fails
+/// differently: the call answers instead of raising, no file appears, and the
+/// historical read that the file used to break still works. Measured before and
+/// after in `examples/cold_file_reach_probe.rs`.
+#[tokio::test]
+async fn rehydrating_without_an_archive_leaves_no_archive_behind() {
+    let harness = TestHarness::new();
+    let db = Database::open_with_cadence(&harness.db_path, None)
+        .await
+        .unwrap();
+    db.upsert_concept(ConceptUpsert::new("a", "A").content("body").valid_from(T0))
+        .await
+        .unwrap();
+
+    // An instant below the newest hot stamp, so the reach check cannot take its
+    // `MAX(recorded_at) <= ts` short circuit and the archive arm is the one
+    // under test. The hot log is intact, so the honest answer is the state as
+    // it stood then — empty, and not an error.
+    let before = db.reconstruct(T1).await.expect("an intact hot log answers");
+
+    // The whole call: a concept that exists, hot, on a ledger with no archive.
+    let report = db
+        .rehydrate(&["a"])
+        .await
+        .expect("there is no archive, which is an answer and not a fault");
+    assert_eq!(report.concepts_rehydrated, 0);
+
+    assert!(
+        !db.archive_path().exists(),
+        "rehydrate created an archive file at {:?} by asking whether one existed",
+        db.archive_path()
+    );
+
+    let after = db
+        .reconstruct(T1)
+        .await
+        .expect("the historical read still works");
+    assert_eq!(before.concepts.len(), after.concepts.len());
+    assert_eq!(before.edges.len(), after.edges.len());
+
+    db.close().await.unwrap();
+}

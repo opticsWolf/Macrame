@@ -164,6 +164,7 @@ pub fn macrame::connection::Database::snapshots_dir(&self) -> &std::path::Path
 pub async fn macrame::connection::Database::upsert_concept(&self, macrame::connection::ConceptUpsert) -> macrame::error::Result<()>
 pub async fn macrame::connection::Database::upsert_embeddings(&self, &macrame::vector::ModelName, alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<f32>)>) -> macrame::error::BulkResult<usize>
 pub async fn macrame::connection::Database::upsert_embeddings_with(&self, &macrame::vector::ModelName, alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<f32>)>, macrame::connection::BulkControl) -> macrame::error::BulkResult<usize>
+pub async fn macrame::connection::Database::verify_last_link(&self) -> macrame::error::Result<core::option::Option<macrame::temporal::ChainCheck>>
 pub async fn macrame::connection::Database::verify_snapshot_chain(&self, &str) -> macrame::error::Result<macrame::temporal::ChainCheck>
 pub fn macrame::connection::Database::view(&alloc::sync::Arc<Self>, macrame::branch::BranchId) -> macrame::branch::BranchView
 pub async fn macrame::connection::Database::write_analytics_annotations(&self, alloc::vec::Vec<macrame::connection::Annotation>) -> macrame::error::BulkResult<usize>
@@ -951,6 +952,7 @@ pub fn macrame::connection::Database::snapshots_dir(&self) -> &std::path::Path
 pub async fn macrame::connection::Database::upsert_concept(&self, macrame::connection::ConceptUpsert) -> macrame::error::Result<()>
 pub async fn macrame::connection::Database::upsert_embeddings(&self, &macrame::vector::ModelName, alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<f32>)>) -> macrame::error::BulkResult<usize>
 pub async fn macrame::connection::Database::upsert_embeddings_with(&self, &macrame::vector::ModelName, alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<f32>)>, macrame::connection::BulkControl) -> macrame::error::BulkResult<usize>
+pub async fn macrame::connection::Database::verify_last_link(&self) -> macrame::error::Result<core::option::Option<macrame::temporal::ChainCheck>>
 pub async fn macrame::connection::Database::verify_snapshot_chain(&self, &str) -> macrame::error::Result<macrame::temporal::ChainCheck>
 pub fn macrame::connection::Database::view(&alloc::sync::Arc<Self>, macrame::branch::BranchId) -> macrame::branch::BranchView
 pub async fn macrame::connection::Database::write_analytics_annotations(&self, alloc::vec::Vec<macrame::connection::Annotation>) -> macrame::error::BulkResult<usize>
@@ -1333,6 +1335,7 @@ pub async fn macrame::temporal::reconstruct_on(&libsql::connection::Connection, 
 pub async fn macrame::temporal::rehydrate(&libsql::connection::Connection, &[&str], &std::path::Path) -> macrame::error::Result<macrame::temporal::RehydrateReport>
 pub fn macrame::temporal::resolve_beliefs(&[macrame::temporal::EdgeBelief], &[macrame::branch::Ancestor]) -> alloc::vec::Vec<macrame::temporal::EdgeBelief>
 pub fn macrame::temporal::save_snapshot(&std::path::Path, &macrame::temporal::MaterializedState) -> macrame::error::Result<std::path::PathBuf>
+pub async fn macrame::temporal::verify_last_link(&libsql::connection::Connection, core::option::Option<&std::path::Path>, &std::path::Path) -> macrame::error::Result<core::option::Option<macrame::temporal::ChainCheck>>
 pub async fn macrame::temporal::verify_snapshot_chain(&libsql::connection::Connection, &str, core::option::Option<&std::path::Path>, &std::path::Path) -> macrame::error::Result<macrame::temporal::ChainCheck>
 pub async fn macrame::temporal::write_final(&libsql::connection::Connection, &std::path::Path, &str, core::option::Option<&std::path::Path>) -> macrame::error::Result<std::path::PathBuf>
 pub mod macrame::util
@@ -1700,6 +1703,7 @@ pub fn macrame::connection::Database::snapshots_dir(&self) -> &std::path::Path
 pub async fn macrame::connection::Database::upsert_concept(&self, macrame::connection::ConceptUpsert) -> macrame::error::Result<()>
 pub async fn macrame::connection::Database::upsert_embeddings(&self, &macrame::vector::ModelName, alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<f32>)>) -> macrame::error::BulkResult<usize>
 pub async fn macrame::connection::Database::upsert_embeddings_with(&self, &macrame::vector::ModelName, alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<f32>)>, macrame::connection::BulkControl) -> macrame::error::BulkResult<usize>
+pub async fn macrame::connection::Database::verify_last_link(&self) -> macrame::error::Result<core::option::Option<macrame::temporal::ChainCheck>>
 pub async fn macrame::connection::Database::verify_snapshot_chain(&self, &str) -> macrame::error::Result<macrame::temporal::ChainCheck>
 pub fn macrame::connection::Database::view(&alloc::sync::Arc<Self>, macrame::branch::BranchId) -> macrame::branch::BranchView
 pub async fn macrame::connection::Database::write_analytics_annotations(&self, alloc::vec::Vec<macrame::connection::Annotation>) -> macrame::error::BulkResult<usize>

@@ -1073,6 +1073,48 @@ pub(crate) const LC_LINEAGE_CUT: &str = "CREATE INDEX IF NOT EXISTS \
      (branch_id, recorded_at, source_id, target_id, edge_type, valid_from, \
       valid_to, weight);";
 
+/// Every index declared `ON links_current`, for the shadow swap to put back
+/// (0.15.19, review C-12).
+///
+/// # Why this exists next to [`CREATE_INDICES`] rather than being a scan of it
+///
+/// `integrity::shadow`'s swap does `DROP TABLE links_current`, which takes the
+/// table's indexes with it, and has to recreate exactly the set the projection
+/// has **today** — unlike a migration rung, which owes the set its own version
+/// declared and is right to name them one at a time. So the swap did the one
+/// thing available to it and filtered `CREATE_INDICES` on
+/// `stmt.contains("links_current")`.
+///
+/// That test has a false positive waiting: any future index on **`links`**
+/// whose text happens to mention `links_current` — in a partial-index `WHERE`,
+/// or in the comment above it, since these are one string each — would be
+/// recreated against the renamed table inside the swap's transaction. It would
+/// either fail the swap or leave an index nobody declared.
+///
+/// A name is a name. The list is spelled out, and
+/// `every_links_current_index_is_in_the_swap_list` fails the build if
+/// `CREATE_INDICES` gains an entry on this table that is not here — which is
+/// the property the substring test was reaching for and could not state.
+pub(crate) const LINKS_CURRENT_INDICES: &[&str] =
+    &[LC_TRAVERSAL_COVER, LC_OPEN_INTERVAL, LC_LINEAGE_CUT];
+
+/// Every trigger that names `links_current`, with the name to drop it by
+/// (0.15.19, review C-12).
+///
+/// Paired rather than two lists, because the swap needs both halves and needs
+/// them to agree: `ALTER TABLE … RENAME` re-resolves every trigger body, so a
+/// trigger naming `links_current` must be **dropped** before the rename and
+/// **recreated** after it (see the `integrity::shadow` module header, which
+/// measured that). A trigger dropped but not recreated leaves the projection
+/// unmaintained; one recreated but not dropped fails the rename. Deriving the
+/// name from the DDL by string surgery would be the same substring match one
+/// layer down, so the pair is written out and
+/// `every_links_current_trigger_is_in_the_swap_list` checks both directions.
+pub(crate) const LINKS_CURRENT_TRIGGERS: &[(&str, &str)] = &[
+    ("trg_links_current_sync", CREATE_LINKS_CURRENT_SYNC),
+    ("trg_links_single_open", CREATE_LINKS_SINGLE_OPEN),
+];
+
 pub const CREATE_INDICES: &[&str] = &[
     // Covering index for the traversal CTE (§5.2, D-042).
     //
@@ -1626,6 +1668,63 @@ mod tests {
             );
         }
         assert!(super::CREATE_LINKS_TABLE.contains(OPEN_SENTINEL));
+    }
+
+    /// The swap's index list must be every index on `links_current`.
+    ///
+    /// `integrity::shadow` drops the table and puts these back by name. An
+    /// index added to [`CREATE_INDICES`] on this table and not added here
+    /// would be dropped by the swap and never recreated — a projection that is
+    /// still correct and silently unindexed, which is the failure the open-time
+    /// verifier was written for and which this catches a build earlier.
+    #[test]
+    fn every_links_current_index_is_in_the_swap_list() {
+        for sql in super::CREATE_INDICES {
+            if sql.contains("ON links_current") {
+                assert!(
+                    super::LINKS_CURRENT_INDICES.contains(sql),
+                    "an index on links_current is missing from LINKS_CURRENT_INDICES,                      so the shadow swap would drop it and not put it back: {sql}"
+                );
+            }
+        }
+        for sql in super::LINKS_CURRENT_INDICES {
+            assert!(
+                sql.contains("ON links_current"),
+                "LINKS_CURRENT_INDICES carries something that is not on that table: {sql}"
+            );
+        }
+    }
+
+    /// The swap's trigger list must be every trigger that names
+    /// `links_current`, and each pair must agree.
+    ///
+    /// Both directions matter and they fail differently. A trigger missing from
+    /// the list is left in place across `ALTER TABLE … RENAME`, which fails the
+    /// rename outright — loud, but inside a maintenance operation. A pair whose
+    /// name does not match its body drops one trigger and recreates another,
+    /// which is silent.
+    #[test]
+    fn every_links_current_trigger_is_in_the_swap_list() {
+        for trigger in super::CREATE_TRIGGERS {
+            if trigger.contains("links_current") {
+                assert!(
+                    super::LINKS_CURRENT_TRIGGERS
+                        .iter()
+                        .any(|(_, ddl)| ddl == trigger),
+                    "a trigger naming links_current is missing from                      LINKS_CURRENT_TRIGGERS, so the shadow swap's rename would                      fail on it: {trigger}"
+                );
+            }
+        }
+        for (name, ddl) in super::LINKS_CURRENT_TRIGGERS {
+            assert!(
+                ddl.contains(name),
+                "LINKS_CURRENT_TRIGGERS pairs {name} with a body that does not declare it"
+            );
+            assert!(
+                super::CREATE_TRIGGERS.contains(ddl),
+                "LINKS_CURRENT_TRIGGERS carries a trigger the schema does not create: {name}"
+            );
+        }
     }
 
     /// Every abort message the classifier matches on must actually appear in the

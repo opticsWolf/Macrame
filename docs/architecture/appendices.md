@@ -323,6 +323,19 @@ check.truncated;                           // true when either list hit the cap
 // this function, and rewriting the file would destroy the only evidence that
 // composition has a defect.
 
+// The affordable half of the same idea (0.15.19, C-18). Re-derives the NEWEST
+// snapshot from the one before it: one anchored delta, not a fold from genesis,
+// so it is cheap enough to run whenever a snapshot is written -- and the
+// snapshot cadence does, logging a divergence at `warn` after every anchor.
+let link: Option<ChainCheck> = db.verify_last_link().await?;
+// None when there are not two snapshots yet -- a young database, not a fault.
+// It catches a defect AS IT IS INTRODUCED: a snapshot that does not survive its
+// own round trip, an `apply_to` that composes differently from how it composed,
+// a delta that has stopped covering the window between two anchors. It does NOT
+// catch a defect inherited from further back -- both sides descend from the same
+// wrong state and agree. That is what verify_snapshot_chain is for, and why it
+// stays. It reports and does not repair, for the reason above.
+
 // -- Lineage: branching (§15, D-213 … D-224) --
 // A branch is transaction time with a tree order, not a third axis (D-213).
 let alt: Branch = db.fork(BranchId::new("turn/17/alt/1")?,   // high-pri, ONE row
@@ -699,7 +712,7 @@ New in 0.13.38 ([D-211](s13-decision-register.md#d-211)). [Appendix A](appendice
 
 *Frozen* means a change requires a **major version**.
 
-**1. The public Rust API, item for item and path for path.** [`docs/architecture/public-api.txt`](public-api.txt) is the surface — **1,757 items**. No item is removed, no path stops resolving, and no signature narrows. Each item is reachable at exactly one canonical path, plus flat aliases at the crate root and in `macrame::prelude` ([D-208](s13-decision-register.md#d-208)). Held by `scripts/check_public_api.py` in CI and by `tests/public_path_tests.rs` in `cargo test`. The cycle that produced this surface was reviewed against 0.13.0 item by item before it was frozen — [`api-review-0.14.0.md`](api-review-0.14.0.md), [D-212](s13-decision-register.md#d-212) — which is the last release where that review is cheap.
+**1. The public Rust API, item for item and path for path.** [`docs/architecture/public-api.txt`](public-api.txt) is the surface — **1,761 items**. No item is removed, no path stops resolving, and no signature narrows. Each item is reachable at exactly one canonical path, plus flat aliases at the crate root and in `macrame::prelude` ([D-208](s13-decision-register.md#d-208)). Held by `scripts/check_public_api.py` in CI and by `tests/public_path_tests.rs` in `cargo test`. The cycle that produced this surface was reviewed against 0.13.0 item by item before it was frozen — [`api-review-0.14.0.md`](api-review-0.14.0.md), [D-212](s13-decision-register.md#d-212) — which is the last release where that review is cheap.
 
 **2. The ledger tables** — `concepts`, `links`, `transaction_log`. Additive only: `ALTER TABLE ADD COLUMN` and new indexes. A changed primary key, a dropped column or altered bitemporal semantics is a major version with an explicit ETL path, because bitemporal data is the hardest data to migrate: a rebuild means replaying history and recomputing transaction-time boundaries, which is rewriting the past ([D-036](s13-decision-register.md#d-036), [Doctrine III](s0-s3-foundations.md#doctrine-iii)).
 

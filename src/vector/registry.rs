@@ -130,15 +130,38 @@ fn parse_f32_blob_dim(declared: &str) -> Option<usize> {
 ///
 /// Derived from `sqlite_master` for the same reason as the dimension: the set of
 /// registered models is a fact about the schema, and asking the schema cannot
-/// drift from it. libSQL's own `libsql_vector_meta_shadow` and `*_shadow` tables
-/// are filtered out — they are engine internals that happen to live in `main`.
+/// drift from it.
+///
+/// # `GLOB` rather than `LIKE`, and one filter rather than two (0.15.19, C-15)
+///
+/// `LIKE` treats `_` as *any single character*, and both arms of this filter
+/// contained one. The prefix arm was harmless — `embeddingsX_foo` would have
+/// matched, and the `strip_prefix` below rejects it anyway — but the exclusion
+/// arm was not: `NOT LIKE '%_shadow'` reads as *"anything ending in shadow,
+/// with any character before it"*, so a perfectly ordinary model named
+/// `ashadow` or `bigshadow` was **silently missing from this list**, and from
+/// everything that asks it what is registered. A model that exists, works, and
+/// does not appear in its own registry is the shape of defect this function was
+/// written to make impossible.
+///
+/// `GLOB`'s `_` is a literal, so the prefix says what it looks like. It is also
+/// case-sensitive, which costs nothing here and is the stricter reading:
+/// [`ModelName`] admits lowercase ASCII, digits and `_` only, so every table
+/// this crate creates is `embeddings_<model>` in exactly that case.
+///
+/// The shadow exclusion is gone rather than escaped. libSQL's internals are
+/// `libsql_vector_meta_shadow` and `<index>_shadow`, and this crate's indexes
+/// are named `idx_embeddings_<model>_vec` — so none of them start with
+/// `embeddings_` and the prefix already excludes every one. Escaping the
+/// underscore would have kept a filter that can only ever fire on a real model
+/// whose name happens to end in `_shadow`, which is the same defect one
+/// character narrower.
 pub async fn registered_models(conn: &libsql::Connection) -> Result<Vec<ModelName>> {
     let mut rows = conn
         .query(
             "SELECT name FROM sqlite_master
               WHERE type = 'table'
-                AND name LIKE 'embeddings_%'
-                AND name NOT LIKE '%_shadow'
+                AND name GLOB 'embeddings_*'
               ORDER BY name",
             (),
         )

@@ -15,6 +15,7 @@
 //! could not run. The fusion function is unchanged in substance; what is new is
 //! everything that feeds it.
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use crate::error::{DbError, Result};
@@ -345,14 +346,30 @@ impl HybridSearch {
 
         let fused = reciprocal_rank_fusion(&vector_ids, &keyword_ids, self.rrf_k);
 
-        let rank_of = |list: &[String], id: &str| list.iter().position(|x| x == id).map(|i| i + 1);
+        // One pass to index each list, then a hash lookup per hit (0.15.19,
+        // review C-16). This was `position()` per hit per list — a linear scan
+        // of the candidate list for every result returned. At the default
+        // `rerank_depth` of `max(5 * top_k, 50)` and a `top_k` of 1,000 that is
+        // two scans of 5,000 strings, a thousand times over: about 10 million
+        // string comparisons to recover a rank each list already knew when it
+        // was built. The maps borrow rather than clone and are the same length
+        // as the lists already in hand, so what this costs is one allocation
+        // each and what it removes is the only superlinear term in the fuse.
+        fn rank_index(list: &[String]) -> HashMap<&str, usize> {
+            list.iter()
+                .enumerate()
+                .map(|(i, id)| (id.as_str(), i + 1))
+                .collect()
+        }
+        let vector_rank = rank_index(&vector_ids);
+        let keyword_rank = rank_index(&keyword_ids);
 
         Ok(fused
             .into_iter()
             .take(self.top_k)
             .map(|(concept_id, score)| HybridHit {
-                vector_rank: rank_of(&vector_ids, &concept_id),
-                keyword_rank: rank_of(&keyword_ids, &concept_id),
+                vector_rank: vector_rank.get(concept_id.as_str()).copied(),
+                keyword_rank: keyword_rank.get(concept_id.as_str()).copied(),
                 concept_id,
                 score,
             })

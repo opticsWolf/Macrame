@@ -1017,15 +1017,41 @@ pub enum AbortKind {
     NotAGuard,
 }
 
-/// Recognise a schema guard's `RAISE(ABORT, …)` by its message.
+/// `SQLITE_CONSTRAINT_TRIGGER` — `SQLITE_CONSTRAINT | (7 << 8)`.
 ///
-/// **The only place in the crate that matches on engine error text.** SQLite
-/// reports a `RAISE(ABORT)` as a generic constraint failure carrying the
-/// message, so the message is the only thing distinguishing "you violated the
-/// single-open-interval rule" from "the disk is full" — but matching on it
-/// scattered across call sites means an upstream wording change degrades an
-/// unknown number of typed errors into opaque ones, silently. Concentrated here,
-/// a change breaks one function and the tests that cover it.
+/// The code a `RAISE(ABORT, …)` inside a trigger body carries. Measured on
+/// libSQL 0.9.30 rather than taken from the header: the probe
+/// `examples/abort_code_probe.rs` fires one of the crate's own guards and
+/// prints `SqliteFailure(1811, "…")`, against 1299 for a `NOT NULL` failure
+/// the engine raises itself.
+const SQLITE_CONSTRAINT_TRIGGER: std::ffi::c_int = 1811;
+
+/// Recognise a schema guard's `RAISE(ABORT, …)`.
+///
+/// **The only place in the crate that matches on engine error text**, and since
+/// 0.15.19 the text is reached only after the *code* says a trigger raised it.
+/// SQLite flattens every `RAISE(ABORT)` into one constraint failure, so the
+/// message remains the only thing distinguishing "you violated the
+/// single-open-interval rule" from "you violated the cross-lineage rule" — but
+/// it no longer has to distinguish a guard from an unrelated failure.
+///
+/// # Code first, then text (0.15.19, review C-20)
+///
+/// `libsql::Error::SqliteFailure(1811, msg)` is what a guard produces, and
+/// `msg` is the crate's own abort string **verbatim** — the probe above prints
+/// it, and the "libSQL prefix" this was thought to depend on is `Display`'s,
+/// not the message's. So two things improve at once. The needle is matched
+/// against the engine's message field rather than against a rendered string,
+/// which removes `Display` as a layer that can change underneath the
+/// classification; and a non-trigger error that happens to quote one of these
+/// strings — a caller's own text echoed back in a `NOT NULL` message, say —
+/// can no longer be read as a guard.
+///
+/// The free-text arm stays as the fallback, because not every route to this
+/// function produces `SqliteFailure`: an error wrapped or re-rendered on the
+/// way here would otherwise degrade every guard to
+/// [`AbortKind::NotAGuard`] at once, which is the silent failure this function
+/// exists to concentrate rather than to cause.
 ///
 /// The needles are the [`crate::schema::ddl`] constants spliced into the
 /// triggers themselves, so guard and classifier cannot drift.
@@ -1035,7 +1061,16 @@ pub fn abort_kind(err: &libsql::Error) -> AbortKind {
         ABORT_MONOTONIC_RA, ABORT_SINGLE_OPEN,
     };
 
-    let text = err.to_string();
+    let text = match err {
+        libsql::Error::SqliteFailure(code, msg) if *code == SQLITE_CONSTRAINT_TRIGGER => {
+            msg.clone()
+        }
+        // Not a trigger abort by its code. Only a variant that carries no code
+        // at all can still be one of our guards, so an engine failure with a
+        // *different* code is refused here rather than sent to the text arm.
+        libsql::Error::SqliteFailure(..) => return AbortKind::NotAGuard,
+        other => other.to_string(),
+    };
     if text.contains(ABORT_SINGLE_OPEN) {
         AbortKind::SingleOpenInterval
     } else if text.contains(ABORT_MONOTONIC_RA) {

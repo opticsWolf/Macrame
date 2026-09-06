@@ -1669,6 +1669,7 @@ impl Database {
                     archive_path.clone(),
                     cadence,
                     rx,
+                    Arc::clone(&shared) as Arc<dyn snapshot::CommittedTurns>,
                 ));
                 (Some(tx), Some(handle))
             }
@@ -1721,9 +1722,7 @@ impl Database {
         // appear. They still get an anchor from `close()`.
         if migration.upgraded() && handle.cadence.is_some() {
             let ts = handle.clock.now();
-            let archive = handle
-                .archive_path
-                .exists()
+            let archive = crate::temporal::archive::archive_present(&handle.archive_path)
                 .then_some(handle.archive_path.as_path());
             match snapshot::write_final(&handle.read_conn, &handle.snapshots_dir, &ts, archive)
                 .await
@@ -2137,12 +2136,33 @@ impl Database {
     ///
     /// [Doctrine VI]: ../../docs/architecture/s0-s3-foundations.md#doctrine-vi
     pub async fn verify_snapshot_chain(&self, ts: &str) -> Result<crate::temporal::ChainCheck> {
-        let archive = self
-            .archive_path
-            .exists()
+        let archive = crate::temporal::archive::archive_present(&self.archive_path)
             .then_some(self.archive_path.as_path());
         crate::temporal::verify_snapshot_chain(&self.read_conn, ts, archive, &self.snapshots_dir)
             .await
+    }
+
+    /// Check the newest link of the snapshot chain (0.15.19, review C-18).
+    ///
+    /// The affordable half of [`Self::verify_snapshot_chain`]: re-derive the
+    /// newest snapshot from the one before it and compare, which is one
+    /// anchored delta rather than a fold from genesis. `Ok(None)` when there
+    /// are not two snapshots yet.
+    ///
+    /// The snapshot cadence already runs this after every anchor it writes and
+    /// logs a divergence at `warn`, so a caller reaching for it directly is
+    /// usually one that wants the [`crate::temporal::ChainCheck`] itself — the
+    /// disagreeing ids — rather than a yes or no.
+    ///
+    /// **It reports; it does not repair.** A snapshot is derivative
+    /// (Doctrine VI), so the repair is to delete the snapshot directory, which
+    /// is the caller's call and one line. What this cannot tell you is whether
+    /// the chain went wrong further back than one link; that is what
+    /// [`Self::verify_snapshot_chain`] is for, and why it stays.
+    pub async fn verify_last_link(&self) -> Result<Option<crate::temporal::ChainCheck>> {
+        let archive = crate::temporal::archive::archive_present(&self.archive_path)
+            .then_some(self.archive_path.as_path());
+        crate::temporal::verify_last_link(&self.read_conn, archive, &self.snapshots_dir).await
     }
 
     /// The clock every write is stamped with (§5.1.1).
@@ -3730,9 +3750,7 @@ impl Database {
         }
 
         let ts = self.clock.now();
-        let archive = self
-            .archive_path
-            .exists()
+        let archive = crate::temporal::archive::archive_present(&self.archive_path)
             .then_some(self.archive_path.as_path());
         snapshot::write_final(&self.read_conn, &self.snapshots_dir, &ts, archive).await?;
 
@@ -4148,10 +4166,51 @@ struct Turn<'a> {
 /// whether its work is still valid, so it has to be present in every build, not
 /// only under the `metrics` feature. Counting archives happens to be what both
 /// want; only one of them is allowed to be compiled out.
+///
+/// `turns` is here for the same reason and serves the snapshot cadence — see
+/// its own note.
 #[derive(Default)]
 struct ActorShared {
     metrics: crate::metrics::ActorMetrics,
     archive_epoch: std::sync::atomic::AtomicU64,
+    /// Commands this actor has answered `Ok` to (0.15.19, review C-19).
+    ///
+    /// # What it is for, and why it is not a `seq_id`
+    ///
+    /// `snapshot::run_cadence` used to run `SELECT MAX(seq_id), MAX(recorded_at)`
+    /// on **every tick**, five seconds apart by default, whether or not
+    /// anything had been written. Two aggregates on an idle database, for a
+    /// fact the actor already had: *nothing has happened*.
+    ///
+    /// The review asked for a `watch<u64>` of the last committed `seq_id`. This
+    /// is the same idea one step cheaper, and the difference matters. The actor
+    /// does not currently know the `seq_id` its writes produced — the log rows
+    /// are written by triggers — so publishing one would mean adding a query to
+    /// **every write** in order to remove a query from an idle timer, which is
+    /// the wrong direction. A turn count needs no query at all: one relaxed
+    /// `fetch_add` on a path already doing a database round trip.
+    ///
+    /// # Why this cannot change when a snapshot is written
+    ///
+    /// The cadence skips its tick when the count has not moved since the last
+    /// one. That is sound because the implication runs the right way: if
+    /// `MAX(seq_id)` grew, some command committed, so some turn answered `Ok`,
+    /// so the count moved. The converse is not claimed and does not need to be
+    /// — a turn that answered `Ok` without writing a log row makes the cadence
+    /// do exactly the query it used to do every time. It over-counts, never
+    /// under-counts, and the tick it protects had nothing to do anyway.
+    ///
+    /// `Relaxed` because nothing is ordered against it. The cadence reads a
+    /// number to compare with a number it read before; a value one tick stale
+    /// costs one deferred tick and no correctness, and the same is true of the
+    /// `archive_epoch` beside it.
+    turns: std::sync::atomic::AtomicU64,
+}
+
+impl crate::temporal::snapshot::CommittedTurns for ActorShared {
+    fn committed_turns(&self) -> u64 {
+        self.turns.load(std::sync::atomic::Ordering::Relaxed)
+    }
 }
 
 impl<'a> Turn<'a> {
@@ -4189,6 +4248,9 @@ impl<'a> Turn<'a> {
         self.shared
             .metrics
             .record_hold(self.kind, self.timer.elapsed());
+        if res.is_ok() {
+            self.turn_committed();
+        }
         let _ = responder.send(res);
     }
 
@@ -4206,7 +4268,21 @@ impl<'a> Turn<'a> {
     fn answer_chunk(&self, responder: oneshot::Sender<Result<ChunkOutcome>>, res: Result<usize>) {
         let held = self.timer.elapsed();
         self.shared.metrics.record_hold(self.kind, held);
+        if res.is_ok() {
+            self.turn_committed();
+        }
         let _ = responder.send(res.map(|rows| ChunkOutcome { rows, held }));
+    }
+
+    /// Record that a turn answered `Ok`, for [`ActorShared::turns`].
+    ///
+    /// Called from both answer paths rather than from the loop, because those
+    /// are the two places that know the result. A command that returns an error
+    /// does not bump it: a failed write rolls back and the log is where it was.
+    fn turn_committed(&self) {
+        self.shared
+            .turns
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 }
 

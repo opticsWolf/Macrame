@@ -199,6 +199,7 @@ impl Database {
     pub fn snapshots_dir(&self) -> &Path                  // Snapshot directory
     pub fn metrics(&self) -> MetricsSnapshot              // Actor metrics (feature: metrics)
     pub async fn verify_snapshot_chain(ts: &str) -> Result<ChainCheck>
+    pub async fn verify_last_link() -> Result<Option<ChainCheck>>
 }
 ```
 
@@ -210,7 +211,9 @@ impl Database {
 
 **`raw()`**: `#[doc(hidden)]` — exposes the raw `libsql::Database` handle. Left public to provoke a guard (§4.7 invariant 2).
 
-**`verify_snapshot_chain(ts)`**: Folds from genesis by withholding the snapshot directory, compares against the composed answer. Reports and does not repair — under Doctrine VI a snapshot is disposable. `seq_anchor` is reported but never compared (the composed answer and the fold legitimately differ); edges are compared as a *set*; results capped at `SAMPLE_LIMIT = 32` with a `truncated` flag (D-092).
+**`verify_snapshot_chain(ts)`**: Folds from genesis by withholding the snapshot directory, compares against the composed answer. Reports and does not repair — under Doctrine VI a snapshot is disposable. `seq_anchor` is reported but never compared (the composed answer and the fold legitimately differ); edges are compared as a *set*; results capped at `SAMPLE_LIMIT = 32` with a `truncated` flag (D-092). **It folds the whole log**, which is why nothing schedules it.
+
+**`verify_last_link()`**: The affordable half (0.15.19, [D-261](architecture/s13-decision-register.md#d-261)) — re-derives the newest snapshot from the one before it, one anchored delta rather than a genesis fold. `None` until there are two snapshots. The snapshot cadence runs it after every anchor it writes and logs a divergence at `warn`, so the chain is now checked by default. It catches a defect **as it is introduced**; it cannot see one inherited from further back, because both sides descend from the same wrong state — which is what the genesis check is for, and is pinned by `the_link_check_does_not_see_a_defect_older_than_one_link`.
 
 ### 5.2 Concepts
 
