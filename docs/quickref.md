@@ -1,6 +1,6 @@
 # Macrame — Architecture Quick Reference
 
-**v0.16.0 · A Bitemporal Graph Ledger on libSQL**
+**v0.15.21 · A Bitemporal Graph Ledger on libSQL**
 
 ---
 
@@ -180,7 +180,7 @@ Every temporal column is exactly 27 characters: `YYYY-MM-DDTHH:MM:SS.ffffffZ`
 | v16 | `log_integrity` — one row, one bit: *has anything ever been deleted from `transaction_log`?* Seeded from the log, maintained by `trg_txlog_mark_gap`, so the reach guard reads a bit instead of counting the log on every recorded-time read ([D-249](architecture/s13-decision-register.md#d-249)) |
 | v17 | `idx_txlog_fold_partition` — the fold's own partition, and **not** the index review item C-4 asked for, which was never measured faster than no index at all ([D-254](architecture/s13-decision-register.md#d-254)) |
 
-**This table stopped at v10 for seven rungs and fourteen releases** (corrected at 0.16.0). `tests/doc_currency_tests.rs` gates `docs/architecture/README.md`'s revision history and the register's `D-001…D-NNN` line; it does not read this file, which is why the drift here ran longer than anywhere the gate looks. The authority on the ladder is `src/schema/migrations.rs`'s `STEPS`, and `SCHEMA_VERSION` is the number to trust over this table.
+**This table stopped at v10 for seven rungs and fourteen releases** (corrected while writing the 0.16.0 release note). `tests/doc_currency_tests.rs` gates `docs/architecture/README.md`'s revision history and the register's `D-001…D-NNN` line; it does not read this file, which is why the drift here ran longer than anywhere the gate looks. The authority on the ladder is `src/schema/migrations.rs`'s `STEPS`, and `SCHEMA_VERSION` is the number to trust over this table.
 
 ---
 
