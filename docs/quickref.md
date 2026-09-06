@@ -1,6 +1,6 @@
 # Macrame — Architecture Quick Reference
 
-**v0.15.22 · A Bitemporal Graph Ledger on libSQL**
+**v0.15.23 · A Bitemporal Graph Ledger on libSQL**
 
 ---
 
@@ -849,7 +849,7 @@ The surface itself *is* pinned: `tests/doc_sync_tests.rs` fails the build when t
 
 A synchronous Python binding built on pyo3 0.29 and maturin, delivered as a wheel alongside the Rust crate. The binding is **synchronous** (D-095): the Write Actor serialises every write through one channel, so exposing `await` on the write path advertises concurrency the architecture does not grant. A mixed async/sync surface is worse than either pure form.
 
-**Runtime boundary.** Every `Database` method runs inside `Python::detach` around `Runtime::block_on`, releasing the GIL for the duration of the call. A single process-global multi-threaded runtime is behind a `OnceLock`; per-handle runtimes would mean N thread pools and a panic risk (tokio `Runtime::drop` panics from inside a runtime). The `PyDatabase` struct is `#[pyclass(frozen)]` over `RwLock<Option<Database>>` — reads take a read lock and run concurrently; `close()` takes the write lock and waits. The lock must be acquired *inside* the GIL-released closure, not outside, or `close()` blocks on the GIL and deadlocks. A `fork()` guard poisons the runtime on Linux `multiprocessing` children, converting a silent hang into an exception.
+**Runtime boundary.** Every `Database` method runs inside `Python::detach` around `Runtime::block_on`, releasing the GIL for the duration of the call. A single process-global multi-threaded runtime is behind a `OnceLock`; per-handle runtimes would mean N thread pools and a panic risk (tokio `Runtime::drop` panics from inside a runtime). The `PyDatabase` struct is `#[pyclass(frozen)]` over `RwLock<Option<Database>>` — reads take a read lock and run concurrently; `close()` takes the write lock and waits. The lock must be acquired *inside* the GIL-released closure, not outside, or `close()` blocks on the GIL and deadlocks. **The read lock is held for a whole call**, so `close()` waits out an in-flight bulk import — 74 ms behind 500 edges, 992 behind 4,000, silently ([D-264](architecture/s13-decision-register.md#d-264)). Since 0.15.23 a `closing` flag read *before* the lock refuses later calls with `MacrameClosedError` instead of queueing them in front of the shutdown, and `close(timeout=…)` bounds the wait, raising `CloseTimeoutError` with `in_flight` and `waited`. Neither cancels anything and a timed-out `close()` is resumed by calling it again; the default is `None`, the old behaviour ([D-265](architecture/s13-decision-register.md#d-265)). A `fork()` guard poisons the runtime on Linux `multiprocessing` children, converting a silent hang into an exception.
 
 **Error mapping.** Every `DbError` variant maps to its own Python exception class with its fields as attributes — `MacrameError` is the base, with trees under `IntegrityError`, `ValidationError`, `VectorError`, `TemporalError`, `WriterError`, etc. Completeness was enforced by a wildcard-free `match` until 0.13.33; from 0.13.34 `DbError` is `#[non_exhaustive]`, so the wildcard arm is mandatory and `tests/binding_parity_tests.rs` — in the Rust suite, needing no wheel — is what fails when a variant has no arm (D-207). The `#[error]` rendering survives as `str(e)`, so callers who only want the sentence get it.
 

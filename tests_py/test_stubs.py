@@ -171,12 +171,21 @@ def test_exception_attributes_match_the_mapping_layer(stub):
     """
     src = (REPO / "bindings" / "python" / "src" / "errors.rs").read_text(encoding="utf-8")
 
-    # Each arm reads `raise::<SomeError, _>(py, m, |e| { e.setattr("a", …)… })`.
-    # Splitting on the raise sites keeps each arm's setattrs with their class.
-    arms = re.split(r"raise::<(\w+),", src)[1:]
+    # Most arms read `raise::<SomeError, _>(py, m, |e| { e.setattr("a", …)… })`.
+    # The two exceptions with no `DbError` behind them are built by hand instead
+    # — `closed_error` and, since 0.15.23, `close_timeout_error` — and reach the
+    # same `setattr` calls through `SomeError::new_err(…)`. Both forms name their
+    # class immediately before the fields they set, so both are split points; a
+    # constructor missed here would have its fields folded into whichever arm
+    # happens to precede it, which is how `CloseTimeoutError`'s two attributes
+    # were first reported as `MacrameError`'s.
+    starts = list(re.finditer(r"raise::<(\w+),|\b(\w+)::new_err\(", src))
     from_rust: dict[str, set[str]] = {}
-    for cls, body in zip(arms[::2], arms[1::2]):
-        from_rust[cls] = set(re.findall(r'setattr\("(\w+)"', body))
+    for i, m in enumerate(starts):
+        cls = m.group(1) or m.group(2)
+        end = starts[i + 1].start() if i + 1 < len(starts) else len(src)
+        fields = set(re.findall(r'setattr\("(\w+)"', src[m.end() : end]))
+        from_rust.setdefault(cls, set()).update(fields)
 
     assert from_rust, "no raise sites found — has errors.rs been restructured?"
 
@@ -188,11 +197,8 @@ def test_exception_attributes_match_the_mapping_layer(stub):
         if not issubclass(cls, Exception):
             continue
         stubbed = _declared(node.body) - IGNORED
-        # `UNIVERSAL` comes off both sides. `written` is set outside every arm
-        # (0.13.9, D-182), and the split above has no end delimiter -- whatever
-        # follows the last `raise::<…>` in the file is folded into that arm's
-        # body, so `closed_error`'s central default would otherwise be reported
-        # as a field of whichever class happens to be matched last.
+        # `UNIVERSAL` comes off both sides: `written` is set on every error
+        # (0.13.9, D-182) and says nothing about which class this is.
         actual = from_rust.get(name, set()) - UNIVERSAL
         if missing := actual - stubbed:
             problems.append(f"{name}: errors.rs sets {sorted(missing)}, stub does not declare it")

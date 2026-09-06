@@ -842,7 +842,7 @@ class Database:
         manufactures more of itself. Raises `FutureRecordedAtError`.
         """
 
-    def close(self) -> None:
+    def close(self, timeout: float | None = None) -> None:
         """Shut down the write actor and write the final snapshot.
 
         Idempotent, so `__exit__` after an explicit `close()` is fine. Two things
@@ -850,6 +850,25 @@ class Database:
         (the next `reconstruct` folds from an older anchor — slower, not wrong,
         since a snapshot is derivative under Doctrine VI), and the write actor's
         exit status, which no other method can return.
+
+        Every call holds the handle for its whole duration, so `close()` waits
+        out whatever is already running — a bulk import of 4,000 edges costs it
+        about a second, silently (0.15.22, D-264). From the moment `close()`
+        starts, every *other* method raises `MacrameClosedError` immediately
+        instead of queueing in front of it.
+
+        `timeout` bounds that wait and nothing else. On expiry it raises
+        `CloseTimeoutError` carrying `in_flight` and `waited`; the calls that
+        were running are still running, the write actor is still draining, and
+        no write that has returned to its caller is at risk. The handle stays
+        *closing* — `is_closing and not is_closed` — so `close()` is the only
+        method that still works, and calling it again resumes the wait.
+
+            try:
+                db.close(timeout=5.0)
+            except macrame.CloseTimeoutError as e:
+                log.warning("still %d call(s) in flight after %.1fs", e.in_flight, e.waited)
+                db.close()  # resume waiting, nothing was lost
         """
 
     def __enter__(self) -> Database: ...
@@ -857,6 +876,19 @@ class Database:
     def __repr__(self) -> str: ...
     @property
     def is_closed(self) -> bool: ...
+    @property
+    def is_closing(self) -> bool:
+        """True from the moment a `close()` starts, including after it finishes.
+
+        `is_closing and not is_closed` is the state a `CloseTimeoutError` leaves
+        behind: on its way out, every method but `close()` refusing.
+        """
+
+    @property
+    def in_flight(self) -> int:
+        """How many calls are inside the handle right now. Diagnostic, and a
+        sample rather than a lock — it may be stale before it is printed."""
+
     @property
     def path(self) -> Path: ...
     @property
@@ -1399,7 +1431,28 @@ class MacrameError(Exception):
 
 class MacrameClosedError(MacrameError):
     """Raised by any method on a closed handle. A closed handle is not
-    reusable — reopen with `Database.open(path)`."""
+    reusable — reopen with `Database.open(path)`.
+
+    Also raised, from 0.15.23, by any method other than `close()` once a
+    `close()` has started — the handle is on its way out, and making the caller
+    queue behind the shutdown to be told the same thing later helps nobody."""
+
+class CloseTimeoutError(MacrameError):
+    """`close(timeout=...)` stopped waiting for the calls already in flight.
+
+    Nothing was cancelled and nothing was lost: the in-flight calls are still
+    running, the write actor is still draining, and every write that has
+    returned to its caller was committed before it returned. Only this caller's
+    wait ended.
+
+    The handle is left *closing*, so `close()` is the one method that still
+    works — call it again to resume waiting.
+
+    Attributes: `in_flight` (calls still inside the handle when the wait
+    expired) and `waited` (seconds)."""
+
+    in_flight: int
+    waited: float
 
 # The six intermediate classes exist to be caught as groups, and are never
 # raised directly.

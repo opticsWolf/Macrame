@@ -127,6 +127,7 @@ from ._macrame import (
     EdgeRef,
     EngineError,
     FilterStrategy,
+    CloseTimeoutError,
     IntegrityError,
     Interval,
     InvalidEdgeTypeError,
@@ -225,6 +226,7 @@ __all__ = [
     # base and groups
     "MacrameError",
     "MacrameClosedError",
+    "CloseTimeoutError",
     "IntegrityError",
     "ValidationError",
     "VectorError",

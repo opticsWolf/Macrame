@@ -76,6 +76,8 @@
 //! ```text
 //! ```
 
+use std::time::Duration;
+
 use pyo3::prelude::*;
 use pyo3::types::PyType;
 use pyo3::{create_exception, PyErr, PyTypeInfo};
@@ -102,6 +104,24 @@ create_exception!(
      No `DbError` counterpart: in Rust `Database::close` consumes the handle, so \
      the type system removes the possibility. Python cannot express that, so the \
      same guarantee is enforced at runtime."
+);
+
+create_exception!(
+    macrame,
+    CloseTimeoutError,
+    MacrameError,
+    "`close(timeout=...)` gave up waiting for the calls already in flight \
+     (0.15.23).\n\n\
+     **Nothing was cancelled and nothing was lost.** The in-flight call is \
+     still running, the write actor is still draining, and every write that \
+     has returned to its caller was already committed before it returned. What \
+     expired is *this caller's willingness to wait*, which is the only thing a \
+     timeout here is allowed to end.\n\n\
+     The handle is left *closing*: every other method now raises \
+     `MacrameClosedError` immediately rather than queueing behind the close, \
+     and `close()` is the one call that still works — call it again to resume \
+     waiting. Attributes: `in_flight` (how many calls were still inside the \
+     handle when the wait expired) and `waited` (seconds)."
 );
 
 // -- grouping bases ---------------------------------------------------------
@@ -940,6 +960,32 @@ pub(crate) fn closed_error() -> PyErr {
     err
 }
 
+/// The error for a `close(timeout=...)` that expired.
+///
+/// The second Macrame exception with no [`DbError`] behind it, and for the same
+/// reason as [`closed_error`]: what it reports is a fact about the *handle*,
+/// which is a binding-only object. `written` is `None` (0.13.9, D-182) and
+/// means what it always means — nothing here left the database partly written,
+/// because a bounded wait abandons only a caller that has not been told
+/// anything yet.
+pub(crate) fn close_timeout_error(in_flight: usize, waited: Duration) -> PyErr {
+    let secs = waited.as_secs_f64();
+    let err = CloseTimeoutError::new_err(format!(
+        "close() waited {secs:.3}s and {in_flight} call(s) were still in \
+         flight. Nothing was cancelled: the calls are still running and the \
+         write actor is still draining. This handle is now closing -- every \
+         other method raises MacrameClosedError from here on -- and calling \
+         close() again resumes the wait."
+    ));
+    Python::attach(|py| {
+        let v = err.value(py);
+        let _ = v.setattr("written", py.None());
+        let _ = v.setattr("in_flight", in_flight);
+        let _ = v.setattr("waited", secs);
+    });
+    err
+}
+
 /// Register every class on the module.
 ///
 /// Order matters only in that a base must exist before anything reads it; pyo3
@@ -955,6 +1001,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     add!(
         MacrameError,
         MacrameClosedError,
+        CloseTimeoutError,
         // bases
         IntegrityError,
         ValidationError,

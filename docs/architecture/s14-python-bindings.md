@@ -209,7 +209,8 @@ is what `Python::detach` requires, and the alternative is `#[pyclass(unsendable)
 pins the object to its creating thread. A compile-time assertion in `runtime.rs` fails
 with an explanation if a future field on `Database` breaks it.
 
-**Three consequences that are not obvious, all of them found by building it:**
+**Four consequences that are not obvious, all of them found by building it —**
+the fourth by measuring it, three releases and one review after the first three:
 
 1. **`close()` consumes `self` and Python cannot.** The type system makes call-after-close
    impossible in Rust. Python has no way to express that, so the handle holds an `Option`
@@ -224,6 +225,22 @@ with an explanation if a future field on `Database` breaks it.
    `inner.write()` while holding the GIL, against a reader holding the read lock inside
    `detach`, deadlocks: the reader needs the GIL back to finish and the closer will not
    yield it.
+4. **"Waits for them" is the whole of an in-flight call, and that is a hang with no
+   message** ([D-264](s13-decision-register.md#d-264),
+   [D-265](s13-decision-register.md#d-265)). The read lock is held for the entire call, so
+   `close()` waits out a bulk import: **74 ms** behind 500 edges, **379** behind 2,000,
+   **992** behind 4,000 — linear, silent, and from outside the process indistinguishable
+   from a deadlock. Review A-6 predicted this hang and named the wrong cause; the cause it
+   named (SRWLock's lack of writer preference) stopped applying when Rust's standard
+   library moved `x86_64-pc-windows-msvc` to a writer-preferring futex `RwLock`. Two
+   things answer the real one, and they do different jobs: a **`closing` flag** read
+   before the write lock is asked for, so later calls fail fast with `MacrameClosedError`
+   instead of queueing in front of the shutdown, and **`close(timeout=…)`**, which bounds
+   the acquisition and raises `CloseTimeoutError` carrying `in_flight` and `waited`.
+   Neither cancels anything — the call finishes, the actor drains, and `Database::high`
+   awaits a `oneshot` per command, so no acknowledged write is ever still queued. A
+   timed-out handle stays *closing*, because un-setting the flag would race a `close()`
+   about to take the lock.
 
 **`fork()` is made loud rather than made to work.** A `OnceLock<Runtime>` is not
 fork-safe: on Linux `multiprocessing` still defaults to `fork`, and a child inherits the
@@ -253,6 +270,7 @@ structured fields set as attributes and `str(e)` still the `#[error]` rendering 
 ```text
 MacrameError
 ├── EngineError, MigrationError, NotFoundError, DiagnosticConnError, MacrameClosedError
+├── CloseTimeoutError  (0.15.23; like MacrameClosedError, no DbError behind it)
 ├── IntegrityError    overlaps, drift, rebuild, recorded_at, weights, leaked archive session
 ├── ValidationError   edge types, ids, timestamps, model names, attribute mode
 ├── VectorError       dimensions, unregistered models

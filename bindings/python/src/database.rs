@@ -32,6 +32,32 @@
 //!
 //! # 3. The lock is acquired with the GIL already released
 //!
+//! # 4. `close()` is bounded on request, and bounds only the caller's wait
+//!
+//! The read lock is held for the *whole* of a call, so `close()` blocks on
+//! `inner.write()` for as long as whatever is in flight takes — measured at
+//! 74 ms behind 500 edges, 379 behind 2,000 and 992 behind 4,000 (0.15.22,
+//! [D-264](../../../docs/architecture/s13-decision-register.md#d-264)). Silent,
+//! linear in the other thread's work, and from outside the process
+//! indistinguishable from a hang.
+//!
+//! Two things answer it, and they do different jobs. `closing` is raised
+//! *before* the write lock is asked for, so calls arriving after `close()`
+//! started fail fast instead of joining the queue in front of it — a hot loop
+//! can no longer feed the thing `close()` is waiting for. And `timeout` bounds
+//! the acquisition itself, so a caller can stop waiting and be told what it was
+//! waiting for.
+//!
+//! **Neither cancels anything.** The in-flight call keeps running, the write
+//! actor keeps draining, and no write is ever queued behind an acknowledgement
+//! — `Database::high` awaits a `oneshot` per command — so abandoning the wait
+//! can only ever abandon a caller that has not been told anything yet. A
+//! timed-out handle *stays* closing rather than reverting: un-setting the flag
+//! would race a `close()` about to acquire the lock a millisecond later, and
+//! the honest state of that handle is "on its way out", not "open".
+//!
+//! # 5. The lock is acquired with the GIL already released
+//!
 //! Subtle and load-bearing. If `close()` blocked on `inner.write()` while
 //! holding the GIL, and another thread held the read lock inside `detach`,
 //! neither could proceed: the reader needs the GIL back to finish, and the
@@ -40,7 +66,9 @@
 //! [`PyDatabase::with_db`] exists rather than each method taking its own guard.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant};
 
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple, PyType};
@@ -48,7 +76,7 @@ use pyo3::types::{PyDict, PyTuple, PyType};
 use macrame::prelude::*;
 
 use crate::branch;
-use crate::errors::{closed_error, to_py, to_py_bulk};
+use crate::errors::{close_timeout_error, closed_error, to_py, to_py_bulk};
 use crate::graph;
 use crate::observe;
 use crate::plan;
@@ -201,15 +229,41 @@ pub(crate) struct PyDatabase {
     path: PathBuf,
     /// Serialises the diagnostic path's opens. See [`PyDatabase::diagnostic_rows`].
     diagnostic_open: Mutex<()>,
+    /// Raised by `close()` before it asks for the write lock, and never
+    /// lowered. See module docs, part 4.
+    closing: AtomicBool,
+    /// How many calls are inside [`PyDatabase::with_db`] right now.
+    ///
+    /// Diagnostic, not a gate: nothing waits on it and no decision is made from
+    /// it. It exists so that a [`crate::errors::CloseTimeoutError`] can say what
+    /// the wait was for instead of only that there was one.
+    in_flight: AtomicUsize,
+}
+
+/// Decrements the in-flight count however the call leaves — including by panic,
+/// which `with_db` deliberately does not treat as poisoning.
+struct InFlight<'a>(&'a AtomicUsize);
+
+impl Drop for InFlight<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 impl PyDatabase {
     /// Run `f` against the live handle with the GIL released.
     ///
-    /// The single choke point for every call that touches the ledger. Three
-    /// things happen here and they must happen in this order: the GIL is
-    /// released, *then* the lock is taken (see module docs, part 3), then the
-    /// closed check.
+    /// The single choke point for every call that touches the ledger. The
+    /// order is not arbitrary: the GIL is released, *then* the closing flag is
+    /// read, *then* the lock is taken (see module docs, parts 4 and 5), then
+    /// the closed check.
+    ///
+    /// The flag is read before the lock on purpose. A call that arrives while
+    /// `close()` is waiting must not queue in front of it — that is how a hot
+    /// loop turns a bounded wait back into an unbounded one — and a caller who
+    /// is going to meet a closed handle anyway is better served hearing so now
+    /// than after the import ahead of it finishes. Reading the flag late would
+    /// give the same answer eventually and be useless.
     fn with_db<F, T>(&self, py: Python<'_>, f: F) -> PyResult<T>
     where
         F: FnOnce(&Database) -> PyResult<T> + Send,
@@ -217,6 +271,11 @@ impl PyDatabase {
     {
         py.detach(|| {
             check_not_forked()?;
+            if self.closing.load(Ordering::Acquire) {
+                return Err(closed_error());
+            }
+            self.in_flight.fetch_add(1, Ordering::Relaxed);
+            let _counted = InFlight(&self.in_flight);
             // A panic inside one call must not brick the handle for every
             // later one: poisoning here would turn a single failed traversal
             // into a permanently unusable database with a confusing message.
@@ -226,6 +285,48 @@ impl PyDatabase {
             let db = guard.as_ref().ok_or_else(closed_error)?;
             f(db)
         })
+    }
+
+    /// Take the write lock, or give up after `limit` and say what for.
+    ///
+    /// `std::sync::RwLock` has no timed acquisition, so this polls `try_write`.
+    /// The interval starts at 200 µs and doubles to a 5 ms ceiling: a close
+    /// that only had to let a short read finish still returns in well under a
+    /// millisecond, and one waiting out a long import does not spin a core to
+    /// find that out. Both numbers are latency floors on a path that is already
+    /// bounded by the other thread's work, not tuning parameters.
+    ///
+    /// Losing the race repeatedly is not starvation: the flag is already set,
+    /// so no *new* reader can be admitted, and what this waits for is a fixed
+    /// set of calls that were already inside.
+    fn write_within(
+        &self,
+        limit: Duration,
+    ) -> PyResult<std::sync::RwLockWriteGuard<'_, Option<Database>>> {
+        const FIRST: Duration = Duration::from_micros(200);
+        const CEILING: Duration = Duration::from_millis(5);
+
+        let started = Instant::now();
+        let mut nap = FIRST;
+        loop {
+            match self.inner.try_write() {
+                Ok(guard) => return Ok(guard),
+                // The data is an `Option<Database>`; a panic cannot break its
+                // invariants, so poisoning is recovered from here exactly as
+                // `with_db` recovers from it.
+                Err(std::sync::TryLockError::Poisoned(e)) => return Ok(e.into_inner()),
+                Err(std::sync::TryLockError::WouldBlock) => {}
+            }
+            let waited = started.elapsed();
+            if waited >= limit {
+                return Err(close_timeout_error(
+                    self.in_flight.load(Ordering::Relaxed),
+                    waited,
+                ));
+            }
+            std::thread::sleep(nap.min(limit - waited));
+            nap = (nap * 2).min(CEILING);
+        }
     }
 
     /// Run `sql` on the diagnostic connection, **one caller at a time**.
@@ -431,6 +532,8 @@ impl PyDatabase {
             inner: RwLock::new(Some(db)),
             path,
             diagnostic_open: Mutex::new(()),
+            closing: AtomicBool::new(false),
+            in_flight: AtomicUsize::new(0),
         })
     }
 
@@ -481,6 +584,8 @@ impl PyDatabase {
             inner: RwLock::new(Some(db)),
             path,
             diagnostic_open: Mutex::new(()),
+            closing: AtomicBool::new(false),
+            in_flight: AtomicUsize::new(0),
         })
     }
 
@@ -495,10 +600,36 @@ impl PyDatabase {
     /// under Doctrine VI. The second is the write actor's exit status, which no
     /// other method can return: a handle that is dropped cannot tell you its
     /// write path had died.
-    fn close(&self, py: Python<'_>) -> PyResult<()> {
+    ///
+    /// # `timeout`
+    ///
+    /// `None` — the default, and what every release before 0.15.23 did — waits
+    /// for the calls already in flight however long they take. A float bounds
+    /// *that wait only*: on expiry the handle is left closing and
+    /// [`crate::errors::CloseTimeoutError`] says how many calls were still
+    /// inside and for how long it waited. Nothing is cancelled, nothing is
+    /// rolled back, and calling `close()` again resumes the wait — see module
+    /// docs, part 4.
+    #[pyo3(signature = (timeout = None))]
+    fn close(&self, py: Python<'_>, timeout: Option<f64>) -> PyResult<()> {
+        let timeout = match timeout {
+            Some(s) if !s.is_finite() || s < 0.0 => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "timeout must be a non-negative number of seconds, got {s}"
+                )))
+            }
+            other => other.map(Duration::from_secs_f64),
+        };
         py.detach(|| {
             check_not_forked()?;
-            let mut guard = self.inner.write().unwrap_or_else(|e| e.into_inner());
+            // Raised before the lock is asked for, so that everything arriving
+            // from here on fails fast rather than lengthening this wait. Never
+            // lowered: see module docs, part 4.
+            self.closing.store(true, Ordering::Release);
+            let mut guard = match timeout {
+                None => self.inner.write().unwrap_or_else(|e| e.into_inner()),
+                Some(limit) => self.write_within(limit)?,
+            };
             match guard.take() {
                 Some(db) => runtime().block_on(db.close()).map_err(to_py),
                 None => Ok(()),
@@ -533,8 +664,33 @@ impl PyDatabase {
         traceback: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<bool> {
         let _ = (exc_type, exc_value, traceback);
-        self.close(py)?;
+        // No timeout: `with` is the shape that must not leave a handle half
+        // shut, and a caller who wants a bound has to say so at a `close()`
+        // they can see.
+        self.close(py, None)?;
         Ok(false)
+    }
+
+    /// Whether a `close()` has started and not finished.
+    ///
+    /// True from the moment `close()` raises the flag until the process exits,
+    /// including after a successful close — `is_closed` is the one that answers
+    /// "did it finish". The pair a caller wants after a
+    /// [`crate::errors::CloseTimeoutError`] is `is_closing and not is_closed`,
+    /// which is the state where every method but `close()` refuses.
+    #[getter]
+    fn is_closing(&self) -> bool {
+        self.closing.load(Ordering::Acquire)
+    }
+
+    /// How many calls are inside the handle right now.
+    ///
+    /// Diagnostic. It is a sample, not a lock: by the time a caller reads it
+    /// the number may already be different, which is fine for the thing it is
+    /// for — printing what a `close()` is waiting on.
+    #[getter]
+    fn in_flight(&self) -> usize {
+        self.in_flight.load(Ordering::Relaxed)
     }
 
     /// Whether [`PyDatabase::close`] has run.
