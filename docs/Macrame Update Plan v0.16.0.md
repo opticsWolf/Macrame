@@ -324,7 +324,7 @@ The review files A-5 as one finding. It is not. `dev/**` in CI **shipped at 0.15
 
 **A rule that depends on someone remembering is not a plan, and this list has the receipts.** [D-234](architecture/s13-decision-register.md#d-234) prescribed a draft pull request per branch; nobody made one, and nineteen releases shipped with no CI run at all until [D-262](architecture/s13-decision-register.md#d-262) widened the trigger. So each part below states its mechanism, and *"run it before a release"* is not one of them.
 
-**Part 1 — four fuzz targets on the small text readers (half a day, first).**
+**Part 1 — four fuzz targets on the small text readers (half a day, first). Shipped as 0.15.24, [D-266](architecture/s13-decision-register.md#d-266).**
 
 `timestamp::parse`, `escape_fts5_query`, `BranchId::new`, `validate_id`. Each is a parser of external input, each is a few lines, and all four are publicly reachable — unlike the snapshot targets these need no `fuzzing` feature door, so a target calls them exactly as a downstream user would. Three carry the same property: arbitrary bytes in, `Err` out, never a panic. **`escape_fts5_query` is the exception and is the one that matters most**, because it is the only one of the four taking text straight from an end user: it returns a `String` and cannot refuse, so its property is a round trip — what comes out is safe to hand to FTS5, and escaping twice equals escaping once.
 
@@ -333,6 +333,8 @@ The review files A-5 as one finding. It is not. `dev/**` in CI **shipped at 0.15
 What the review's own phrasing (*"four targets at 30 s each"*) and this correction agree on is that the run is not the hard part. The hard part was that nothing built the crate at all, which [D-263](architecture/s13-decision-register.md#d-263) fixed for compilation and this fixes for behaviour.
 
 *One thing the existing job does that is worth naming rather than inheriting.* It pins `cargo-fuzz` with `--locked` and does **not** pin the nightly: `dtolnay/rust-toolchain@nightly` floats. That is a live source of a red run for a toolchain reason rather than a crash, which is [D-236](architecture/s13-decision-register.md#d-236)'s shape — a gate that cries wolf stops being read. It is not changed here, because pinning it is a decision about every fuzz target and not only these four, and it wants its own entry.
+
+*Between Part 1 and Part 2, the floor got a bound.* Not an A-5 item and worth recording where the next reader of this list will be standing: no `timeout-minutes` existed anywhere in the four workflow files, so every job — the quarantined property step included — ran under GitHub's silent 360-minute default. That step is measured at 17.6 / 35.9 / **51.9** minutes on Windows, and [D-236](architecture/s13-decision-register.md#d-236) had granted it the right to *fail*, never the right to run for six hours. Bounded at 0.15.25 ([D-267](architecture/s13-decision-register.md#d-267)), on the **step** rather than only the job, because a job killed at its limit is cancelled and `continue-on-error` cannot absorb a cancellation. Part 2 matters to this because its promotion design leans on that step: whatever the generator finds becomes a blocking test, while the discovery run itself stays where failure is tolerated — and *tolerated* only works while it is also bounded.
 
 **Part 2 — the lineage property generator (one release; the real item).**
 

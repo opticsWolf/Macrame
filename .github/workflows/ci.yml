@@ -59,10 +59,28 @@ env:
 # `pypa/gh-action-pypi-publish@release/v1` is a composite action with no Node
 # runtime at all. `dtolnay/rust-toolchain` is a branch ref by design.
 
+# Every job below carries a `timeout-minutes`, and so does one step (0.15.25,
+# [D-267]).
+#
+# Not tuning. Without one, a job inherits GitHub's default of **360 minutes** --
+# a number nobody in this repository chose, which arrived by omission, and which
+# no job here has ever come within four times of. A cap that is never reached
+# costs nothing. The run it exists for is the one that stops making progress,
+# where the difference is a job that fails in an hour against a runner held for
+# six and a queue behind it.
+#
+# Each number is roughly three to five times the maximum observed across the
+# twelve runs before this commit, and the comment beside it records what that
+# maximum was -- so a later reader can tell a bound that was measured from a
+# bound that was guessed, and can see when a job has grown into its cap rather
+# than discovering it the day the cap fires.
+
 jobs:
   lint:
     name: clippy
     runs-on: ubuntu-latest
+    # clippy, rustdoc and the fuzz-crate check; max observed 2.4 min.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -182,6 +200,8 @@ jobs:
   msrv:
     name: MSRV (rust-version in Cargo.toml)
     runs-on: ubuntu-latest
+    # one `cargo check` on the pinned MSRV; max observed 0.5 min.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
       - id: msrv
@@ -208,6 +228,10 @@ jobs:
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # the suite on three runners. Windows is the long one, and the reason
+    # this number is not tighter: max observed 64.7 min, of which 51.9 was
+    # the quarantined step, which now carries its own cap below.
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
@@ -386,9 +410,42 @@ jobs:
         shell: bash
         run: python scripts/run_rust_suite.py --no-default-features --attempts 3
 
+      # **The cap is on the step and not only on the job, and that is the
+      # whole design** (0.15.25, [D-267]).
+      #
+      # [D-236] gave this step the right to fail: it is red on a healthy tree
+      # roughly two runs in three on Windows, so `continue-on-error` keeps its
+      # exit code away from the job. Nobody gave it the right to run for six
+      # hours. That permission arrived from the default job cap above, which is
+      # a number no one here set.
+      #
+      # A job cap alone would not preserve the quarantine. When the platform
+      # stops a job at its limit the job is **cancelled**, and a cancelled job
+      # is not a failed step -- `continue-on-error` never engages, and
+      # `release.yml`'s `verify`, which calls this workflow whole, would see a
+      # failed run rather than a step that was allowed to fail. A **step**
+      # timeout produces a step failure, which is exactly what the quarantine
+      # already absorbs. So this fires first, and the job cap is the backstop
+      # rather than the mechanism.
+      #
+      # 75 minutes, from measurement. Across the twelve runs before this commit
+      # the step took 17.6 / 35.9 / 51.9 minutes on Windows (min / median / max)
+      # and 1.7 to 3.7 elsewhere. The bound is deliberately not "one clean pass
+      # plus slack": on Windows the R15 retries **are** the healthy case, and
+      # the 51.9-minute run was one that passed, so a tighter number would cut
+      # runs that work today. This sits about 45% above the worst healthy run
+      # and at about a fifth of the default it replaces.
+      #
+      # It also bounds a question it does not answer. Six attempts against a
+      # suite known to crash on this platform for a reason outside this
+      # repository is what produces a 52-minute step, and whether the sixth
+      # attempt buys signal or lottery tickets is worth asking on its own. The
+      # cap limits what the answer being "no" can cost while that question
+      # waits.
       - name: property tests (quarantined, R15-prone, non-blocking)
         shell: bash
         continue-on-error: true
+        timeout-minutes: 75
         run: python scripts/run_rust_suite.py --features property-tests --attempts 6
 
   # The snapshot loader's fuzz targets (0.13.14, W8.4, D-187).
@@ -447,6 +504,8 @@ jobs:
   fuzz:
     name: fuzz (snapshot loader and the small parsers)
     runs-on: ubuntu-latest
+    # nightly toolchain, cargo-fuzz install, seven targets; max observed 9.0 min.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@nightly
@@ -528,6 +587,8 @@ jobs:
   public-api:
     name: public API baseline
     runs-on: ubuntu-latest
+    # cargo-public-api install and one diff; max observed 2.2 min.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@nightly
@@ -554,6 +615,8 @@ jobs:
   package:
     name: cargo publish --dry-run
     runs-on: ubuntu-latest
+    # `cargo publish --dry-run`; max observed 1.1 min.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable

@@ -50,6 +50,8 @@ jobs:
   wheels:
     name: wheel (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
+    # one cibuildwheel target per leg, aarch64 under emulation; max observed 6.0 min.
+    timeout-minutes: 40
     strategy:
       # One platform failing should not hide whether the others build: a matrix
       # that stops at the first red tells you about one target per run.
@@ -133,6 +135,8 @@ jobs:
   sdist:
     name: sdist
     runs-on: ubuntu-latest
+    # max observed 5.3 min.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
 
@@ -174,6 +178,8 @@ jobs:
     name: publish to PyPI
     needs: [wheels, sdist, suite]
     runs-on: ubuntu-latest
+    # one upload; max observed 0.5 min.
+    timeout-minutes: 15
     # A tag publishes; a manual run publishes only when asked. Same shape as
     # `release.yml`, and for the same reason: a PyPI version number cannot be
     # reused once taken, even after a delete, so a failed upload spends it.
