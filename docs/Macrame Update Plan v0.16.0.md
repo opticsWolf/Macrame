@@ -316,7 +316,9 @@ The rest are what they say: the shadow swap recreates DDL from two named lists w
 
 ### Ongoing, not a release (A-4, A-5, A-6)
 
-`temporal/archive.rs` split into its four modules; a lineage fixture generator for the tests; `dev/**` in CI's branch filter; the four fuzz targets; the closing flag on the Python side. Each lands when it is convenient and none of them gate 0.16.0.
+`temporal/archive.rs` split into its four modules; a lineage fixture generator for the tests; the four fuzz targets; the closing flag on the Python side. Each lands when it is convenient and none of them gate 0.16.0.
+
+**`dev/**` in CI's branch filter shipped as 0.15.20, [D-262](architecture/s13-decision-register.md#d-262)**, and was moved off this list because it stopped being convenience: it is the only reason §8's criterion 10 had no evidence to read. [D-234](architecture/s13-decision-register.md#d-234) had rejected the widening and prescribed a draft pull request per line instead, which is correct, cheaper, and was not done for this branch — so D-243 … D-261 shipped with no CI run at all. The trigger is widened; the two publishing workflows are untouched and cannot fire on a branch push.
 
 ---
 

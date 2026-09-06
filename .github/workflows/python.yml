@@ -34,9 +34,33 @@ name: Python
 # every check would go green, because the only thing that built it was
 # `wheels.yml`, which runs on tags.
 
+# Development lines are covered, and publication is not on this path (0.15.20,
+# [D-262], review C-23).
+#
+# [D-234] found sixteen releases whose CI had never run, and set the policy
+# "branches live under pull requests; push triggers stay main-only" — widening
+# `push:` was rejected there because it double-runs a branch that has a pull
+# request open. The policy is correct and it did not hold: it depends on a
+# person remembering to open a draft pull request per line, and for `dev/0.16.0`
+# nobody did, so nineteen more releases went unreplicated. That is D-234's own
+# defect arriving through the remedy's one manual step. A trigger nobody has to
+# remember is worth the duplicate runs, and the duplicate is bounded — it costs
+# runner minutes while a pull request from a `dev/**` branch is open, and
+# nothing else. No concurrency group cancels it, because cancelling a
+# superseded run would trade a documented cost for an undocumented weakening of
+# D-234's standing obligation: **a run must exist for the pushed SHA**, and a
+# release commit pushed shortly before the next one would lose its evidence.
+#
+# **Nothing here can publish.** `release.yml` (crates.io) and `wheels.yml`
+# (PyPI) trigger on `push: tags: ["v*"]` and `workflow_dispatch` only, and a
+# branch push creates no tag. Their publish jobs are guarded a second time by
+# `startsWith(github.ref, 'refs/tags/v') || inputs.publish == true`, which a
+# `refs/heads/dev/**` ref fails. They reach this file through `workflow_call`,
+# which is a separate entry point a push trigger cannot fire. Two layers, and
+# widening the branch filter moves neither.
 on:
   push:
-    branches: [main]
+    branches: [main, "dev/**"]
   pull_request:
   workflow_call: # so wheels.yml can gate an upload on exactly this
 

@@ -4480,7 +4480,7 @@ sixteen absences of a run.
 widen the push trigger to `dev/**`. Rejected: it double-runs every future pull
 request, and the trigger is not where the gap is. The gap is that a long-lived
 branch had no pull request. So: **branches live under pull requests; push
-triggers stay main-only.** Opening the pull request is the entire remedy —
+triggers stay main-only.** **That policy line is superseded by [D-262](s13-decision-register.md#d-262)**, and not because it was wrong: it depends on a person opening the pull request, nobody opened one for `dev/0.16.0`, and nineteen further releases went unreplicated. The push trigger is widened to `dev/**` there. The diagnosis in the two sentences above is unchanged, and the draft pull request is still the cheaper habit. Opening the pull request is the entire remedy —
 every push to a head branch fires `pull_request` from then on, with no workflow
 edit and no double-runs. `dev/0.15.0` is PR #2, opened as a draft because it is
 a development line and not a merge proposal; a bare `pull_request:` trigger
@@ -4504,7 +4504,7 @@ and no mechanism will stop it — which is the accepted risk D-236 states rather
 than implies.
 
 Rejected: *widening `push:` to `dev/**`* (double-runs every PR, and treats the
-symptom); *treating the local gate battery as sufficient* (it is thorough and it
+symptom — **taken anyway at 0.15.20**, [D-262](s13-decision-register.md#d-262), once the remedy preferred here had been measured failing); *treating the local gate battery as sufficient* (it is thorough and it
 is one machine — the macOS red is the counterexample); *waiting until 0.15.0 to
 open the pull request* (the value is CI on the commits still to come, so the
 only useful time to open it is the earliest one).
@@ -5382,6 +5382,26 @@ after:     reconstruct(early) -> engine: SQLite failure: `no such table: cold.tr
 Surface **1,757 → 1,761 items**: `Database::verify_last_link`, `temporal::verify_last_link`, and the Python binding's `verify_last_link`. Suites **745** Rust and **726** with `--no-default-features` (the gap is 19, unchanged), **592** Python. Schema unchanged at **v17**.
 
 Rejected: *wiring the link check into `write_final` rather than the cadence* (it runs on `close()` too, and a comparison in the shutdown path has to decide what to do when it fails — the only correct action is the caller's). *Deleting a stray cold file on the error path* (it needs a before-and-after test on a path that already failed once, to remove a file the presence test now ignores). *Keeping the `archive_horizon` rule the review suggested* (`archive_branch` writes no such row on purpose). *A `watch<u64>` of `seq_id` for the cadence* (see C-19 above). *Renumbering the review's items after C-13 turned out not to be Low* (the review is a document with a date on it; the finding belongs here, where the correction is).
+
+<a id="d-262"></a>D-262 — a policy with a manual step is a policy that holds until someone forgets, and this one was forgotten for nineteen releases (0.15.20, review C-23). Supersedes the policy line in [D-234](s13-decision-register.md#d-234). [D-147](s13-decision-register.md#d-147), [D-236](s13-decision-register.md#d-236), [D-241](s13-decision-register.md#d-241). Evidence: `gh run list`, `.github/workflows/{ci,python}.yml`.
+
+`ci.yml` and `python.yml` now trigger on `push` to `main` **and `dev/**`**. That is the one-line change C-23 asked for, and [D-234](s13-decision-register.md#d-234) had rejected it by name. The reason it is taken now is not that D-234 was wrong.
+
+**D-234's policy was right and it did not hold.** That entry found sixteen releases whose CI had never run, diagnosed it correctly — *the gap is that a long-lived branch had no pull request* — and set the remedy accordingly: **branches live under pull requests; push triggers stay main-only**. Opening a draft pull request is a complete fix, costs nothing, and needs no workflow edit. `dev/0.15.0` was opened as PR #2 and the policy worked for the rest of that cycle.
+
+Then `dev/0.16.0` was branched and **nobody opened one**. Measured at 0.15.19: `gh run list` on this repository returns nothing newer than `v0.15.0` on `main`, dated 2026-08-30. **Nineteen releases, D-243 through D-261, with no CI run of any kind** — the same defect D-234 exists to prevent, at greater length, arriving through the remedy's own single manual step. A policy whose enforcement is *someone remembers* has a failure rate, and this one's first observed sample is 100%.
+
+So the trade is restated with the term D-234 could not have priced: a trigger nobody has to remember, against duplicate runs while a pull request from a `dev/**` branch is open. **Duplicate runs cost runner minutes. The alternative cost nineteen releases of evidence.**
+
+**No concurrency group, deliberately.** The obvious refinement is `concurrency: { group: …, cancel-in-progress: true }`, keyed so a `push` and a `pull_request` for one commit share a group and the second supersedes the first — it removes the duplicate entirely. It is refused because of what else it removes. D-234's standing obligation is that **a CI run exists for the pushed SHA**, and cancellation is defined on the *older* run: two release commits pushed within one suite's runtime — 46 minutes for `ci.yml` — and the first release ships with its evidence cancelled. That trades a cost this entry has measured for a weakening of an obligation it has not, which is the wrong direction. The duplicate is bounded, visible on the runs page, and cheaper than the thing it would buy.
+
+**Nothing on this path can publish, on two independent layers, and the branch filter moves neither.** `release.yml` and `wheels.yml` trigger on `push: tags: ["v*"]` and `workflow_dispatch` only; a branch push creates no tag, so neither workflow starts. Their publish jobs are then guarded a second time — `startsWith(github.ref, 'refs/tags/v') || inputs.publish == true` — which a `refs/heads/dev/**` ref fails even if the workflow were somehow entered. The two files reach `ci.yml` and `python.yml` through `workflow_call`, which is a **separate entry point**: a `push` trigger cannot fire it, and widening `push` does not make a called workflow callable by anything new. Both layers were read rather than assumed, and the pairing is why this is stated as a property rather than an intention.
+
+**What this makes reachable.** Criterion 10 of the 0.16.0 plan — *the suite passes under `run_rust_suite.py --features metrics --attempts 3` on all three platforms, and the feature-off run passes on Ubuntu* — is the one criterion `docs/releases/v0.16.0.md` reports as **not met**, and the note says there why: not because a gate failed, but because no run existed to read. It is now reachable from the branch it is about, without opening a pull request first. The standing obligation is unchanged and so is [D-236](s13-decision-register.md#d-236)'s clause on top of it: the quarantined property step is **read**, not merely run — `completed`, or `crashed-R15` with zero named failures confirmed — because a green job whose non-blocking step said `named failures` is a release that must not go out.
+
+CI-only: no crate code changed, surface unchanged at **1,761 items**, suites unchanged at **745** and **726** Rust and **592** Python. Schema unchanged at **v17**.
+
+Rejected: *opening a draft pull request instead* (it is D-234's remedy and it is still worth doing — but it is the thing that was already available and already not done, and this entry exists because the fix that depends on nobody is the one that survives); *a concurrency group to kill the duplicate* (see above — it buys minutes with a standing obligation); *`branches: ["**"]`* (every scratch branch, including the ones pushed to think out loud, and the noise would be paid for by everyone reading the runs page); *widening `release.yml` or `wheels.yml` in any form* (they publish, and nothing that publishes should be one branch-name typo away from firing); *editing D-234's policy line* ([Doctrine III](s0-s3-foundations.md#doctrine-iii) — it is superseded here and its diagnosis, which was correct, still stands as written).
 
 [A-2]: ../Macrame%20Codebase%20Review%20v0.15.0.md
 [C-10]: ../Macrame%20Codebase%20Review%20v0.15.0.md
