@@ -354,10 +354,14 @@ let view: MaterializedState = db.reconstruct_on(ts, &alt.id).await?;
 // ^ `view.edges` is resolved: one belief per (source, target, type, valid_from),
 //   held by the NEAREST lineage that has one, each ancestor cut at its own fork
 //   point. Agrees edge for edge with db.edges(ReadPlan::new().on(alt.id)..).
-// `view.concepts` is NARROWED and NOT resolved -- it is keyed by concept id
-//   alone, so an invisible lineage contributes nothing and an ancestor's
-//   post-cutoff writes are cut, but where two VISIBLE lineages wrote the same
-//   concept the winner is the later log row, not the nearer lineage.
+// `view.concepts` is NARROWED and needs no resolving (0.15.18, D-260): an
+//   invisible lineage contributes nothing and an ancestor's post-cutoff writes
+//   are cut, and that is enough, because TWO VISIBLE LINEAGES CANNOT BOTH HOLD
+//   ONE CONCEPT ID. `concepts.id` is NOT NULL UNIQUE and
+//   trg_concepts_cross_lineage raises DbError::CrossLineage; a branch inherits
+//   its parent's concepts and may not restate them (D-225, §15.2). The one
+//   route past that guard is archive_branch + re-mint, and an archived lineage
+//   is in nobody's ancestry, so no per-lineage read can see it.
 // An unforked database pays none of this: the shape is Trunk and it delegates
 //   to `reconstruct`, snapshots and all. A forked one cannot use snapshots at
 //   all -- a snapshot has no recorded_at left in it for a cutoff to compare

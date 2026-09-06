@@ -1164,12 +1164,13 @@ impl PyDatabase {
     /// it — the resolution the traversals and `edges()` read through, applied
     /// to a fold.
     ///
-    /// `concepts` is narrowed but **not resolved**: a lineage outside the
-    /// ancestry contributes nothing and an ancestor's post-cutoff writes are cut,
-    /// but where two *visible* lineages both wrote a concept the winner is the
-    /// later log row rather than the nearer lineage. A folded concept row carries
-    /// no branch, so there is no nearest one left to pick. Only `edges` gets the
-    /// distance rule.
+    /// `concepts` is narrowed but not *resolved*, and needs no resolution:
+    /// a lineage outside the ancestry contributes nothing and an ancestor's
+    /// post-cutoff writes are cut, which is all a concept needs because **two
+    /// visible lineages cannot both hold one concept id** (0.15.18, D-260).
+    /// `concepts.id` is globally unique and the schema refuses the collision by
+    /// name, so a branch inherits its parent's concepts and cannot restate
+    /// them. Only `edges` needs the distance rule, and only `edges` has it.
     ///
     /// On an **unforked** database this is `reconstruct` — same path, same
     /// snapshots. On a forked one it cannot use snapshots at all: a snapshot

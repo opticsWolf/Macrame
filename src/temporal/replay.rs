@@ -322,19 +322,48 @@ pub fn resolve_beliefs(beliefs: &[EdgeBelief], ancestry: &[Ancestor]) -> Vec<Edg
 /// one lineage and nothing to resolve, and this delegates to [`reconstruct`]
 /// unchanged, snapshots and all.
 ///
-/// # Concepts are **not** resolved by lineage
+/// # Concepts need no distance rule, because the tie cannot happen (0.15.18,
+/// [D-260])
 ///
 /// [`MaterializedState::concepts`] is keyed by concept id alone, so once a row
 /// is folded there is no lineage left on it to pick a nearest one by. The fold
 /// here *is* narrowed — a lineage outside the ancestry contributes nothing, and
-/// an ancestor's post-cutoff concept writes are cut like its edges — but where
-/// two **visible** lineages both wrote a concept, the winner is the later log
-/// row rather than the nearer lineage.
+/// an ancestor's post-cutoff concept writes are cut like its edges — and that
+/// narrowing is all a concept needs, because **two visible lineages cannot both
+/// hold one concept id**.
+///
+/// That is the schema's guarantee and not this function's. `concepts.id` is
+/// `NOT NULL UNIQUE` — identity, not identity-per-lineage — and
+/// `trg_concepts_cross_lineage` turns the index's refusal into
+/// [`DbError::CrossLineage`](crate::DbError::CrossLineage) so it says which
+/// rule was broken; `trg_concepts_branch_immutable` stops a concept being moved
+/// to another lineage afterwards. A branch therefore **inherits** its parent's
+/// concepts and cannot restate them (§15.2, [D-225]), which is the same rule
+/// read from the other side.
+///
+/// The one route past that guard is [`archive_branch`] — it reads the live
+/// table, and archiving moves rows out of it — so archiving a lineage and then
+/// minting its id on the trunk does leave two lineages' rows for one id in
+/// hot-plus-cold history. It still reaches no reader: an archived lineage is
+/// gone from `branches`, so it is in nobody's ancestry, so the `JOIN` above
+/// drops its rows on **both** arms (the cold one joins the union, not each
+/// file). `rehydrate` refuses to bring the concept back while its lineage is
+/// forgotten ([D-253]). `examples/concept_lineage_probe.rs` walks all five
+/// routes and prints which the database refuses.
+///
+/// So this is not a resolution the caller must compensate for. It is a rule
+/// with nothing to decide, and if `concepts` ever gained per-lineage rows —
+/// the overlay design [D-214] defers — it would need one, along with a lineage
+/// on the folded row to apply it to.
 ///
 /// Only [`MaterializedState::edges`] gets the distance rule, which is the field
-/// review C-10 named and the only one the rule has ever been written for.
-/// Carrying the lineage on a concept is a change to a public field's type and
-/// is its own decision, not a detail of this one.
+/// review C-10 named and the only one the rule has ever been needed for.
+///
+/// [D-260]: ../../docs/architecture/s13-decision-register.md#d-260
+/// [D-253]: ../../docs/architecture/s13-decision-register.md#d-253
+/// [D-225]: ../../docs/architecture/s13-decision-register.md#d-225
+/// [D-214]: ../../docs/architecture/s13-decision-register.md#d-214
+/// [`archive_branch`]: crate::Database::archive_branch
 ///
 /// # This result is not a snapshot
 ///

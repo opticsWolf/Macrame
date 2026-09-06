@@ -1051,11 +1051,13 @@ class Database:
         own fork point and each edge key comes from the nearest lineage holding
         it — the resolution every other reader applies, applied to a fold.
 
-        `concepts` is narrowed but not *resolved*: a lineage outside the
-        ancestry contributes nothing and an ancestor's post-cutoff writes are
-        cut, but where two visible lineages both wrote a concept the winner is
-        the later log row, not the nearer lineage — a folded concept row carries
-        no branch. Only `edges` gets the distance rule.
+        `concepts` is narrowed but not *resolved*, and does not need to be:
+        a lineage outside the ancestry contributes nothing and an ancestor's
+        post-cutoff writes are cut, which is all a concept needs, because **two
+        visible lineages cannot both hold one concept id** (0.15.18). Concept
+        ids are globally unique and the database refuses the collision by name
+        (`CrossLineageError`), so a branch inherits its parent's concepts and
+        cannot restate them. Only `edges` needs the nearest-branch rule.
 
         On an **unforked** database this is `reconstruct` — same path, same
         snapshots. On a forked one it cannot use snapshots at all: a snapshot

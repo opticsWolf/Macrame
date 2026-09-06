@@ -290,6 +290,16 @@ The `lineage` CTE becomes a bound `VALUES` table produced from W14.3's cache: `(
 
 *Two tests passed without testing what they were named for.* The cold-arm test never reached the cold arm — with an archive present, reach is `NeedsArchive` only when the newest hot stamp is *after* the instant asked for, so a read at "now" takes the hot arm however much was archived. Proven by panicking inside the cold builder and watching the test pass; re-pointed at an early instant, it immediately caught a real `ambiguous column name: branch_id`. And the sweep across instants did not catch mutating the distance rule, because the fixture had no key held by two lineages at once. Surface **1,733 → 1,757**: `reconstruct_on`, `ancestry`, `resolve_beliefs`, and `Ancestor` with `new` and `cutoff`. The growth gate asked the D-255 question — does a caller build one? — and the first answer, *no, an ancestry written by hand is a distance rule they invented*, was refuted by the compiler four minutes later: the pure test for `resolve_beliefs` builds a two-row ancestry precisely because stating a pure function's properties should not need a database. So it carries the attribute **and** a named entry point, which is what D-255 asks for when the answer is yes.
 
+### W16.1b · 0.15.18 — the concept caveat describes a state that cannot exist (D-259 follow-up)
+
+**Shipped as 0.15.18, [D-260](architecture/s13-decision-register.md#d-260).** Doc-only. Not planned: it exists because a question about W16.1 — *how does the concept/edge asymmetry actually impact the database?* — was answered by trying to build the state the caveat warns about instead of re-reading the caveat.
+
+D-259 wrote the asymmetry down as a trade-off with a tie-break. Neither half survives being asked. **Two visible lineages cannot both hold one concept id**: `concepts.id` is `NOT NULL UNIQUE`, `trg_concepts_cross_lineage` refuses the insert by name, and four of the five routes to the collision are refused by the schema before any read is involved. The fifth — archive a lineage, then mint its id on the trunk — gets past a guard that consults the live table, and reaches no reader anyway, because an archived lineage is in nobody's ancestry and the fold's `JOIN` drops it on both arms. And the tie-break named was not the code's: the outer select has no `ORDER BY`, so the survivor would have been whichever row came back last.
+
+The correction goes to `src/temporal/replay.rs`, the Python binding, the `.pyi`, Appendix A.1 and the quick reference, with `examples/concept_lineage_probe.rs` as the evidence — a probe rather than a test, because four of its arms assert that a write fails and the fifth leaves a deliberately odd database worth reading rather than pinning. D-259's sentence is superseded rather than edited, and D-259 now points here.
+
+What replaces the caveat is the thing actually missing: a branch cannot hold its own version of a concept's title or content at all. That is [D-214](architecture/s13-decision-register.md#d-214)'s deferred overlay, and if it is ever built it needs a nearest-lineage rule for concepts *and* a lineage on the folded row to apply it to — at which point D-259's sentence becomes a correct description of a system that does not exist yet.
+
 ### W16.2 · 0.15.14 — hygiene (C-12 … C-22)
 
 The DDL substring match in the shadow swap, cold DDL outside the session transaction, `save_and_prune`'s `JoinError`, `registered_models` and `LIKE`, the two contradicting comments, `abort_kind` on message text, the conservative closed-interval arm, the quadratic hybrid rank lookup, `verify_snapshot_chain` on one link, the polling cadence, `rehydrate` per id. One release, one register entry with a row per item.
@@ -327,6 +337,7 @@ Merge to `main` after W16.2, tagged. `docs/releases/v0.16.0.md` written before t
 | 15 | 0.15.15 | W15.5 | the shared connection is scrubbed between callers | `connection.rs`, `database.rs` | `diagnostic_hygiene_probe.rs`, `diagnostic_conn_tests.rs`, `test_maintenance.py` |
 | 15b | 0.15.16 | W15.5b | `hard_heap_limit` through the side door ends the process — **done** | — (doc-only) | `diagnostic_global_pragmas.py` (probe, not a test) |
 | 15 | 0.15.17 | W16.1 | ancestry in Rust; `reconstruct_on` (C-10) — **done** | `graph/{lineage,plan,builder}.rs`, `temporal/replay.rs`, `connection.rs`, `branch.rs`, `bindings/python` | `reconstruct_on_tests.rs` differential against `ReadPlan`; three probes; numbers in D-259 |
+| 15b | 0.15.18 | W16.1b | the concept caveat describes an unreachable state — **done** | — (doc-only) | `concept_lineage_probe.rs` (probe, not a test) |
 | 16 | 0.15.14 | W16.2 | hygiene batch | various | one register row per item |
 | 17 | 0.16.0 | — | release note before merge; merge; tag | `docs/releases/v0.16.0.md` | §8 |
 
