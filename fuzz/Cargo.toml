@@ -62,6 +62,42 @@ test = false
 doc = false
 bench = false
 
+# -- the four small parsers (0.15.24, review A-5) ----------------------------
+#
+# Each takes text a caller supplied and turns it into something the ledger will
+# carry: a stamp, a MATCH expression, a log key, a lineage name. They need no
+# `fuzzing` feature -- all four functions are public, so these targets call them
+# exactly as a downstream caller does, which is also why the corpus for one is
+# worth nothing to another and each gets its own binary.
+
+[[bin]]
+name = "timestamp_parse"
+path = "fuzz_targets/timestamp_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fts5_escape"
+path = "fuzz_targets/fts5_escape.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "validate_id"
+path = "fuzz_targets/validate_id.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "branch_id"
+path = "fuzz_targets/branch_id.rs"
+test = false
+doc = false
+bench = false
+
 # The seed generator. A plain binary, run with plain `cargo run` before a
 # fuzzing session rather than under libFuzzer.
 #

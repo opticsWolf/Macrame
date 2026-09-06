@@ -445,7 +445,7 @@ jobs:
   # runner. It is not a claim about the loader; the malloc limit is the claim
   # about the loader, and it is the one that did not move.
   fuzz:
-    name: fuzz (snapshot loader)
+    name: fuzz (snapshot loader and the small parsers)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -473,6 +473,30 @@ jobs:
         run: cargo fuzz run snapshot_payload -- -max_total_time=90 -rss_limit_mb=2048 -malloc_limit_mb=256
       - name: snapshot_frame
         run: cargo fuzz run snapshot_frame -- -max_total_time=90 -rss_limit_mb=2048 -malloc_limit_mb=256
+
+      # The four small parsers the review's A-5 names (0.15.24, [D-266]). Each
+      # takes text a caller supplied and turns it into something the ledger
+      # keeps: a stamp, a MATCH expression, a log key, a lineage name.
+      #
+      # 30 s and not 90: these are pure functions over a short string, with no
+      # container format to discover and no decompression to bound, so a run
+      # saturates what it is going to reach far sooner than the snapshot
+      # targets do. Nothing here can allocate on the input's say-so either,
+      # which is why the memory limits the snapshot targets carry are absent --
+      # `-malloc_limit_mb` on a function that allocates one String per call
+      # would be checking a bound nobody could exceed.
+      #
+      # They need no corpus seeding: the seed generator above builds valid
+      # snapshot containers, and there is no analogous "valid" starting point
+      # here that libFuzzer cannot find in the first second by itself.
+      - name: timestamp_parse
+        run: cargo fuzz run timestamp_parse -- -max_total_time=30 -rss_limit_mb=2048
+      - name: fts5_escape
+        run: cargo fuzz run fts5_escape -- -max_total_time=30 -rss_limit_mb=2048
+      - name: validate_id
+        run: cargo fuzz run validate_id -- -max_total_time=30 -rss_limit_mb=2048
+      - name: branch_id
+        run: cargo fuzz run branch_id -- -max_total_time=30 -rss_limit_mb=2048
 
       # A crash is the whole output of this job, and libFuzzer writes it to a
       # file rather than to the log. Without this the run says "the fuzzer
