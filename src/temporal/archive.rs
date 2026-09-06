@@ -1427,7 +1427,8 @@ pub struct RehydrateReport {
 ///
 /// # A concept outlives its lineage, and is refused (0.15.11, W15.1, C-3)
 ///
-/// [`archive_branch`] takes a lineage's `branches` row with it, and a cold
+/// [`Database::archive_branch`](crate::Database::archive_branch) takes a
+/// lineage's `branches` row with it, and a cold
 /// concept keeps the `branch_id` it was minted on. Rehydrating one after the
 /// other therefore reinstates a row whose lineage no longer exists — which
 /// `concepts.branch_id REFERENCES branches(branch_id)` refuses, with foreign

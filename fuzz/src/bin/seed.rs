@@ -33,11 +33,20 @@ use macrame::temporal::{fuzzing, save_snapshot, EdgeBelief, MaterializedState, N
 fn states() -> Vec<MaterializedState> {
     let ts = "2026-08-24T12:00:00.000000Z".to_string();
 
-    let concept = |i: u32| NodeAttributes {
-        id: format!("c{i}"),
-        title: format!("concept {i}"),
-        content: format!("content for concept {i} ").repeat(4),
-        embedding_model: (i % 3 == 0).then(|| "model-a".to_string()),
+    // Built through the constructors, not by struct expression: both types are
+    // `#[non_exhaustive]` since D-255, so a literal does not compile outside the
+    // crate and this binary lives outside it (0.15.21, [D-263]).
+    let concept = |i: u32| {
+        let node = NodeAttributes::new(
+            format!("c{i}"),
+            format!("concept {i}"),
+            format!("content for concept {i} ").repeat(4),
+        );
+        if i % 3 == 0 {
+            node.embedding_model("model-a")
+        } else {
+            node
+        }
     };
 
     let build = |seq: i64, n_concepts: u32, n_edges: u32, predates: bool| {
@@ -67,13 +76,12 @@ fn states() -> Vec<MaterializedState> {
                 }
             })
             .collect();
-        MaterializedState {
-            seq_anchor: seq,
-            timestamp: ts.clone(),
-            concepts,
-            edges,
-            predates_recorded_history: predates,
-        }
+        let mut state = MaterializedState::empty(&ts);
+        state.seq_anchor = seq;
+        state.concepts = concepts;
+        state.edges = edges;
+        state.predates_recorded_history = predates;
+        state
     };
 
     vec![

@@ -136,6 +136,26 @@ jobs:
       # warnings can fail the gate. `--features metrics` matches what the test
       # job documents; `property-tests` adds no library items, so unlike clippy
       # there is nothing extra for it to reach here.
+      # The fuzz crate compiles against the crate's *public* surface, and it is
+      # a separate workspace no other gate builds (0.15.21, [D-263]).
+      #
+      # It was already built once per run — by the `fuzz` job below, after a
+      # nightly toolchain and a `cargo install cargo-fuzz --locked`. That is
+      # several minutes before a one-line type error is reported, and it is the
+      # only place the error could appear at all: D-255's `#[non_exhaustive]`
+      # sweep reached `NodeAttributes` and `MaterializedState`, which
+      # `fuzz/src/bin/seed.rs` builds by struct expression, and a struct
+      # expression for a `#[non_exhaustive]` type is refused only *outside* the
+      # defining crate. Every in-crate use kept compiling, so the local gates
+      # and this workflow's other jobs stayed green through nine releases.
+      #
+      # Stable and `check`: the three targets check clean without nightly, and
+      # a type error does not need a fuzzer to find. Locally:
+      # `python scripts/run_rust_suite.py --fuzz-check`.
+      - name: fuzz crate compiles (its own workspace)
+        working-directory: fuzz
+        run: cargo check --all-targets
+
       - name: rustdoc (no broken links)
         run: cargo doc --no-deps --features metrics
         env:
@@ -191,7 +211,28 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+            attempts: 3
+          - os: macos-latest
+            attempts: 3
+          # Eight on Windows, which is what the local release gate has always
+          # used (0.15.21, [D-263]). The first CI run this branch ever had
+          # crashed 3/3 on the main suite — `branch_storage_tests`,
+          # `wave1_regression_tests`, then `branch_read_tests` — a different
+          # target each time, zero named failures throughout: R15's signature
+          # exactly, and the reason `.cargo/config.toml` sets
+          # RUST_TEST_THREADS = "1" in the first place.
+          #
+          # This is not laundering a failure into a pass, for the reason the
+          # property step below states at length: the classifier returns FAILED
+          # on attempt 1 and never retries it, so a larger budget buys tolerance
+          # for CRASH and for nothing else. Three was inherited from the
+          # feature-off step, which runs on ubuntu where R15 has never been
+          # observed; it had never been checked against a Windows runner
+          # because, per [D-262], no CI run existed to check it against.
+          - os: windows-latest
+            attempts: 8
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -240,7 +281,7 @@ jobs:
 
       - name: test (with R15 retry)
         shell: bash
-        run: python scripts/run_rust_suite.py --features metrics --attempts 3
+        run: python scripts/run_rust_suite.py --features metrics --attempts ${{ matrix.attempts }}
 
       # The generated-history binaries are quarantined behind a feature (see
       # .cargo/config.toml): a property case opens a database of its own, which

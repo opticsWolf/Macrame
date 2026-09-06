@@ -3000,13 +3000,13 @@ impl Database {
     ///
     /// # Errors
     ///
-    /// [`DbError::UnknownBranch`](crate::DbError::UnknownBranch) naming a
+    /// [`DbError::UnknownBranch`] naming a
     /// lineage that was never registered — refused rather than answered for the
     /// trunk, for `graph::lineage::Lineages::shape`'s reason.
-    /// [`DbError::RecordedInstantUnreachable`](crate::DbError::RecordedInstantUnreachable)
+    /// [`DbError::RecordedInstantUnreachable`]
     /// when [`ReadPlan::recorded`] is below what the hot log still covers
     /// ([D-247](../../docs/architecture/s13-decision-register.md#d-247)).
-    /// [`DbError::InvalidTimestamp`](crate::DbError::InvalidTimestamp) for a
+    /// [`DbError::InvalidTimestamp`] for a
     /// stamp that is not canonical, from the same normaliser every other read
     /// uses — a plan is inert and validates nothing, so this is where a
     /// malformed instant is noticed.

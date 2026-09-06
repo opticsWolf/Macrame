@@ -189,7 +189,7 @@ impl TraversalBuilder {
         self
     }
 
-    /// Take every read qualifier from one [`ReadPlan`] (0.15.9, W13.4,
+    /// Take every read qualifier from one [`ReadPlan`](crate::ReadPlan) (0.15.9, W13.4,
     /// [D-251]).
     ///
     /// Exactly [`Self::on_branch`], [`Self::as_of_valid`],
@@ -225,7 +225,7 @@ impl TraversalBuilder {
         self
     }
 
-    /// What this traversal's read qualifiers say, as a [`ReadPlan`].
+    /// What this traversal's read qualifiers say, as a [`ReadPlan`](crate::ReadPlan).
     ///
     /// The inverse of [`Self::plan`], and the reason the pair is worth having
     /// over a one-way setter: a caller can take the qualifiers off a traversal

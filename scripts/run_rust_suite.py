@@ -395,6 +395,40 @@ def run_docs(features: str) -> int:
     return 1
 
 
+def run_fuzz_check(_features: str) -> int:
+    """Compile the fuzz crate, which is a second workspace nothing else builds.
+
+    `fuzz/` is deliberately not a member of the crate's workspace, so
+    `cargo check --all-targets` at the root does not reach it and neither does
+    the suite. The only thing that ever compiled it was `ci.yml`'s `fuzz` job,
+    behind a nightly toolchain and a `cargo install cargo-fuzz` — far enough
+    down the run that a one-line breakage cost the whole job.
+
+    It broke exactly that way: D-255 put `#[non_exhaustive]` on
+    `NodeAttributes` and `MaterializedState`, `fuzz/src/bin/seed.rs` builds both
+    by struct expression, and a struct expression for a `#[non_exhaustive]`
+    type does not compile *outside the defining crate*. Every in-crate use kept
+    working, so every local gate stayed green through the release that broke it
+    and through the eight after it.
+
+    Stable, not nightly, and `check` rather than `build`: the three fuzz targets
+    check clean on stable, `cargo fuzz` is not needed to find a type error, and
+    the point is to notice in seconds what CI notices in minutes.
+    """
+    cmd = ["cargo", "check", "--all-targets"]
+    print(f"::group::{' '.join(cmd)}  (in fuzz/)")
+    proc = subprocess.run(cmd, cwd=REPO / "fuzz")
+    print("::endgroup::")
+    if proc.returncode == 0:
+        print("PASSED: the fuzz crate compiles against this tree")
+        return 0
+    print("::error::FUZZ: the fuzz crate no longer compiles against the crate. "
+          "It is a separate workspace and no other gate builds it, so this is "
+          "usually a public-API change the crate's own tests cannot see -- a "
+          "new `#[non_exhaustive]`, a moved item, a changed signature.")
+    return 1
+
+
 def verdict(state: str, detail: str) -> None:
     """Say, in one line a human will actually meet, what this run was.
 
@@ -458,6 +492,11 @@ def main() -> int:
         help="run ci.yml's rustdoc gate instead of the test suite; not retried",
     )
     parser.add_argument(
+        "--fuzz-check",
+        action="store_true",
+        help="compile the fuzz crate (its own workspace, built by nothing else)",
+    )
+    parser.add_argument(
         "--self-test",
         action="store_true",
         help="classify fixed fixtures and exit; runs no cargo, compiles nothing",
@@ -472,6 +511,9 @@ def main() -> int:
 
     if args.docs:
         return run_docs(args.features)
+
+    if args.fuzz_check:
+        return run_fuzz_check(args.features)
 
     cargo_args = ["--features", args.features] if args.features else []
     cargo_args += passthrough

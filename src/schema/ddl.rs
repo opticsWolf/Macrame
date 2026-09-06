@@ -748,7 +748,7 @@ pub fn create_embeddings_index(model: &crate::vector::ModelName) -> String {
 ///
 /// # Why this is a table and not a query
 ///
-/// The bit is [`crate::temporal::replay`]'s reach guard, and until v16 the
+/// The bit is `temporal::replay`'s reach guard, and until v16 the
 /// guard computed it: `MIN(seq_id) = 1 AND COUNT(*) = MAX(seq_id)`, exact
 /// because `seq_id` is `INTEGER PRIMARY KEY AUTOINCREMENT` and never reused.
 /// The `MIN` and `MAX` are index seeks; the `COUNT(*)` is a scan of the whole
@@ -806,7 +806,7 @@ pub const CREATE_LOG_INTEGRITY_TABLE: &str = r#"
 /// if and only if nothing has left, whatever the shape of what left: interior
 /// gaps, a raised floor, or every row at once.
 ///
-/// That last one is why this is not the test [`crate::temporal::replay`] used
+/// That last one is why this is not the test `temporal::replay` used
 /// before v16. `MIN(seq_id) = 1 AND COUNT(*) = MAX(seq_id)` is exact on a
 /// non-empty log and says *intact* on an empty one, which is right for a
 /// database that has never been written and wrong for one that has been fully
@@ -835,7 +835,8 @@ pub const SEED_LOG_INTEGRITY: &str = r#"
 /// Set the bit when a log row is physically deleted (v16, [D-249]).
 ///
 /// `AFTER DELETE`, so it fires only on a delete that happened —
-/// [`CREATE_TXLOG_GUARD_DELETE`]'s `BEFORE DELETE` aborts first when there is
+/// `trg_txlog_guard_delete`'s `BEFORE DELETE` ([`CREATE_TRIGGERS`]) aborts
+/// first when there is
 /// no archive session, and an aborted delete must not mark the log.
 ///
 /// It is `FOR EACH ROW` and it writes the same value every time, which looks

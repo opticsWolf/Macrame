@@ -320,6 +320,8 @@ The rest are what they say: the shadow swap recreates DDL from two named lists w
 
 **`dev/**` in CI's branch filter shipped as 0.15.20, [D-262](architecture/s13-decision-register.md#d-262)**, and was moved off this list because it stopped being convenience: it is the only reason §8's criterion 10 had no evidence to read. [D-234](architecture/s13-decision-register.md#d-234) had rejected the widening and prescribed a draft pull request per line instead, which is correct, cheaper, and was not done for this branch — so D-243 … D-261 shipped with no CI run at all. The trigger is widened; the two publishing workflows are untouched and cannot fire on a branch push.
 
+**The run that followed came back red in three jobs, and 0.15.21 is what it cost** ([D-263](architecture/s13-decision-register.md#d-263)). None of the three was a defect in the trigger change. The fuzz crate had not compiled since 0.15.13 — it is a second workspace no local gate reaches, and [D-255](architecture/s13-decision-register.md#d-255)'s `#[non_exhaustive]` sweep is refused only outside the defining crate. Nine rustdoc `-D warnings` errors had accumulated behind a local gate that exists and was being run the wrong way. And the Windows attempt budget was a number that had never met a Windows runner: 3/3 crashed with [D-147](architecture/s13-decision-register.md#d-147)'s R15 signature and zero named failures, where the local release gate has used eight since 0.12.0. All three are fixed and all three now have a gate that runs without anyone remembering to.
+
 ---
 
 ## 6. The 0.16.0 release itself
@@ -351,7 +353,9 @@ Merge to `main` after W16.2, tagged. `docs/releases/v0.16.0.md` written before t
 | 15 | 0.15.17 | W16.1 | ancestry in Rust; `reconstruct_on` (C-10) — **done** | `graph/{lineage,plan,builder}.rs`, `temporal/replay.rs`, `connection.rs`, `branch.rs`, `bindings/python` | `reconstruct_on_tests.rs` differential against `ReadPlan`; three probes; numbers in D-259 |
 | 15b | 0.15.18 | W16.1b | the concept caveat describes an unreachable state — **done** | — (doc-only) | `concept_lineage_probe.rs` (probe, not a test) |
 | 16 | 0.15.19 | W16.2 | hygiene batch, C-12 … C-22 — **done** | `schema/ddl.rs`, `integrity/shadow.rs`, `temporal/{archive,replay,snapshot}.rs`, `connection.rs`, `error.rs`, `vector/{registry,hybrid}.rs`, `bindings/python` | one register row per item; `cold_file_reach_probe.rs`, `abort_code_probe.rs`; `rehydrate_lineage_tests` (mutation-found), `snapshot_chain_tests`; numbers in D-261 |
-| 17 | 0.16.0 | — | release note before merge; merge; tag | `docs/releases/v0.16.0.md` | §8 |
+| 17 | 0.15.20 | — | `dev/**` in CI's branch filter, review C-23 — **done** | `.github/workflows/{ci,python}.yml` | D-262; criterion 10 becomes reachable |
+| 18 | 0.15.21 | — | the three things the first CI run found — **done** | `fuzz/src/bin/seed.rs`, `scripts/run_rust_suite.py`, `.github/workflows/ci.yml`, doc comments in `src/` | D-263; `--fuzz-check`; per-OS attempt budget |
+| 19 | 0.16.0 | — | release note before merge; merge; tag | `docs/releases/v0.16.0.md` | §8 |
 
 **The Release column is a projection for every row not marked *done*, and it has already been overtaken.** W14.1, W14.2 and W14.4 shipped as 0.15.3, 0.15.4 and 0.15.5 — the three numbers this table had pencilled in for W13.3, W13.4 and W13.5 — because the review's findings were ranked by value and taken in that order rather than in wave order. A done row carries the version it actually shipped as; the rest carry a place in a queue. Renumbering the tail each time something jumps it would make the column look authoritative when the only thing it records is order.
 
