@@ -1,0 +1,14 @@
+# D-229, symptom two: "a closed interval is history" is false of a shadow.
+#
+# A branch retires an edge it inherited by writing its own closed row at the
+# ancestor's key — the only cross-lineage retirement Doctrine III permits.
+# Archiving that row does not send history cold: it removes the branch's
+# disbelief and lets the ancestor's open row win the resolution again, so the
+# branch reaches a node it had stopped believing in. An operation that mints no
+# assertions changed an answer.
+#
+# The guard is the `NOT EXISTS (… other.branch_id <> links.branch_id)` arm of
+# the closed-interval clause. Remove it and this case fails.
+fork parent=main child=x
+retire key=0 branch=x
+archive

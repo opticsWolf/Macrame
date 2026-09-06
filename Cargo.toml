@@ -4,7 +4,7 @@
 # keeps the import path `use macrame::…` unchanged, so this is a registry name
 # and not a rename of the crate anyone writes against.
 name = "macrame-db"
-version = "0.15.25"
+version = "0.15.26"
 edition = "2021"
 # Measured, not declared: `cargo +1.88.0 check --all-features --all-targets`
 # passes and 1.85 does not.
@@ -261,6 +261,14 @@ required-features = ["property-tests"]
 
 [[test]]
 name = "graph_property_tests"
+required-features = ["property-tests"]
+
+# The generated half of the lineage properties (0.15.26, D-268). Its blocking
+# half, `lineage_replay_tests`, is deliberately *not* here: it replays committed
+# case files, needs no generation, and would gate nothing from inside the
+# quarantine.
+[[test]]
+name = "lineage_property_tests"
 required-features = ["property-tests"]
 
 # §9's budgets, measured (D-055). Not a CI gate — see the note at the top of the

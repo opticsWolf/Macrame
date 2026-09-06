@@ -1,0 +1,25 @@
+# D-269, and the first thing the generator found on a clean tree.
+#
+# Written by `lineage_property_tests.rs` and promoted by hand — the history
+# below is verbatim what the shrinker produced, the comment is not.
+#
+# `x` forks. The trunk then restates edges it already holds, at the same keys
+# and the same intervals, which is what an idempotent importer does on every
+# run. One ordinary `archive` follows. Every restated log entry is superseded on
+# its own lineage, so `LOG_ARCHIVABLE` took it — and `x` reads its ancestors
+# through `recorded_at <= forked_at`, so the entry it was pinned to is the one
+# that went cold. The branch loses `a → b` while the trunk keeps it.
+#
+# **No branch writes anything anywhere in this history.** That is what makes it
+# a different finding from D-229 rather than another spelling of it: D-229
+# needed a lineage disagreeing at a shared key, and this needs only a lineage
+# that existed while somebody wrote twice.
+#
+# The clause that fixes it is the `NOT EXISTS (… branches.forked_at …)` guard on
+# `LOG_ARCHIVABLE` in `src/temporal/archive.rs`. Remove it and this case fails.
+fork parent=main child=x
+assert key=1 branch=main closed=0
+assert key=0 branch=main closed=0
+assert key=0 branch=main closed=0
+assert key=0 branch=main closed=0
+archive

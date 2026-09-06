@@ -1,0 +1,24 @@
+# D-269, the second shape, and the one that only exists because of the first
+# fix. Found by `lineage_property_tests.rs`; history verbatim, comment by hand.
+#
+# The trunk asserts `a → b` open. `x` forks. The trunk later restates the same
+# key with a *closed* interval — a retirement, in effect. (The `branch=y` line
+# is refused: `y` was never forked. It is left in because this is the history
+# the shrinker produced, and editing a case file to look tidier is how a case
+# stops reproducing what it was kept for.)
+#
+# The open row is now held hot: `x` forked between it and the closed one, which
+# is the first clause of D-269 doing its job. The closed-interval arm then took
+# the closed row, because no *other lineage* holds the key — and with the older
+# row still hot, the trunk's resolution fell back to it. The trunk believed the
+# edge again, restored by an operation that mints no assertions. That is D-229's
+# resurrection, reached through D-269's own repair.
+#
+# The clause that fixes it makes the closed-interval arm stand down when an
+# older row at this key on this lineage is itself pinned by a fork point.
+assert key=0 branch=main closed=0
+fork parent=main child=x
+assert key=1 branch=main closed=0
+assert key=0 branch=y closed=0
+assert key=0 branch=main closed=1
+archive

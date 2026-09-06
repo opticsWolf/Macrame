@@ -260,6 +260,12 @@ const LINKS_ARCHIVABLE: &str = r#"
               AND newer.valid_from  = links.valid_from
               AND newer.branch_id   = links.branch_id
               AND newer.recorded_at > links.recorded_at
+              AND NOT EXISTS (
+                    SELECT 1 FROM branches b
+                    WHERE b.forked_at IS NOT NULL
+                      AND b.forked_at >= links.recorded_at
+                      AND b.forked_at <  newer.recorded_at
+                  )
         )
         OR (valid_to <> '9999-12-31T23:59:59.999999Z' AND valid_to <= :cutoff
             AND NOT EXISTS (
@@ -269,6 +275,18 @@ const LINKS_ARCHIVABLE: &str = r#"
                   AND other.edge_type  = links.edge_type
                   AND other.valid_from = links.valid_from
                   AND other.branch_id <> links.branch_id
+            )
+            AND NOT EXISTS (
+                SELECT 1 FROM links older, branches b
+                WHERE older.source_id   = links.source_id
+                  AND older.target_id   = links.target_id
+                  AND older.edge_type   = links.edge_type
+                  AND older.valid_from  = links.valid_from
+                  AND older.branch_id   = links.branch_id
+                  AND older.recorded_at < links.recorded_at
+                  AND b.forked_at IS NOT NULL
+                  AND b.forked_at >= older.recorded_at
+                  AND b.forked_at <  links.recorded_at
             ))
     )
 "#;
@@ -294,6 +312,54 @@ const LINKS_ARCHIVABLE: &str = r#"
 /// carries one lineage. The clause is a no-op there by construction, not by
 /// accident.
 ///
+/// # The fork-point clause, added at 0.15.26 ([D-269])
+///
+/// [D-229] made supersession ask **whose** entry is newer. It did not ask
+/// **when**, and a fork point is a `recorded_at` that a descendant is pinned to:
+/// a branch reads its ancestors through `recorded_at <= branches.forked_at`, so
+/// it folds whichever entry was newest *at the moment it forked*, not whichever
+/// is newest now. Supersession on one lineage therefore says nothing about
+/// whether the superseded entry is still in use — a descendant that forked
+/// between the two writes is reading the older one, and it is the only reader
+/// that is.
+///
+/// Found by `lineage_property_tests.rs` on its first run against a clean tree,
+/// and it needs **no cross-lineage write anywhere in the history**: the trunk
+/// restates an edge it already holds, one ordinary `archive` runs, and the fork
+/// stops reaching a node the trunk still reaches. The branch did nothing except
+/// exist across a restatement. That is the consequence [D-229] refused for a
+/// retirement — *"a different, older belief"* — here degraded to no belief at
+/// all, and reached without anybody writing on a branch.
+///
+/// So a superseded entry stays hot while any lineage's fork point falls in
+/// `[entry.recorded_at, newer.recorded_at)`, the half-open interval whose
+/// readers are exactly the branches pinned to `entry`. Conservative in
+/// [D-229]'s sense and for its reasons: it asks about *any* branch rather than
+/// resolving which descend from `transaction_log.branch_id`, because this
+/// operation takes no branch parameter and `graph::lineage` cannot be reused by
+/// one that has none. Holding an entry nobody needs costs file size; releasing
+/// one somebody needs costs an answer. It clears itself exactly as
+/// [`LINKS_ARCHIVABLE`]'s closed-interval arm does: `archive_branch` removes the
+/// row from `branches`, and the next ordinary session takes what was held.
+///
+/// **This clause is the one that closes the finding, and which predicate that
+/// is was measured rather than reasoned.** The obvious guess is that the gap
+/// lives on [`LINKS_ARCHIVABLE`], since that is where [D-229] was. The first
+/// repair was written on that guess and **fixed nothing**: with the guard on
+/// `links` alone the ledger kept every row and the branch still lost the edge,
+/// because a forked read does not resolve through `links_current` and the only
+/// table the session had changed was `transaction_log`. So the order matters —
+/// the log side first, on evidence.
+///
+/// [`LINKS_ARCHIVABLE`] carries the same guard too, and for a different history
+/// rather than for symmetry: a *retirement* on the trunk after a fork reaches
+/// the links side, where a restatement does not. That clause then forced a
+/// third, on the closed-interval arm, because an older open row held hot lets
+/// the arm take the row that closed it and resurrect the retired belief —
+/// [D-229]'s own symptom, reached through this entry's repair. The generator
+/// found that one as well, on the run after the first fix.
+///
+/// [D-269]: ../../docs/architecture/s13-decision-register.md#d-269
 /// [D-229]: ../../docs/architecture/s13-decision-register.md#d-229
 const LOG_ARCHIVABLE: &str = r#"
     recorded_at < :cutoff AND EXISTS (
@@ -301,6 +367,12 @@ const LOG_ARCHIVABLE: &str = r#"
         WHERE newer.entity_id = transaction_log.entity_id
           AND newer.branch_id = transaction_log.branch_id
           AND newer.seq_id    > transaction_log.seq_id
+          AND NOT EXISTS (
+                SELECT 1 FROM branches b
+                WHERE b.forked_at IS NOT NULL
+                  AND b.forked_at >= transaction_log.recorded_at
+                  AND b.forked_at <  newer.recorded_at
+              )
     )
 "#;
 

@@ -291,27 +291,56 @@ async fn a_key_two_lineages_hold_keeps_its_closed_intervals_hot() {
 
     let report = db.archive(LATE).await.unwrap();
 
-    // One row does go cold, and it is not one of the two in question: retiring on
-    // the trunk wrote a new row and superseded the trunk's own open one, which is
-    // the supersession arm doing exactly its job on one lineage.
-    assert_eq!(report.links_archived, 1);
+    // **Nothing goes cold, and this number moved at 0.15.26** ([D-269]). It read
+    // 1 until then: retiring on the trunk superseded the trunk's own open row,
+    // and the supersession arm took it. That arm now asks *when* as well as
+    // whose, and `alt` forked between the open row and the retirement — so the
+    // open row is the one `alt`'s cutoff still points at, and taking it would
+    // have changed what a branch believes. The assertion below is the reason
+    // the number is allowed to move: the answers are what they were.
+    //
+    // [D-269]: ../docs/architecture/s13-decision-register.md#d-269
+    assert_eq!(report.links_archived, 0);
     assert_eq!(
         rows_at(&db, "b", "c").await,
-        [format!("alt {T1}"), format!("main {T1}")],
+        [
+            format!("alt {T1}"),
+            format!("main {T1}"),
+            format!("main {OPEN}")
+        ],
         "both closed rows stay hot: two lineages hold the key, so the \
-         closed-interval arm stands down for both"
+         closed-interval arm stands down for both. The trunk's open row is the \
+         third and is held for the other reason ([D-269]): `alt` forked after it \
+         and reads it still"
     );
     assert_eq!(reached_at(&db, None, T2).await, ["a", "b"]);
     assert_eq!(reached_at(&db, Some("alt"), T2).await, ["a", "b"]);
+    // At an instant inside the retired interval both lineages still believe the
+    // edge, which is the reading the held row is being held for.
+    assert_eq!(reached_at(&db, Some("alt"), EPOCH).await, ["a", "b", "c"]);
 
     db.close().await.unwrap();
 }
 
-/// A key only one lineage holds still sends its closed intervals cold.
+/// A key only one lineage holds still sends its closed intervals cold — and
+/// **"one lineage holds it" has to be true of the whole key**, not of one row
+/// of it ([D-269], 0.15.26).
 ///
 /// The arm the repair narrows is the one the cold file exists for, so the
-/// narrowing has to stop where shadowing stops. `a → b` is closed on the trunk
-/// and no branch has ever written at that key.
+/// narrowing has to stop where shadowing stops. That was D-229's sentence and
+/// it was half of one. Shadowing is not the only thing that pins a row: a fork
+/// point is a `recorded_at` a descendant reads its ancestors through, so a
+/// branch goes on believing the row that was newest when it forked. This
+/// fixture used to close the seed's own `a → b` — a key with a pre-fork row on
+/// it — and assert both later rows cold, which took `alt`'s inheritance with
+/// them and is the defect D-269 fixes.
+///
+/// So the key here is one that **did not exist when `alt` forked**. `a → c` is
+/// written and retired entirely after the fork, `alt` never writes at it and
+/// never inherited anything at it, and the archive behaves exactly as D-229
+/// said it should: both rows cold.
+///
+/// [D-269]: ../docs/architecture/s13-decision-register.md#d-269
 #[tokio::test]
 async fn a_key_one_lineage_holds_still_archives_its_closed_interval() {
     let h = TestHarness::new();
@@ -319,7 +348,18 @@ async fn a_key_one_lineage_holds_still_archives_its_closed_interval() {
     let alt = db.fork(id("alt"), BranchId::main()).await.unwrap();
     h.advance(STEP);
 
-    // The branch writes at a *different* key, so `a -> b` is the trunk's alone.
+    // Born after the fork: `alt` inherits nothing at this key, so nothing of
+    // `alt`'s resolves to either row below.
+    db.assert_edge(
+        EdgeAssertion::new("a", "c", "LEADSTO")
+            .valid_from(EPOCH)
+            .valid_to(OPEN),
+    )
+    .await
+    .unwrap();
+    h.advance(STEP);
+
+    // The branch writes at a *different* key, so `a -> c` is the trunk's alone.
     db.assert_edge(
         EdgeAssertion::new("b", "c", "LEADSTO")
             .valid_from(EPOCH)
@@ -331,7 +371,7 @@ async fn a_key_one_lineage_holds_still_archives_its_closed_interval() {
     .unwrap();
     h.advance(STEP);
 
-    db.retire_edge("a", "b", "LEADSTO", EPOCH, T1)
+    db.retire_edge("a", "c", "LEADSTO", EPOCH, T1)
         .await
         .unwrap();
     h.advance(STEP);
@@ -339,17 +379,119 @@ async fn a_key_one_lineage_holds_still_archives_its_closed_interval() {
     let report = db.archive(LATE).await.unwrap();
 
     // Two rows, and both belong in the cold file: the open row the retirement
-    // superseded, and the closed row the retirement wrote. Nobody's shadow.
+    // superseded, and the closed row the retirement wrote. Nobody's shadow and
+    // nobody's inheritance.
     assert_eq!(report.links_archived, 2);
     assert_eq!(
-        rows_at(&db, "a", "b").await,
+        rows_at(&db, "a", "c").await,
         [] as [String; 0],
-        "the trunk's closed `a -> b` is nobody's shadow and belongs in the cold file"
+        "the trunk's closed `a -> c` is nobody's shadow and belongs in the cold file"
     );
     assert_eq!(
         rows_at(&db, "b", "c").await.len(),
         2,
         "and the key two lineages do hold is untouched by this session"
+    );
+
+    db.close().await.unwrap();
+}
+
+/// **A fork pins the row its cutoff points at, with nobody writing on it.**
+///
+/// The case `lineage_property_tests.rs` found on its first run against a clean
+/// tree, minimised by hand ([D-269]). Every operation is on the trunk: `alt`
+/// forks, and then `a → b` is restated — the same key, the same interval, a new
+/// row, which is what an idempotent importer writes on every run. The old row is
+/// superseded *on its own lineage*, so D-229's clause had nothing to say, and
+/// one ordinary `archive` took it.
+///
+/// It is the only row `alt` can resolve `a → b` to. The trunk kept reaching `b`
+/// and the branch stopped, and no branch wrote anything anywhere in the history.
+/// That is what separates this from D-229, which needed two lineages disagreeing
+/// at a shared key: this needs one lineage agreeing with an older version of
+/// itself while somebody else is pinned to it.
+///
+/// [D-269]: ../docs/architecture/s13-decision-register.md#d-269
+#[tokio::test]
+async fn a_fork_keeps_believing_the_row_the_trunk_restated_over() {
+    let h = TestHarness::new();
+    let db = seed(&h).await;
+    let before = reached_at(&db, None, T2).await;
+
+    db.fork(id("alt"), BranchId::main()).await.unwrap();
+    h.advance(STEP);
+
+    // Idempotent restatement: same key, same interval, later `recorded_at`.
+    db.assert_edge(
+        EdgeAssertion::new("a", "b", "LEADSTO")
+            .valid_from(EPOCH)
+            .valid_to(OPEN),
+    )
+    .await
+    .unwrap();
+    h.advance(STEP);
+
+    assert_eq!(reached_at(&db, Some("alt"), T2).await, before);
+    let report = db.archive(LATE).await.unwrap();
+
+    assert_eq!(
+        reached_at(&db, Some("alt"), T2).await,
+        before,
+        "the branch believes what it believed; an archive is a move, not a \
+         retirement (report: {report:?})"
+    );
+    assert_eq!(
+        reached_at(&db, None, T2).await,
+        before,
+        "and the trunk, which was never at risk, is the control"
+    );
+
+    db.close().await.unwrap();
+}
+
+/// **And a held row must not resurrect the row that closed it** ([D-269]).
+///
+/// The second shape the generator found, and it exists only because of the
+/// first repair. `alt` forks after the seed wrote `a → b` open, so that open row
+/// is pinned and stays hot. The trunk then retires the edge, writing a closed
+/// row at the same key — and the closed-interval arm was willing to take it,
+/// because no *other lineage* holds the key. With the older row still hot, the
+/// trunk's resolution falls back to it: the edge the trunk had retired comes
+/// back, restored by an operation that mints no assertions.
+///
+/// That is exactly D-229's resurrection, reached through D-269's own repair,
+/// which is why the fix is two clauses and not one. Worth stating plainly: the
+/// first clause on its own is a regression, and only a generator that keeps
+/// checking after every op would have said so.
+///
+/// [D-269]: ../docs/architecture/s13-decision-register.md#d-269
+#[tokio::test]
+async fn the_row_a_fork_pins_does_not_resurrect_the_retirement_over_it() {
+    let h = TestHarness::new();
+    let db = seed(&h).await;
+
+    db.fork(id("alt"), BranchId::main()).await.unwrap();
+    h.advance(STEP);
+
+    db.retire_edge("a", "b", "LEADSTO", EPOCH, T1)
+        .await
+        .unwrap();
+    h.advance(STEP);
+
+    let before = reached_at(&db, None, T2).await;
+    assert_eq!(before, ["a"], "the trunk retired its way out of the graph");
+
+    let report = db.archive(LATE).await.unwrap();
+
+    assert_eq!(
+        reached_at(&db, None, T2).await,
+        before,
+        "the retirement stands: archiving the closed row would let the open row          the fork pinned win again (report: {report:?})"
+    );
+    assert_eq!(
+        reached_at(&db, Some("alt"), T2).await,
+        ["a", "b", "c"],
+        "and `alt`, which forked before the retirement, never stopped believing it"
     );
 
     db.close().await.unwrap();

@@ -1,0 +1,13 @@
+# D-229, symptom one: supersession matched across lineages.
+#
+# `LINKS_ARCHIVABLE` asked for "a later assertion for the same interval key"
+# without asking whose, so a branch asserting at an ancestor's key made the
+# ancestor's own open, current row look superseded — and one ordinary `archive`
+# then took it. Measured at 0.14.12: the trunk stops reaching `b`.
+#
+# The clause that fixes it is `newer.branch_id = links.branch_id` in
+# `src/temporal/archive.rs`. Remove it and this case fails; that is the
+# mutation D-268 records.
+fork parent=main child=x
+assert key=0 branch=x closed=0
+archive
