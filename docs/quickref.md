@@ -1,6 +1,6 @@
 # Macrame — Architecture Quick Reference
 
-**v0.15.30 · A Bitemporal Graph Ledger on libSQL**
+**v0.16.0 · A Bitemporal Graph Ledger on libSQL**
 
 ---
 
