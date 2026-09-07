@@ -233,6 +233,52 @@ const REGISTRY: &[(&str, Justification)] = &[
     // `idx_links_target` above is **not** `idx_lc_tgt_active` readmitted — it is
     // on `links`, not `links_current`, and it has the named seeking query D-089
     // asks for. `ddl::CREATE_INDICES` states the distinction at length.
+    (
+        "idx_links_branch",
+        Query {
+            // Three of `archive_branch_session`'s five statements on this table
+            // — the copy to cold storage, the key collection, and the delete —
+            // and the shape is the same for all three, so one stands for them.
+            //
+            // **`AND branch_id <> 'main'` is load-bearing and is not a filter.**
+            // The index is partial over exactly that predicate, and SQLite uses
+            // a partial index only where the query's `WHERE` implies the
+            // index's; `branch_id = ?1` against a bound parameter implies
+            // nothing it can prove. Drop those four words from the query and
+            // this entry goes red with `SCAN links`, which is what it is for.
+            label: "the archive's lineage predicate on the links ledger",
+            sql: "SELECT source_id, target_id, edge_type, valid_from, recorded_at, \
+                  valid_to, weight, properties, branch_id \
+                  FROM links WHERE branch_id = ?1 AND branch_id <> 'main'",
+            source: Some((
+                include_str!("../src/temporal/archive.rs"),
+                // The delete rather than the copy: the copy's clause is a
+                // suffix of this one, so a fragment taken from it would go on
+                // matching after the copy lost its predicate.
+                "DELETE FROM links WHERE branch_id = :branch AND branch_id <> '{main}'",
+            )),
+        },
+    ),
+    (
+        "idx_txlog_branch",
+        Query {
+            // The other two, on the larger table: the log is roughly twice
+            // `links` and is the larger of the two scans this pair removes,
+            // which is why indexing `links` alone moved 22.0 ms to 18.2 and
+            // indexing the log alone moved it to 11.9 (D-273).
+            label: "the archive's lineage predicate on the transaction log",
+            sql: "SELECT seq_id, table_name, entity_id, operation, payload, recorded_at, \
+                  branch_id FROM transaction_log \
+                  WHERE branch_id = ?1 AND branch_id <> 'main'",
+            source: Some((
+                include_str!("../src/temporal/archive.rs"),
+                // Kept to one source line for the reason the entry above gives,
+                // and because `include_str!` sees the file's own `\` line
+                // continuations, which no flattening removes.
+                "DELETE FROM transaction_log WHERE branch_id = :branch AND branch_id <> '{main}'",
+            )),
+        },
+    ),
 ];
 
 /// Every declared index appears in the registry, and nothing else does.
@@ -294,6 +340,126 @@ async fn every_justified_index_is_the_one_the_planner_picks_with_statistics() {
             plan.contains(name),
             "{label}: expected {name} on a populated, analysed database — \
              planner chose: {plan}"
+        );
+    }
+}
+
+/// **The archive seeks the lineage it is archiving, on both tables** (0.15.30,
+/// [D-273]).
+///
+/// The registry two entries up asserts that each partial index is the one its
+/// query gets. This asserts the other half — that the statements
+/// `archive_branch_session` actually runs are the ones that can reach it — by
+/// planning all five against a database that **has a branch with rows in it**,
+/// which `populated_and_analysed` does not.
+///
+/// That fixture matters more here than usual. A partial index over
+/// `branch_id <> 'main'` is *empty* on a ledger with no branches, and an empty
+/// index is attractive to any planner; a pin held there would pass whatever the
+/// query said. With four live lineages, `sqlite_stat1` records the index as it
+/// will actually be — eighty rows in four keys — and the choice is a real one.
+///
+/// **The two the archive must not seek on are asserted too.** `archive_session`
+/// archives by cutoff across *every* lineage including the trunk, so the same
+/// predicate there would silently stop archiving most of the ledger. Its two
+/// statements are planned beside these and must keep the plans they had.
+///
+/// Verified by injection: removing `AND branch_id <> 'main'` from any one of the
+/// five turns this red with `SCAN` in the message.
+///
+/// [D-273]: ../docs/architecture/s13-decision-register.md#d-273
+#[tokio::test]
+async fn the_archive_seeks_the_lineage() {
+    use macrame::branch::BranchId;
+    use macrame::graph::EdgeAssertion;
+    use macrame::{ConceptUpsert, Database};
+
+    let harness = TestHarness::new();
+    let db = Database::open(&harness.db_path).await.unwrap();
+    for i in 0..40 {
+        db.upsert_concept(
+            ConceptUpsert::new(format!("c{i:04}"), "c").valid_from("2020-01-01T00:00:00.000000Z"),
+        )
+        .await
+        .unwrap();
+    }
+    for h in 0..4 {
+        let branch = BranchId::new(format!("hold{h}")).unwrap();
+        db.fork(branch.clone(), BranchId::main()).await.unwrap();
+        db.bulk_import(
+            (1..=20)
+                .map(|i| {
+                    EdgeAssertion::new("c0000", format!("c{i:04}"), "ALT")
+                        .valid_from(format!("2026-02-01T00:00:00.{i:06}Z"))
+                        .on_branch(branch.clone())
+                })
+                .collect(),
+        )
+        .await
+        .unwrap();
+    }
+    db.analyze().await.unwrap();
+
+    let conn = db.read_conn();
+
+    let lineage_scoped = [
+        (
+            "copy links to cold",
+            "SELECT source_id, target_id, edge_type, valid_from, recorded_at, valid_to, \
+             weight, properties, branch_id \
+             FROM links WHERE branch_id = ?1 AND branch_id <> 'main'",
+            "idx_links_branch",
+        ),
+        (
+            "collect the archived keys",
+            "SELECT DISTINCT source_id, target_id, edge_type, valid_from, branch_id \
+             FROM links WHERE branch_id = ?1 AND branch_id <> 'main'",
+            "idx_links_branch",
+        ),
+        (
+            "delete the links",
+            "DELETE FROM links WHERE branch_id = ?1 AND branch_id <> 'main'",
+            "idx_links_branch",
+        ),
+        (
+            "copy the log to cold",
+            "SELECT seq_id, table_name, entity_id, operation, payload, recorded_at, branch_id \
+             FROM transaction_log WHERE branch_id = ?1 AND branch_id <> 'main'",
+            "idx_txlog_branch",
+        ),
+        (
+            "delete the log entries",
+            "DELETE FROM transaction_log WHERE branch_id = ?1 AND branch_id <> 'main'",
+            "idx_txlog_branch",
+        ),
+    ];
+
+    for (label, sql, index) in lineage_scoped {
+        let plan = plan_of(conn, sql).await;
+        assert!(
+            plan.contains(index) && plan.contains("branch_id=?"),
+            "{label}: the archive is not seeking the lineage, so it is reading a \
+             trunk-sized table for a lineage-sized answer — planner chose: {plan}"
+        );
+    }
+
+    // The cutoff path, which must not have moved. Neither statement names a
+    // lineage, so neither may reach either index.
+    for (label, sql) in [
+        (
+            "the cutoff copy",
+            "SELECT source_id, target_id FROM links WHERE recorded_at < ?1",
+        ),
+        (
+            "the cutoff log sweep",
+            "SELECT seq_id FROM transaction_log WHERE recorded_at < ?1",
+        ),
+    ] {
+        let plan = plan_of(conn, sql).await;
+        assert!(
+            !plan.contains("idx_links_branch") && !plan.contains("idx_txlog_branch"),
+            "{label} archives across every lineage including the trunk and must not \
+             be served by a partial index that excludes it — planner chose: {plan}"
         );
     }
 }

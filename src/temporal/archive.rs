@@ -1249,21 +1249,55 @@ async fn archive_branch_session(
     tx.execute(&format!("CREATE TABLE {ARCHIVE_SESSION_MARKER} (x)"), ())
         .await?;
 
+    // **`AND branch_id <> 'main'` on all five of the statements below is not
+    // redundant, however much it reads like it** (0.15.30, [D-273]).
+    //
+    // It is redundant as *logic* — `refuse_unarchivable_branch` refused the
+    // trunk three statements ago, so `branch_id = :branch` already cannot match
+    // a trunk row — and that is exactly why it can be written. It is there to
+    // reach `idx_links_branch` and `idx_txlog_branch`, which are **partial**
+    // indexes over the same predicate: SQLite uses one only where the query's
+    // `WHERE` implies the index's, and `branch_id = :branch` against a bound
+    // parameter implies nothing it can prove.
+    //
+    // What that buys is the whole of [D-273]: these statements stop scanning
+    // trunk-sized tables, so archiving a twenty-row lineage stops costing what
+    // the ledger costs — **22.0 ms to 12.0 ms at an 8,000-edge trunk** — while
+    // the indexes themselves
+    // hold only what lineages other than the trunk wrote and cost the write path
+    // nothing measurable. `the_archive_seeks_the_lineage` in
+    // `tests/index_plan_tests.rs` is what keeps these five texts and that DDL
+    // agreeing; delete the predicate from any one of them and it goes red with
+    // the scan in the message.
+    //
+    // **The cutoff path above must not have it.** `archive_session` archives
+    // across every lineage including the trunk, so the same predicate there
+    // would silently stop archiving most of the ledger. That is the reason this
+    // is written out five times rather than folded into a shared constant with
+    // the other archive's clauses.
+    //
+    // [D-273]: ../../docs/architecture/s13-decision-register.md#d-273
     let links_archived = tx
         .execute(
-            "INSERT OR IGNORE INTO cold.links
+            &format!(
+                "INSERT OR IGNORE INTO cold.links
                  (source_id, target_id, edge_type, valid_from, recorded_at,
                   valid_to, weight, properties, branch_id)
              SELECT source_id, target_id, edge_type, valid_from, recorded_at,
                     valid_to, weight, properties, branch_id
-             FROM links WHERE branch_id = :branch",
+             FROM links WHERE branch_id = :branch AND branch_id <> '{main}'",
+                main = crate::schema::ddl::MAIN_BRANCH
+            ),
             libsql::named_params! {":branch": branch},
         )
         .await? as usize;
 
     collect_archived_keys(
         &tx,
-        "branch_id = :branch",
+        &format!(
+            "branch_id = :branch AND branch_id <> '{main}'",
+            main = crate::schema::ddl::MAIN_BRANCH
+        ),
         libsql::named_params! {":branch": branch},
     )
     .await?;
@@ -1271,7 +1305,10 @@ async fn archive_branch_session(
     let links_deleted = delete_guarded(
         &tx,
         conn,
-        "DELETE FROM links WHERE branch_id = :branch",
+        &format!(
+            "DELETE FROM links WHERE branch_id = :branch AND branch_id <> '{main}'",
+            main = crate::schema::ddl::MAIN_BRANCH
+        ),
         libsql::named_params! {":branch": branch},
         "links",
     )
@@ -1303,10 +1340,14 @@ async fn archive_branch_session(
 
     let log_entries_archived = tx
         .execute(
-            "INSERT OR IGNORE INTO cold.transaction_log
+            &format!(
+                "INSERT OR IGNORE INTO cold.transaction_log
                  (seq_id, table_name, entity_id, operation, payload, recorded_at, branch_id)
              SELECT seq_id, table_name, entity_id, operation, payload, recorded_at, branch_id
-             FROM transaction_log WHERE branch_id = :branch",
+             FROM transaction_log WHERE branch_id = :branch \
+                 AND branch_id <> '{main}'",
+                main = crate::schema::ddl::MAIN_BRANCH
+            ),
             libsql::named_params! {":branch": branch},
         )
         .await? as usize;
@@ -1314,7 +1355,10 @@ async fn archive_branch_session(
     delete_guarded(
         &tx,
         conn,
-        "DELETE FROM transaction_log WHERE branch_id = :branch",
+        &format!(
+            "DELETE FROM transaction_log WHERE branch_id = :branch AND branch_id <> '{main}'",
+            main = crate::schema::ddl::MAIN_BRANCH
+        ),
         libsql::named_params! {":branch": branch},
         "transaction_log",
     )

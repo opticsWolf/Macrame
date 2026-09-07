@@ -13,7 +13,7 @@ use crate::schema::ddl::*;
 /// guarantee D-029 buys would be void on it while `user_version` insisted all
 /// was well. Reserving 1 as a value this build refuses by name is what makes
 /// "no legacy support" an enforced property instead of a README sentence.
-pub const SCHEMA_VERSION: u32 = 17;
+pub const SCHEMA_VERSION: u32 = 18;
 
 type StepFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
 
@@ -185,6 +185,15 @@ const STEPS: &[Step] = &[
         // v5 -> v6 and v10 -> v11 rungs stood on.
         suspends_foreign_keys: false,
         apply: |conn| Box::pin(add_lineage_cut_index(conn)),
+    },
+    Step {
+        from: 17,
+        to: 18,
+        name: "branch-partition-indices",
+        // Two `CREATE INDEX` statements, each on one table and referencing no
+        // other. Nothing to defer, exactly as on the rung above.
+        suspends_foreign_keys: false,
+        apply: |conn| Box::pin(add_branch_partition_indices(conn)),
     },
     Step {
         from: 16,
@@ -964,6 +973,30 @@ async fn add_lineage_cut_index(conn: &libsql::Connection) -> Result<()> {
 /// [D-254]: ../../docs/architecture/s13-decision-register.md#d-254
 async fn add_fold_partition_index(conn: &libsql::Connection) -> Result<()> {
     create_indices(conn, &["idx_txlog_fold_partition"]).await
+}
+
+/// v17 → v18: the archive gets the lineage it is archiving (0.15.30, W16.6,
+/// [D-273]).
+///
+/// Index-only and the cheapest kind of rung there is, on exactly the ground the
+/// rung above stands on: two `CREATE INDEX` statements inside the ladder's own
+/// transaction, no data movement and no shape change.
+///
+/// **The build is cheap in a way an ordinary index rung is not.** Both are
+/// partial — `WHERE branch_id <> 'main'` — so SQLite still reads each table once
+/// to decide what qualifies, but what it *writes* is only the rows lineages
+/// other than the trunk wrote. On the overwhelmingly common ledger, that is a
+/// handful of pages against a table of millions.
+///
+/// A rung rather than a line in `CREATE_INDICES` alone, for the reason
+/// [`add_fold_partition_index`] gives: `CREATE_INDICES` runs on the baseline, so
+/// a file created by an earlier build would never see these, and an archive that
+/// stops growing with the trunk on new databases only is not the improvement
+/// [D-273] describes.
+///
+/// [D-273]: ../../docs/architecture/s13-decision-register.md#d-273
+async fn add_branch_partition_indices(conn: &libsql::Connection) -> Result<()> {
+    create_indices(conn, &["idx_links_branch", "idx_txlog_branch"]).await
 }
 
 /// The v15 shape of `links`, pinned as text (0.14.15, [D-232]).

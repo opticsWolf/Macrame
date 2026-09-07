@@ -442,7 +442,7 @@ async fn plan_string(conn: &libsql::Connection, sql: &str) -> String {
 #[test]
 fn a_version_bump_must_bring_its_own_rung_test() {
     assert_eq!(
-        SCHEMA_VERSION, 17,
+        SCHEMA_VERSION, 18,
         "SCHEMA_VERSION moved. Add a test for the new rung — one that starts \
          from a database at the previous version and asserts what the rung is \
          *for*, not merely that `run` reached the top."
@@ -2225,6 +2225,122 @@ async fn a_v17_stamp_over_a_v16_index_set_is_refused_at_open() {
     let message = err.to_string();
     assert!(
         message.contains("idx_txlog_fold_partition"),
+        "the refusal does not name the missing index: {message}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// v17 → v18 — the archive gets the lineage it archives (0.15.30, W16.6, D-273)
+// ---------------------------------------------------------------------------
+
+/// The rung is what stops `archive_branch` reading the whole ledger to find
+/// twenty rows.
+///
+/// Index-only, so *what it is for* is a plan, exactly as on the two rungs
+/// above, and the fixture is built the same way: a real database wound back by
+/// `DROP INDEX` plus a stamp, which is what a v17 database is, because this
+/// rung changes nothing else.
+///
+/// Three assertions, and the third is the one that makes this rung different
+/// from an ordinary index.
+///
+/// 1. **Before**, both statements scan a trunk-sized table for a lineage-sized
+///    answer — `links` and `transaction_log`, six statements between them,
+///    which is why a twenty-row lineage cost 22.0 ms at an 8,000-edge trunk.
+/// 2. **After**, both seek. The indexes are **partial** (`WHERE branch_id <>
+///    'main'`), so this is not merely "the index exists": it is only reachable
+///    from a query that restates that predicate, and
+///    `archive_branch_session` is written to.
+/// 3. **The cutoff path must not move.** `archive_session` archives across
+///    every lineage *including* the trunk, so if either of its statements
+///    started using one of these indexes it would silently stop seeing most of
+///    the ledger. A partial index cannot be reached from a query that does not
+///    imply its predicate — this asserts that property rather than trusting it.
+#[tokio::test]
+async fn a_v17_database_climbs_to_v18_and_the_branch_archive_stops_scanning_the_trunk() {
+    // The two shapes, copied — the originals are inline in
+    // `archive_branch_session` and `EXPLAIN QUERY PLAN` cannot reach them.
+    // `index_plan_tests` bounds the same copies against their source with
+    // `include_str!` fragments, so a divergence is caught there.
+    const LINEAGE_LINKS: &str =
+        "DELETE FROM links WHERE branch_id = ?1 AND branch_id <> 'main'";
+    const LINEAGE_LOG: &str =
+        "DELETE FROM transaction_log WHERE branch_id = ?1 AND branch_id <> 'main'";
+
+    let harness = TestHarness::new();
+    let conn = connect(&harness).await;
+    macrame::schema::run_migrations(&conn).await.unwrap();
+
+    for index in ["idx_links_branch", "idx_txlog_branch"] {
+        conn.execute(&format!("DROP INDEX {index}"), ()).await.unwrap();
+    }
+    conn.execute("PRAGMA user_version = 17", ()).await.unwrap();
+
+    for (label, sql) in [("links", LINEAGE_LINKS), ("the log", LINEAGE_LOG)] {
+        let before = plan_string(&conn, sql).await;
+        assert!(
+            before.contains("SCAN"),
+            "the fixture is not starting from the v17 plan — expected the \
+             archive to scan {label} for one lineage, got: {before}"
+        );
+    }
+
+    macrame::schema::run_migrations(&conn).await.unwrap();
+    assert_eq!(user_version(&conn).await, SCHEMA_VERSION);
+
+    for (sql, index) in [
+        (LINEAGE_LINKS, "idx_links_branch"),
+        (LINEAGE_LOG, "idx_txlog_branch"),
+    ] {
+        let after = plan_string(&conn, sql).await;
+        assert!(
+            after.contains(index) && after.contains("branch_id=?"),
+            "the rung created {index} and the archive did not take it — an \
+             index nothing seeks on is D-089's failure, not a schema change: \
+             {after}"
+        );
+    }
+
+    // The half the rung could take away by accident.
+    for (label, sql) in [
+        (
+            "the cutoff's links sweep",
+            "SELECT source_id FROM links WHERE recorded_at < ?1",
+        ),
+        (
+            "the cutoff's log sweep",
+            "SELECT seq_id FROM transaction_log WHERE recorded_at < ?1",
+        ),
+    ] {
+        let plan = plan_string(&conn, sql).await;
+        assert!(
+            !plan.contains("idx_links_branch") && !plan.contains("idx_txlog_branch"),
+            "{label} archives every lineage including the trunk, and a partial \
+             index that excludes the trunk cannot answer it: {plan}"
+        );
+    }
+}
+
+/// A v18 stamp over a database that never ran the rung is refused at open.
+///
+/// The counterpart of `a_v17_stamp_over_a_v16_index_set_is_refused_at_open`,
+/// and pinned for the same reason: a mis-stamped database should be a sentence
+/// at open time rather than an archive that quietly reads the whole ledger with
+/// nothing to say about it.
+#[tokio::test]
+async fn a_v18_stamp_over_a_v17_index_set_is_refused_at_open() {
+    let harness = TestHarness::new();
+    let conn = connect(&harness).await;
+    macrame::schema::run_migrations(&conn).await.unwrap();
+
+    conn.execute("DROP INDEX idx_txlog_branch", ()).await.unwrap();
+
+    let err = macrame::schema::run_migrations(&conn)
+        .await
+        .expect_err("a v18 stamp over a missing index was accepted");
+    let message = err.to_string();
+    assert!(
+        message.contains("idx_txlog_branch"),
         "the refusal does not name the missing index: {message}"
     );
 }

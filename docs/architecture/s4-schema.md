@@ -145,6 +145,27 @@ CREATE TABLE links (
 -- traversing the table, and still does (D-150).
 CREATE INDEX idx_links_recorded_at ON links (recorded_at);
 CREATE INDEX idx_links_target      ON links (target_id);
+--
+-- The lineage index (0.15.30, W16.6, D-273, v17 -> v18). Six statements in
+-- archive_branch_session filter on `branch_id = ?` and nothing led with that
+-- column -- the primary key carries it last, by the argument above -- so
+-- archiving a twenty-row lineage scanned the whole ledger, and cost what the
+-- ledger cost: 9.5 ms at a 2,000-edge trunk against 22.0 ms at 8,000.
+--
+-- It is PARTIAL, and that is the whole design. The trunk is never archivable
+-- (refuse_unarchivable_branch refuses `main` first thing), so the rows every
+-- ordinary write adds do not belong in an index built for archival. What the
+-- index holds is what branches wrote -- eighty rows against a ledger's
+-- millions -- so a 200-edge batch costs 24.8 ms against the unindexed 24.9,
+-- and the file grows by 20 KB rather than the full form's 260 KB.
+--
+-- The price is that the archive's statements must restate the predicate: SQLite
+-- uses a partial index only where the query's WHERE implies the index's, and
+-- `branch_id = ?` against a bound parameter implies nothing. That price is also
+-- the safety: neither of this pair can be reached by any other reader of these
+-- tables, so adding them puts no new candidate in front of the fold (D-254) or
+-- the branched guard's log arm (D-272).
+CREATE INDEX idx_links_branch ON links (branch_id) WHERE branch_id <> 'main';
 
 -- Materialized current belief: the latest assertion per interval.
 -- Traversals read ONLY this table.
@@ -313,6 +334,19 @@ CREATE TABLE transaction_log (
 --   idx_txlog_time keeps the log's stamp aggregates and the reach guard's
 --     counts; it no longer serves the fold, and its registry entry in
 --     tests/index_plan_tests.rs says so.
+--
+--   idx_txlog_branch is the log's half of D-273's pair (0.15.30, v17 -> v18) --
+--     partial over the same predicate, for the same reason, and it is the
+--     larger half: the log is roughly twice `links`, so indexing `links` alone
+--     moved the archive 22.0 -> 18.2 ms and indexing the log alone moved it to
+--     11.9. Together, 12.0. See the note beside idx_links_branch above.
+--
+--     What the pair does NOT close is the foreign-key child search: branch_id
+--     on all four ledger tables REFERENCES branches(branch_id), so
+--     `DELETE FROM branches` makes SQLite look for children in each of them,
+--     and that search is SQLite's own text -- no predicate, so no partial index
+--     can serve it. Full indexes would (7.2 ms, and flat in the trunk) and cost
+--     10-15% of every write forever; refused, and named here instead.
 --   idx_txlog_entity keeps the archive's supersession probe. The AtTime
 --     hydration above moved to the new index and gained nothing by it: that
 --     fold partitions on entity_id alone, so branch_id sits between its

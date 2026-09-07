@@ -1840,6 +1840,28 @@ fn exempt_kinds(c: &mut Criterion) {
     // that would open it. Sub-linear because a fixed component dominates at
     // these sizes: roughly 2.2 ms flat plus ~4.2 ms per 2,000 trunk rows.
     //
+    //
+    // **The separate decision was taken, and the answer was yes in a form this
+    // comment did not consider** (0.15.30, [D-273]). Not an index *leading*
+    // with `branch_id` in the sense priced above — a **partial** one,
+    // `WHERE branch_id <> 'main'`, on `links` and on `transaction_log`. The
+    // trunk is never archivable, so the rows that dominate both tables and that
+    // every ordinary write adds do not belong in it, and the write cost the
+    // question was about turns out not to exist: a 200-edge batch costs 24.8 ms
+    // against the unindexed 24.9, and the file grows by 20 KB. This arm's own
+    // figure goes **22.0 ms to 12.0 ms** at an 8,000-edge trunk.
+    //
+    // **The falsified expectation is only three quarters repaired, and the
+    // remaining quarter is named.** What still tracks the trunk is the
+    // foreign-key child search `DELETE FROM branches` performs on all four
+    // ledger tables — SQLite's own text, carrying no predicate, so no partial
+    // index can serve it. Full indexes close it (7.2 ms, flat) for 10-15% of
+    // every write in the crate, which is the trade D-273 declined. So this arm
+    // should still be expected to grow with the trunk, less steeply than the
+    // row above records, and the growth that remains is one scan rather than
+    // six statements.
+    //
+    // [D-273]: ../docs/architecture/s13-decision-register.md#d-273
     // D-230's all-or-nothing chain is what makes the shape matter: there is no
     // smaller unit, so whatever this costs is paid in one hold.
     //

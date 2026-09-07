@@ -1328,6 +1328,101 @@ pub const CREATE_INDICES: &[&str] = &[
     // concluded the index was worth having and was paying to construct a
     // throwaway copy per statement.
     "CREATE INDEX IF NOT EXISTS idx_links_target ON links (target_id);",
+    // The lineage's own rows, and only the lineage's (0.15.30, W16.6, [D-273],
+    // shipped v17 -> v18).
+    //
+    // Six statements in `archive_branch_session` filter on `branch_id = ?` and
+    // nothing led with that column, so each of them scanned a trunk-sized
+    // table: `links`' primary key carries `branch_id` last (D-232) and
+    // `idx_txlog_fold_partition` carries it third. A twenty-row lineage
+    // therefore cost what the whole ledger cost, and grew with it — **9.5 ms at
+    // a 2,000-edge trunk against 22.0 ms at 8,000**, on the same twenty rows,
+    // which is D-271's falsified expectation restated as a plan.
+    //
+    // Measured (`examples/branch_archive_index_probe.rs`, 8,000-edge trunk,
+    // analysed, best of five, through `Database::archive_branch`):
+    //
+    //   none (v17)                      22.0 ms
+    //   links (branch_id)               18.2
+    //   transaction_log (branch_id)     11.9
+    //   both                             6.8
+    //   what shipped (both, partial)    12.0
+    //
+    // **Neither table alone is enough.** The log is twice the size of `links`
+    // and is the larger of the two scans, which is why indexing `links` by
+    // itself moves so little.
+    //
+    // # `WHERE branch_id <> 'main'` is what makes these free
+    //
+    // The trunk is never archivable — `refuse_unarchivable_branch` refuses it in
+    // its first three lines, because every lineage's parent chain ends there —
+    // so the rows that dominate both tables, and that every ordinary assertion
+    // adds to, do not belong in an index built for archival. Against the full
+    // form on the same fixture: **the same plans on both tables, before and
+    // after `ANALYZE`**; a 200-edge batch at 24.8 ms against the unindexed
+    // 24.9, where the full form costs 27.3; and **+20 KB on disk against
+    // +260 KB**. An index that holds eighty rows out of a ledger's millions is
+    // not a write cost anybody has to argue about.
+    //
+    // **Its statistics also do not decay.** `ANALYZE` records the full index as
+    // `9144 1829` — average rows per key, dragged upward by a trunk that is most
+    // of the table, and heading for the ratio at which the planner declines it —
+    // against the partial index's `80 20`, which describes branches and stays
+    // true however large the trunk grows. A full index here would get *less*
+    // likely to be used as the problem it solves got worse.
+    //
+    // **What the partial form does not close, and it is one thing.** The last
+    // row above is 12.0 against the full pair's 6.8, and adding *full* indexes
+    // on top of the shipped partial pair recovers exactly that difference —
+    // 7.2 ms, and flat in the trunk where 12.0 still grows (8.3 ms at a
+    // 2,000-edge trunk). What only a full index can serve is the **foreign-key
+    // child search**: `branch_id` on all four ledger tables is
+    // `REFERENCES branches(branch_id)`, so `DELETE FROM branches` makes SQLite
+    // look for children in each of them, and that search is SQLite's own text —
+    // it carries no predicate, so no partial index can be reached from it, and
+    // it has no `EXPLAIN QUERY PLAN` output to pin. Buying it costs the 10–15%
+    // above on every write forever, for an operation run by hand, so it is left
+    // open and named rather than paid for. Three quarters of the repair for
+    // nothing; the last quarter priced.
+    //
+    // **The price is that the five statements have to restate the invariant.**
+    // SQLite uses a partial index only where the query's `WHERE` *implies* the
+    // index's, and `branch_id = ?` against a bound parameter implies nothing —
+    // so `archive_branch_session` says `AND branch_id <> 'main'` explicitly.
+    // `the_archive_seeks_the_lineage` in `tests/index_plan_tests.rs` is what
+    // keeps those two texts agreeing.
+    //
+    // **And that price is the strongest thing about this shape.** A partial
+    // index cannot be chosen by a query that does not carry the predicate, so
+    // neither of these can be reached by the fold ([D-254]), by the branched
+    // guard's log arm ([D-272], which had to be nailed down with `CROSS JOIN`
+    // four days ago), or by anything else that reads these two tables. Adding a
+    // *full* index on the log would have put a new candidate in front of every
+    // one of them. This is an index that can only be used on purpose.
+    //
+    // **Not `concepts (branch_id)` and not `links_current (branch_id)`.** They
+    // were measured with these two: together they move 6.8 ms to 6.5. The first
+    // is the shape the planner declines and is right to — a lineage that mints
+    // no concepts leaves one distinct key in `sqlite_stat1` and the plan reverts
+    // to a scan — and the second is [D-089]'s table, the crate's hottest write
+    // path, for 0.3 ms of an operation that runs by hand.
+    //
+    // [D-089]: ../../docs/architecture/s13-decision-register.md#d-089
+    // [D-254]: ../../docs/architecture/s13-decision-register.md#d-254
+    // [D-272]: ../../docs/architecture/s13-decision-register.md#d-272
+    // [D-273]: ../../docs/architecture/s13-decision-register.md#d-273
+    concat!(
+        "CREATE INDEX IF NOT EXISTS idx_links_branch ON links (branch_id) \
+         WHERE branch_id <> '",
+        main_branch!(),
+        "';"
+    ),
+    concat!(
+        "CREATE INDEX IF NOT EXISTS idx_txlog_branch ON transaction_log (branch_id) \
+         WHERE branch_id <> '",
+        main_branch!(),
+        "';"
+    ),
 ];
 
 /// Every trigger the schema declares.

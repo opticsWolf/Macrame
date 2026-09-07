@@ -379,6 +379,49 @@ SEARCH lc USING COVERING INDEX idx_lc_lineage_cut (branch_id=?)
 
 **Rejected.** `INDEXED BY idx_txlog_entity` measures identically and was refused: it writes an index name into generated SQL, makes that index undroppable, and is a hard error rather than a slow plan if it ever stops applying. `churned AS MATERIALIZED` helps and is not the fix — 0.16 ms/row against `CROSS JOIN`'s 0.012 at a 2,000-edge trunk, and 0.56 against 0.016 at 8,000 — so 0.15.8's refusal of it stands, now for a second reason and against a schema that has changed underneath it.
 
+#### The archive's other half of D-271, which is an index that costs nothing because it skips the trunk
+
+**Shipped as 0.15.30, [D-273](architecture/s13-decision-register.md#d-273).** The second finding [D-271](architecture/s13-decision-register.md#d-271) recorded and deferred, and the one it deferred by name: *"whether an index leading with `branch_id` earns its write cost is a decision with its own measurement and is not taken here; this row is the evidence that would open it."* This is that measurement, and the answer turns on a form of the index D-271 did not consider.
+
+**The symptom.** `archive_branch` on a twenty-row lineage costs what the **trunk** costs. Measured through the public call on an analysed database: **9.5 ms at a 2,000-edge trunk and 22.0 ms at 8,000** — 2.3x for 4x the trunk, reproducing the bench arm's 2.2x — while the thing being archived is the same twenty rows either way. [D-230](architecture/s13-decision-register.md#d-230)'s chain is what makes it matter: the links, the log entries and the `branches` row leave in one hold or the ledger disagrees with itself, so there is no smaller unit and the whole of that figure is time nothing else can write.
+
+**Why.** Six statements filter on `branch_id = ?` and no index on either table leads with that column, so each one scans a trunk-sized table. `examples/branch_archive_index_probe.rs` plans all six and times the operation against five index sets.
+
+**Neither table alone is enough, and the two together are the whole of it.** At an 8,000-edge trunk, analysed, best of five:
+
+| index set | archive | file | one 200-edge batch |
+|---|---|---|---|
+| none — today | 22.0 ms | 19.63 MB | 24.9 ms |
+| `links (branch_id)` | 18.2 ms | 19.80 MB | 25.4 ms |
+| `transaction_log (branch_id)` | 11.9 ms | 20.10 MB | 26.2 ms |
+| both | **6.8 ms** | 19.90 MB | 27.3 ms |
+| both + `concepts` + `links_current` | 6.5 ms | 20.23 MB | 28.0 ms |
+
+The log is twice the size of `links` and is the larger of the two scans, which is why indexing `links` alone buys so little. The fourth row is the answer to the question as asked: **3.3x, and flat rather than growing** — 6.3 ms at 2,000 against 6.8 at 8,000, where the unindexed figure more than doubles across the same step. The fifth row is refused: `concepts (branch_id)` is the shape the planner declines *correctly* — no lineage mints concepts in this fixture, `sqlite_stat1` records one distinct key, and it reverts to a scan — and `links_current` is the crate's hottest write path, which is [D-089](architecture/s13-decision-register.md#d-089)'s exact lesson. Together the two of them move 6.8 ms to 6.5.
+
+**But the fourth row's write cost is real.** Two full indexes cost **10–15% on every bulk batch** and about 260 KB on a 20 MB file, and every ordinary assertion pays it forever so that an operation run by hand is fast. That is [D-089](architecture/s13-decision-register.md#d-089)'s question, and the answer here is no.
+
+**The trunk is never archivable, so its rows need not be in the index at all.** `refuse_unarchivable_branch` refuses `main` in its first three lines, because every lineage's parent chain ends there. So:
+
+```sql
+CREATE INDEX idx_links_branch ON links (branch_id) WHERE branch_id <> 'main';
+CREATE INDEX idx_txlog_branch ON transaction_log (branch_id) WHERE branch_id <> 'main';
+```
+
+A partial index holds only the rows a branch wrote — eighty against a ledger's millions. Measured against the full form on the same fixture: **the same plans on both tables, before and after `ANALYZE`**; a 200-edge batch at **24.8 ms against the unindexed 24.9**, which is no cost at all; and **+20 KB on disk against +260 KB**.
+
+**The price is that the statements have to restate the invariant.** SQLite uses a partial index only where the query's `WHERE` *implies* the index's, and `branch_id = ?1` against a bound parameter implies nothing — so the five lineage-scoped statements on these two tables gain `AND branch_id <> 'main'`, which is a restatement of something `refuse_unarchivable_branch` has already enforced by the time they run.
+
+**That price is also the strongest thing about this shape, twice over.** A partial index is **invisible to every query that does not carry the predicate** — so neither of these can be reached by the fold ([D-254](architecture/s13-decision-register.md#d-254)), by the branched guard's log arm ([D-272](architecture/s13-decision-register.md#d-272)), or by anything else that reads these two tables, where a full index on the log would have put a new candidate in front of all of them. And its **statistics do not decay**: `ANALYZE` records the full index as `9144 1829` — average rows per key, dragged upward by a trunk that is most of the table, and heading for the point where the planner declines it — against the partial index's `80 20`, which describes branches and stays true however large the trunk grows.
+
+**What it does not close, measured rather than assumed.** On the shipped tree, an 8,000-edge trunk, analysed: **22.0 ms → 12.0 ms**, and the growth is reduced rather than removed — 8.3 ms at a 2,000-edge trunk against 12.0 at 8,000, where v17 goes 9.5 to 22.0. Adding *full* indexes on top of the shipped partial pair takes it to **7.2 ms and flat**, and that difference is the whole of what remains: the **foreign-key child search**. `branch_id` on all four ledger tables is `REFERENCES branches(branch_id)`, so `DELETE FROM branches` makes SQLite look for children in each of them, and that search is generated by SQLite rather than written here — it carries no predicate, cannot reach a partial index, and has no `EXPLAIN QUERY PLAN` output to pin. Closing it costs the 10–15% this item exists to avoid, which is why it stays open and named instead: three quarters of the fix for nothing, and the last quarter priced.
+
+**Schema v17 → v18**, an index-only rung of the same shape as v16 → v17: two `CREATE INDEX` statements inside the ladder's transaction, no data movement, nothing backfilled. A line in `CREATE_INDICES` alone would leave every existing database without it.
+
+**The gate is a plan pin.** `the_archive_seeks_the_lineage` asserts that each of the five statements binds `branch_id` on the named index, and that the cutoff path's statements — which archive across every lineage and must *not* carry the predicate — are unchanged. Verified by injection: removing the predicate from one statement turns it red with the scan in the message. No timing assertion ([D-055](architecture/s13-decision-register.md#d-055)).
+
+**Rejected.** Full indexes on both tables (they are flat where the partial pair is merely much better, and buy that last 4.8 ms with 10–15% of every write on the crate's hottest path, forever, for an operation run by hand — and their statistics decay as the trunk grows where the partial pair's do not). `concepts (branch_id)` and `links_current (branch_id)` (0.3 ms of 6.8, and one of them is D-089's table). A covering `links (branch_id, source_id, target_id, edge_type, valid_from)` (removes the key collection's `USE TEMP B-TREE FOR DISTINCT` and measures no faster end to end, for the widest index of the five). Rewriting the statements to drive off the collected key table instead (the log's copy and delete have no key set to drive from, which is the half that dominates).
+
 **`dev/**` in CI's branch filter shipped as 0.15.20, [D-262](architecture/s13-decision-register.md#d-262)**, and was moved off this list because it stopped being convenience: it is the only reason §8's criterion 10 had no evidence to read. [D-234](architecture/s13-decision-register.md#d-234) had rejected the widening and prescribed a draft pull request per line instead, which is correct, cheaper, and was not done for this branch — so D-243 … D-261 shipped with no CI run at all. The trigger is widened; the two publishing workflows are untouched and cannot fire on a branch push.
 
 **The run that followed came back red in three jobs, and 0.15.21 is what it cost** ([D-263](architecture/s13-decision-register.md#d-263)). None of the three was a defect in the trigger change. The fuzz crate had not compiled since 0.15.13 — it is a second workspace no local gate reaches, and [D-255](architecture/s13-decision-register.md#d-255)'s `#[non_exhaustive]` sweep is refused only outside the defining crate. Nine rustdoc `-D warnings` errors had accumulated behind a local gate that exists and was being run the wrong way. And the Windows attempt budget was a number that had never met a Windows runner: 3/3 crashed with [D-147](architecture/s13-decision-register.md#d-147)'s R15 signature and zero named failures, where the local release gate has used eight since 0.12.0. All three are fixed and all three now have a gate that runs without anyone remembering to.
@@ -417,7 +460,8 @@ Merge to `main` after W16.2, tagged. `docs/releases/v0.16.0.md` written before t
 | 17 | 0.15.20 | — | `dev/**` in CI's branch filter, review C-23 — **done** | `.github/workflows/{ci,python}.yml` | D-262; criterion 10 becomes reachable |
 | 18 | 0.15.21 | — | the three things the first CI run found — **done** | `fuzz/src/bin/seed.rs`, `scripts/run_rust_suite.py`, `.github/workflows/ci.yml`, doc comments in `src/` | D-263; `--fuzz-check`; per-OS attempt budget |
 | 19 | 0.15.29 | — | the branched log arm's join order, found by D-271 — **done** | `src/graph/lineage.rs` | `the_log_arm_is_driven_by_the_churned_set` verified by injection; `branch_write_guard_probe.rs`, `resolved_read_probe.rs`; numbers in D-272 |
-| 20 | 0.16.0 | — | release note before merge; merge | `docs/releases/v0.16.0.md`, `README.md`, `docs/quickref.md`, `docs/architecture/README.md` | §8 read as evidence in the note: seven met, two restated then met, the tenth met late |
+| 20 | 0.15.30 | — | schema **v18**: two partial `branch_id` indexes and the predicate that reaches them, D-271's other finding — **done** | `schema/{ddl,migrations}.rs`, `temporal/archive.rs`, `tests/index_plan_tests.rs` | rung tests; `the_archive_seeks_the_lineage` verified by injection; `branch_archive_index_probe.rs`; numbers in D-273 |
+| 21 | 0.16.0 | — | release note before merge; merge | `docs/releases/v0.16.0.md`, `README.md`, `docs/quickref.md`, `docs/architecture/README.md` | §8 read as evidence in the note: seven met, two restated then met, the tenth met late |
 
 **The Release column is a projection for every row not marked *done*, and it has already been overtaken.** W14.1, W14.2 and W14.4 shipped as 0.15.3, 0.15.4 and 0.15.5 — the three numbers this table had pencilled in for W13.3, W13.4 and W13.5 — because the review's findings were ranked by value and taken in that order rather than in wave order. A done row carries the version it actually shipped as; the rest carry a place in a queue. Renumbering the tail each time something jumps it would make the column look authoritative when the only thing it records is order.
 

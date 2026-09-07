@@ -5713,6 +5713,71 @@ Suites **753 → 754** Rust, **732 → 733** feature-off; Python unchanged at **
 
 Rejected: *`INDEXED BY idx_txlog_entity`* (measures identically — 0.0124 and 0.0163 ms/row — and was refused because it writes an index name into generated SQL, makes that index undroppable, and becomes a hard error rather than a slow plan if it ever stops applying); *`churned AS MATERIALIZED`* (0.158 and 0.565 ms/row: it fixes part of the constant and none of the growth, because a materialised `churned` is still the inner loop — 0.15.8's refusal of it stands, now for a second reason and against a schema that changed underneath it); *both together* (0.018 and 0.027, slower than the join order alone, and two mechanisms where one is enough); *dropping or narrowing `idx_txlog_fold_partition`* (it serves this arm better than what preceded it once entered correctly, and removing an index because a query entered it badly is [D-089](s13-decision-register.md#d-089) in reverse); *an index leading with `branch_id`* (D-271's other open question, about `archive_branch`, and not this one — it would not have helped here, where the missing bound was `entity_id`); *editing the 0.15.8 rustdoc in place* (Doctrine III: the superseded claim is pointed at, and what it says about the release that measured it is still true); *a timing assertion in the suite* ([D-055](s13-decision-register.md#d-055)); *repairing this inside 0.15.28* (the release that made costs visible should not also be the one that changed them — [D-271](s13-decision-register.md#d-271) said so and this entry is what that deferral bought: a separated cause, both shapes measured, and a gate).
 
+<a id="d-273"></a>D-273 — the archive stops reading the trunk to find a lineage, with two **partial** indexes that cost the write path nothing because they exclude the rows the write path adds (0.15.30, W16.6, schema **v17 → v18**, D-271's other open question). [D-036](s13-decision-register.md#d-036), [D-055](s13-decision-register.md#d-055), [D-089](s13-decision-register.md#d-089), [D-149](s13-decision-register.md#d-149), [D-151](s13-decision-register.md#d-151), [D-230](s13-decision-register.md#d-230), [D-231](s13-decision-register.md#d-231), [D-232](s13-decision-register.md#d-232), [D-245](s13-decision-register.md#d-245), [D-254](s13-decision-register.md#d-254), [D-271](s13-decision-register.md#d-271), [D-272](s13-decision-register.md#d-272). Evidence: `src/schema/{ddl,migrations}.rs`, `src/temporal/archive.rs`, `examples/branch_archive_index_probe.rs`, `tests/{index_plan_tests,migration_tests}.rs`, `tests/common/v11_schema.rs`, `benches/budgets.rs`.
+
+[D-271](s13-decision-register.md#d-271) found two things and repaired neither. [D-272](s13-decision-register.md#d-272) took the first. This is the second, and that entry deferred it by name: *"whether an index leading with `branch_id` earns its write cost is a decision with its own measurement and is not taken here; this row is the evidence that would open it."*
+
+# The question as asked has a yes and a no in it
+
+`archive_branch` on a twenty-row lineage costs what the **trunk** costs. Through the public call, on an analysed database, best of five: **9.5 ms at a 2,000-edge trunk and 22.0 ms at 8,000** — 2.3x for 4x the trunk, reproducing the bench arm's 2.2x, on the same twenty rows either way. [D-230](s13-decision-register.md#d-230)'s chain is what makes it matter rather than merely annoy: the links, the log entries and the `branches` row leave in one hold or the ledger disagrees with itself about what is currently believed, so there is no smaller unit and the whole of that figure is time during which nothing else can write.
+
+Six statements filter on `branch_id = ?` and nothing on either table leads with that column — `links`' primary key carries it last ([D-232](s13-decision-register.md#d-232)) and `idx_txlog_fold_partition` carries it third. `examples/branch_archive_index_probe.rs` plans all six and times the operation against each candidate index set on one fixture. At an 8,000-edge trunk, analysed:
+
+| index set | archive | file | one 200-edge batch |
+|---|---|---|---|
+| none — v17 | 22.0 ms | 19.63 MB | 24.9 ms |
+| `links (branch_id)` | 18.2 ms | 19.80 MB | 25.4 ms |
+| `transaction_log (branch_id)` | 11.9 ms | 20.10 MB | 26.2 ms |
+| both | **6.8 ms** | 19.90 MB | 27.3 ms |
+| both + `concepts` + `links_current` | 6.5 ms | 20.23 MB | 28.0 ms |
+
+**Neither table alone is enough.** The log is roughly twice the size of `links` and is the larger of the two scans, which is why indexing `links` by itself moves so little. The fourth row is flat in the trunk — 6.3 ms at 2,000 against 6.8 at 8,000 — and it is the answer to the question as D-271 posed it.
+
+The fifth row is refused on its own measurement: `concepts (branch_id)` is a shape the planner **declines and is right to**, because a lineage that mints no concepts leaves one distinct key in `sqlite_stat1` and the plan reverts to a scan, and `links_current` is the crate's hottest write path, which is [D-089](s13-decision-register.md#d-089)'s exact lesson. Between them, 0.3 ms.
+
+**And the fourth row's write cost is the reason the answer is not simply yes.** Two full indexes cost 10–15% on every bulk batch and 260 KB on a 20 MB file, paid by every assertion in the crate, forever, so that an operation run by hand is fast.
+
+# The form that has the benefit and not the cost
+
+**The trunk is never archivable.** `refuse_unarchivable_branch` refuses `main` in its first three lines, on the grounds that every lineage's parent chain ends there and every default `branch_id` names it. So the rows that dominate both tables — and that every ordinary write adds to — do not belong in an index built for archival:
+
+```sql
+CREATE INDEX idx_links_branch ON links (branch_id) WHERE branch_id <> 'main';
+CREATE INDEX idx_txlog_branch ON transaction_log (branch_id) WHERE branch_id <> 'main';
+```
+
+Measured against the full form on the same fixture: **the same plans on both tables, before and after `ANALYZE`**; a 200-edge batch at **24.8 ms against the unindexed 24.9**, which is no cost at all; **+20 KB on disk against +260 KB**.
+
+**The price is that five statements have to restate an invariant.** SQLite uses a partial index only where the query's `WHERE` *implies* the index's, and `branch_id = :branch` against a bound parameter implies nothing it can prove — so `archive_branch_session` says `AND branch_id <> 'main'` explicitly, three statements after the refusal that already guarantees it.
+
+**That price is the strongest thing about this shape, twice over.**
+
+A partial index is **invisible to every query that does not carry the predicate**. A full index on the log would be a new candidate in front of every reader of that table — the fold ([D-254](s13-decision-register.md#d-254)), the stamp aggregates, and the branched guard's log arm that [D-272](s13-decision-register.md#d-272) had to nail down with `CROSS JOIN` one release ago. Neither of these can be chosen by any of them. It is an index that can only be used on purpose, which is the opposite of the failure mode [D-089](s13-decision-register.md#d-089), [D-059](s13-decision-register.md#d-059) and D-254's own C-4 arm are all instances of.
+
+And **its statistics do not decay**. `ANALYZE` records the full index as `9144 1829` — average rows per key, dragged upward by a trunk that is most of the table, and heading toward the ratio at which the planner declines it — against the partial index's `80 20`, which describes branches and stays true however large the trunk grows. A full index here would become *less* likely to be used exactly as the problem it solves got worse. That is not a subtlety about this fixture; it is what `sqlite_stat1` is, and [D-149](s13-decision-register.md#d-149) is why it is the planner callers actually get.
+
+# What it does not close, measured rather than assumed
+
+On the shipped tree, an 8,000-edge trunk, analysed: **22.0 ms → 12.0 ms**, and the growth is reduced rather than removed — 8.3 ms at 2,000 against 12.0 at 8,000, where v17 goes 9.5 to 22.0.
+
+Adding *full* indexes on top of the shipped partial pair takes it to **7.2 ms and flat**, and that difference is the whole of what remains: the **foreign-key child search**. `branch_id` on all four ledger tables is `REFERENCES branches(branch_id)` and `PRAGMA foreign_keys` is `ON`, so `DELETE FROM branches` makes SQLite look for children in each of them. That search is generated by SQLite rather than written here — it carries no predicate, so no partial index can be reached from it, it has no `EXPLAIN QUERY PLAN` output to pin, and the only thing that serves it is a full index on all four tables. Closing it costs the 10–15% this entry exists to avoid, so it stays open and named: three quarters of the repair for nothing, and the last quarter priced.
+
+**The bench arm's falsified expectation is therefore answered and not retracted.** `archive_branch_small_lineage` still expects growth in the trunk; what changed is that the growth is one scan rather than six statements, and the comment recording the falsification now records the decision beside it rather than being edited into agreement (Doctrine III).
+
+# The rung and the gates
+
+**Schema v17 → v18**, index-only, `suspends_foreign_keys: false`, on exactly the ground [D-254](s13-decision-register.md#d-254)'s rung stood on: two `CREATE INDEX` statements inside the ladder's own transaction, no data movement, nothing backfilled. A line in `CREATE_INDICES` alone would leave every existing database without it — [D-231](s13-decision-register.md#d-231)'s reason — and `a_v18_stamp_over_a_v17_index_set_is_refused_at_open` makes a mis-stamped file a sentence at open time. The build is cheaper than an ordinary index rung's: SQLite reads each table once to decide what qualifies, and writes only what lineages other than the trunk wrote.
+
+**Three gates, and the third is the one this shape needs.** `the_archive_seeks_the_lineage` plans all five statements against a database with **four live lineages in it** — `populated_and_analysed` has none, and a partial index on a ledger with no branches is *empty*, which is attractive to any planner and would make the pin pass whatever the query said. `a_v17_database_climbs_to_v18_and_the_branch_archive_stops_scanning_the_trunk` holds the same claim across the rung. And both assert that the **cutoff path's** statements are unchanged: `archive_session` archives across every lineage including the trunk, so a partial index reaching those would silently stop archiving most of the ledger.
+
+Verified by injection, in both directions the copies can fail: dropping `AND branch_id <> 'main'` from the pinned query makes `the_archive_seeks_the_lineage` red with `SCAN links` in the message, and respelling it in `archive.rs` makes `every_reproduced_query_still_exists_in_its_source` red. Deleting it from the source outright does not compile, because the format argument goes unused — a fourth gate nobody wrote.
+
+**No timing assertion.** [D-055](s13-decision-register.md#d-055) stands: every number here is seen and not enforced.
+
+Suites **754 → 757** Rust, **733 → 736** feature-off; Python unchanged at **607** / 2 skipped; surface unchanged at **1,763**; schema **v17 → v18**.
+
+Rejected: *full indexes on both tables* (flat where the partial pair is merely much better, and they buy that last 4.8 ms with 10–15% of every write on the crate's hottest path, forever, for an operation run by hand — and their statistics decay as the trunk grows where the partial pair's do not); *`concepts (branch_id)` and `links_current (branch_id)`* (0.3 ms of 6.8 measured, and one of them is [D-089](s13-decision-register.md#d-089)'s table); *a covering `links (branch_id, source_id, target_id, edge_type, valid_from)`* (it removes the key collection's `USE TEMP B-TREE FOR DISTINCT` and measures no faster end to end, for the widest index of the five); *rewriting the archive to drive off the collected key table instead of the predicate* (the log's copy and delete have no key set to drive from, and they are the half that dominates); *dropping the foreign key so the child search goes away* ([D-230](s13-decision-register.md#d-230)'s chain is the reason the constraint exists); *editing the bench arm's falsified expectation into agreement* (Doctrine III — an expectation is evidence about what was believed); *a timing assertion in the suite* ([D-055](s13-decision-register.md#d-055)).
+
 [A-2]: ../Macrame%20Codebase%20Review%20v0.15.0.md
 [C-10]: ../Macrame%20Codebase%20Review%20v0.15.0.md
 

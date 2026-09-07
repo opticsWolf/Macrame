@@ -296,7 +296,10 @@ pub fn indices_v11() -> Vec<&'static str> {
         .iter()
         .copied()
         .filter(|sql| {
-            !sql.contains("idx_lc_lineage_cut") && !sql.contains("idx_txlog_fold_partition")
+            !sql.contains("idx_lc_lineage_cut")
+                && !sql.contains("idx_txlog_fold_partition")
+                && !sql.contains("idx_links_branch")
+                && !sql.contains("idx_txlog_branch")
         })
         .collect()
 }
@@ -368,6 +371,17 @@ pub async fn wind_back_to_v11(conn: &libsql::Connection) {
     conn.execute("DROP INDEX IF EXISTS idx_txlog_fold_partition", ())
         .await
         .unwrap();
+
+    // And v18's two, for the same reason and one more (0.15.30, W16.6, D-273):
+    // both name `branch_id` in their columns *and* in a partial `WHERE`, so
+    // `DROP COLUMN` refuses twice over. `idx_links_branch` is on the table
+    // rebuilt below rather than altered, so it would go anyway — dropping it
+    // here keeps the two halves of this pair in one place.
+    for index in ["idx_links_branch", "idx_txlog_branch"] {
+        conn.execute(&format!("DROP INDEX IF EXISTS {index}"), ())
+            .await
+            .unwrap();
+    }
 
     for table in ["concepts", "transaction_log"] {
         conn.execute(&format!("ALTER TABLE {table} DROP COLUMN branch_id"), ())
