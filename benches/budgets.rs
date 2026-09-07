@@ -1718,6 +1718,262 @@ fn fixture_matrix(c: &mut Criterion) {
     group.finish();
 }
 
+
+// ---------------------------------------------------------------------------
+// The budget-exempt kinds, priced (0.15.28, D-271, review A-5)
+// ---------------------------------------------------------------------------
+
+/// **What the operations nobody bounds actually cost, as the ledger grows.**
+///
+/// Seven `CommandKind`s are exempt from `CHUNK_BUDGET`
+/// (`CommandKind::exempt_from_budget`), which means no counter and no test will
+/// ever complain about how long they hold the write lock. Three of them were
+/// already priced here — `Archive` since D-245 (`archive_small_slice`),
+/// `Rehydrate` twice over (C-4), and `WriteBulkAtomic` through `bulk_chunks`.
+/// The other four had **no arm at all**, so their cost was not merely
+/// unbounded but unmeasured: `RebuildCurrent` had a fixed-size claim row in
+/// `integrity` and no scaling row, and `Checkpoint`, `ArchiveBranch` and
+/// `ShadowSwap` had nothing.
+///
+/// # Every arm states its expected shape, and that is the point
+///
+/// There is no baseline file here, so a number on its own says nothing across
+/// releases. What survives a machine change is the **shape**: whether the
+/// figure moves with `MACRAME_BENCH_SCALE` and how. Each arm below says which
+/// it expects and why, so a run at two scales falsifies the claim without
+/// anything to compare against — the same instrument `archive_small_slice`
+/// uses, where a flat number is the whole result.
+///
+/// # Not a gate
+///
+/// D-055 stands: these are seen, not enforced, and `perf_claim_tests` gains no
+/// assertion from this group. A threshold on a kind that is exempt *by
+/// contract* would re-impose in a test exactly the bound the exemption exists
+/// to lift. The report that makes these visible at runtime is
+/// `MetricsSnapshot::exempt_costs()`.
+fn exempt_kinds(c: &mut Criterion) {
+    use macrame::branch::BranchId;
+    use macrame::integrity::{ShadowOutcome, ShadowStep};
+
+    let rt = runtime();
+    let edges = 2_000 * scale();
+
+    let mut group = controlled_group(c, "exempt_kinds");
+    group.sample_size(10);
+    // **A short warm-up, because criterion's default one is priced in the wrong
+    // currency here.** Warm-up runs until three seconds of *timed routine* has
+    // accumulated, and it counts only the routine — an `iter_batched` setup is
+    // free as far as that budget is concerned. With a 12 ms archive that is
+    // some 250 warm-up iterations, each paying a full lineage setup, which is
+    // where this group's first wall-clock hour went. A hundred milliseconds is
+    // still several iterations of every arm here, and every arm here is
+    // milliseconds of real database work rather than nanoseconds of arithmetic,
+    // so there is no cold-cache effect for a longer warm-up to remove.
+    group.warm_up_time(std::time::Duration::from_millis(100));
+
+    // **Grows with the ledger, as expected, and two points cannot say how
+    // exactly. Measured 30.4 ms at 2,000 and 156.8 ms at 8,000** — 5.2x on a 4x
+    // fixture, where an earlier session gave 37.3 ms for the same 2,000 and the
+    // same 156.7 ms at 8,000, i.e. 4.2x. The control row was 1.51 µs in both, so
+    // the sessions are comparable and the spread is this arm's own: **wider than
+    // the difference between linear and mildly super-linear**, which is the
+    // honest limit of a two-point measurement under [D-070]'s ~29% noise. What
+    // it does establish is that the figure moves with the ledger and roughly in
+    // proportion. `rebuild_current` re-derives
+    // the whole projection; `integrity` prices it at one fixed size against
+    // §9's 500 ms claim, and this row is the same operation asked whether it
+    // grows the way that claim assumes. It does, which is what makes the 500 ms
+    // figure extrapolable rather than a single point. Largest recorded hold of
+    // any exempt kind outside `Archive` (318 ms at 40K rows, D-077).
+    let fx = rt.block_on(async {
+        let fx = fixture().await;
+        seed_concepts(&fx.db, edges + 1).await;
+        seed_edges(&fx.db, edges).await;
+        fx
+    });
+    group.bench_function(BenchmarkId::new("rebuild_current", edges), |b| {
+        b.to_async(&rt)
+            .iter(|| async { fx.db.rebuild_current().await.unwrap() })
+    });
+
+    // **Flat in the ledger, as expected. Measured 1.52 ms at 2,000 and 1.52 ms
+    // at 8,000** — unchanged on a 4x fixture, and the only exempt
+    // kind here that fits inside `CHUNK_BUDGET`. A checkpoint moves the
+    // write-ahead log into the main file, so it is priced by what has been
+    // written *since the last one* rather than by how much the database holds.
+    // The fixture is deliberately the large one above with one small write in
+    // front of each iteration: a figure that grew with the scale would mean the
+    // checkpoint was paying for the ledger instead of for the delta.
+    group.bench_function(BenchmarkId::new("checkpoint_after_one_write", edges), |b| {
+        b.to_async(&rt).iter(|| async {
+            fx.db
+                .upsert_concept(concept_upsert_for_checkpoint())
+                .await
+                .unwrap();
+            fx.db.checkpoint().await.unwrap()
+        })
+    });
+
+    // **This arm expected flat and measured 10.7 ms at 2,000 against 23.4 ms
+    // at 8,000 — 2.2x on a 4x trunk. The expectation is wrong, and so is the
+    // sentence it came from** (0.15.28, D-271). The ratio is 2.2x whether the
+    // lineage holds 20 rows or 200, which is the finding stated twice: the cost
+    // tracks the *trunk*, not the thing being archived.
+    //
+    // `connection.rs` records `archive_branch` as "unmeasured; a function of
+    // how much one lineage wrote", and this arm was written to turn that
+    // sentence into a number: a fixed 200-row lineage on a trunk that grows,
+    // the same ratio `archive_small_slice` measures for `Archive`. It is also a
+    // function of how much the **trunk** holds, and the reason is in the
+    // schema rather than in the session. Every lineage-scoped statement here
+    // filters on `branch_id`, and **no index on either table leads with that
+    // column**: `links`' primary key carries it *last*
+    // (source, target, type, valid_from, recorded_at, branch_id — D-232), and
+    // `idx_txlog_fold_partition` carries it third. So the copy, the key
+    // collection, and both deletes each scan a trunk-sized table.
+    //
+    // D-245's keyed repair is not what is missing — `repair_archived_keys` does
+    // stop paying for the trunk, and the comment in `archive_branch_session`
+    // saying so is true of the repair and was read as true of the session.
+    // Whether an index leading with `branch_id` is worth its write cost is a
+    // separate decision with its own measurement, and this row is the evidence
+    // that would open it. Sub-linear because a fixed component dominates at
+    // these sizes: roughly 2.2 ms flat plus ~4.2 ms per 2,000 trunk rows.
+    //
+    // D-230's all-or-nothing chain is what makes the shape matter: there is no
+    // smaller unit, so whatever this costs is paid in one hold.
+    //
+    // **The trunk is seeded once and the setup only forks**, which is a
+    // correction rather than a tidy-up. The first version of this arm built the
+    // whole trunk inside `iter_batched`'s setup, so each of ten samples
+    // re-seeded `edges` concepts and `edges` links. The session takes the
+    // lineage's own rows and the `branches` row and leaves the trunk as it
+    // found it, so the database returns to its seeded state after every
+    // iteration and one trunk serves them all. That the fixture *can* be reused
+    // this way is the same property the arm is measuring.
+    //
+    // **[`LINEAGE_ROWS`] is 20 rather than the 200 this arm was first written
+    // with, and the reason is a defect this arm found in a path it does not
+    // measure** — see [`LINEAGE_ROWS`] for the numbers. Reusing the trunk did
+    // not make the setup cheap, because seeding was never what cost: writing
+    // the lineage was. Twenty rows measures the same operation on the same
+    // shape and is the difference between a run of minutes and a run of hours.
+    group.bench_function(BenchmarkId::new("archive_branch_small_lineage", edges), |b| {
+        b.iter_batched(
+            || {
+                rt.block_on(async {
+                    let branch = next_bench_branch();
+                    fx.db.fork(branch.clone(), BranchId::main()).await.unwrap();
+                    let batch: Vec<_> = (1..=LINEAGE_ROWS)
+                        .map(|i| {
+                            EdgeAssertion::new("c0000000", format!("c{i:07}"), "ALT")
+                                .valid_from(TS)
+                                .on_branch(branch.clone())
+                        })
+                        .collect();
+                    fx.db.bulk_import(batch).await.unwrap();
+                    branch
+                })
+            },
+            |branch| {
+                let report = rt.block_on(fx.db.archive_branch(branch)).unwrap();
+                assert!(
+                    report.links_archived > 0,
+                    "the fixture abandoned an empty lineage"
+                );
+            },
+            BatchSize::PerIteration,
+        )
+    });
+
+    // **Super-linear, which is steeper than this arm expected. Measured
+    // 7.6 ms at 2,000 against 49.5 ms at 8,000** — 6.5x on a 4x fixture, where
+    // the comment first written here said "linear". Three index builds under
+    // the write lock is an `n log n` shape and the constant is large, so the
+    // gap between this kind and every other exempt one widens as the ledger
+    // grows. D-082's 46.8 ms at 10,000 keys sits squarely on this curve, which
+    // is the cross-check that the arm is measuring what D-082 measured.
+    //
+    // The swap is atomic by necessity, and that inapplicability is the
+    // criterion its exemption rests on (D-234). `ShadowRebuild`, the fill half,
+    // is *not* exempt precisely because it is meant to fit the budget, so this
+    // arm prices the half that never can. Only the swap is timed; `Begin` and
+    // `Fill` run in the setup.
+    group.bench_function(BenchmarkId::new("shadow_swap", edges), |b| {
+        b.iter_batched(
+            || {
+                rt.block_on(async {
+                    let fx = fixture().await;
+                    seed_concepts(&fx.db, edges + 1).await;
+                    seed_edges(&fx.db, edges).await;
+                    let ShadowOutcome::Started { build_start, epoch } =
+                        fx.db.shadow_step(ShadowStep::Begin).await.unwrap()
+                    else {
+                        panic!("Begin returned the wrong outcome")
+                    };
+                    let mut after = None;
+                    while let ShadowOutcome::Filled { last: Some(k) } =
+                        fx.db.shadow_step(ShadowStep::Fill { after }).await.unwrap()
+                    {
+                        after = Some(k);
+                    }
+                    (fx, build_start, epoch)
+                })
+            },
+            |(fx, build_start, epoch)| {
+                rt.block_on(fx.db.shadow_step(ShadowStep::Swap { build_start, epoch }))
+                    .unwrap();
+            },
+            BatchSize::PerIteration,
+        )
+    });
+
+    group.finish();
+}
+
+/// How many edges the archived lineage holds — small on purpose, and smaller
+/// than it was.
+///
+/// **Writing an edge on a branch costs about a thousand times what writing the
+/// same edge on the trunk costs, and that is a defect rather than a fixture
+/// choice** (found 0.15.28 while building this group, D-271; not fixed here).
+/// Measured on one database, one 200-row batch, 2,000-edge trunk: **55 ms on
+/// `main`, 75 s on a fork of it**. It also grows with the *trunk*, which is
+/// what says where it lives: the write path's overlap guard runs one resolution
+/// per row, and on a branch that resolution's `transaction_log` arm plans as
+/// `SEARCH transaction_log USING INDEX idx_txlog_fold_partition (table_name=?)`
+/// — the whole links log, per asserted row, discarded (a fresh fork has churned
+/// nothing), plus an `AUTOMATIC PARTIAL COVERING INDEX` SQLite rebuilds each
+/// execution. The trunk shapes emit no such arm, which is the whole of the
+/// difference.
+///
+/// It is recorded here and not repaired here because a repair to the write
+/// path's guard is its own release with its own before-and-after, and because
+/// this group is about what the *exempt* kinds cost. The number that matters to
+/// this arm is that 200 rows made the scale-4 run take longer than an hour of
+/// which under a second was the operation being timed.
+const LINEAGE_ROWS: usize = 20;
+
+/// A fresh lineage name per `archive_branch` iteration.
+///
+/// The operation consumes the branch — its `branches` row goes with its links —
+/// so a reused name would fork onto a lineage the previous iteration abandoned.
+fn next_bench_branch() -> macrame::branch::BranchId {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static N: AtomicUsize = AtomicUsize::new(0);
+    let i = N.fetch_add(1, Ordering::Relaxed);
+    macrame::branch::BranchId::new(format!("bench_alt{i:05}")).unwrap()
+}
+
+/// One distinct concept per checkpoint iteration, so each one has a real WAL
+/// delta to move rather than measuring an empty checkpoint.
+fn concept_upsert_for_checkpoint() -> ConceptUpsert {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static N: AtomicUsize = AtomicUsize::new(0);
+    let i = N.fetch_add(1, Ordering::Relaxed);
+    ConceptUpsert::new(format!("ckpt{i:07}"), "checkpoint fixture").valid_from(TS)
+}
+
 criterion_group!(
     budgets,
     write_path,
@@ -1740,6 +1996,8 @@ criterion_group!(
     filtered_vector,
     chunk_index_cost,
     // T4.1.
-    fixture_matrix
+    fixture_matrix,
+    // A-5 Part 3.
+    exempt_kinds
 );
 criterion_main!(budgets);

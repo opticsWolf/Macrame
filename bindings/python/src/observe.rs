@@ -135,6 +135,28 @@ impl PyMetricsSnapshot {
             .collect()
     }
 
+    /// **What the budget-exempt kinds cost**, longest hold first.
+    ///
+    /// The companion to `violations()`, and the only report that reaches them
+    /// (0.15.28, D-271). `violations()` filters on `over_budget > 0`, which
+    /// for an exempt kind is zero *by construction* — so no workload can ever
+    /// put an archive, a rebuild or a checkpoint in that list, however long it
+    /// held the write connection. The numbers were being recorded all along
+    /// and the reporting path dropped them.
+    ///
+    /// Sorted by `longest` rather than by `over_budget`, which here is a
+    /// column of zeros. Kinds with no turns are omitted, as they are from
+    /// `kinds`.
+    ///
+    /// Nothing enforces a bound on these (D-055): they are seen, not gated.
+    fn exempt_costs(&self) -> Vec<PyKindMetrics> {
+        self.inner
+            .exempt_costs()
+            .into_iter()
+            .map(|k| PyKindMetrics { inner: k.clone() })
+            .collect()
+    }
+
     /// Every kind that has been seen at least once.
     ///
     /// Kinds with no turns are dropped rather than reported as zero rows: the

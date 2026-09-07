@@ -599,6 +599,7 @@ pub macrame::metrics::MetricsSnapshot::low_starved_turns: u64
 pub macrame::metrics::MetricsSnapshot::turns: u64
 impl macrame::metrics::MetricsSnapshot
 pub fn macrame::metrics::MetricsSnapshot::budget_violations(&self) -> alloc::vec::Vec<&macrame::metrics::KindSnapshot>
+pub fn macrame::metrics::MetricsSnapshot::exempt_costs(&self) -> alloc::vec::Vec<&macrame::metrics::KindSnapshot>
 pub const macrame::metrics::BUCKET_BOUNDS_MICROS: &[u64]
 pub const macrame::metrics::BUCKET_COUNT: usize
 pub mod macrame::plan
@@ -1067,6 +1068,7 @@ pub macrame::prelude::MetricsSnapshot::low_starved_turns: u64
 pub macrame::prelude::MetricsSnapshot::turns: u64
 impl macrame::metrics::MetricsSnapshot
 pub fn macrame::metrics::MetricsSnapshot::budget_violations(&self) -> alloc::vec::Vec<&macrame::metrics::KindSnapshot>
+pub fn macrame::metrics::MetricsSnapshot::exempt_costs(&self) -> alloc::vec::Vec<&macrame::metrics::KindSnapshot>
 pub struct macrame::prelude::ModelName(_)
 impl macrame::vector::ModelName
 pub fn macrame::vector::ModelName::as_str(&self) -> &str

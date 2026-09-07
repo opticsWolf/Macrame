@@ -883,3 +883,166 @@ async fn a_swap_over_budget_is_not_a_violation() {
     // fill half is not exempt precisely so it can say so.
     db.close().await.unwrap();
 }
+
+// ───────────────────────────────────────────────────────────────────────────
+// `exempt_costs()` — the report the exempt kinds never reached (0.15.28, D-271)
+// ───────────────────────────────────────────────────────────────────────────
+
+/// **The two reports partition the kinds, and neither can see the other half.**
+///
+/// This is the claim A-5's third part rests on, and it is worth asserting
+/// rather than reading off `exempt_from_budget`'s source: `budget_violations()`
+/// filters on `over_budget > 0`, which for an exempt kind is zero **by
+/// construction** — so no sequence of operations, no fixture size and no
+/// machine can ever put one in that list. An exempt kind's cost was therefore
+/// unreachable from the public snapshot's own reports, whatever it cost.
+///
+/// The fixture runs work on both sides of the line: `assert_edge` is counted,
+/// `rebuild_current` and `archive` are exempt.
+///
+/// [D-271]: ../docs/architecture/s13-decision-register.md#d-271
+#[tokio::test]
+async fn the_two_reports_partition_the_kinds_and_neither_sees_the_other_half() {
+    let harness = TestHarness::new();
+    let db = Database::open(&harness.db_path).await.unwrap();
+
+    db.upsert_concept(ConceptUpsert::new("a", "A").valid_from(T0))
+        .await
+        .unwrap();
+    db.upsert_concept(ConceptUpsert::new("b", "B").valid_from(T0))
+        .await
+        .unwrap();
+    db.assert_edge(
+        EdgeAssertion::new("a", "b", "KNOWS")
+            .valid_from(T0)
+            .valid_to(T1),
+    )
+    .await
+    .unwrap();
+    db.rebuild_current().await.unwrap();
+    db.archive("2026-06-01T00:00:00.000000Z").await.unwrap();
+
+    let snap = db.metrics();
+
+    // Every kind either is exempt or is not, and the two reports draw the line
+    // in the same place. A kind in both lists would mean `record_hold` had
+    // counted a violation against an exemption.
+    for k in snap.exempt_costs() {
+        assert!(
+            k.kind.exempt_from_budget(),
+            "`exempt_costs()` returned {}, which is not exempt",
+            k.kind
+        );
+        assert_eq!(
+            k.over_budget, 0,
+            "{} is exempt and was counted as a violation",
+            k.kind
+        );
+        assert!(
+            !snap
+                .budget_violations()
+                .iter()
+                .any(|v| v.kind == k.kind),
+            "{} is in both reports",
+            k.kind
+        );
+    }
+    for v in snap.budget_violations() {
+        assert!(
+            !v.kind.exempt_from_budget(),
+            "`budget_violations()` named the exempt kind {}",
+            v.kind
+        );
+    }
+
+    // And the exempt work this fixture actually did is *in* the new report.
+    // Without this the test above is satisfied by an `exempt_costs()` that
+    // always returns nothing, which is the state this entry is fixing.
+    let named: Vec<_> = snap.exempt_costs().iter().map(|k| k.kind).collect();
+    assert!(
+        named.contains(&CommandKind::RebuildCurrent),
+        "the rebuild is missing from {named:?}"
+    );
+    assert!(
+        named.contains(&CommandKind::Archive),
+        "the archive is missing from {named:?}"
+    );
+
+    db.close().await.unwrap();
+}
+
+/// The numbers behind the report are real, and the order is `longest` first.
+///
+/// `budget_violations()` sorts by `over_budget`; here that column is all
+/// zeros, so it would order by nothing. `longest` is the analogous severity
+/// axis — *which exempt operation held the lock longest* — and [D-233]
+/// established it is the field that survives an exemption, because
+/// `over_budget` counts occurrences rather than magnitude.
+///
+/// Kinds the caller never invoked are omitted, as `budget_violations()` omits
+/// kinds with no violations. A row of zeros for an operation nobody ran is
+/// noise in a report meant to be read at a glance.
+///
+/// [D-233]: ../docs/architecture/s13-decision-register.md#d-233
+/// [D-271]: ../docs/architecture/s13-decision-register.md#d-271
+#[tokio::test]
+async fn exempt_costs_carries_real_numbers_longest_first_and_omits_untouched_kinds() {
+    let harness = TestHarness::new();
+    let db = Database::open(&harness.db_path).await.unwrap();
+
+    db.upsert_concept(ConceptUpsert::new("a", "A").valid_from(T0))
+        .await
+        .unwrap();
+    db.rebuild_current().await.unwrap();
+    db.rebuild_current().await.unwrap();
+
+    let snap = db.metrics();
+    let costs = snap.exempt_costs();
+    assert!(!costs.is_empty(), "the rebuilds reached no report at all");
+
+    for k in &costs {
+        assert!(k.turns > 0, "{} has no turns and should not be listed", k.kind);
+        // `longest` is a maximum over the same holds `mean` averages, so it
+        // cannot be the smaller of the two. This is what says the fields are
+        // the kind's own rather than a default-constructed row.
+        assert!(
+            k.longest >= k.mean,
+            "{}: longest {:?} is below mean {:?}",
+            k.kind,
+            k.longest,
+            k.mean
+        );
+        assert_eq!(
+            k.buckets().iter().sum::<u64>(),
+            k.turns,
+            "{}: the histogram and the turn count disagree",
+            k.kind
+        );
+    }
+
+    let rebuild = costs
+        .iter()
+        .find(|k| k.kind == CommandKind::RebuildCurrent)
+        .expect("two rebuilds ran");
+    assert_eq!(rebuild.turns, 2);
+
+    // Sorted, longest first.
+    for w in costs.windows(2) {
+        assert!(
+            w[0].longest >= w[1].longest,
+            "{} ({:?}) sorts before {} ({:?})",
+            w[0].kind,
+            w[0].longest,
+            w[1].kind,
+            w[1].longest
+        );
+    }
+
+    // An exempt kind nobody invoked is absent rather than present-and-zero.
+    assert!(
+        !costs.iter().any(|k| k.kind == CommandKind::Rehydrate),
+        "a kind with no turns was listed"
+    );
+
+    db.close().await.unwrap();
+}

@@ -971,6 +971,68 @@ impl MetricsSnapshot {
         v.sort_by_key(|k| std::cmp::Reverse(k.over_budget));
         v
     }
+
+    /// What the budget-exempt kinds actually cost, longest first — the
+    /// companion to [`Self::budget_violations`] and the only report that
+    /// reaches them (0.15.28, [D-271], review A-5).
+    ///
+    /// # The data was always collected; the *report* dropped it
+    ///
+    /// A-5 reads the exemption as making these operations invisible. That is
+    /// not quite where the gap was, and the difference decides the fix.
+    /// `record_hold` writes turns, total, [`KindSnapshot::longest`] and the
+    /// full histogram for **every** kind; the one thing it skips for an exempt
+    /// one is the [`KindSnapshot::over_budget`] counter
+    /// ([`CommandKind::exempt_from_budget`]). So the cost was measured all
+    /// along, and then `budget_violations()` — the method every dashboard
+    /// reaches for — filtered on `over_budget > 0`, which for an exempt kind
+    /// is **zero by construction**. The collection path was fine and the
+    /// reporting path threw the numbers away, permanently and silently, for
+    /// exactly the operations whose cost nobody bounds.
+    ///
+    /// That set is not small: an [`crate::Database::archive`] was measured at
+    /// 3.3 s unwindowed on an 8,000-key backlog ([D-199]), and
+    /// `rebuild_current` at 318 ms on 40K rows ([D-077]). Those are the holds
+    /// an operator most needs to see, and they were the ones with no way to
+    /// be seen.
+    ///
+    /// # Sorted by `longest`, and that is the whole design decision
+    ///
+    /// [`Self::budget_violations`] sorts by `over_budget` because that is its
+    /// severity axis. Here it is a column of zeros, so sorting by it would
+    /// order the result by nothing at all. `longest` is the analogous
+    /// question — *which exempt operation held the lock longest* — and it is
+    /// the field [D-233] already established survives an exemption: `over_budget`
+    /// counts occurrences, so a kind whose hold doubled reports the same count
+    /// and a different `longest`. Read `longest` beside
+    /// [`KindSnapshot::buckets`], which says whether that was the shape or one
+    /// bad turn.
+    ///
+    /// # This is not a gate, and that is [D-055] rather than an omission
+    ///
+    /// Nothing asserts a bound on these numbers and `perf_claim_tests` gains
+    /// no assertion here. They are *seen*, not enforced — a threshold on a
+    /// kind that is exempt by contract would re-impose, in a test, the bound
+    /// the exemption exists to lift.
+    ///
+    /// Kinds with no turns are omitted, as `budget_violations` omits kinds
+    /// with no violations: a row of zeros for an operation the caller has
+    /// never invoked is noise in a report meant to be read at a glance.
+    ///
+    /// [D-055]: ../docs/architecture/s13-decision-register.md#d-055
+    /// [D-077]: ../docs/architecture/s13-decision-register.md#d-077
+    /// [D-199]: ../docs/architecture/s13-decision-register.md#d-199
+    /// [D-233]: ../docs/architecture/s13-decision-register.md#d-233
+    /// [D-271]: ../docs/architecture/s13-decision-register.md#d-271
+    pub fn exempt_costs(&self) -> Vec<&KindSnapshot> {
+        let mut v: Vec<_> = self
+            .kinds
+            .iter()
+            .filter(|k| k.kind.exempt_from_budget() && k.turns > 0)
+            .collect();
+        v.sort_by_key(|k| std::cmp::Reverse(k.longest));
+        v
+    }
 }
 
 #[cfg(test)]

@@ -180,6 +180,47 @@ def test_the_swap_is_exempt_and_the_fill_half_is_not(db):
     assert "shadow_swap" not in {k.kind for k in db.metrics().violations()}
 
 
+def test_exempt_costs_reaches_what_violations_cannot(db):
+    """The two reports partition the kinds, and only one of them can be empty
+    for a reason that is not a fact about the workload (0.15.28, D-271).
+
+    `violations()` filters on `over_budget > 0`. For a budget-exempt kind that
+    is zero **by construction** — `record_hold` skips the counter and nothing
+    else does — so no workload, fixture size or machine can put an archive, a
+    rebuild or a checkpoint in that list, however long it held the write
+    connection. Everything else about those holds *was* being recorded: turns,
+    mean, longest, the whole histogram. The reporting path dropped them.
+
+    This crosses the boundary because the gap A-5 named is a dashboard's, and
+    for this crate a dashboard is Python.
+    """
+    db.rebuild_current()
+    db.checkpoint()
+
+    costs = db.metrics().exempt_costs()
+    by_kind = {k.kind: k for k in costs}
+
+    # The work this test did was exempt, so it is exactly the work that had no
+    # report. Without these two the assertions below are satisfied by an
+    # `exempt_costs()` that always returns nothing.
+    assert "rebuild_current" in by_kind, by_kind
+    assert "checkpoint" in by_kind, by_kind
+
+    for k in costs:
+        assert k.turns > 0, f"{k.kind} has no turns and should not be listed"
+        assert k.over_budget == 0, f"{k.kind} is exempt and was counted"
+        assert sum(k.buckets) == k.turns, f"{k.kind}: histogram vs turns"
+
+    # Longest first — `over_budget` is all zeros here, so it would order by
+    # nothing.
+    longest = [k.longest for k in costs]
+    assert longest == sorted(longest, reverse=True), longest
+
+    # And the two lists do not overlap.
+    violating = {k.kind for k in db.metrics().violations()}
+    assert violating.isdisjoint(by_kind), (violating, set(by_kind))
+
+
 def test_analyze_and_optimize_are_separate_kinds(db):
     """Split in 0.13.24 (D-197), and the Python strings move with the enum.
 

@@ -724,6 +724,14 @@ class MetricsSnapshot:
     def violations(self) -> list[KindMetrics]:
         """Kinds that exceeded `CHUNK_BUDGET`. Empty is the expected answer."""
 
+    def exempt_costs(self) -> list[KindMetrics]:
+        """What the budget-exempt kinds cost, longest hold first.
+
+        The companion to `violations()`: an exempt kind's `over_budget` is
+        zero by construction, so it can never appear there however long it
+        held the write connection. Not a gate — seen, not enforced.
+        """
+
     @property
     def kinds(self) -> list[KindMetrics]: ...
     @property
