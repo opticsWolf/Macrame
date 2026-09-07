@@ -5629,6 +5629,90 @@ Suites **751 → 753** Rust, **732** feature-off unchanged, Python **606 → 607
 
 Rejected: *widening `violations()` to include the exempt kinds* (it answers a yes/no question about a bound, callers read a non-empty list as an alarm, and an exempt kind has no bound to be measured against — two questions, two reports); *a threshold on the exempt kinds* ([D-055](s13-decision-register.md#d-055), and it would re-impose in a test the bound the exemption exists to lift); *shipping the report in Rust only* (the gap is a dashboard's, and the dashboards are Python); *repairing the branch-write guard in this release* (a write-path change wants its own before-and-after, and a release that made costs visible should not also be the one that changed them); *keeping the 200-row lineage in the bench* (over an hour of wall clock, under a second of it the measurement); *correcting the two falsified arm comments silently* (an expectation is evidence about what was believed, and Doctrine III applies to a comment as much as to a claim).
 
+<a id="d-272"></a>D-272 — four words of join order: the branched log arm was reading the whole links log once per asserted row, and the churned set it exists to serve was the inner loop (0.15.29, found by [D-271](s13-decision-register.md#d-271)). Supersedes a claim in [D-271](s13-decision-register.md#d-271) about what the plan was doing, and one in `overlap_candidates_resolved`'s rustdoc about a plan that stopped holding at 0.15.12. [D-055](s13-decision-register.md#d-055), [D-059](s13-decision-register.md#d-059), [D-060](s13-decision-register.md#d-060), [D-070](s13-decision-register.md#d-070), [D-089](s13-decision-register.md#d-089), [D-225](s13-decision-register.md#d-225), [D-250](s13-decision-register.md#d-250), [D-254](s13-decision-register.md#d-254), [D-259](s13-decision-register.md#d-259), [D-271](s13-decision-register.md#d-271). Evidence: `src/graph/lineage.rs`, `examples/branch_write_guard_probe.rs`, `examples/resolved_read_probe.rs`.
+
+[D-271](s13-decision-register.md#d-271) found a branch write costing about a thousand times the same write on the trunk, said so, and deliberately did not repair it. This is the repair, and the condition that entry attached to it — *its own before-and-after on both shapes, and its own argument about which of the two costs is the one being fixed* — is what the rest of this is.
+
+# Which of the two costs, which is the question D-271 could not answer
+
+The plan named two suspects at once: the log arm of `links_cut_cte` reading `SEARCH transaction_log USING INDEX idx_txlog_fold_partition (table_name=?)`, and an `AUTOMATIC PARTIAL COVERING INDEX` SQLite built on every execution. `examples/branch_write_guard_probe.rs` separates them by running five spellings of the same statement side by side against the same file, timed once per row of a batch, which is exactly how often the write path runs it.
+
+The answer is **the join order, alone**. The automatic index is still in the repaired plan, in the `visible` join, untouched and costing nothing measurable. It was never a second cost; it was the shape of a query whose driving relation was on the wrong side.
+
+# The plan was worse than D-271 recorded, and that is why the number is quadratic
+
+D-271 says the arm reads the whole links log *"and then discards it, because a fresh fork has churned nothing and the `churned` set the arm exists to serve is empty."* The first half is right and **the second half is the wrong mechanism.** `churned` is not evaluated and found empty. It is not evaluated once at all:
+
+```text
+SEARCH transaction_log USING INDEX idx_txlog_fold_partition (table_name=?)
+SEARCH lc USING COVERING INDEX idx_lc_lineage_cut (branch_id=?)
+```
+
+`transaction_log` drives, and `churned` is inlined as the **inner loop** — re-derived once per log row, with one column bound, having lost the edge-key narrowing [D-250](s13-decision-register.md#d-250) pushed into it *and* the `recorded_at > cutoff` bound that `idx_lc_lineage_cut` was created to serve. So the arm is O(links-log rows × that lineage's `links_current` rows), per execution, and the write path executes it once per asserted row. An empty `churned` costs the same as a full one, which is why nothing about the fixture made it cheaper.
+
+That distinction is not pedantry: *scan and discard* is linear in the log and would have cost milliseconds, and the entry's own "grows with the trunk" observation is only explicable by the product. Measured on the guard alone, per asserted row, on the shipped statement:
+
+| trunk | shipped | repaired | the trunk shape's guard |
+|---|---|---|---|
+| 2,000 edges | 268.6 ms | 0.0124 ms | 0.0046 ms |
+| 8,000 edges | 5,408.1 ms | 0.0160 ms | 0.0081 ms |
+
+**Twenty times the cost for four times the trunk** is the product showing. The repaired column grows by 1.3x across the same 4x, and lands at twice what the same guard costs on the trunk — which is what a branch ought to cost: two ancestry rows to resolve rather than none.
+
+# The repair, and why reordering cannot change the answer
+
+`FROM churned k CROSS JOIN transaction_log`. `CROSS` is not a different join in SQLite; it is the same inner join with the loops nailed down, and it is the documented way to say *do not reorder this*.
+
+It is sound because the two relations meet on a **unique** key. `links_current`'s primary key is `(source_id, target_id, edge_type, valid_from, branch_id)` and `churned_cte` composes `entity_id` from the first four, so `churned` holds at most one row per `(entity_id, branch_id)` pair — the pair the join matches. The join is therefore one-to-many in exactly one direction whichever side drives, the window below sees the same input rows, and `ROW_NUMBER` picks the same one. Nothing about the answer is a function of the order; only the cost was.
+
+With `churned` driving, the log is reached on **three** bound columns instead of one:
+
+```text
+SEARCH lc USING COVERING INDEX idx_lc_lineage_cut (branch_id=? AND recorded_at>?)
+SEARCH transaction_log USING INDEX idx_txlog_fold_partition
+       (table_name=? AND entity_id=? AND branch_id=?)
+```
+
+**[D-254](s13-decision-register.md#d-254)'s index is not the villain and is not touched.** Its leading `table_name` is what the planner grabbed, and the natural reading — that the index added for the fold stole this arm's plan — is half true and the wrong half to act on: the same index, entered from the other side, serves this arm *better* than the `idx_txlog_entity (entity_id=?)` seek it had before 0.15.12. It was being used with a third of itself bound. Dropping or narrowing an index because a query entered it badly is [D-089](s13-decision-register.md#d-089)'s mistake with the sign flipped.
+
+# Both shapes, and a third nobody had asked about
+
+`links_cut_cte` is not the write path's alone. `key` is `None` for every branched **current-belief read** — where the churned set is the whole of it rather than one edge — and the same plan was there. `examples/resolved_read_probe.rs` measures that side through the public API only, on a fixture with deliberate post-fork churn, and compiles unchanged against both trees, so the before and after are one source measuring two builds ([D-259](s13-decision-register.md#d-259)'s habit). Best of 40, 400 concepts, microseconds:
+
+| | depth 1 before | after | depth 8 before | after |
+|---|---|---|---|---|
+| `edges(plan)`, current belief | 5,621.0 | **1,317.8** | 13,556.9 | **1,300.7** |
+| traverse, depth 6 | 5,412.0 | **1,159.6** | 13,658.8 | **1,358.8** |
+| `edges(plan)`, recorded instant | 1,870.3 | 1,895.8 | 2,427.2 | 2,435.4 |
+| `edges(plan)` on the trunk *[control]* | 328.3 | 333.7 | 330.6 | 331.7 |
+
+**The branched read stopped growing with fork depth**, which is the durable half of that table and not the 10.4x. Depth multiplies the ancestry, the ancestry multiplied the churned set, and the churned set was being re-derived per log row; the product is gone and what remains is flat. The two bottom rows are the controls and neither moves: the transaction-time read uses `links_at_tx` and emits no such arm, and the trunk emits no CTEs at all. A change that moved those would be a change measuring something else.
+
+End to end, through `bulk_import`, one 200-edge batch against a 2,000-edge trunk:
+
+| | before | after |
+|---|---|---|
+| asserted on `main` | 25.9 ms | 28.9 ms |
+| asserted on a fork of `main` | **68.0 s** | **49.0 ms** |
+
+**1,387x on the branch and nothing on the trunk.** The 26/29 ms pair is run-to-run spread on a batch that opens a transaction and fires two triggers per row — the trunk shapes cannot reach this relation, so there is no mechanism for the change to touch them, and the read probe's 0.33 ms control is the tighter statement of the same thing.
+
+# The gate is a plan pin, and it was checked by injection
+
+`the_log_arm_is_driven_by_the_churned_set`, beside `the_guard_seeks_the_edge_key_on_every_shape` in `lineage.rs`'s own tests, on the generated statement rather than a copy. It asserts that the resolved shape's log arm binds `entity_id`, which cannot be true unless `churned` is on the outside, and that the two trunk shapes touch the log **not at all** — so a repair to a relation two of the three shapes never emit cannot look as though it were verified on all three.
+
+The fixture is empty on purpose. With no rows and no statistics the planner has nothing but the query text to go on, which is the weakest position the pin can be held from; a pin that needs a populated table is a pin a distribution can satisfy. Reverting the four words makes it red, with the defective plan in the failure message — checked, because this codebase verifies a gate by injection rather than asserting it.
+
+**No timing assertion.** [D-055](s13-decision-register.md#d-055) stands: the milliseconds above are seen and not enforced, and a threshold here would be a number about this machine.
+
+# What this says about the seventeen releases in between
+
+The arm has planned this way since `idx_txlog_fold_partition` shipped at 0.15.12, and `overlap_candidates_resolved`'s rustdoc has said since 0.15.8 that the churned base scan *"planned as `SEARCH lc USING COVERING INDEX idx_lc_lineage_cut (branch_id=? AND recorded_at>?)` in 0.15.7 and it plans that way now."* That sentence was true when written and false four releases later, and nothing noticed, because **the plan it described was a choice the planner was free to revisit and no test held it.** The comment is left standing with the correction beside it rather than edited: what it says about 0.15.7 and 0.15.8 is still what happened, and the thing worth recording is that a measured plan without a pin is a plan with a shelf life. Every branch read and every branch write in the crate got slower at 0.15.12 and the release note for that rung says the other readers were checked and none of them moved — which was true of the readers it checked, and this arm was not one of them.
+
+Suites **753 → 754** Rust, **732 → 733** feature-off; Python unchanged at **607** / 2 skipped; surface unchanged at **1,763**; schema unchanged at **v17**.
+
+Rejected: *`INDEXED BY idx_txlog_entity`* (measures identically — 0.0124 and 0.0163 ms/row — and was refused because it writes an index name into generated SQL, makes that index undroppable, and becomes a hard error rather than a slow plan if it ever stops applying); *`churned AS MATERIALIZED`* (0.158 and 0.565 ms/row: it fixes part of the constant and none of the growth, because a materialised `churned` is still the inner loop — 0.15.8's refusal of it stands, now for a second reason and against a schema that changed underneath it); *both together* (0.018 and 0.027, slower than the join order alone, and two mechanisms where one is enough); *dropping or narrowing `idx_txlog_fold_partition`* (it serves this arm better than what preceded it once entered correctly, and removing an index because a query entered it badly is [D-089](s13-decision-register.md#d-089) in reverse); *an index leading with `branch_id`* (D-271's other open question, about `archive_branch`, and not this one — it would not have helped here, where the missing bound was `entity_id`); *editing the 0.15.8 rustdoc in place* (Doctrine III: the superseded claim is pointed at, and what it says about the release that measured it is still true); *a timing assertion in the suite* ([D-055](s13-decision-register.md#d-055)); *repairing this inside 0.15.28* (the release that made costs visible should not also be the one that changed them — [D-271](s13-decision-register.md#d-271) said so and this entry is what that deferral bought: a separated cause, both shapes measured, and a gate).
+
 [A-2]: ../Macrame%20Codebase%20Review%20v0.15.0.md
 [C-10]: ../Macrame%20Codebase%20Review%20v0.15.0.md
 

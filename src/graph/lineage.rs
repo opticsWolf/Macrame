@@ -676,6 +676,77 @@ pub(crate) fn churned_cte(tag: &str, key: Option<KeySlots>) -> String {
 ///
 /// The column list matches `links_current`'s and `links_at_tx`'s exactly, which
 /// is what lets [`visible_cte`] reduce any of the three without knowing which.
+///
+/// # The log arm's join order, which is four words and was worth 1,387x
+/// (0.15.29, [D-272])
+///
+/// The `CROSS JOIN` is not a different join. It is the same inner join with
+/// the loops nailed down, which is what `CROSS` means to SQLite and the only
+/// thing it means: *do not reorder this*.
+///
+/// Left to choose, the planner drove from `transaction_log` on the one
+/// equality it could see — `table_name = 'links'` — and inlined `churned` as
+/// the inner loop, where the key narrowing and the `recorded_at > cutoff`
+/// bound both fell out of the access path:
+///
+/// ```text
+/// SEARCH transaction_log USING INDEX idx_txlog_fold_partition (table_name=?)
+/// SEARCH lc USING COVERING INDEX idx_lc_lineage_cut (branch_id=?)
+/// ```
+///
+/// One column bound on the inner scan, so the whole of that lineage's
+/// `links_current` per row of the links log, per execution of this relation.
+/// [`crate::connection`]'s write path executes it **once per asserted row**,
+/// which is how a 200-edge batch on a fork of a 2,000-edge trunk came to cost
+/// **68 s against the trunk's 26 ms** — and 20x that for a 4x trunk, because
+/// the shape is a product of two things that both grow.
+///
+/// With `churned` driving, the log is reached on three bound columns instead
+/// of one:
+///
+/// ```text
+/// SEARCH lc USING COVERING INDEX idx_lc_lineage_cut (branch_id=? AND recorded_at>?)
+/// SEARCH transaction_log USING INDEX idx_txlog_fold_partition
+///        (table_name=? AND entity_id=? AND branch_id=?)
+/// ```
+///
+/// **`idx_txlog_fold_partition` is not the villain and did not move.** Its
+/// leading `table_name` is what the planner grabbed, but the index serves this
+/// arm better than the `idx_txlog_entity (entity_id=?)` seek the arm had
+/// before [D-254] existed — three equality columns rather than one. It was
+/// being used with a third of itself bound.
+///
+/// **Why reordering cannot change the answer.** `links_current`'s primary key
+/// is `(source_id, target_id, edge_type, valid_from, branch_id)` and
+/// [`churned_cte`] composes `entity_id` from the first four, so `churned` is
+/// unique on the `(entity_id, branch_id)` pair this join matches. The join is
+/// one-to-many in exactly one direction whichever side drives, so the window
+/// below sees the same input rows and `ROW_NUMBER` picks the same one.
+///
+/// **This arm is not only the write path's.** `key` is `None` for every
+/// branched *current-belief read*, where the churned set is the whole of it
+/// rather than one edge, and the same plan was there. Measured through the
+/// public API on a fixture with deliberate post-fork churn
+/// (`examples/resolved_read_probe.rs`, best of 40, 400 concepts):
+///
+/// ```text
+///                                   depth 1        depth 8
+/// edges(plan), current belief    5.6 -> 1.3 ms  13.6 -> 1.3 ms
+/// traverse, depth 6              5.4 -> 1.2 ms  13.7 -> 1.4 ms
+/// edges(plan), recorded instant  1.87 -> 1.90   2.43 -> 2.44   (no arm here)
+/// edges(plan) on the trunk       0.33 -> 0.33   0.33 -> 0.33   [control]
+/// ```
+///
+/// The branched read **stopped growing with fork depth**, which is the durable
+/// half of that table: depth multiplies the ancestry, the ancestry multiplied
+/// the churned set, and the churned set was being re-derived per log row.
+///
+/// The gate is `the_log_arm_is_driven_by_the_churned_set` below, and it pins
+/// the bound column rather than a millisecond — [D-055] is why.
+///
+/// [D-254]: ../../docs/architecture/s13-decision-register.md#d-254
+/// [D-272]: ../../docs/architecture/s13-decision-register.md#d-272
+/// [D-055]: ../../docs/architecture/s13-decision-register.md#d-055
 pub(crate) fn links_cut_cte(tag: &str, key: Option<KeySlots>) -> String {
     // The narrowing goes on the **projection** arm only. The log arm joins
     // `churned{tag}`, which is already one key when this one is, so repeating
@@ -726,9 +797,13 @@ pub(crate) fn links_cut_cte(tag: &str, key: Option<KeySlots>) -> String {
                    PARTITION BY transaction_log.entity_id, transaction_log.branch_id
                    ORDER BY transaction_log.seq_id DESC
                ) AS rn
-        FROM transaction_log
-        JOIN churned{tag} k ON k.entity_id = transaction_log.entity_id
-                      AND k.branch_id = transaction_log.branch_id
+        FROM churned{tag} k
+        -- CROSS, so `churned` drives. See this function's rustdoc: the same
+        -- join with the loops the other way round is O(log rows x lineage
+        -- rows) per execution, and the write path executes it per asserted
+        -- row (0.15.29, D-272).
+        CROSS JOIN transaction_log ON transaction_log.entity_id = k.entity_id
+                      AND transaction_log.branch_id = k.branch_id
         WHERE transaction_log.table_name = 'links'
           AND transaction_log.recorded_at <= k.cutoff
     ) WHERE rn = 1
@@ -855,6 +930,24 @@ fn write_resolution<'a>(
 /// (entity_id=?)` and scans the whole log, because a materialised `churned` is
 /// no longer a small driving set the planner can see through. It was measured
 /// and not taken.
+///
+/// **The middle sentence of that paragraph stopped being true at 0.15.12 and
+/// was true again at 0.15.29** ([D-272]). `idx_txlog_fold_partition` ([D-254])
+/// gave the planner a reason to drive from `transaction_log` instead, and the
+/// churned base scan then planned as `idx_lc_lineage_cut (branch_id=?)` —
+/// **one** column, not the two the paragraph reports — because it had become
+/// an inner loop. The paragraph is left as written because what it says about
+/// 0.15.7 and 0.15.8 is still what happened; what it could not know is that
+/// this plan was a *choice* the planner was free to revisit, and it did. It is
+/// nailed down now: see [`links_cut_cte`]'s `CROSS JOIN`.
+///
+/// The refusal of `AS MATERIALIZED` survives that and is now refused twice
+/// over. Re-measured against the current schema
+/// (`examples/branch_write_guard_probe.rs`, per asserted row): materialised
+/// alone is **0.158 ms** at a 2,000-edge trunk and **0.565 ms** at 8,000,
+/// against the forced join order's **0.012** and **0.016** — it fixes the
+/// symptom partially and the growth not at all, because a materialised
+/// `churned` is still the inner loop.
 ///
 /// # The predicate set, which is three equalities and nothing else
 ///
@@ -1178,6 +1271,83 @@ mod tests {
         }
     }
 
+    /// **The log arm is driven by the churned set, not by the whole links
+    /// log** (0.15.29, [D-272]).
+    ///
+    /// Sibling of the test above and the same kind of claim: not *which* index
+    /// serves the seek, but how much of it is bound. The arm joins
+    /// `transaction_log` to `churned` on `(entity_id, branch_id)` under
+    /// `table_name = 'links'`. Driven from `churned`, that is three equality
+    /// columns and a seek per churned row. Driven from the log — which is what
+    /// the planner chose for seventeen releases — it is `(table_name=?)`, the
+    /// whole links log, with `churned` re-derived inside it as a one-column
+    /// scan of the lineage's `links_current`. The write path runs this once per
+    /// asserted row, so the second shape is a 200-edge batch costing 68 s
+    /// against the trunk's 26 ms.
+    ///
+    /// `entity_id=?` in the plan is therefore the assertion. It cannot be
+    /// present unless `churned` is on the outside, and it is what the
+    /// `CROSS JOIN` in [`links_cut_cte`] exists to guarantee — so reverting
+    /// those four words makes this red, which is how the gate was checked.
+    ///
+    /// **The trunk shapes are asserted to have no arm at all**, because a
+    /// repair to a relation two of the three shapes never emit would otherwise
+    /// look like it had been verified on all of them.
+    ///
+    /// The fixture is empty and that is deliberate: with no rows and no
+    /// statistics the planner has nothing but the query text to go on, which is
+    /// the weakest position the pin can be held from. A pin that needs a
+    /// populated table is a pin that can be satisfied by a distribution.
+    ///
+    /// [D-272]: ../../docs/architecture/s13-decision-register.md#d-272
+    #[tokio::test]
+    async fn the_log_arm_is_driven_by_the_churned_set() {
+        let conn = fresh().await;
+        fork(&conn, "exp", "main").await;
+
+        for shape in [
+            LineageShape::Trunk,
+            LineageShape::TrunkOnForked,
+            LineageShape::Resolved,
+        ] {
+            let sql = overlap_candidates_resolved(shape, &anc());
+            let mut rows = conn
+                .query(&format!("EXPLAIN QUERY PLAN {sql}"), ())
+                .await
+                .unwrap();
+            let mut plan = Vec::new();
+            while let Some(r) = rows.next().await.unwrap() {
+                plan.push(r.get::<String>(3).unwrap());
+            }
+            let step = plan.join(" | ");
+
+            let arm: Vec<&String> = plan
+                .iter()
+                .filter(|s| s.contains("transaction_log"))
+                .collect();
+
+            if shape == LineageShape::Resolved {
+                assert_eq!(
+                    arm.len(),
+                    1,
+                    "the resolved guard reads the log once and only in the \
+                     fold arm: {step}"
+                );
+                assert!(
+                    arm[0].contains("entity_id=?"),
+                    "the log arm is not seeking the churned key, so the whole \
+                     links log is being read once per asserted row: {step}"
+                );
+            } else {
+                assert!(
+                    arm.is_empty(),
+                    "{shape:?} emits no `links_cut`, so it must not touch the \
+                     log at all: {step}"
+                );
+            }
+        }
+    }
+
     /// One row in `branches` is the trunk shape whatever name is asked for,
     /// and an unknown name is refused before any shape is chosen.
     #[tokio::test]
@@ -1439,3 +1609,4 @@ mod tests {
         assert!(LineageShape::TrunkOnForked.binds_branch());
     }
 }
+
