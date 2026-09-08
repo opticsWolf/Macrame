@@ -43,10 +43,16 @@ categories = ["database", "database-implementations", "data-structures"]
 # and it is not a workspace member either -- its manifest carries an empty
 # `[workspace]` table, which is what keeps libFuzzer and a nightly-only
 # dependency out of every command run here.
+# `benchmarks/` is out for the third reason on this list and not the second:
+# `benchmarks/rs-tpcbih` carries its own manifest and is skipped already, but
+# the README, the Python harness and `results/*.json` beside it are ordinary
+# files at a packaged root. They would ship, silently, and put hardware-labelled
+# preliminary numbers in front of anyone reading the crate.
 exclude = [
     "pyproject.toml",
     "python/",
     "tests_py/",
+    "benchmarks/",
     "/.venv/",
     "*.whl",
 ]

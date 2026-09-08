@@ -361,6 +361,8 @@ All budgets measured on named reference hardware, and deliberately **not** CI ga
 runner is an assertion about whichever machine picked up the job. Regression detection uses
 criterion baselines, machine against itself. See [§9 of the architecture docs](docs/architecture/s6-s10-flows-to-dependencies.md#9-performance-budgets) for full table.
 
+**A second harness answers a different question.** The budgets above are about operations this crate bounds; [`benchmarks/`](benchmarks/README.md) runs a **TPC-BiH-style workload taxonomy** (TPCTC'13 T/K/R classes) over a generated bitemporal history, on the trunk and on a divergent lineage, in Python and in Rust — 13 correctness assertions gate every run, because a benchmark that can time a wrong answer is worse than none. It is a separate package: nothing there is built by an ordinary `cargo test` here, and none of it ships in the crate. Its headline shapes are that fork latency is flat across 3× the data (empirical O(1)), that transaction-dimension work is an order pricier than valid-dimension work, that branch cost is **ancestry rather than divergence** — a fork with no writes costs what a diverged one costs — and that chain reads stay flat from depth 1 to 10.
+
 ---
 
 ## Known Risks

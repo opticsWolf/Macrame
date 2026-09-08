@@ -1,0 +1,323 @@
+{
+  "figures": {
+    "load_total": {
+      "median_ms": 575.426,
+      "control_ms": 0.0564
+    },
+    "evolution_total": {
+      "median_ms": 281.914,
+      "control_ms": 0.052,
+      "corrections": 400
+    },
+    "append_wave": {
+      "median_ms": 15.318,
+      "control_ms": 0.051,
+      "appends": 39
+    },
+    "fork_audit": {
+      "median_ms": 0.168,
+      "control_ms": 0.0478
+    },
+    "branch_divergent_writes": {
+      "median_ms": 91.572,
+      "control_ms": 0.0612,
+      "rows": 100
+    },
+    "Q1_slice_05_main": {
+      "median_ms": 0.689,
+      "min_ms": 0.682,
+      "max_ms": 0.767,
+      "control_ms": 0.0492
+    },
+    "Q1_slice_05_audit": {
+      "median_ms": 2.644,
+      "min_ms": 2.61,
+      "max_ms": 2.814,
+      "control_ms": 0.056
+    },
+    "Q1_slice_09_main": {
+      "median_ms": 1.654,
+      "min_ms": 1.454,
+      "max_ms": 1.806,
+      "control_ms": 0.0492
+    },
+    "Q1_slice_09_audit": {
+      "median_ms": 6.154,
+      "min_ms": 6.089,
+      "max_ms": 6.919,
+      "control_ms": 0.055
+    },
+    "Q1_slice_12_main": {
+      "median_ms": 1.888,
+      "min_ms": 1.862,
+      "max_ms": 2.021,
+      "control_ms": 0.0512
+    },
+    "Q1_slice_12_audit": {
+      "median_ms": 8.059,
+      "min_ms": 7.994,
+      "max_ms": 8.411,
+      "control_ms": 0.0535
+    },
+    "Q2_reconstruct_on_main": {
+      "median_ms": 15.291,
+      "min_ms": 14.643,
+      "max_ms": 17.052,
+      "control_ms": 0.0508
+    },
+    "Q2_reconstruct_on_audit": {
+      "median_ms": 16.058,
+      "min_ms": 15.315,
+      "max_ms": 16.736,
+      "control_ms": 0.0546
+    },
+    "Q5_full_fold": {
+      "median_ms": 12.718,
+      "min_ms": 11.715,
+      "max_ms": 13.604,
+      "control_ms": 0.0514
+    },
+    "Q2_reconstruct_loadpoint": {
+      "median_ms": 8.269,
+      "min_ms": 8.135,
+      "max_ms": 8.674,
+      "control_ms": 0.0515
+    },
+    "Q2_reconstruct_evopoint": {
+      "median_ms": 11.267,
+      "min_ms": 10.69,
+      "max_ms": 11.529,
+      "control_ms": 0.0529
+    },
+    "K1_full_history": {
+      "median_ms": 0.293,
+      "min_ms": 0.289,
+      "max_ms": 0.334,
+      "control_ms": 0.0469
+    },
+    "K2_ranged_history": {
+      "median_ms": 0.287,
+      "min_ms": 0.285,
+      "max_ms": 0.291,
+      "control_ms": 0.0462
+    },
+    "K5_preceding_version": {
+      "median_ms": 0.296,
+      "min_ms": 0.291,
+      "max_ms": 0.306,
+      "control_ms": 0.0463
+    },
+    "T1K_heavy_chain": {
+      "median_ms": 0.263,
+      "min_ms": 0.261,
+      "max_ms": 0.272,
+      "control_ms": 0.0459,
+      "versions": 9
+    },
+    "T2K_insert_chain": {
+      "median_ms": 0.254,
+      "min_ms": 0.252,
+      "max_ms": 0.257,
+      "control_ms": 0.0453,
+      "versions": 1
+    },
+    "K4_top3": {
+      "median_ms": 0.275,
+      "min_ms": 0.265,
+      "max_ms": 0.291,
+      "control_ms": 0.0483
+    },
+    "K6_selectivity_10": {
+      "median_ms": 1.53,
+      "min_ms": 1.524,
+      "max_ms": 1.538,
+      "control_ms": 0.048,
+      "rows": 916
+    },
+    "K6_selectivity_50": {
+      "median_ms": 1.541,
+      "min_ms": 1.507,
+      "max_ms": 1.608,
+      "control_ms": 0.0487,
+      "rows": 1044
+    },
+    "K6_selectivity_100": {
+      "median_ms": 1.526,
+      "min_ms": 1.513,
+      "max_ms": 1.545,
+      "control_ms": 0.0487,
+      "rows": 1196
+    },
+    "T6a_validslice_txnpoint": {
+      "median_ms": 13.138,
+      "min_ms": 13.024,
+      "max_ms": 13.373,
+      "control_ms": 0.0512,
+      "rows": 1472
+    },
+    "T6b_txnversions_validpoint": {
+      "median_ms": 66.28,
+      "min_ms": 65.789,
+      "max_ms": 67.893,
+      "control_ms": 0.0528,
+      "logrows": 1996
+    },
+    "T4_top10_changed": {
+      "median_ms": 2.547,
+      "min_ms": 2.503,
+      "max_ms": 2.575,
+      "control_ms": 0.0505
+    },
+    "R1_statechange_main": {
+      "median_ms": 2.473,
+      "min_ms": 2.453,
+      "max_ms": 2.556,
+      "control_ms": 0.0502
+    },
+    "R1_statechange_audit": {
+      "median_ms": 8.575,
+      "min_ms": 8.403,
+      "max_ms": 9.228,
+      "control_ms": 0.0514
+    },
+    "R3_agg_main": {
+      "median_ms": 6.866,
+      "min_ms": 6.816,
+      "max_ms": 6.948,
+      "control_ms": 0.0497,
+      "instants": 6
+    },
+    "R3_agg_audit": {
+      "median_ms": 25.359,
+      "min_ms": 24.399,
+      "max_ms": 25.49,
+      "control_ms": 0.0529,
+      "instants": 6
+    },
+    "Q3_traverse_main": {
+      "median_ms": 0.451,
+      "min_ms": 0.444,
+      "max_ms": 0.474,
+      "control_ms": 0.0477,
+      "visited": 36
+    },
+    "Q3_traverse_audit": {
+      "median_ms": 18.924,
+      "min_ms": 18.734,
+      "max_ms": 19.059,
+      "control_ms": 0.0502,
+      "visited": 36
+    },
+    "Q3_traverse_audit0_nowrites": {
+      "median_ms": 18.544,
+      "min_ms": 17.725,
+      "max_ms": 22.452,
+      "control_ms": 0.0521
+    },
+    "chain_traverse_d1": {
+      "median_ms": 4.453,
+      "min_ms": 4.357,
+      "max_ms": 4.757,
+      "control_ms": 0.0485
+    },
+    "chain_traverse_d2": {
+      "median_ms": 4.391,
+      "min_ms": 4.352,
+      "max_ms": 4.72,
+      "control_ms": 0.0481
+    },
+    "chain_traverse_d5": {
+      "median_ms": 4.671,
+      "min_ms": 4.451,
+      "max_ms": 6.738,
+      "control_ms": 0.0506
+    },
+    "chain_traverse_d10": {
+      "median_ms": 5.112,
+      "min_ms": 4.92,
+      "max_ms": 5.285,
+      "control_ms": 0.0495
+    }
+  },
+  "assertions": [
+    {
+      "name": "A1_05_main",
+      "pass": true,
+      "detail": "got 485 want 485"
+    },
+    {
+      "name": "A1_05_audit",
+      "pass": true,
+      "detail": "got 485 want 485"
+    },
+    {
+      "name": "A1_09_main",
+      "pass": true,
+      "detail": "got 1196 want 1196"
+    },
+    {
+      "name": "A1_09_audit",
+      "pass": true,
+      "detail": "got 1196 want 1196"
+    },
+    {
+      "name": "A1_12_main",
+      "pass": true,
+      "detail": "got 1559 want 1559"
+    },
+    {
+      "name": "A1_12_audit",
+      "pass": true,
+      "detail": "got 1559 want 1559"
+    },
+    {
+      "name": "A2_equal",
+      "pass": true,
+      "detail": "693 vs 693 rows"
+    },
+    {
+      "name": "A3_main",
+      "pass": true,
+      "detail": "replay-open 1559 reader 1559"
+    },
+    {
+      "name": "A3_audit",
+      "pass": true,
+      "detail": "replay-open 1559 reader 1559"
+    },
+    {
+      "name": "A1K_count",
+      "pass": true,
+      "detail": "log rows 5 versions 3"
+    },
+    {
+      "name": "A2K_range",
+      "pass": true,
+      "detail": "5 vs 5"
+    },
+    {
+      "name": "A4_preceding",
+      "pass": true,
+      "detail": "k5 [(2695,)] want seq 2695"
+    },
+    {
+      "name": "A5_diff",
+      "pass": true,
+      "detail": "101 differing rows"
+    }
+  ],
+  "meta": {
+    "scale": 1,
+    "label": "PRELIMINARY (non-reference hardware)",
+    "concepts": 640,
+    "seed_edges": 1520,
+    "chain_heavy": {
+      "max": 9,
+      "avg": 3.5
+    },
+    "chain_insert": {
+      "max": 1,
+      "avg": 1.0
+    }
+  }
+}

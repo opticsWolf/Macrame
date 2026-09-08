@@ -1,0 +1,58 @@
+{
+  "scale": 3,
+  "reps": 3,
+  "figures": {
+    "load_total": {
+      "ms": 1943.901,
+      "concepts": 1920,
+      "edges": 4560
+    },
+    "evolution_total": {
+      "ms": 1107.041,
+      "corrections": 1200
+    },
+    "fork_audit": {
+      "ms": 0.147
+    },
+    "branch_divergent_writes": {
+      "ms": 271.672,
+      "rows": 300
+    },
+    "Q1_slice_main": {
+      "ms": 6.301,
+      "rows": 4560
+    },
+    "Q1_slice_audit": {
+      "ms": 20.009,
+      "rows": 4560
+    },
+    "Q2_reconstruct_loadpoint": {
+      "ms": 23.246
+    },
+    "Q2_reconstruct_on_main": {
+      "ms": 37.617
+    },
+    "Q2_reconstruct_on_audit": {
+      "ms": 41.812
+    },
+    "Q3_traverse_main": {
+      "ms": 0.444,
+      "visited": 36
+    },
+    "Q3_traverse_audit": {
+      "ms": 54.08,
+      "visited": 36
+    },
+    "Q4_agg_main": {
+      "ms": 23.964,
+      "instants": 6
+    },
+    "Q4_agg_audit": {
+      "ms": 76.531,
+      "instants": 6
+    },
+    "Q5_full_fold": {
+      "ms": 35.725
+    }
+  }
+}

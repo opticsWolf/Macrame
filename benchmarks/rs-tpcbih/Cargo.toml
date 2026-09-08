@@ -1,0 +1,41 @@
+# The TPC-BiH-style workload harness, in Rust (see ../README.md).
+#
+# Not a workspace member, and the empty `[workspace]` below is what keeps it
+# that way -- the same mechanism `fuzz/` uses and for the same two reasons.
+# `tests/packaging_tests.rs` pins the parent's membership list to
+# `["bindings/python"]` because every member is built by any command not scoped
+# to a package, and a criterion harness that joined the workspace would put
+# criterion and its dependency tree into `cargo test` at the root.
+#
+# Cargo also skips a subdirectory carrying its own manifest when it builds the
+# `.crate` tarball, so this directory costs a published crate nothing. The rest
+# of `benchmarks/` is not a package and *would* ship, which is why the root
+# manifest names `benchmarks/` in `exclude`.
+#
+# The dependency is a path to the repo root rather than a version from
+# crates.io, deliberately: the point of this harness is to time the tree it is
+# sitting in. Outside the repo it needed a clone of Macrame beside it to build
+# against; inside, that clone is nonsense and is not carried over.
+
+[package]
+name = "rs-tpcbih"
+version = "0.1.0"
+publish = false
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+macrame-db = { path = "../.." }
+tokio = { version = "1", features = ["full"] }
+tempfile = "3"
+
+[dev-dependencies]
+criterion = { version = "0.5", default-features = false, features = [
+    "async_tokio",
+    "cargo_bench_support",
+] }
+
+[[bench]]
+name = "tpcbih"
+harness = false

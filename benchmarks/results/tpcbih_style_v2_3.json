@@ -1,0 +1,323 @@
+{
+  "figures": {
+    "load_total": {
+      "median_ms": 1968.269,
+      "control_ms": 0.0568
+    },
+    "evolution_total": {
+      "median_ms": 1115.438,
+      "control_ms": 0.0746,
+      "corrections": 1200
+    },
+    "append_wave": {
+      "median_ms": 82.347,
+      "control_ms": 0.0585,
+      "appends": 119
+    },
+    "fork_audit": {
+      "median_ms": 0.19,
+      "control_ms": 0.0545
+    },
+    "branch_divergent_writes": {
+      "median_ms": 330.838,
+      "control_ms": 0.052,
+      "rows": 300
+    },
+    "Q1_slice_05_main": {
+      "median_ms": 2.079,
+      "min_ms": 2.043,
+      "max_ms": 2.208,
+      "control_ms": 0.0486
+    },
+    "Q1_slice_05_audit": {
+      "median_ms": 13.104,
+      "min_ms": 8.57,
+      "max_ms": 13.623,
+      "control_ms": 0.0487
+    },
+    "Q1_slice_09_main": {
+      "median_ms": 6.779,
+      "min_ms": 4.67,
+      "max_ms": 8.684,
+      "control_ms": 0.0667
+    },
+    "Q1_slice_09_audit": {
+      "median_ms": 18.214,
+      "min_ms": 16.894,
+      "max_ms": 26.849,
+      "control_ms": 0.0744
+    },
+    "Q1_slice_12_main": {
+      "median_ms": 6.03,
+      "min_ms": 5.786,
+      "max_ms": 6.339,
+      "control_ms": 0.0493
+    },
+    "Q1_slice_12_audit": {
+      "median_ms": 22.049,
+      "min_ms": 21.284,
+      "max_ms": 32.418,
+      "control_ms": 0.0486
+    },
+    "Q2_reconstruct_on_main": {
+      "median_ms": 49.019,
+      "min_ms": 38.674,
+      "max_ms": 60.88,
+      "control_ms": 0.0491
+    },
+    "Q2_reconstruct_on_audit": {
+      "median_ms": 51.73,
+      "min_ms": 43.79,
+      "max_ms": 54.334,
+      "control_ms": 0.0511
+    },
+    "Q5_full_fold": {
+      "median_ms": 38.631,
+      "min_ms": 36.012,
+      "max_ms": 47.455,
+      "control_ms": 0.0494
+    },
+    "Q2_reconstruct_loadpoint": {
+      "median_ms": 28.715,
+      "min_ms": 27.54,
+      "max_ms": 35.503,
+      "control_ms": 0.0479
+    },
+    "Q2_reconstruct_evopoint": {
+      "median_ms": 36.672,
+      "min_ms": 35.027,
+      "max_ms": 44.957,
+      "control_ms": 0.0496
+    },
+    "K1_full_history": {
+      "median_ms": 0.714,
+      "min_ms": 0.712,
+      "max_ms": 0.737,
+      "control_ms": 0.0604
+    },
+    "K2_ranged_history": {
+      "median_ms": 1.273,
+      "min_ms": 0.722,
+      "max_ms": 1.293,
+      "control_ms": 0.0714
+    },
+    "K5_preceding_version": {
+      "median_ms": 1.26,
+      "min_ms": 1.145,
+      "max_ms": 1.424,
+      "control_ms": 0.0601
+    },
+    "T1K_heavy_chain": {
+      "median_ms": 1.141,
+      "min_ms": 0.646,
+      "max_ms": 1.286,
+      "control_ms": 0.0507,
+      "versions": 9
+    },
+    "T2K_insert_chain": {
+      "median_ms": 0.635,
+      "min_ms": 0.632,
+      "max_ms": 0.685,
+      "control_ms": 0.0468,
+      "versions": 1
+    },
+    "K4_top3": {
+      "median_ms": 0.643,
+      "min_ms": 0.64,
+      "max_ms": 0.659,
+      "control_ms": 0.0456
+    },
+    "K6_selectivity_10": {
+      "median_ms": 4.436,
+      "min_ms": 4.397,
+      "max_ms": 4.803,
+      "control_ms": 0.0582,
+      "rows": 2770
+    },
+    "K6_selectivity_50": {
+      "median_ms": 7.835,
+      "min_ms": 4.485,
+      "max_ms": 9.065,
+      "control_ms": 0.0495,
+      "rows": 3154
+    },
+    "K6_selectivity_100": {
+      "median_ms": 4.881,
+      "min_ms": 4.413,
+      "max_ms": 6.255,
+      "control_ms": 0.0739,
+      "rows": 3626
+    },
+    "T6a_validslice_txnpoint": {
+      "median_ms": 41.999,
+      "min_ms": 37.785,
+      "max_ms": 54.171,
+      "control_ms": 0.0504,
+      "rows": 4493
+    },
+    "T6b_txnversions_validpoint": {
+      "median_ms": 628.674,
+      "min_ms": 625.288,
+      "max_ms": 649.941,
+      "control_ms": 0.049,
+      "logrows": 6026
+    },
+    "T4_top10_changed": {
+      "median_ms": 7.86,
+      "min_ms": 7.677,
+      "max_ms": 7.878,
+      "control_ms": 0.0487
+    },
+    "R1_statechange_main": {
+      "median_ms": 7.688,
+      "min_ms": 7.631,
+      "max_ms": 9.892,
+      "control_ms": 0.0557
+    },
+    "R1_statechange_audit": {
+      "median_ms": 29.555,
+      "min_ms": 24.109,
+      "max_ms": 35.527,
+      "control_ms": 0.0482
+    },
+    "R3_agg_main": {
+      "median_ms": 26.468,
+      "min_ms": 20.701,
+      "max_ms": 32.295,
+      "control_ms": 0.0485,
+      "instants": 6
+    },
+    "R3_agg_audit": {
+      "median_ms": 79.782,
+      "min_ms": 77.248,
+      "max_ms": 87.222,
+      "control_ms": 0.0493,
+      "instants": 6
+    },
+    "Q3_traverse_main": {
+      "median_ms": 0.47,
+      "min_ms": 0.46,
+      "max_ms": 0.616,
+      "control_ms": 0.0483,
+      "visited": 36
+    },
+    "Q3_traverse_audit": {
+      "median_ms": 66.205,
+      "min_ms": 56.974,
+      "max_ms": 74.437,
+      "control_ms": 0.0529,
+      "visited": 36
+    },
+    "Q3_traverse_audit0_nowrites": {
+      "median_ms": 59.627,
+      "min_ms": 50.557,
+      "max_ms": 65.54,
+      "control_ms": 0.0518
+    },
+    "chain_traverse_d1": {
+      "median_ms": 12.621,
+      "min_ms": 12.537,
+      "max_ms": 15.151,
+      "control_ms": 0.0772
+    },
+    "chain_traverse_d2": {
+      "median_ms": 12.624,
+      "min_ms": 12.494,
+      "max_ms": 21.739,
+      "control_ms": 0.0502
+    },
+    "chain_traverse_d5": {
+      "median_ms": 12.853,
+      "min_ms": 12.727,
+      "max_ms": 15.181,
+      "control_ms": 0.0505
+    },
+    "chain_traverse_d10": {
+      "median_ms": 15.023,
+      "min_ms": 14.798,
+      "max_ms": 21.967,
+      "control_ms": 0.0504
+    }
+  },
+  "assertions": [
+    {
+      "name": "A1_05_main",
+      "pass": true,
+      "detail": "got 1547 want 1547"
+    },
+    {
+      "name": "A1_05_audit",
+      "pass": true,
+      "detail": "got 1547 want 1547"
+    },
+    {
+      "name": "A1_09_main",
+      "pass": true,
+      "detail": "got 3626 want 3626"
+    },
+    {
+      "name": "A1_09_audit",
+      "pass": true,
+      "detail": "got 3626 want 3626"
+    },
+    {
+      "name": "A1_12_main",
+      "pass": true,
+      "detail": "got 4679 want 4679"
+    },
+    {
+      "name": "A1_12_audit",
+      "pass": true,
+      "detail": "got 4679 want 4679"
+    },
+    {
+      "name": "A2_equal",
+      "pass": true,
+      "detail": "2161 vs 2161 rows"
+    },
+    {
+      "name": "A3_main",
+      "pass": true,
+      "detail": "replay-open 4679 reader 4679"
+    },
+    {
+      "name": "A3_audit",
+      "pass": true,
+      "detail": "replay-open 4679 reader 4679"
+    },
+    {
+      "name": "A1K_count",
+      "pass": true,
+      "detail": "log rows 11 versions 6"
+    },
+    {
+      "name": "A2K_range",
+      "pass": true,
+      "detail": "11 vs 11"
+    },
+    {
+      "name": "A4_preceding",
+      "pass": true,
+      "detail": "k5 [(8877,)] want seq 8877"
+    },
+    {
+      "name": "A5_diff",
+      "pass": true,
+      "detail": "303 differing rows"
+    }
+  ],
+  "meta": {
+    "scale": 3,
+    "label": "PRELIMINARY (non-reference hardware)",
+    "concepts": 1920,
+    "seed_edges": 4560,
+    "chain_heavy": {
+      "max": 9,
+      "avg": 3.5
+    },
+    "chain_insert": {
+      "max": 1,
+      "avg": 1.0
+    }
+  }
+}
