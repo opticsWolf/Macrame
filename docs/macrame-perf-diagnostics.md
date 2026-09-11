@@ -1,6 +1,8 @@
 # Macrame bottleneck diagnostics — test & fix plan
 
-**Status:** executed (F2 landed as [D-274](architecture/s13-decision-register.md#d-274), 0.16.1) · **Date:** 2026-09-10 · **Branch:** `dev/0.17.0`
+**Status:** executed, and the follow-on cycle (§9) closed (F2 as [D-274](architecture/s13-decision-register.md#d-274), 0.16.1; F6's recipe as [D-276](architecture/s13-decision-register.md#d-276), 0.16.2; F1 as [D-277](architecture/s13-decision-register.md#d-277), 0.16.3; §9.3/§9.4/§9.5 closed with numbers in place) · **Date:** 2026-09-10, follow-on measured 2026-09-11 · **Branch:** `dev/0.17.0`
+
+**What remains open is named and is not this crate's to fix alone**: the DiskANN-vs-HNSW build economics and the DiskANN index shadow's footprint are libSQL's (the crate does not fork its engine; the search side is flat in corpus size and inside §9's ≤20 ms line), and every number here is preliminary-hardware pending the reference-iron rerun.
 **Trigger:** spikeladders (same box, seeded RNG, `.venv` with `macrame-db==0.16.0`):
 
 | Observation | Numbers |
