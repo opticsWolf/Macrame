@@ -875,6 +875,18 @@ impl PyDatabase {
     ///
     /// `cancel` takes a `CancelToken`. This call holds the GIL released for its
     /// whole run, so the cancelling thread has to be a different one.
+    ///
+    /// **The WAL during a bulk** (measured, 0.16.1): every chunk's commit can
+    /// trigger SQLite's autocheckpoint (default: every 1,000 pages), and on a
+    /// bulk that fires every few chunks. On the 16,000-edge random-pair ladder
+    /// (medians of 3, `benchmarks/diagnostics/spike_ladder.py`): 5.0 s with the
+    /// default, 3.7 s with `wal_autocheckpoint=10_000` at open, 3.6 s with it
+    /// disabled — and the disabled variant's WAL is ~554 MB for that fixture
+    /// against 43 MB at the 10,000-page threshold, with one explicit
+    /// `checkpoint()` after the bulk paying back the frames. The 10,000-page
+    /// setting is the recipe unless the disk is known to be large; on an
+    /// ordered (chain-shaped) import the sweep is a wash. The knob is set at
+    /// open, per handle.
     #[pyo3(signature = (edges, *, progress = None, cancel = None))]
     fn bulk_import(
         &self,

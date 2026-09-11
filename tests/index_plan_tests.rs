@@ -40,7 +40,9 @@ mod plan_fixture;
 
 use harness::TestHarness;
 use macrame::schema::ddl;
-use plan_fixture::{assert_has_statistics, migrated, plan_of, populated_and_analysed};
+use plan_fixture::{
+    assert_has_statistics, migrated, plan_of, populated_and_analysed, populated_without_statistics,
+};
 
 /// Why an index exists.
 enum Justification {
@@ -340,6 +342,63 @@ async fn every_justified_index_is_the_one_the_planner_picks_with_statistics() {
             plan.contains(name),
             "{label}: expected {name} on a populated, analysed database — \
              planner chose: {plan}"
+        );
+    }
+}
+
+/// Each justified index is also the one its query gets **without statistics**.
+///
+/// The third planner state, and the one the write path actually runs in: a
+/// database that has rows and no `sqlite_stat1` is what every fresh file holds
+/// for its whole first session, and what a migration rung's new index holds
+/// until the first `optimize()` — a brand-new index has no stat1 row even on a
+/// database whose other indexes do. D-274 is the instance: the single-open
+/// probe was pinned on an empty fixture and on a populated *analysed* one,
+/// and both were green while the populated statistics-free planner scanned a
+/// lineage per trigger firing.
+///
+/// This test is the registry swept across that state, and it is not a demand
+/// that every plan be identical in it — statistics legitimately change plans,
+/// and `statistics_effect_tests` exists to compare the states honestly. What
+/// it demands is narrower: the index a query is justified by is the one the
+/// no-statistics planner picks too. A registry entry that cannot hold here is
+/// either another D-274-class defect on the write path's window, or a reader
+/// the index does not actually serve in the state fresh files are in — and
+/// either way the entry has to say so, in this file, beside its query.
+#[tokio::test]
+async fn every_justified_index_is_the_one_the_planner_picks_without_statistics() {
+    let harness = TestHarness::new();
+    let conn = populated_without_statistics(&harness.db_path).await;
+
+    // The fixture's own guard, from the other side: `populated_without_statistics`
+    // exists to isolate one variable, and a fixture that quietly gained
+    // statistics would make this test a copy of the analysed arm above. The
+    // table itself does not exist until the first `ANALYZE` creates it, so the
+    // honest assertion is that absence.
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' \
+             AND name = 'sqlite_stat1'",
+            (),
+        )
+        .await
+        .unwrap();
+    let stat_tables: i64 = rows.next().await.unwrap().unwrap().get(0).unwrap();
+    assert_eq!(
+        stat_tables, 0,
+        "the no-statistics fixture holds sqlite_stat1, so this is the \
+         analysed arm wearing the wrong name (D-150's shape)"
+    );
+
+    for (name, j) in REGISTRY {
+        let Query { label, sql, .. } = j else {
+            continue;
+        };
+        let plan = plan_of(&conn, sql).await;
+        assert!(
+            plan.contains(name),
+            "{label}: expected {name} on a populated, statistics-free database \
+             — planner chose: {plan}"
         );
     }
 }

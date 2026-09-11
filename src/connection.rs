@@ -2833,6 +2833,23 @@ impl Database {
     /// `recorded_at` stamps this import writes — depend on how fast the machine
     /// was, not only on how many edges were passed (§5.1.6).
     ///
+    /// # The WAL during a bulk (measured, 0.16.1 — see D-274's diagnostics)
+    ///
+    /// Every chunk's commit runs WAL pages back into the database file when
+    /// SQLite's own autocheckpoint threshold (1,000 pages) is reached, and on a
+    /// bulk that fires every few chunks. Measured on the 16,000-edge random-pair
+    /// ladder (medians of 3, `benchmarks/diagnostics/`): 5.0 s with the default,
+    /// 3.7 s with the threshold at 10,000 pages (`wal_autocheckpoint = 10_000`
+    /// at open), 3.6 s with it disabled outright — and the checkpoint the bulk
+    /// was paying is 240 ms once at the end instead. The WAL is the price of the
+    /// third: ~554 MB for that fixture against 43 MB at the 10,000-page
+    /// threshold and ~6 MB at the default, so the 10,000-page setting is the
+    /// recipe unless the disk is known to be large. On an ordered (chain-shaped)
+    /// import the sweep is a wash — the recipe is for the random-order shape a
+    /// real importer produces. The knob is per-handle and set at
+    /// [`Database::open`](crate::Database::open); call
+    /// [`Self::checkpoint`] once after a disabled-checkpoint bulk.
+    ///
     /// Returns [`BulkInterrupted`] rather than [`DbError`] on failure, because
     /// a path that is not all-or-nothing owes its caller the count of what
     /// landed (0.13.8, W7.6). `?` into a `Result<_, DbError>` still compiles

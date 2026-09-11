@@ -1,0 +1,144 @@
+{
+ "date": "2026-09-10T22:57:22",
+ "hardware": "windows-dev-box",
+ "python": "3.13.14",
+ "vector_ladder": {
+  "dim64": {
+   "median": {
+    "wall_s": 10.534,
+    "wall_s_min": 10.505,
+    "wall_s_max": 10.562,
+    "hold_sum_ms": 10522.95,
+    "hold_sum_ms_min": 10494.9,
+    "hold_sum_ms_max": 10551.0
+   },
+   "runs": [
+    {
+     "label": "vectors-d64",
+     "n": 5000,
+     "wall_s": 10.562,
+     "hold_sum_ms": 10551.0,
+     "chunks": 167,
+     "holds_first5": [
+      3.1,
+      6.47,
+      11.8,
+      15.26,
+      23.0
+     ],
+     "holds_last5": [
+      72.14,
+      72.45,
+      72.9,
+      72.38,
+      49.09
+     ],
+     "control_ms": 0.0474,
+     "storage_after": {
+      "pages": 10995,
+      "freelist": 0,
+      "wal_bytes": 12619592,
+      "snapshot_bytes": 0
+     }
+    },
+    {
+     "label": "vectors-d64",
+     "n": 5000,
+     "wall_s": 10.505,
+     "hold_sum_ms": 10494.9,
+     "chunks": 167,
+     "holds_first5": [
+      2.62,
+      6.37,
+      11.51,
+      14.8,
+      22.3
+     ],
+     "holds_last5": [
+      79.76,
+      79.88,
+      74.3,
+      72.19,
+      33.82
+     ],
+     "control_ms": 0.044,
+     "storage_after": {
+      "pages": 10995,
+      "freelist": 0,
+      "wal_bytes": 7893952,
+      "snapshot_bytes": 0
+     }
+    }
+   ]
+  },
+  "dim256": {
+   "median": {
+    "wall_s": 76.407,
+    "wall_s_min": 75.671,
+    "wall_s_max": 77.143,
+    "hold_sum_ms": 76388.0,
+    "hold_sum_ms_min": 75652.2,
+    "hold_sum_ms_max": 77123.8
+   },
+   "runs": [
+    {
+     "label": "vectors-d256",
+     "n": 5000,
+     "wall_s": 77.143,
+     "hold_sum_ms": 77123.8,
+     "chunks": 167,
+     "holds_first5": [
+      10.28,
+      110.1,
+      234.68,
+      303.11,
+      308.86
+     ],
+     "holds_last5": [
+      509.78,
+      497.11,
+      492.53,
+      510.22,
+      352.27
+     ],
+     "control_ms": 0.0432,
+     "storage_after": {
+      "pages": 68574,
+      "freelist": 0,
+      "wal_bytes": 73624432,
+      "snapshot_bytes": 0
+     }
+    },
+    {
+     "label": "vectors-d256",
+     "n": 5000,
+     "wall_s": 75.671,
+     "hold_sum_ms": 75652.2,
+     "chunks": 167,
+     "holds_first5": [
+      8.83,
+      86.74,
+      194.35,
+      241.53,
+      250.37
+     ],
+     "holds_last5": [
+      505.0,
+      503.26,
+      501.19,
+      505.43,
+      356.51
+     ],
+     "control_ms": 0.0425,
+     "storage_after": {
+      "pages": 68574,
+      "freelist": 0,
+      "wal_bytes": 73307192,
+      "snapshot_bytes": 0
+     }
+    }
+   ]
+  }
+ },
+ "total_s": 175.4
+}

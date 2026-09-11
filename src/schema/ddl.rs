@@ -1496,6 +1496,30 @@ pub const CREATE_LINKS_CURRENT_SYNC: &str = r#"
 /// honest cost `reject_overlapping_interval` has carried since D-060 — a
 /// trigger able to make it would need a recursive ancestry walk on every
 /// insert, on the path D-059 exists to keep fast.
+///
+/// # Why the `branch_id` predicate carries a unary `+` (0.16.1, D-274)
+///
+/// The `+` is index-avoidance on purpose, the same idiom the resolved write
+/// guard's `TrunkOnForked` arm has carried since 0.15.8 (W13.3, D-250), and
+/// without it the predicate is the one thing that can wreck the bulk path.
+/// `idx_lc_lineage_cut` leads on `branch_id`, and on a database with **no
+/// statistics** — a fresh file, mid-import: the exact state between a bulk load
+/// and the first `optimize()` (D-149, D-198) — the planner enters it with only
+/// `branch_id` bound and scans one lineage's whole projection **per trigger
+/// firing**. Measured on the spike ladder (`benchmarks/diagnostics/`): 16,000
+/// edges into a fresh ledger take 21.8 s with the branch predicate seekable and
+/// 8.4 s with it not — and the per-row hold stops growing with the table, which
+/// is the O(rows) cost the scan contributes. The existing plan pin did not see
+/// it because it ran against an empty fixture, where the wrong index is empty
+/// and attractive to nobody — D-273's lesson about partial indexes, arrived at
+/// from the other side.
+///
+/// With the `+`, the planner cannot enter any branch-led index and must seek on
+/// `idx_lc_open_interval` with `(source_id=? AND target_id=? AND edge_type=? AND
+/// valid_to=?)` — the plan `the_single_open_probe_seeks_rather_than_scans`
+/// pins against a populated fixture. The predicate is unchanged: the seek
+/// narrows to the key, the branch filter is applied to the candidates, and the
+/// rule stays row-level per lineage exactly as the v12 comment above states.
 pub const CREATE_LINKS_SINGLE_OPEN: &str = concat!(
     r#"
     CREATE TRIGGER IF NOT EXISTS trg_links_single_open
@@ -1506,7 +1530,7 @@ pub const CREATE_LINKS_SINGLE_OPEN: &str = concat!(
              WHERE source_id  = NEW.source_id
                AND target_id  = NEW.target_id
                AND edge_type  = NEW.edge_type
-               AND branch_id  = NEW.branch_id
+               AND +branch_id = NEW.branch_id
                AND valid_from <> NEW.valid_from
                AND valid_to   = '9999-12-31T23:59:59.999999Z'
          )

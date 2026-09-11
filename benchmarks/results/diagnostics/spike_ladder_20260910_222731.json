@@ -1,0 +1,46 @@
+{
+ "date": "2026-09-10T22:27:22",
+ "hardware": "windows-dev-box",
+ "python": "3.13.14",
+ "explain": {
+  "plans": {
+   "raw": {
+    "guard_trunk": [
+     "SEARCH l USING COVERING INDEX idx_lc_open_interval (source_id=? AND target_id=? AND edge_type=?)"
+    ],
+    "guard_forked": [
+     "SEARCH l USING INDEX idx_lc_open_interval (source_id=? AND target_id=? AND edge_type=?)"
+    ],
+    "insert_link": [],
+    "trigger_single_open": [
+     "SEARCH links_current USING COVERING INDEX idx_lc_lineage_cut (branch_id=?)"
+    ],
+    "trigger_current_sync": [],
+    "traverse_sample": [
+     "SEARCH links_current USING COVERING INDEX idx_lc_open_interval (source_id=?)"
+    ]
+   },
+   "analysed": {
+    "guard_trunk": [
+     "SEARCH l USING COVERING INDEX idx_lc_open_interval (source_id=? AND target_id=? AND edge_type=?)"
+    ],
+    "guard_forked": [
+     "SEARCH l USING INDEX idx_lc_open_interval (source_id=? AND target_id=? AND edge_type=?)"
+    ],
+    "insert_link": [],
+    "trigger_single_open": [
+     "SEARCH links_current USING COVERING INDEX idx_lc_lineage_cut (branch_id=?)"
+    ],
+    "trigger_current_sync": [],
+    "traverse_sample": [
+     "SEARCH links_current USING COVERING INDEX idx_lc_open_interval (source_id=?)"
+    ]
+   }
+  },
+  "guard_ms_at_16000": {
+   "guard_trunk": 0.0611,
+   "guard_forked": 0.0643
+  }
+ },
+ "total_s": 9.0
+}

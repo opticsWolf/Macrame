@@ -1,0 +1,81 @@
+{
+ "date": "2026-09-10T22:57:03",
+ "hardware": "windows-dev-box",
+ "python": "3.13.14",
+ "concept_ladder": {
+  "median": {
+   "wall_s": 0.901,
+   "wall_s_min": 0.895,
+   "wall_s_max": 0.905,
+   "hold_sum_ms": 867.7,
+   "hold_sum_ms_min": 864.1,
+   "hold_sum_ms_max": 872.8
+  },
+  "runs": [
+   {
+    "label": "concepts-20000",
+    "wall_s": 0.901,
+    "hold_sum_ms": 867.7,
+    "chunks": 395,
+    "holds_first5": [
+     2.17,
+     1.74,
+     1.97,
+     2.16,
+     2.04
+    ],
+    "holds_last5": [
+     1.44,
+     4.04,
+     2.86,
+     2.86,
+     0.44
+    ],
+    "control_ms": 0.0536
+   },
+   {
+    "label": "concepts-20000",
+    "wall_s": 0.905,
+    "hold_sum_ms": 872.8,
+    "chunks": 393,
+    "holds_first5": [
+     1.95,
+     2.01,
+     1.77,
+     1.79,
+     2.03
+    ],
+    "holds_last5": [
+     1.35,
+     3.22,
+     2.59,
+     2.8,
+     0.56
+    ],
+    "control_ms": 0.0506
+   },
+   {
+    "label": "concepts-20000",
+    "wall_s": 0.895,
+    "hold_sum_ms": 864.1,
+    "chunks": 391,
+    "holds_first5": [
+     1.94,
+     1.75,
+     1.78,
+     2.2,
+     1.98
+    ],
+    "holds_last5": [
+     1.1,
+     2.0,
+     1.38,
+     3.7,
+     1.16
+    ],
+    "control_ms": 0.0422
+   }
+  ]
+ },
+ "total_s": 3.0
+}

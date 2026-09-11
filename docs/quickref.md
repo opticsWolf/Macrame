@@ -1,6 +1,6 @@
 # Macrame — Architecture Quick Reference
 
-**v0.16.0 · A Bitemporal Graph Ledger on libSQL**
+**v0.16.1 · A Bitemporal Graph Ledger on libSQL**
 
 ---
 
@@ -178,8 +178,9 @@ Every temporal column is exactly 27 characters: `YYYY-MM-DDTHH:MM:SS.ffffffZ`
 | v14 | `idx_lc_lineage_cut` on `links_current` — the index the branched read seeks and the trunk walk does not ([D-231](architecture/s13-decision-register.md#d-231)) |
 | v15 | `links`' primary key gains `branch_id`, and `cold.links` takes the same key ([D-232](architecture/s13-decision-register.md#d-232)). The **last rung to change a primary key** before the 1.0 freeze |
 | v16 | `log_integrity` — one row, one bit: *has anything ever been deleted from `transaction_log`?* Seeded from the log, maintained by `trg_txlog_mark_gap`, so the reach guard reads a bit instead of counting the log on every recorded-time read ([D-249](architecture/s13-decision-register.md#d-249)) |
-| v18 | `idx_links_branch` and `idx_txlog_branch` — the lineage's own indexes on the two tables `archive_branch` scans, **partial** over `branch_id <> 'main'` because the trunk is never archivable, so they hold what branches wrote and cost the write path nothing ([D-273](architecture/s13-decision-register.md#d-273)) |
 | v17 | `idx_txlog_fold_partition` — the fold's own partition, and **not** the index review item C-4 asked for, which was never measured faster than no index at all ([D-254](architecture/s13-decision-register.md#d-254)) |
+| v18 | `idx_links_branch` and `idx_txlog_branch` — the lineage's own indexes on the two tables `archive_branch` scans, **partial** over `branch_id <> 'main'` because the trunk is never archivable, so they hold what branches wrote and cost the write path nothing ([D-273](architecture/s13-decision-register.md#d-273)) |
+| v19 | `trg_links_single_open`'s body re-pinned: the branch predicate carries a unary `+`, so on a statistics-free database the probe seeks `idx_lc_open_interval` instead of scanning a lineage per trigger firing — the fresh-file bulk import was 3.9× wall at 16k edges. Trigger-only; no table touched ([D-274](architecture/s13-decision-register.md#d-274)) |
 
 **This table stopped at v10 for seven rungs and fourteen releases** (corrected while writing the 0.16.0 release note). `tests/doc_currency_tests.rs` gates `docs/architecture/README.md`'s revision history and the register's `D-001…D-NNN` line; it does not read this file, which is why the drift here ran longer than anywhere the gate looks. The authority on the ladder is `src/schema/migrations.rs`'s `STEPS`, and `SCHEMA_VERSION` is the number to trust over this table.
 

@@ -13,7 +13,7 @@ use crate::schema::ddl::*;
 /// guarantee D-029 buys would be void on it while `user_version` insisted all
 /// was well. Reserving 1 as a value this build refuses by name is what makes
 /// "no legacy support" an enforced property instead of a README sentence.
-pub const SCHEMA_VERSION: u32 = 18;
+pub const SCHEMA_VERSION: u32 = 19;
 
 type StepFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
 
@@ -194,6 +194,21 @@ const STEPS: &[Step] = &[
         // other. Nothing to defer, exactly as on the rung above.
         suspends_foreign_keys: false,
         apply: |conn| Box::pin(add_branch_partition_indices(conn)),
+    },
+    Step {
+        from: 18,
+        to: 19,
+        name: "single-open-plan-pin",
+        // One `DROP TRIGGER` and one `CREATE TRIGGER`: the v18 body of
+        // `trg_links_single_open` leaves its `branch_id` predicate seekable,
+        // and on a statistics-free database the planner serves the probe from
+        // `idx_lc_lineage_cut` with only `branch_id` bound — one whole-lineage
+        // scan per trigger firing, O(rows) per row over a bulk (D-274). No
+        // table is rebuilt, no row moves, and the trigger is on `links`, whose
+        // inbound foreign keys are the parents' — the two rungs that needed
+        // the flag touch the table itself, this one does not.
+        suspends_foreign_keys: false,
+        apply: |conn| Box::pin(pin_single_open_plan(conn)),
     },
     Step {
         from: 16,
@@ -997,6 +1012,35 @@ async fn add_fold_partition_index(conn: &libsql::Connection) -> Result<()> {
 /// [D-273]: ../../docs/architecture/s13-decision-register.md#d-273
 async fn add_branch_partition_indices(conn: &libsql::Connection) -> Result<()> {
     create_indices(conn, &["idx_links_branch", "idx_txlog_branch"]).await
+}
+
+/// v18 → v19: the single-open probe's plan is pinned against statistics (0.16.1,
+/// [D-274]).
+///
+/// One trigger body replaced, by the same two statements every trigger rung
+/// runs. The v18 body left `branch_id = NEW.branch_id` seekable, which is
+/// correct on a database that has statistics and a defect on one that does
+/// not: with no `sqlite_stat1` the planner enters `idx_lc_lineage_cut` with
+/// only `branch_id` bound and scans the lineage per firing. D-274 spells the
+/// `+` into the body; this rung puts that body on every database the ladder
+/// brings forward, because [`CREATE_TRIGGERS`] runs on the baseline and a file
+/// created by an earlier build would otherwise keep the v18 body — a plan
+/// repair that fixes new databases only is not the repair the measurement
+/// describes, which is [`add_fold_partition_index`]'s reason restated.
+///
+/// # Why this is a rung and not a silent rebuild
+///
+/// `CREATE TRIGGER IF NOT EXISTS` on an existing name keeps the old body
+/// (§15.2, [D-214]), so anything short of the explicit drop would stamp a v19
+/// database whose trigger still plans the scan — the exact failure the v12 →
+/// v13 rung documented for `trg_branches_frozen_delete`, one layer down.
+///
+/// [D-274]: ../../docs/architecture/s13-decision-register.md#d-274
+async fn pin_single_open_plan(conn: &libsql::Connection) -> Result<()> {
+    conn.execute("DROP TRIGGER IF EXISTS trg_links_single_open", ())
+        .await?;
+    conn.execute(CREATE_LINKS_SINGLE_OPEN, ()).await?;
+    Ok(())
 }
 
 /// The v15 shape of `links`, pinned as text (0.14.15, [D-232]).

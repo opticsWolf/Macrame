@@ -1,5 +1,7 @@
 #[path = "common/harness.rs"]
 mod harness;
+#[path = "common/plan_fixture.rs"]
+mod plan_fixture;
 #[path = "common/v7_schema.rs"]
 mod v7_schema;
 
@@ -10,9 +12,11 @@ use harness::TestHarness;
 use macrame::error::DbError;
 use macrame::schema::ddl;
 use macrame::schema::SCHEMA_VERSION;
+use plan_fixture::populated_without_statistics;
 use v7_schema::seeded_v7;
 
 const TS: &str = "2026-01-01T00:00:00.000000Z";
+const OPEN: &str = "9999-12-31T23:59:59.999999Z";
 
 /// Open the harness database and hand back a connection.
 async fn connect(harness: &TestHarness) -> libsql::Connection {
@@ -442,7 +446,7 @@ async fn plan_string(conn: &libsql::Connection, sql: &str) -> String {
 #[test]
 fn a_version_bump_must_bring_its_own_rung_test() {
     assert_eq!(
-        SCHEMA_VERSION, 18,
+        SCHEMA_VERSION, 19,
         "SCHEMA_VERSION moved. Add a test for the new rung — one that starts \
          from a database at the previous version and asserts what the rung is \
          *for*, not merely that `run` reached the top."
@@ -979,15 +983,29 @@ async fn a_negative_weight_already_stored_blocks_the_v7_rung_with_an_explanation
 /// the test goes on proving something about a query nobody runs. It is bounded
 /// by `the_open_interval_probe_matches_the_trigger` below, which checks the
 /// trigger DDL still contains the predicate this test models.
+///
+/// **And it runs against a populated fixture too (D-274).** The first arm was
+/// the only one through 0.16.0, and it is the weaker of the two: on an empty
+/// database `idx_lc_lineage_cut` is empty, and an empty index is attractive to
+/// nobody — the same reason D-273 pinned its partial indexes against a fixture
+/// holding live lineages. The populated arm is the state a bulk import runs
+/// in — rows, no statistics, D-198's fixture — and that is where the planner
+/// misbehaved: with the branch predicate seekable it served the probe from
+/// `idx_lc_lineage_cut` with only `branch_id` bound, a whole-lineage scan per
+/// trigger firing. Asserting that index by name in both arms is the pin.
 #[tokio::test]
 async fn the_single_open_probe_seeks_rather_than_scans() {
     let harness = TestHarness::new();
     let conn = connect(&harness).await;
     macrame::schema::run_migrations(&conn).await.unwrap();
 
+    // The `+` is part of the shipped body (D-274) and part of what this probe
+    // models: without it the branch predicate is seekable and the planner's
+    // choice is statistics-dependent, which is what the populated arm below
+    // pins.
     let probe = "SELECT 1 FROM links_current \
                  WHERE source_id = ?1 AND target_id = ?2 AND edge_type = ?3 \
-                   AND valid_from <> ?4 AND valid_to = ?5";
+                   AND +branch_id = ?4 AND valid_from <> ?4 AND valid_to = ?5";
 
     let mut rows = conn
         .query(&format!("EXPLAIN QUERY PLAN {probe}"), ())
@@ -1008,6 +1026,30 @@ async fn the_single_open_probe_seeks_rather_than_scans() {
     assert!(
         step.contains("source_id=? AND target_id=? AND edge_type=?"),
         "the probe binds fewer columns than the index offers, so it still scans: {step}"
+    );
+
+    // The populated arm: rows, no statistics — D-198's fixture, and the state
+    // a fresh ledger holds for the whole of a bulk import. The empty arm
+    // above passes under either body; this one is where the wrong index has
+    // rows to be attractive to the planner with.
+    let populated =
+        populated_without_statistics(&harness.temp_dir.path().join("single_open_populated.db"))
+            .await;
+    let populated_plan = plan_string(&populated, probe).await;
+    assert!(
+        populated_plan.contains("idx_lc_open_interval"),
+        "on a populated, statistics-free database the probe left its own \
+         index: {populated_plan}"
+    );
+    assert!(
+        populated_plan.contains("source_id=? AND target_id=? AND edge_type=?"),
+        "the populated probe binds fewer columns than the index offers: \
+         {populated_plan}"
+    );
+    assert!(
+        !populated_plan.contains("idx_lc_lineage_cut"),
+        "the branch-led index is serving a key-led lookup — a whole-lineage \
+         scan per trigger firing, the D-274 defect in the plan: {populated_plan}"
     );
 }
 
@@ -1082,6 +1124,10 @@ fn the_open_interval_probe_matches_the_trigger() {
         "source_id = NEW.source_id",
         "target_id = NEW.target_id",
         "edge_type = NEW.edge_type",
+        // The `+` is the plan (D-274): without it the branch predicate is
+        // seekable and the populated planner serves this probe from
+        // `idx_lc_lineage_cut` with one column bound.
+        "+branch_id = NEW.branch_id",
         "valid_from <> NEW.valid_from",
         "valid_to = '9999-12-31T23:59:59.999999Z'",
     ] {
@@ -2319,6 +2365,144 @@ async fn a_v17_database_climbs_to_v18_and_the_branch_archive_stops_scanning_the_
              index that excludes the trunk cannot answer it: {plan}"
         );
     }
+}
+
+/// **v18 → v19: the single-open probe's plan is pinned against statistics, on
+/// every database the ladder brings forward (D-274).**
+///
+/// The counterpart of the climb test above and pinned for the same reason — a
+/// rung whose reader is on the bulk path must be asserted on a database that
+/// *reached* it, not only on the baseline. The v18 body is reproduced here as
+/// `TRIGGERS_V11` reproduces the v11 ones: it is the body the crate shipped
+/// through 0.16.0, and the rung that replaces it must be shown to replace it
+/// rather than stamp over it.
+///
+/// The populated part is the point. On an empty database the plan is already
+/// right — the wrong index is empty and attractive to nobody — so the defect
+/// is only visible after rows exist, and `sqlite_stat1` is what the fresh-file
+/// bulk import never has (D-198). Both states are seeded by hand, because the
+/// fixture helpers run the ladder and this test must hold the ladder back.
+#[tokio::test]
+async fn a_v18_database_climbs_to_v19_and_the_single_open_probe_stops_scanning_the_lineage() {
+    // The v18 body — the pre-`+` trigger exactly as shipped through 0.16.0.
+    const SINGLE_OPEN_V18: &str = r#"
+    CREATE TRIGGER IF NOT EXISTS trg_links_single_open
+    BEFORE INSERT ON links
+    WHEN NEW.valid_to = '9999-12-31T23:59:59.999999Z'
+         AND EXISTS (
+             SELECT 1 FROM links_current
+             WHERE source_id  = NEW.source_id
+               AND target_id  = NEW.target_id
+               AND edge_type  = NEW.edge_type
+               AND branch_id  = NEW.branch_id
+               AND valid_from <> NEW.valid_from
+               AND valid_to   = '9999-12-31T23:59:59.999999Z'
+         )
+    BEGIN
+        SELECT RAISE(ABORT, 'macrame: edge already has an open interval; retire it first');
+    END;
+    "#;
+    // The probe, copied — the original is a trigger body and `EXPLAIN QUERY
+    // PLAN` cannot reach it. Two of them, because the claim spans the rung:
+    // the v18 probe plans the scan, the v19 probe must not.
+    // `the_single_open_probe_seeks_rather_than_scans` bounds the v19 copy
+    // against its source.
+    const PROBE_V18: &str = "SELECT 1 FROM links_current \
+         WHERE source_id = ?1 AND target_id = ?2 AND edge_type = ?3 \
+           AND branch_id = ?4 AND valid_from <> ?4 \
+           AND valid_to = '9999-12-31T23:59:59.999999Z'";
+    const PROBE_V19: &str = "SELECT 1 FROM links_current \
+         WHERE source_id = ?1 AND target_id = ?2 AND edge_type = ?3 \
+           AND +branch_id = ?4 AND valid_from <> ?4 \
+           AND valid_to = '9999-12-31T23:59:59.999999Z'";
+
+    let harness = TestHarness::new();
+    let conn = connect(&harness).await;
+    macrame::schema::run_migrations(&conn).await.unwrap();
+
+    // Downgrade to v18 honestly: the pre-`+` body, the v18 stamp.
+    conn.execute("DROP TRIGGER trg_links_single_open", ()).await.unwrap();
+    conn.execute(SINGLE_OPEN_V18, ()).await.unwrap();
+    conn.execute("PRAGMA user_version = 18", ()).await.unwrap();
+
+    // Rows first — the plan is only wrong where the index has rows — then
+    // the defect, observed before the climb can touch it.
+    conn.execute("BEGIN", ()).await.unwrap();
+    for i in 0..260 {
+        conn.execute(
+            "INSERT INTO concepts (id, title, content, valid_from, valid_to, \
+             recorded_at, retired) VALUES (?1, ?2, '', ?3, ?4, ?3, 0)",
+            libsql::params![format!("c{i:03}"), format!("C{i}"), TS, OPEN],
+        )
+        .await
+        .unwrap();
+    }
+    for i in 1..210 {
+        conn.execute(
+            "INSERT INTO links (source_id, target_id, edge_type, valid_from, \
+             valid_to, weight, properties, recorded_at) \
+             VALUES (?1, ?2, 'LINKS', ?3, ?4, 1.0, '{}', ?3)",
+            libsql::params!["c000", format!("c{i:03}"), TS, OPEN],
+        )
+        .await
+        .unwrap();
+    }
+    conn.execute("COMMIT", ()).await.unwrap();
+
+    let before = plan_string(&conn, PROBE_V18).await;
+    assert!(
+        before.contains("idx_lc_lineage_cut") && before.contains("branch_id=?"),
+        "the fixture is not starting from the v18 plan — expected the probe \
+         to be served by the branch-led index with one column bound, got: {before}"
+    );
+
+    macrame::schema::run_migrations(&conn).await.unwrap();
+    assert_eq!(user_version(&conn).await, SCHEMA_VERSION);
+
+    let after = plan_string(&conn, PROBE_V19).await;
+    assert!(
+        after.contains("idx_lc_open_interval") && after.contains("source_id=?"),
+        "the rung restored the body and the probe still did not take its own \
+         index: {after}"
+    );
+    assert!(
+        !after.contains("idx_lc_lineage_cut"),
+        "the climbed database still plans the whole-lineage scan: {after}"
+    );
+
+    // The body the rung put down, read back from the database rather than
+    // assumed from the constant.
+    let mut rows = conn
+        .query(
+            "SELECT sql FROM sqlite_master WHERE type = 'trigger' \
+             AND name = 'trg_links_single_open'",
+            (),
+        )
+        .await
+        .unwrap();
+    let body = rows.next().await.unwrap().unwrap().get::<String>(0).unwrap();
+    assert!(
+        body.contains("+branch_id = NEW.branch_id"),
+        "the climbed database does not carry the pinned body: {body}"
+    );
+
+    // And the rule the trigger exists to enforce is untouched: the `+` is a
+    // plan, not a permission. A second open interval on the same key, from the
+    // same lineage, is still a refusal.
+    let err = conn
+        .execute(
+            "INSERT INTO links (source_id, target_id, edge_type, valid_from, \
+             valid_to, weight, properties, recorded_at) \
+             VALUES ('c000', 'c001', 'LINKS', '2027-01-01T00:00:00.000000Z', \
+                     '9999-12-31T23:59:59.999999Z', 1.0, '{}', ?1)",
+            libsql::params![TS],
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("already has an open interval"),
+        "the single-open guard stopped refusing with the plan pinned: {err}"
+    );
 }
 
 /// A v18 stamp over a database that never ran the rung is refused at open.

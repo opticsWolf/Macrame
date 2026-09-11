@@ -39,6 +39,8 @@ criterion baselines, or a diff of the result JSON.
 benchmarks/
   README.md              this file
   tpcbih_style.py        Python harness (the macrame package), v2 hardened
+  diagnostics/
+    spike_ladder.py      the measurement half of docs/macrame-perf-diagnostics.md
   results/               run JSON: figures + assertion log + meta
   rs-tpcbih/             Rust harness (criterion), same workload classes
     Cargo.toml           its own package, its own workspace, path dep on ../..
@@ -95,6 +97,11 @@ benchmark that can time a wrong answer is worse than none.
   (Windows 11, NVMe SSD, 32 GB RAM, release build).
 
 ## Latest readings (scale 1 → 3, preliminary)
+
+**The branch column predates 0.16.0's last two releases and the edge-bulk
+ladder predates D-274** — see `diagnostics/` for the spike-ladder harness that
+found and fixed the fresh-file bulk-import defect, whose before/after table
+lives in [D-274](../docs/architecture/s13-decision-register.md#d-274).
 
 | Class | Trunk | Branch |
 |---|---|---|
