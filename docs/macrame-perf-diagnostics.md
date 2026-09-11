@@ -560,3 +560,93 @@ assertion in CI (D-055). The remaining flat ~135 µs/row on the edge path is
 the maintained materialization doing its job; the lever for it is F1, which is
 a decision a caller makes, not a defect.
 
+---
+
+## 9. The follow-on cycle — what the 0.16.1 comparison leaves open (2026-09-11)
+
+The same battery run against ladybug 0.20.3 on the same box, with 0.16.1
+plugged in, splits cleanly into what this crate has already won and what it
+has not. **Won**: small writes (927 ms vs 1,010 ms for 2k + 4k), and every
+traversal — 1-hop 0.13 ms vs 5.9 ms, 5-hop 0.23 ms vs 4.4 ms, 19–45× across
+the ladder. **Still open**, ranked by gap size; each item names the
+measurement that would validate it before anyone commits code, per §0's own
+discipline. Per the release discipline adopted with 0.16.1: **each landed fix
+ships as its own patch release** (0.16.2, 0.16.3, …) with its own register
+entry and its own gates run; a measured refutation that changes no code lands
+as a docs commit without a bump.
+
+### 9.1 The vector build — 8.5–10× behind, and superlinear in dimension (F6, engine-side)
+
+The largest gap in the table: 2k×256 is **29.8 s against ladybug's 3.5 s**, and
+2k×512 is **58 s against 5.6 s**. Within macrame the scaling itself is the
+tell: 64→256 is 4× the dimensions but **7.8× the time** (3.8 s→29.8 s),
+~12× per-vector. A linear-in-bytes build (ladybug's shape, ~linear) would be
+4×; the excess is the item.
+
+Measurements before any code:
+
+- **(a) Blob I/O vs DiskANN maintenance.** Same 2k×256 corpus, insert with the
+  DiskANN index dropped vs present (fresh file per arm; recreate after). If
+  blob inserts are flat while indexed inserts grow, the cost is per-row index
+  maintenance, not I/O.
+- **(b) Full build vs incremental.** Insert every row with the index absent,
+  then `CREATE INDEX` once (one-pass DiskANN build), against the incremental
+  path. If the one-pass build is materially faster, the candidate is a
+  **drop → load → rebuild recipe**.
+- **(c) The D-275 WAL recipe on the vector path** — heavy WAL traffic, never
+  measured with the 10k-page threshold.
+- **(d) The dim-scaling dissection** — per-chunk holds at 64/256/512 on the
+  same N, to say whether the growth is in the encode, the statement, or the
+  index.
+
+The correctness twist §4 of the schema states plainly: the DiskANN index is
+**load-bearing for correctness**, not only for speed — it is the storage-layer
+dimension backstop (a wrong-length blob is *accepted* without it, `ddl.rs`
+`create_embeddings_index`). So a drop-rebuild recipe cannot be a silent
+default; it is a register decision with its own Rejected line for keeping the
+index during loads, and it must lean on the API layer's check
+(`EmbeddingCodec::encode` rejects a wrong dimension before any statement
+runs). The storage backstop would hold for everything that goes through the
+crate and be given up only for callers loading through the recipe.
+
+### 9.2 The edge ladder residual — ~2.5× per 2×, down from ~4×
+
+Post-D-274 the ladder is 0.4/1.3/3.5/8.0 s at 2k/4k/8k/16k — per-row cost
+still climbs (~200→500 µs) where the fix made it *flat at a fixed size*. Two
+hypotheses, in order:
+
+- **Checkpoint drain.** The ladder ran at the default WAL threshold; D-275
+  already measured 16k at 5.0→3.7 s with the 10k-page recipe. Rerun the whole
+  ladder with the recipe: if scaling moves toward ~2×, the residual is WAL
+turnover and the recipe (or an opt-in `bulk_import` knob) closes it.
+- **Page-cache misses.** If the growth survives the recipe, dissect cache_size
+  against DB size — a file that outgrows the page cache turns every probe into
+  a miss, and that shape would also explain the concept-per-row gap.
+
+### 9.3 The vector query — 16.4 ms vs 4.5 ms top-10
+
+The path is `vector_top_k` → distance recompute on the k rows it selects, and
+the escalation loop only when a first pass comes up short — which a clean
+corpus should never trigger. Dissect raw `vector_top_k` against the full
+`search()` path to locate the 16.4 ms; then price the DiskANN search-width
+knob against recall, with a Rejected line for anything that silently lowers
+it.
+
+### 9.4 The footprint — 260 + 11 MB vs 79 MB, never re-measured
+
+§7's unverified row (§8.5). First re-measure @20k with the D-275 recipe —
+transient WAL is part of that number — then decompose what remains:
+page_size, the content envelope, the FTS shadow, the log table. The question
+is the same one Doctrine VI answers for `links_current`: is anything being
+stored that a fold could regenerate.
+
+### 9.5 The keyword cell — empty for honesty's sake
+
+0.16.0's "21 ms top-10" and ladybug's "47 ms, 18k rows" are different
+workloads; the cell as it stands proves nothing in either direction. Run
+ladybug's shape — the full 18k-row match — on 0.16.1's FTS5 and fill the cell
+with the same workload on both sides. Likely outcome: macrame is already
+faster, and the row closes with a number instead of an absence.
+
+---
+
