@@ -1,0 +1,1002 @@
+{
+ "date": "2026-09-11T09:10:41",
+ "hardware": "windows-dev-box",
+ "python": "3.13.14",
+ "edge_ladder_default_cadence": {
+  "2000": {
+   "median": {
+    "wall_s": 0.285,
+    "wall_s_min": 0.284,
+    "wall_s_max": 0.287,
+    "hold_sum_ms": 282.7,
+    "hold_sum_ms_min": 282.2,
+    "hold_sum_ms_max": 285.2
+   },
+   "per_row_ms": 0.1425,
+   "runs": [
+    {
+     "label": "edges-2000",
+     "edges": 2000,
+     "wall_s": 0.284,
+     "hold_sum_ms": 282.2,
+     "chunks": 56,
+     "rows_per_chunk_first_last": [
+      90,
+      20
+     ],
+     "holds_first5": [
+      8.11,
+      3.82,
+      4.25,
+      3.9,
+      3.96
+     ],
+     "holds_last5": [
+      4.34,
+      10.44,
+      5.32,
+      5.08,
+      3.22
+     ],
+     "seed_s": null,
+     "control_ms": 0.0474,
+     "storage_after": {
+      "pages": 752,
+      "freelist": 0,
+      "wal_bytes": 4754512,
+      "snapshot_bytes": 0
+     },
+     "violations_after": [
+      "<macrame.KindMetrics bulk_import_chunk turns=56 over_budget=56>",
+      "<macrame.KindMetrics write_concepts_chunk turns=16 over_budget=1>"
+     ]
+    },
+    {
+     "label": "edges-2000",
+     "edges": 2000,
+     "wall_s": 0.285,
+     "hold_sum_ms": 282.7,
+     "chunks": 56,
+     "rows_per_chunk_first_last": [
+      90,
+      20
+     ],
+     "holds_first5": [
+      8.28,
+      3.64,
+      4.0,
+      4.3,
+      4.26
+     ],
+     "holds_last5": [
+      4.39,
+      10.27,
+      5.05,
+      4.84,
+      3.33
+     ],
+     "seed_s": null,
+     "control_ms": 0.0422,
+     "storage_after": {
+      "pages": 752,
+      "freelist": 0,
+      "wal_bytes": 4754512,
+      "snapshot_bytes": 0
+     },
+     "violations_after": [
+      "<macrame.KindMetrics bulk_import_chunk turns=56 over_budget=56>",
+      "<macrame.KindMetrics write_concepts_chunk turns=16 over_budget=1>"
+     ]
+    },
+    {
+     "label": "edges-2000",
+     "edges": 2000,
+     "wall_s": 0.287,
+     "hold_sum_ms": 285.2,
+     "chunks": 56,
+     "rows_per_chunk_first_last": [
+      90,
+      20
+     ],
+     "holds_first5": [
+      7.81,
+      3.44,
+      3.88,
+      3.94,
+      4.06
+     ],
+     "holds_last5": [
+      4.45,
+      10.51,
+      5.11,
+      4.78,
+      3.31
+     ],
+     "seed_s": null,
+     "control_ms": 0.0422,
+     "storage_after": {
+      "pages": 752,
+      "freelist": 0,
+      "wal_bytes": 4754512,
+      "snapshot_bytes": 0
+     },
+     "violations_after": [
+      "<macrame.KindMetrics bulk_import_chunk turns=56 over_budget=56>",
+      "<macrame.KindMetrics write_concepts_chunk turns=16 over_budget=1>"
+     ]
+    }
+   ]
+  },
+  "4000": {
+   "median": {
+    "wall_s": 0.681,
+    "wall_s_min": 0.672,
+    "wall_s_max": 0.746,
+    "hold_sum_ms": 677.4,
+    "hold_sum_ms_min": 668.3,
+    "hold_sum_ms_max": 742.4
+   },
+   "per_row_ms": 0.1703,
+   "runs": [
+    {
+     "label": "edges-4000",
+     "edges": 4000,
+     "wall_s": 0.681,
+     "hold_sum_ms": 677.4,
+     "chunks": 113,
+     "rows_per_chunk_first_last": [
+      90,
+      25
+     ],
+     "holds_first5": [
+      7.91,
+      3.8,
+      3.93,
+      4.01,
+      3.88
+     ],
+     "holds_last5": [
+      14.81,
+      5.43,
+      5.22,
+      5.31,
+      3.83
+     ],
+     "seed_s": null,
+     "control_ms": 0.0426,
+     "storage_after": {
+      "pages": 1486,
+      "freelist": 0,
+      "wal_bytes": 5067632,
+      "snapshot_bytes": 0
+     },
+     "violations_after": [
+      "<macrame.KindMetrics bulk_import_chunk turns=113 over_budget=113>",
+      "<macrame.KindMetrics write_concepts_chunk turns=37 over_budget=7>"
+     ]
+    },
+    {
+     "label": "edges-4000",
+     "edges": 4000,
+     "wall_s": 0.672,
+     "hold_sum_ms": 668.3,
+     "chunks": 113,
+     "rows_per_chunk_first_last": [
+      90,
+      25
+     ],
+     "holds_first5": [
+      8.37,
+      3.64,
+      3.85,
+      4.0,
+      3.93
+     ],
+     "holds_last5": [
+      14.48,
+      5.24,
+      5.28,
+      5.55,
+      3.89
+     ],
+     "seed_s": null,
+     "control_ms": 0.0436,
+     "storage_after": {
+      "pages": 1486,
+      "freelist": 0,
+      "wal_bytes": 5067632,
+      "snapshot_bytes": 0
+     },
+     "violations_after": [
+      "<macrame.KindMetrics bulk_import_chunk turns=113 over_budget=113>",
+      "<macrame.KindMetrics write_concepts_chunk turns=38 over_budget=6>"
+     ]
+    },
+    {
+     "label": "edges-4000",
+     "edges": 4000,
+     "wall_s": 0.746,
+     "hold_sum_ms": 742.4,
+     "chunks": 113,
+     "rows_per_chunk_first_last": [
+      90,
+      25
+     ],
+     "holds_first5": [
+      8.09,
+      3.59,
+      3.79,
+      3.96,
+      3.9
+     ],
+     "holds_last5": [
+      17.16,
+      5.36,
+      5.17,
+      5.29,
+      4.02
+     ],
+     "seed_s": null,
+     "control_ms": 0.0425,
+     "storage_after": {
+      "pages": 1486,
+      "freelist": 0,
+      "wal_bytes": 5067632,
+      "snapshot_bytes": 0
+     },
+     "violations_after": [
+      "<macrame.KindMetrics bulk_import_chunk turns=113 over_budget=113>",
+      "<macrame.KindMetrics write_concepts_chunk turns=37 over_budget=7>"
+     ]
+    }
+   ]
+  },
+  "8000": {
+   "median": {
+    "wall_s": 1.883,
+    "wall_s_min": 1.878,
+    "wall_s_max": 2.124,
+    "hold_sum_ms": 1875.2,
+    "hold_sum_ms_min": 1869.7,
+    "hold_sum_ms_max": 2113.8
+   },
+   "per_row_ms": 0.2354,
+   "runs": [
+    {
+     "label": "edges-8000",
+     "edges": 8000,
+     "wall_s": 1.883,
+     "hold_sum_ms": 1875.2,
+     "chunks": 227,
+     "rows_per_chunk_first_last": [
+      90,
+      35
+     ],
+     "holds_first5": [
+      8.2,
+      3.33,
+      3.98,
+      3.98,
+      7.28
+     ],
+     "holds_last5": [
+      9.56,
+      9.36,
+      10.07,
+      9.14,
+      10.46
+     ],
+     "seed_s": null,
+     "control_ms": 0.0667,
+     "storage_after": {
+      "pages": 2946,
+      "freelist": 0,
+      "wal_bytes": 6538472,
+      "snapshot_bytes": 0
+     },
+     "violations_after": [
+      "<macrame.KindMetrics bulk_import_chunk turns=227 over_budget=227>",
+      "<macrame.KindMetrics write_concepts_chunk turns=78 over_budget=16>"
+     ]
+    },
+    {
+     "label": "edges-8000",
+     "edges": 8000,
+     "wall_s": 1.878,
+     "hold_sum_ms": 1869.7,
+     "chunks": 227,
+     "rows_per_chunk_first_last": [
+      90,
+      35
+     ],
+     "holds_first5": [
+      7.98,
+      3.79,
+      3.92,
+      4.08,
+      3.65
+     ],
+     "holds_last5": [
+      28.99,
+      11.61,
+      9.86,
+      10.77,
+      11.98
+     ],
+     "seed_s": null,
+     "control_ms": 0.0635,
+     "storage_after": {
+      "pages": 2946,
+      "freelist": 0,
+      "wal_bytes": 10225872,
+      "snapshot_bytes": 0
+     },
+     "violations_after": [
+      "<macrame.KindMetrics bulk_import_chunk turns=227 over_budget=227>",
+      "<macrame.KindMetrics write_concepts_chunk turns=78 over_budget=17>"
+     ]
+    },
+    {
+     "label": "edges-8000",
+     "edges": 8000,
+     "wall_s": 2.124,
+     "hold_sum_ms": 2113.8,
+     "chunks": 227,
+     "rows_per_chunk_first_last": [
+      90,
+      35
+     ],
+     "holds_first5": [
+      8.33,
+      7.25,
+      5.67,
+      4.38,
+      4.61
+     ],
+     "holds_last5": [
+      6.24,
+      5.82,
+      20.71,
+      5.8,
+      8.76
+     ],
+     "seed_s": null,
+     "control_ms": 0.0557,
+     "storage_after": {
+      "pages": 2946,
+      "freelist": 0,
+      "wal_bytes": 13414752,
+      "snapshot_bytes": 0
+     },
+     "violations_after": [
+      "<macrame.KindMetrics bulk_import_chunk turns=227 over_budget=227>",
+      "<macrame.KindMetrics write_concepts_chunk turns=86 over_budget=17>"
+     ]
+    }
+   ]
+  },
+  "16000": {
+   "median": {
+    "wall_s": 4.61,
+    "wall_s_min": 4.579,
+    "wall_s_max": 4.795,
+    "hold_sum_ms": 4592.5,
+    "hold_sum_ms_min": 4562.0,
+    "hold_sum_ms_max": 4777.7
+   },
+   "per_row_ms": 0.2881,
+   "runs": [
+    {
+     "label": "edges-16000",
+     "edges": 16000,
+     "wall_s": 4.579,
+     "hold_sum_ms": 4562.0,
+     "chunks": 456,
+     "rows_per_chunk_first_last": [
+      90,
+      20
+     ],
+     "holds_first5": [
+      7.55,
+      4.02,
+      3.85,
+      3.99,
+      9.72
+     ],
+     "holds_last5": [
+      8.09,
+      9.55,
+      27.43,
+      6.87,
+      3.65
+     ],
+     "seed_s": null,
+     "control_ms": 0.046,
+     "storage_after": {
+      "pages": 5866,
+      "freelist": 0,
+      "wal_bytes": 14053352,
+      "snapshot_bytes": 0
+     },
+     "violations_after": [
+      "<macrame.KindMetrics bulk_import_chunk turns=456 over_budget=456>",
+      "<macrame.KindMetrics write_concepts_chunk turns=158 over_budget=31>"
+     ]
+    },
+    {
+     "label": "edges-16000",
+     "edges": 16000,
+     "wall_s": 4.795,
+     "hold_sum_ms": 4777.7,
+     "chunks": 456,
+     "rows_per_chunk_first_last": [
+      90,
+      20
+     ],
+     "holds_first5": [
+      7.57,
+      3.8,
+      3.95,
+      4.28,
+      7.95
+     ],
+     "holds_last5": [
+      6.29,
+      6.26,
+      29.54,
+      7.41,
+      3.72
+     ],
+     "seed_s": null,
+     "control_ms": 0.0494,
+     "storage_after": {
+      "pages": 5866,
+      "freelist": 0,
+      "wal_bytes": 12409472,
+      "snapshot_bytes": 0
+     },
+     "violations_after": [
+      "<macrame.KindMetrics bulk_import_chunk turns=456 over_budget=456>",
+      "<macrame.KindMetrics write_concepts_chunk turns=159 over_budget=30>"
+     ]
+    },
+    {
+     "label": "edges-16000",
+     "edges": 16000,
+     "wall_s": 4.61,
+     "hold_sum_ms": 4592.5,
+     "chunks": 456,
+     "rows_per_chunk_first_last": [
+      90,
+      20
+     ],
+     "holds_first5": [
+      7.69,
+      3.83,
+      3.99,
+      8.0,
+      4.27
+     ],
+     "holds_last5": [
+      6.57,
+      6.39,
+      23.36,
+      6.72,
+      6.37
+     ],
+     "seed_s": null,
+     "control_ms": 0.053,
+     "storage_after": {
+      "pages": 5866,
+      "freelist": 0,
+      "wal_bytes": 14053352,
+      "snapshot_bytes": 0
+     },
+     "violations_after": [
+      "<macrame.KindMetrics bulk_import_chunk turns=456 over_budget=456>",
+      "<macrame.KindMetrics write_concepts_chunk turns=160 over_budget=33>"
+     ]
+    }
+   ]
+  }
+ },
+ "edge_ladder_no_cadence": {
+  "2000": {
+   "median": {
+    "wall_s": 0.284,
+    "wall_s_min": 0.276,
+    "wall_s_max": 0.29,
+    "hold_sum_ms": 282.5,
+    "hold_sum_ms_min": 273.8,
+    "hold_sum_ms_max": 287.8
+   },
+   "per_row_ms": 0.142,
+   "runs": [
+    {
+     "label": "edges-2000",
+     "edges": 2000,
+     "wall_s": 0.276,
+     "hold_sum_ms": 273.8,
+     "chunks": 56,
+     "rows_per_chunk_first_last": [
+      90,
+      20
+     ],
+     "holds_first5": [
+      7.69,
+      3.47,
+      3.78,
+      3.95,
+      6.4
+     ],
+     "holds_last5": [
+      4.82,
+      5.83,
+      5.33,
+      5.29,
+      3.81
+     ],
+     "seed_s": null,
+     "control_ms": 0.0473,
+     "storage_after": {
+      "pages": 752,
+      "freelist": 0,
+      "wal_bytes": 33726352,
+      "snapshot_bytes": 0
+     },
+     "violations_after": [
+      "<macrame.KindMetrics bulk_import_chunk turns=56 over_budget=56>",
+      "<macrame.KindMetrics write_concepts_chunk turns=16 over_budget=1>"
+     ]
+    },
+    {
+     "label": "edges-2000",
+     "edges": 2000,
+     "wall_s": 0.29,
+     "hold_sum_ms": 287.8,
+     "chunks": 56,
+     "rows_per_chunk_first_last": [
+      90,
+      20
+     ],
+     "holds_first5": [
+      7.81,
+      3.69,
+      3.98,
+      3.9,
+      4.22
+     ],
+     "holds_last5": [
+      4.91,
+      5.57,
+      5.27,
+      5.64,
+      4.24
+     ],
+     "seed_s": null,
+     "control_ms": 0.0423,
+     "storage_after": {
+      "pages": 752,
+      "freelist": 0,
+      "wal_bytes": 33718112,
+      "snapshot_bytes": 0
+     },
+     "violations_after": [
+      "<macrame.KindMetrics bulk_import_chunk turns=56 over_budget=56>",
+      "<macrame.KindMetrics write_concepts_chunk turns=16 over_budget=1>"
+     ]
+    },
+    {
+     "label": "edges-2000",
+     "edges": 2000,
+     "wall_s": 0.284,
+     "hold_sum_ms": 282.5,
+     "chunks": 56,
+     "rows_per_chunk_first_last": [
+      90,
+      20
+     ],
+     "holds_first5": [
+      7.93,
+      3.49,
+      3.95,
+      4.11,
+      4.22
+     ],
+     "holds_last5": [
+      5.2,
+      5.46,
+      5.52,
+      5.32,
+      3.71
+     ],
+     "seed_s": null,
+     "control_ms": 0.043,
+     "storage_after": {
+      "pages": 752,
+      "freelist": 0,
+      "wal_bytes": 33726352,
+      "snapshot_bytes": 0
+     },
+     "violations_after": [
+      "<macrame.KindMetrics bulk_import_chunk turns=56 over_budget=56>",
+      "<macrame.KindMetrics write_concepts_chunk turns=16 over_budget=1>"
+     ]
+    }
+   ]
+  },
+  "4000": {
+   "median": {
+    "wall_s": 0.66,
+    "wall_s_min": 0.653,
+    "wall_s_max": 0.663,
+    "hold_sum_ms": 656.0,
+    "hold_sum_ms_min": 649.0,
+    "hold_sum_ms_max": 659.3
+   },
+   "per_row_ms": 0.165,
+   "runs": [
+    {
+     "label": "edges-4000",
+     "edges": 4000,
+     "wall_s": 0.66,
+     "hold_sum_ms": 656.0,
+     "chunks": 113,
+     "rows_per_chunk_first_last": [
+      90,
+      25
+     ],
+     "holds_first5": [
+      8.57,
+      3.99,
+      3.84,
+      4.37,
+      4.03
+     ],
+     "holds_last5": [
+      5.48,
+      5.0,
+      5.14,
+      6.48,
+      5.67
+     ],
+     "seed_s": null,
+     "control_ms": 0.0552,
+     "storage_after": {
+      "pages": 1486,
+      "freelist": 0,
+      "wal_bytes": 41842752,
+      "snapshot_bytes": 0
+     },
+     "violations_after": [
+      "<macrame.KindMetrics bulk_import_chunk turns=113 over_budget=113>",
+      "<macrame.KindMetrics write_concepts_chunk turns=37 over_budget=7>"
+     ]
+    },
+    {
+     "label": "edges-4000",
+     "edges": 4000,
+     "wall_s": 0.663,
+     "hold_sum_ms": 659.3,
+     "chunks": 113,
+     "rows_per_chunk_first_last": [
+      90,
+      25
+     ],
+     "holds_first5": [
+      8.04,
+      3.63,
+      3.93,
+      4.11,
+      4.11
+     ],
+     "holds_last5": [
+      5.41,
+      5.1,
+      5.25,
+      5.73,
+      4.25
+     ],
+     "seed_s": null,
+     "control_ms": 0.0433,
+     "storage_after": {
+      "pages": 1486,
+      "freelist": 0,
+      "wal_bytes": 41842752,
+      "snapshot_bytes": 0
+     },
+     "violations_after": [
+      "<macrame.KindMetrics bulk_import_chunk turns=113 over_budget=113>",
+      "<macrame.KindMetrics write_concepts_chunk turns=37 over_budget=7>"
+     ]
+    },
+    {
+     "label": "edges-4000",
+     "edges": 4000,
+     "wall_s": 0.653,
+     "hold_sum_ms": 649.0,
+     "chunks": 113,
+     "rows_per_chunk_first_last": [
+      90,
+      25
+     ],
+     "holds_first5": [
+      8.01,
+      3.75,
+      3.94,
+      4.37,
+      3.94
+     ],
+     "holds_last5": [
+      5.43,
+      5.11,
+      5.3,
+      5.36,
+      3.96
+     ],
+     "seed_s": null,
+     "control_ms": 0.0444,
+     "storage_after": {
+      "pages": 1486,
+      "freelist": 0,
+      "wal_bytes": 41842752,
+      "snapshot_bytes": 0
+     },
+     "violations_after": [
+      "<macrame.KindMetrics bulk_import_chunk turns=113 over_budget=113>",
+      "<macrame.KindMetrics write_concepts_chunk turns=39 over_budget=5>"
+     ]
+    }
+   ]
+  },
+  "8000": {
+   "median": {
+    "wall_s": 1.459,
+    "wall_s_min": 1.435,
+    "wall_s_max": 1.478,
+    "hold_sum_ms": 1450.5,
+    "hold_sum_ms_min": 1427.1,
+    "hold_sum_ms_max": 1469.8
+   },
+   "per_row_ms": 0.1824,
+   "runs": [
+    {
+     "label": "edges-8000",
+     "edges": 8000,
+     "wall_s": 1.459,
+     "hold_sum_ms": 1450.5,
+     "chunks": 227,
+     "rows_per_chunk_first_last": [
+      90,
+      35
+     ],
+     "holds_first5": [
+      8.56,
+      3.66,
+      4.45,
+      4.5,
+      3.88
+     ],
+     "holds_last5": [
+      6.46,
+      6.51,
+      6.15,
+      6.0,
+      6.64
+     ],
+     "seed_s": null,
+     "control_ms": 0.0704,
+     "storage_after": {
+      "pages": 2946,
+      "freelist": 0,
+      "wal_bytes": 42040512,
+      "snapshot_bytes": 0
+     },
+     "violations_after": [
+      "<macrame.KindMetrics bulk_import_chunk turns=227 over_budget=227>",
+      "<macrame.KindMetrics write_concepts_chunk turns=76 over_budget=13>"
+     ]
+    },
+    {
+     "label": "edges-8000",
+     "edges": 8000,
+     "wall_s": 1.478,
+     "hold_sum_ms": 1469.8,
+     "chunks": 227,
+     "rows_per_chunk_first_last": [
+      90,
+      35
+     ],
+     "holds_first5": [
+      10.43,
+      5.65,
+      4.37,
+      4.75,
+      4.09
+     ],
+     "holds_last5": [
+      6.47,
+      6.58,
+      6.14,
+      6.31,
+      6.32
+     ],
+     "seed_s": null,
+     "control_ms": 0.0524,
+     "storage_after": {
+      "pages": 2946,
+      "freelist": 0,
+      "wal_bytes": 42040512,
+      "snapshot_bytes": 0
+     },
+     "violations_after": [
+      "<macrame.KindMetrics bulk_import_chunk turns=227 over_budget=227>",
+      "<macrame.KindMetrics write_concepts_chunk turns=77 over_budget=15>"
+     ]
+    },
+    {
+     "label": "edges-8000",
+     "edges": 8000,
+     "wall_s": 1.435,
+     "hold_sum_ms": 1427.1,
+     "chunks": 227,
+     "rows_per_chunk_first_last": [
+      90,
+      35
+     ],
+     "holds_first5": [
+      8.02,
+      3.51,
+      4.1,
+      6.77,
+      6.12
+     ],
+     "holds_last5": [
+      6.65,
+      6.86,
+      6.2,
+      7.07,
+      6.72
+     ],
+     "seed_s": null,
+     "control_ms": 0.0566,
+     "storage_after": {
+      "pages": 2946,
+      "freelist": 0,
+      "wal_bytes": 42040512,
+      "snapshot_bytes": 0
+     },
+     "violations_after": [
+      "<macrame.KindMetrics bulk_import_chunk turns=227 over_budget=227>",
+      "<macrame.KindMetrics write_concepts_chunk turns=79 over_budget=16>"
+     ]
+    }
+   ]
+  },
+  "16000": {
+   "median": {
+    "wall_s": 3.398,
+    "wall_s_min": 3.395,
+    "wall_s_max": 3.458,
+    "hold_sum_ms": 3381.3,
+    "hold_sum_ms_min": 3378.5,
+    "hold_sum_ms_max": 3441.1
+   },
+   "per_row_ms": 0.2124,
+   "runs": [
+    {
+     "label": "edges-16000",
+     "edges": 16000,
+     "wall_s": 3.398,
+     "hold_sum_ms": 3381.3,
+     "chunks": 456,
+     "rows_per_chunk_first_last": [
+      90,
+      20
+     ],
+     "holds_first5": [
+      7.96,
+      4.12,
+      4.1,
+      4.26,
+      4.04
+     ],
+     "holds_last5": [
+      6.56,
+      7.1,
+      6.36,
+      6.89,
+      4.1
+     ],
+     "seed_s": null,
+     "control_ms": 0.0434,
+     "storage_after": {
+      "pages": 5866,
+      "freelist": 0,
+      "wal_bytes": 42246512,
+      "snapshot_bytes": 0
+     },
+     "violations_after": [
+      "<macrame.KindMetrics bulk_import_chunk turns=456 over_budget=456>",
+      "<macrame.KindMetrics write_concepts_chunk turns=162 over_budget=29>"
+     ]
+    },
+    {
+     "label": "edges-16000",
+     "edges": 16000,
+     "wall_s": 3.395,
+     "hold_sum_ms": 3378.5,
+     "chunks": 456,
+     "rows_per_chunk_first_last": [
+      90,
+      20
+     ],
+     "holds_first5": [
+      7.89,
+      4.21,
+      4.23,
+      4.31,
+      4.11
+     ],
+     "holds_last5": [
+      6.96,
+      6.83,
+      6.37,
+      7.08,
+      4.3
+     ],
+     "seed_s": null,
+     "control_ms": 0.0421,
+     "storage_after": {
+      "pages": 5866,
+      "freelist": 0,
+      "wal_bytes": 42436032,
+      "snapshot_bytes": 0
+     },
+     "violations_after": [
+      "<macrame.KindMetrics bulk_import_chunk turns=456 over_budget=456>",
+      "<macrame.KindMetrics write_concepts_chunk turns=163 over_budget=29>"
+     ]
+    },
+    {
+     "label": "edges-16000",
+     "edges": 16000,
+     "wall_s": 3.458,
+     "hold_sum_ms": 3441.1,
+     "chunks": 456,
+     "rows_per_chunk_first_last": [
+      90,
+      20
+     ],
+     "holds_first5": [
+      7.68,
+      4.01,
+      4.11,
+      4.25,
+      4.45
+     ],
+     "holds_last5": [
+      6.65,
+      6.92,
+      6.4,
+      6.89,
+      4.26
+     ],
+     "seed_s": null,
+     "control_ms": 0.0425,
+     "storage_after": {
+      "pages": 5866,
+      "freelist": 0,
+      "wal_bytes": 42436032,
+      "snapshot_bytes": 0
+     },
+     "violations_after": [
+      "<macrame.KindMetrics bulk_import_chunk turns=456 over_budget=456>",
+      "<macrame.KindMetrics write_concepts_chunk turns=164 over_budget=31>"
+     ]
+    }
+   ]
+  }
+ },
+ "total_s": 46.6
+}

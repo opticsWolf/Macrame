@@ -609,19 +609,38 @@ index during loads, and it must lean on the API layer's check
 runs). The storage backstop would hold for everything that goes through the
 crate and be given up only for callers loading through the recipe.
 
-### 9.2 The edge ladder residual — ~2.5× per 2×, down from ~4×
+### 9.2 The edge ladder residual — **measured 2026-09-11, closed** — and the residual that survives has a named lever
 
-Post-D-274 the ladder is 0.4/1.3/3.5/8.0 s at 2k/4k/8k/16k — per-row cost
-still climbs (~200→500 µs) where the fix made it *flat at a fixed size*. Two
-hypotheses, in order:
+The plan's hypothesis split was checkpoint drain vs page-cache misses. The
+measurement found **both smaller than the shape the table blamed, and one
+absent**. First fact: the near-chain ladder the harness ships (`make_edges`
+default) is already **linear** post-D-274 — per-row 0.135→0.148 ms across the
+whole 2k→16k ladder, scaling 2.06×/2.08×/2.01× per doubling, with the WAL
+recipe and without it differing by less than run noise (0.27 vs 0.26 s at
+2k; 2.32 vs 2.37 s at 16k). The "~2.5× per 2×" the comparison table carried
+for 0.16.1 is the **random-pair shape** (`--edges-hub`, the shape where every
+edge touches a fresh neighborhood), and there the story is real but layered:
 
-- **Checkpoint drain.** The ladder ran at the default WAL threshold; D-275
-  already measured 16k at 5.0→3.7 s with the 10k-page recipe. Rerun the whole
-  ladder with the recipe: if scaling moves toward ~2×, the residual is WAL
-turnover and the recipe (or an opt-in `bulk_import` knob) closes it.
-- **Page-cache misses.** If the growth survives the recipe, dissect cache_size
-  against DB size — a file that outgrows the page cache turns every probe into
-  a miss, and that shape would also explain the concept-per-row gap.
+| arm (random-pair, 2k/4k/8k/16k) | wall | per-row head→tail | scaling per 2× |
+|---|---|---|---|
+| default WAL (medians of 3) | 0.29/0.68/1.88/4.61 s | 0.143→0.288 ms | 2.4–2.8× |
+| + D-275's 10k-page recipe | 0.28/0.66/1.46/3.40 s | 0.142→0.212 ms | 2.3–2.4× |
+| + recipe + 64 MiB writer cache | 3.12 s at 16k (n=2) | 0.168→0.217 ms | — |
+
+Three layers, priced: **the WAL recipe is worth 1.36× at 16k** (4.61→3.40 s)
+and is the largest single dial — but it does not flatten the scaling, so
+§9.2's first hypothesis is *partially* confirmed and not the whole story.
+**The page cache is minor and saturates**: a 64 MiB writer cache recovers ~5%
+of wall and trims the per-row tail (245→217 µs), and 128 MiB buys nothing over
+64 — a knob that exists (`writer_cache_size`), worth a paragraph, not a
+default change. **What remains is the maintained materialization doing its
+job on a shape that fights it**: random pairs make every insert touch a fresh
+neighborhood, so the per-row cost of keeping `links_current` true grows with
+the graph. That is not a defect to fix; it is the same lever §8.1 names — the
+materialization-skipping bulk (F1) — and it is opt-in by design because it
+sells a stale-read window. §9.2's own lever list is therefore closed: recipe
+(recovered, documented since D-275), cache (measured, minor), and the rest is
+F1's case, not §9.2's.
 
 ### 9.3 The vector query — 16.4 ms vs 4.5 ms top-10
 
@@ -632,21 +651,47 @@ corpus should never trigger. Dissect raw `vector_top_k` against the full
 knob against recall, with a Rejected line for anything that silently lowers
 it.
 
-### 9.4 The footprint — 260 + 11 MB vs 79 MB, never re-measured
+### 9.4 The footprint — **measured 2026-09-11 and decomposed**
 
-§7's unverified row (§8.5). First re-measure @20k with the D-275 recipe —
-transient WAL is part of that number — then decompose what remains:
-page_size, the content envelope, the FTS shadow, the log table. The question
-is the same one Doctrine VI answers for `links_current`: is anything being
-stored that a fold could regenerate.
+At the comparison's exact shape — 20k documents, 40k edges, 20k × 64-dim
+embeddings, snapshot cadence on, recipe WAL — the main file is **234 MB**
+(57,135 pages × 4 KiB), with the WAL at close fully checkpointed away. That
+confirms the comparison table's order of magnitude against ladybug's 79 MB.
+The `dbstat` decomposition says where it lives, and the headline is not the
+ledger:
 
-### 9.5 The keyword cell — empty for honesty's sake
+| object | size | note |
+|---|---|---|
+| `idx_embeddings_e5_vec_shadow` | **156.4 MB** | DiskANN's own structure for **5.3 MB of raw vectors** — 30× the vector bytes, the physical counterpart of D-276's build-cost finding |
+| `transaction_log` | 16.8 MB | the ledger itself (Doctrine III) |
+| `embeddings_e5` | 5.3 MB | the vectors |
+| `links_current` + `links` + their indexes | ~21 MB | 40k edges, doubled by the maintained projection |
+| `concepts` | 3.3 MB | |
+| other log indexes | ~8 MB | |
 
-0.16.0's "21 ms top-10" and ladybug's "47 ms, 18k rows" are different
-workloads; the cell as it stands proves nothing in either direction. Run
-ladybug's shape — the full 18k-row match — on 0.16.1's FTS5 and fill the cell
-with the same workload on both sides. Likely outcome: macrame is already
-faster, and the row closes with a number instead of an absence.
+So: **the ledger's own footprint — concepts + links + log + their indexes —
+is ~50 MB for this corpus, roughly ladybug's size; two-thirds of the gap is
+the DiskANN index shadow**, engine-side, the same fact the build times
+already told (D-276). What stays open is the question §8.5 restated, and it
+now has a sharper form: the shadow is *regenerable* — dropping and rebuilding
+the index is D-276's own recipe — but it regenerates as big as it was, because
+the size is DiskANN's graph adjacency, not stale rows. The lever, if anyone
+wants this cell closed rather than explained, is the same one the vector
+build named: engine-side, or a corpus the DiskANN structure is sized for. No
+code change follows from this measurement.
+
+### 9.5 The keyword cell — **measured 2026-09-11: macrame faster on the same workload**
+
+At 20k documents (`content` populated, FTS rebuilt): the **full match** —
+ladybug's shape, every row returned — is **~32 ms for all 20,000 rows**
+(medians of 5, three query shapes, consistent), against ladybug's 47 ms for
+18,000; top-10 is 12.6 ms. The raw statement through `diagnostic_query`
+matches the typed path (23.7 ms for 20k rows), so the binding adds nothing
+worth naming at this scale. **A measurement note recorded because it was
+nearly recorded wrong the other way: the first pass printed 32,237 ms — a
+formatting bug (`median × 1000` on an already-milliseconds median), not a
+32-second query** — the bisect that caught it is the honest part of the cell.
+The keyword row closes with macrame ahead on both shapes of the workload.
 
 ---
 

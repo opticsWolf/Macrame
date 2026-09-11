@@ -86,7 +86,7 @@ def make_edges(n: int, concepts: int, hub: bool = False) -> list[EdgeAssertion]:
 class Session:
     """One fresh DB, one open, one ladder run."""
 
-    def __init__(self, snapshot_every: int | None = 10_000, poll: float = 1.0):
+    def __init__(self, snapshot_every: int | None = 10_000, poll: float = 1.0, wal_pages: int | None = None):
         # Not a TemporaryDirectory: its finalizer deletes while the engine may
         # still hold the file handle, and Windows refuses. Explicit dir + a
         # tolerant cleanup after close() instead.
@@ -96,6 +96,9 @@ class Session:
         self.path = Path(self.tmp_name) / "ladder.db"
         self.snapshot_every = snapshot_every
         self.poll = poll
+        # D-275's recipe as a knob, so the ladder can measure what it changes
+        # (plan §9.2): None leaves the default at SQLite's 1,000 pages.
+        self.wal_pages = wal_pages
 
     def cleanup(self) -> None:
         shutil.rmtree(self.tmp_name, ignore_errors=True)
@@ -105,6 +108,7 @@ class Session:
             str(self.path),
             snapshot_every_entries=self.snapshot_every,
             snapshot_poll_seconds=self.poll,
+            wal_autocheckpoint=self.wal_pages,
         )
         return db
 
@@ -182,17 +186,17 @@ def medians(runs: list[dict]) -> dict:
     return out
 
 
-def bench_edges(sessions: int, sizes: list[int], snapshot_every: int | None) -> dict:
+def bench_edges(sessions: int, sizes: list[int], snapshot_every: int | None, wal_pages: int | None = None, hub: bool = False) -> dict:
     """Section 1.1: the edge bulk ladder. Fresh DB + seeded concepts each run."""
     out: dict[str, list] = {}
     for n in sizes:
         runs = []
         for s in range(sessions):
-            sess = Session(snapshot_every=snapshot_every)
+            sess = Session(snapshot_every=snapshot_every, wal_pages=wal_pages)
             db = sess.open()
             sess._last_db = db
             db.write_concepts(make_concepts(max(n // 2, 1000)))
-            r = run_ladder(sess, db, make_edges(n, max(n // 2, 1000)), f"edges-{n}")
+            r = run_ladder(sess, db, make_edges(n, max(n // 2, 1000), hub=hub), f"edges-{n}")
             r["seed_s"] = None
             r["control_ms"] = sess.control_ms(db)
             r["storage_after"] = sess.storage()
@@ -417,6 +421,10 @@ def main() -> None:
                     choices=["all", "edges", "sweep", "vectors", "concepts", "explain"])
     ap.add_argument("--sessions", type=int, default=3)
     ap.add_argument("--out", default=None)
+    ap.add_argument("--edges-wal", type=int, default=None,
+                    help="wal_autocheckpoint pages for the edge ladder (plan 9.2)")
+    ap.add_argument("--edges-hub", action="store_true",
+                    help="hub-shaped edges (heavy overlap-guard candidates) instead of near-chain")
     args = ap.parse_args()
 
     RESULTS.mkdir(parents=True, exist_ok=True)
@@ -426,8 +434,8 @@ def main() -> None:
 
     if args.which in ("all", "edges"):
         # Python None = no cadence; the shipped default is every 10,000 entries.
-        out["edge_ladder_default_cadence"] = bench_edges(args.sessions, [2000, 4000, 8000, 16000], 10_000)
-        out["edge_ladder_no_cadence"] = bench_edges(args.sessions, [2000, 4000, 8000, 16000], None)
+        out["edge_ladder_default_cadence"] = bench_edges(args.sessions, [2000, 4000, 8000, 16000], 10_000, hub=args.edges_hub)
+        out["edge_ladder_no_cadence"] = bench_edges(args.sessions, [2000, 4000, 8000, 16000], None, wal_pages=args.edges_wal, hub=args.edges_hub)
     if args.which in ("all", "sweep"):
         out["call_size_sweep"] = bench_call_sizes(args.sessions, 16000, None)
     if args.which in ("all", "vectors"):
