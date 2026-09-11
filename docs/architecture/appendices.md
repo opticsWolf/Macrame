@@ -159,7 +159,11 @@ db.write_concepts(concepts).await?;    // chunked up to chunk_rows::CONCEPTS, at
 // D-276 (0.16.2) adds bulk_embeddings_with to that family: drop the model's
 // DiskANN index, load through the same chunking, rebuild in one pass. 1.8×
 // at 5,000 × 256; unsearchable and storage-unchecked between drop and rebuild,
-// so the failure path rebuilds before it reports.
+// so the failure path rebuilds before it reports. D-277 (0.16.3) adds
+// bulk_import_deferred_with in the same shape on the edge path: the links_current
+// mirror is dropped for the load, restored, then rebuild_current_chunked
+// re-derives the projection (2.05× at 16k random-pair). The window touches only
+// Doctrine VI derivative state; the ledger is complete at every instant.
 let token = CancelToken::new();        // .cancel() from any thread or task
 let control = BulkControl::new()       // ...or BulkControl::new() for neither
     .cancel_with(token.clone())        // stops at the next boundary; nothing rolls back
@@ -716,7 +720,7 @@ New in 0.13.38 ([D-211](s13-decision-register.md#d-211)). [Appendix A](appendice
 
 *Frozen* means a change requires a **major version**.
 
-**1. The public Rust API, item for item and path for path.** [`docs/architecture/public-api.txt`](public-api.txt) is the surface — **1,773 items** (0.16.2, D-276: `Database::bulk_embeddings` and `_with`, plus one `CommandKind` pair — the Drop/Rebuild pair is +8 through the flat aliases, since a new enum variant is two items). No item is removed, no path stops resolving, and no signature narrows. Each item is reachable at exactly one canonical path, plus flat aliases at the crate root and in `macrame::prelude` ([D-208](s13-decision-register.md#d-208)). Held by `scripts/check_public_api.py` in CI and by `tests/public_path_tests.rs` in `cargo test`. The cycle that produced this surface was reviewed against 0.13.0 item by item before it was frozen — [`api-review-0.14.0.md`](api-review-0.14.0.md), [D-212](s13-decision-register.md#d-212) — which is the last release where that review is cheap.
+**1. The public Rust API, item for item and path for path.** [`docs/architecture/public-api.txt`](public-api.txt) is the surface — **1,781 items** (0.16.3, D-277: `Database::bulk_import_deferred` and `_with`, plus `CommandKind::LinksCurrentMirror` — a new enum variant is two items through the flat aliases). No item is removed, no path stops resolving, and no signature narrows. Each item is reachable at exactly one canonical path, plus flat aliases at the crate root and in `macrame::prelude` ([D-208](s13-decision-register.md#d-208)). Held by `scripts/check_public_api.py` in CI and by `tests/public_path_tests.rs` in `cargo test`. The cycle that produced this surface was reviewed against 0.13.0 item by item before it was frozen — [`api-review-0.14.0.md`](api-review-0.14.0.md), [D-212](s13-decision-register.md#d-212) — which is the last release where that review is cheap.
 
 **2. The ledger tables** — `concepts`, `links`, `transaction_log`. Additive only: `ALTER TABLE ADD COLUMN` and new indexes. A changed primary key, a dropped column or altered bitemporal semantics is a major version with an explicit ETL path, because bitemporal data is the hardest data to migrate: a rebuild means replaying history and recomputing transaction-time boundaries, which is rewriting the past ([D-036](s13-decision-register.md#d-036), [Doctrine III](s0-s3-foundations.md#doctrine-iii)).
 

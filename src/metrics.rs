@@ -239,6 +239,18 @@ pub enum CommandKind {
     ///
     /// At the end of the declaration order, per [`CommandKind::index`].
     RebuildEmbeddingIndex,
+    /// Dropping or restoring the links_current mirror (0.16.3, D-277).
+    ///
+    /// The window half of `bulk_import_deferred`: the toggle that defers the
+    /// per-row projection and puts it back. One DDL statement either way —
+    /// atomic by necessity, no smaller unit — and µs-scale in practice. Its
+    /// kind exists for the same reason `DropEmbeddingIndex`'s does:
+    /// attribution beside the work it wraps, so a bulk load that went wrong
+    /// is read off these counters first.
+    ///
+    /// **Exempt**: one statement, no smaller unit. At the end of the
+    /// declaration order, per [`CommandKind::index`].
+    LinksCurrentMirror,
 }
 
 impl CommandKind {
@@ -269,6 +281,7 @@ impl CommandKind {
         CommandKind::ShadowSwap,
         CommandKind::DropEmbeddingIndex,
         CommandKind::RebuildEmbeddingIndex,
+        CommandKind::LinksCurrentMirror,
     ];
 
     pub const COUNT: usize = CommandKind::ALL.len();
@@ -323,6 +336,7 @@ impl CommandKind {
             CommandKind::ShadowSwap => "shadow_swap",
             CommandKind::DropEmbeddingIndex => "drop_embedding_index",
             CommandKind::RebuildEmbeddingIndex => "rebuild_embedding_index",
+            CommandKind::LinksCurrentMirror => "links_current_mirror",
         }
     }
 
@@ -534,6 +548,7 @@ impl CommandKind {
                 | CommandKind::ShadowSwap
                 | CommandKind::DropEmbeddingIndex
                 | CommandKind::RebuildEmbeddingIndex
+                | CommandKind::LinksCurrentMirror
         )
     }
 }

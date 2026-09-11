@@ -968,6 +968,35 @@ class Database:
         `token.cancel()` has to be another thread.
         """
 
+    def bulk_import_deferred(
+        self,
+        edges: Sequence[EdgeAssertion],
+        *,
+        progress: Callable[[BulkProgress], object] | None = None,
+        cancel: CancelToken | None = None,
+    ) -> int:
+        """Load edges without the maintained projection in the way, then
+        re-derive it in one chunked rebuild (0.16.3, D-277).
+
+        Drop the `links_current` mirror trigger → load through the same
+        chunked path as `bulk_import` → restore the trigger →
+        `rebuild_current_chunked`. Measured at 16,000 random-pair edges:
+        5.08 s shipped vs **2.29 s + 0.19 s rebuild = 2.48 s — 2.05×**.
+
+        What the window touches, stated precisely: the ledger is complete at
+        every instant (the log mirror and the single-open guard stay up);
+        what lags is `links_current` — the Doctrine VI projection. Current-time
+        reads during the window see a partial projection; the window ends when
+        this call returns, failure and cancellation included. If the process
+        dies mid-load, `audit_current()` reports the drift and
+        `rebuild_current()` closes it — the ledger itself is never incomplete.
+
+        The shipped path never has a window; that is why this is opt-in by
+        signature. A failure raises with `written` after the mirror is back
+        and the projection rebuilt. An empty `edges` touches nothing.
+        `progress` and `cancel` mean what they mean for `bulk_import`.
+        """
+
     def write_concepts(
         self,
         concepts: Sequence[ConceptUpsert],

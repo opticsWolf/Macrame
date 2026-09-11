@@ -612,3 +612,94 @@ def test_written_is_readable_on_anything_caught_as_a_macrame_error(db):
     assert seen[0] is None
     assert seen[1] is None
     assert isinstance(seen[2], int), "a chunked path answers with a count"
+
+
+# --------------------------------------------------------------------------
+# bulk_import_deferred (0.16.3, D-277): the mirror's window, opt-in
+# --------------------------------------------------------------------------
+
+
+def test_a_deferred_bulk_maintains_the_same_projection_the_shipped_path_does(db_path):
+    import random
+
+    def edges(n, concepts):
+        rng = random.Random(20250911)
+        out, seen = [], set()
+        while len(out) < n:
+            a, b = rng.randrange(concepts), rng.randrange(concepts)
+            if a != b and (a, b) not in seen:
+                seen.add((a, b))
+                out.append(
+                    macrame.EdgeAssertion(f"c{a:03}", f"c{b:03}", "RELATES", valid_from=T0)
+                )
+        return out
+
+    def current(handle):
+        rows = handle.diagnostic_query(
+            "SELECT source_id, target_id, edge_type, valid_from, valid_to FROM links_current "
+            "ORDER BY source_id, target_id, branch_id"
+        )
+        return [tuple(r) for r in rows]
+
+    with macrame.Database.open(db_path, snapshot_every_entries=None) as db:
+        db.write_concepts(
+            [macrame.ConceptUpsert(f"c{i:03}", "T", valid_from=T0) for i in range(200)]
+        )
+        db.bulk_import_deferred(edges(200, 200))
+        deferred = current(db)
+        assert db.audit_current() == 0
+        g = db.load_subgraph("c000", 1, 1 << 20)
+        assert len(g) >= 1
+
+    with macrame.Database.open(db_path, snapshot_every_entries=None) as db:
+        db.write_concepts(
+            [macrame.ConceptUpsert(f"c{i:03}", "T", valid_from=T0) for i in range(200)]
+        )
+        db.bulk_import(edges(200, 200))
+        assert current(db) == deferred, "both paths maintain the same belief"
+
+
+def test_a_write_after_a_deferred_bulk_is_mirrored_again(db_path):
+    with macrame.Database.open(db_path, snapshot_every_entries=None) as db:
+        db.write_concepts(
+            [macrame.ConceptUpsert(f"c{i:03}", "T", valid_from=T0) for i in range(40)]
+        )
+        db.bulk_import_deferred(
+            [
+                macrame.EdgeAssertion("c000", "c001", "RELATES", valid_from=T0),
+                macrame.EdgeAssertion("c001", "c002", "RELATES", valid_from=T0),
+            ]
+        )
+        # A normal write after the window must reach links_current again.
+        db.assert_edge(macrame.EdgeAssertion("c002", "c003", "NEWTYPE", valid_from=T0))
+        assert db.audit_current() == 0
+
+
+def test_a_failed_deferred_bulk_still_rebuilds_and_restores(db_path):
+    with macrame.Database.open(db_path, snapshot_every_entries=None) as db:
+        db.write_concepts(
+            [macrame.ConceptUpsert(f"c{i:03}", "T", valid_from=T0) for i in range(40)]
+        )
+        db.assert_edge(macrame.EdgeAssertion("c000", "c001", "EARLY", valid_from=T0))
+        with pytest.raises(macrame.SingleOpenViolationError):
+            db.bulk_import_deferred(
+                [
+                    macrame.EdgeAssertion("c001", "c002", "RELATES", valid_from=T0),
+                    macrame.EdgeAssertion("c000", "c001", "EARLY", valid_from="2027-01-01T00:00:00.000000Z"),
+                ]
+            )
+        # Mirror back on, projection true: a follow-up write is mirrored.
+        db.assert_edge(macrame.EdgeAssertion("c002", "c003", "NEWTYPE", valid_from=T0))
+        assert db.audit_current() == 0
+
+
+def test_an_empty_deferred_bulk_touches_nothing(db_path):
+    with macrame.Database.open(db_path, snapshot_every_entries=None) as db:
+        db.write_concepts([macrame.ConceptUpsert("c0", "T", valid_from=T0)])
+        assert db.bulk_import_deferred([]) == 0
+        # The Python snapshot drops kinds with no turns ("evidence of what
+        # this process did"), so absence IS the assertion.
+        assert not any(
+            k.kind in ("links_current_mirror", "rebuild_current", "shadow_rebuild", "shadow_swap")
+            for k in db.metrics().kinds
+        )

@@ -448,6 +448,7 @@ fn next_chunk_size(
 /// | [`Database::checkpoint`] | a function of the WAL's size, which is a function of how long since the last checkpoint — not of anything the caller passes | It is not a transaction at all. `PRAGMA wal_checkpoint` copies frames back into the main file and there is no unit smaller than the frame it is already working in; the caller asked for exactly this, and the alternative to a long checkpoint is a WAL that keeps growing (0.12.13, W5.2, D-156) |
 /// | the drop turn of [`Database::bulk_embeddings`], counted as `drop_embedding_index` (0.16.2, D-276) | µs-scale; one `DROP INDEX IF EXISTS` | One statement, no smaller unit — the same shape as [`Database::checkpoint`] by nature and [`Database::write_bulk_atomic`] by atomicity. Its kind exists for attribution beside `rebuild_embedding_index`, not for cost |
 /// | the rebuild turn of [`Database::bulk_embeddings`], counted as `rebuild_embedding_index` (0.16.2, D-276) | measured **2.61 / 19.7 / 39.0 s** for 2,000 vectors at dim 64 / 256 / 512, ~10 ms/vector at dim 256, growing with the corpus | One `CREATE INDEX` over the whole table — the one-pass DiskANN build is indivisible, exactly the criterion `shadow_swap` and `rebuild_current` meet. The difference is schedule: this hold is caller-scheduled and opt-in, so the docstring states the number instead of arguing it. Counted would add a permanent `N(bulk loads)` to every database that ever bulk-embedded — [`CommandKind::ShadowSwap`]'s argument, unchanged |
+/// | the toggle turn of [`Database::bulk_import_deferred`], counted as `links_current_mirror` (0.16.3, D-277) | µs-scale; one DDL statement either direction | Same shape as `drop_embedding_index`: one statement, no smaller unit, and its kind exists for attribution beside the load it wraps. The window's *cost* is the chunked rebuild that follows, which keeps its own counted kinds rather than hiding behind the toggle's exemption — the toggle is not where the time goes |
 ///
 /// The `archive` figure is end-to-end through this method, so it **includes**
 /// the re-derivation `archive()` runs inside its transaction — but it does not
@@ -852,6 +853,19 @@ pub(crate) enum LowPriCommand {
     BulkImportChunk {
         chunk: Vec<EdgeAssertion>,
         responder: oneshot::Sender<Result<ChunkOutcome>>,
+    },
+    /// Drop or restore `trg_links_current_sync` — the links_current mirror's
+    /// window, opened and closed by [`Database::bulk_import_deferred`]
+    /// (D-277).
+    ///
+    /// Low priority beside the chunks it serves. One DDL statement either way
+    /// (`DROP TRIGGER IF EXISTS` down, `CREATE TRIGGER IF NOT EXISTS` up — the
+    /// same idempotent pair the v19 rung used on `trg_links_single_open`), so
+    /// the toggle is safe to send twice and the restore cannot fail on an
+    /// already-present trigger.
+    LinksCurrentMirror {
+        present: bool,
+        responder: oneshot::Sender<Result<()>>,
     },
     Archive {
         cutoff: String,
@@ -2901,6 +2915,136 @@ impl Database {
         .await
     }
 
+    /// Load edges **without the maintained projection in the way**, then
+    /// re-derive it in one chunked rebuild (D-277, plan §8.1 / F1).
+    ///
+    /// Three phases through the actor: drop `trg_links_current_sync` (the
+    /// per-row upsert into `links_current`), load every edge through the same
+    /// chunked path [`Self::bulk_import`] uses, restore the trigger, then
+    /// [`Self::rebuild_current_chunked`] — the re-derivation D-082 made
+    /// chunked, whose fill costs ~104 ms per 16k rows and whose swap is the
+    /// exempt 46.8 ms turn. Measured on the reference box, 16,000 random-pair
+    /// edges (medians of three):
+    ///
+    /// | arm | bulk | rebuild + restore | total |
+    /// |---|---|---|---|
+    /// | shipped (`bulk_import`) | 5.08 s | — | 5.08 s |
+    /// | this | 2.29 s | 0.19 s | **2.48 s (2.05×)** |
+    ///
+    /// The mirror is what the ladder showed growing with the graph on random
+    /// pairs (plan §9.2): the near-chain shape pays it too, just flatter, so
+    /// this is the lever for both — and the rebuild's cost is a function of
+    /// the table, not the shape, which is why the skip arm's total is flat
+    /// where the shipped arm's is not.
+    ///
+    /// # What the window actually touches, stated precisely
+    ///
+    /// **The ledger is complete at every instant of the window.** The log
+    /// mirror and the single-open guard stay up: `links` and
+    /// `transaction_log` gain every row this call loads, versioned and
+    /// guarded exactly as the shipped path does. What lags is
+    /// `links_current` — Doctrine VI's derivative state, which the crate
+    /// has always maintained as *the projection you could fold from the
+    /// ledger*. Current-time reads during the window (`traverse`,
+    /// `query_as_of_edges` without an instant) see a partial projection and
+    /// are not wrong about the past — they are stale about the present, the
+    /// one state Doctrine VI calls disposable.
+    ///
+    /// The window **ends when this method returns**, success, failure, or
+    /// cancellation: the restore runs before the rebuild, so any write that
+    /// lands after it mirrors again, and the rebuild then sweeps the backlog.
+    /// If the future is dropped or the process unwinds mid-load, the window
+    /// stays open — the projection stays stale but the ledger stays complete,
+    /// `audit_current` reports the drift as [`DbError::CurrentDrift`], and
+    /// [`Self::rebuild_current_chunked`] closes it. That is the honest doc
+    /// entry plan §8.1 asked for, and why this is a signature rather than a
+    /// default: the shipped path never has a window at all.
+    ///
+    /// # What a failure does
+    ///
+    /// The load's failure — [`BulkInterrupted`] with its `written` count —
+    /// propagates only **after** the trigger is restored and the projection
+    /// rebuilt from what did commit, so a failed deferred bulk is in exactly
+    /// the state a caller expects: the prefix is committed, the projection is
+    /// true, the mirror is on. An empty `edges` is a no-op: no DDL, no
+    /// rebuild, nothing attributed.
+    pub async fn bulk_import_deferred(
+        &self,
+        edges: Vec<EdgeAssertion>,
+    ) -> BulkResult<usize> {
+        self.bulk_import_deferred_with(edges, BulkControl::new())
+            .await
+    }
+
+    /// [`Self::bulk_import_deferred`] with cancellation and progress, on the
+    /// load half — the same chunked loop, the same token, the same callbacks
+    /// [`Self::bulk_import_with`] takes. The toggle and the rebuild are
+    /// single turns around it.
+    pub async fn bulk_import_deferred_with(
+        &self,
+        edges: Vec<EdgeAssertion>,
+        control: BulkControl,
+    ) -> BulkResult<usize> {
+        let edges = normalize_all(edges).map_err(before_any_chunk)?;
+        if edges.is_empty() {
+            return Ok(0);
+        }
+
+        if let Err(cause) = self
+            .low(|responder| LowPriCommand::LinksCurrentMirror {
+                present: false,
+                responder,
+            })
+            .await
+        {
+            // A toggle that failed has left the mirror exactly where it was —
+            // on. Stopping here is safe: nothing was loaded, nothing is stale.
+            return Err(BulkInterrupted { written: 0, cause });
+        }
+
+        let loaded = self
+            .low_chunked(edges, chunk_rows::EDGES, control, |chunk, responder| {
+                LowPriCommand::BulkImportChunk { chunk, responder }
+            })
+            .await;
+
+        // Restore before reporting, and before rebuilding: any write that
+        // lands after the restore maintains the projection itself, and the
+        // rebuild then sweeps whatever the window left behind.
+        let restored = self
+            .low(|responder| LowPriCommand::LinksCurrentMirror {
+                present: true,
+                responder,
+            })
+            .await;
+        let rebuilt = self.rebuild_current_chunked().await;
+
+        // The mirror's absence out-ranks the rebuild's failure out-ranks the
+        // load's: a caller must not read success beside a mirror that is off,
+        // and a load error beside a restored-and-rebuilt projection is just
+        // the load's answer.
+        let written = match &loaded {
+            Ok(n) => *n,
+            Err(e) => e.written,
+        };
+        match (loaded, restored, rebuilt) {
+            (Ok(n), Ok(()), Ok(_)) => Ok(n),
+            // A failed load with the mirror restored and the projection
+            // rebuilt is the load's own answer — the prefix committed, the
+            // projection is true, the mirror is on.
+            (Err(e), Ok(()), Ok(_)) => Err(e),
+            (_, Err(cause), _) => Err(BulkInterrupted { written, cause }),
+            (Err(e), Ok(()), Err(report)) => Err(BulkInterrupted {
+                written: e.written,
+                cause: report,
+            }),
+            (Ok(n), Ok(()), Err(report)) => Err(BulkInterrupted {
+                written: n,
+                cause: report,
+            }),
+        }
+    }
+
     /// Upsert many **concepts** on the background channel, chunked (D-011).
     ///
     /// This is the bulk concept path, and every row it writes is a ledger write:
@@ -4861,6 +5005,7 @@ impl LowPriCommand {
             LowPriCommand::DropEmbeddingIndex { .. } => K::DropEmbeddingIndex,
             LowPriCommand::RebuildEmbeddingIndex { .. } => K::RebuildEmbeddingIndex,
             LowPriCommand::BulkImportChunk { .. } => K::BulkImportChunk,
+            LowPriCommand::LinksCurrentMirror { .. } => K::LinksCurrentMirror,
             LowPriCommand::Archive { .. } => K::Archive,
             // Its own counter since 0.12.9 (W4.3, D-152). It reported as
             // `K::Archive` from 0.9.0 to 0.12.8 — the budget really is shared,
@@ -4923,6 +5068,21 @@ impl LowPriCommand {
                 turn.answer_chunk(
                     responder,
                     write_edges_atomic(state, conn, &chunk, &stamp).await,
+                );
+            }
+            LowPriCommand::LinksCurrentMirror { present, responder } => {
+                // Schema work on the actor's own connection, like
+                // RegisterModel and the embedding-index pair: the
+                // single-writer invariant is what keeps the mirror's window
+                // on one timeline with the chunks it wraps.
+                let sql = if present {
+                    crate::schema::ddl::CREATE_LINKS_CURRENT_SYNC.to_string()
+                } else {
+                    "DROP TRIGGER IF EXISTS trg_links_current_sync".to_string()
+                };
+                turn.answer(
+                    responder,
+                    conn.execute(&sql, ()).await.map(|_| ()).map_err(Into::into),
                 );
             }
             LowPriCommand::WriteConceptsChunk { chunk, responder } => {

@@ -906,6 +906,50 @@ impl PyDatabase {
         })
     }
 
+    /// Load edges **without the maintained projection in the way**, then
+    /// re-derive it in one chunked rebuild (0.16.3, D-277).
+    ///
+    /// Drop the `links_current` mirror trigger → load through the same chunked
+    /// path `bulk_import` uses → restore the trigger → `rebuild_current_chunked`.
+    /// Measured on the reference box, 16,000 random-pair edges (medians of 3):
+    /// 5.08 s shipped vs **2.29 s + 0.19 s rebuild = 2.48 s — 2.05×**.
+    ///
+    /// **What the window touches, stated precisely.** The ledger is complete
+    /// at every instant: the log mirror and the single-open guard stay up, so
+    /// `links` and `transaction_log` gain every row exactly as `bulk_import`
+    /// writes them. What lags is `links_current` — Doctrine VI's derivative
+    /// state. Current-time reads during the window see a partial projection
+    /// (stale about the present, never wrong about the past); the window ends
+    /// when this call returns — failure and cancellation included, because the
+    /// restore runs before the rebuild and both before the answer. If the
+    /// process dies mid-load, the projection stays stale but the ledger stays
+    /// complete: `audit_current()` reports the drift and `rebuild_current()`
+    /// closes it. That is why this is opt-in: the shipped path never has a
+    /// window at all.
+    ///
+    /// **On failure, the exception carries `written`** (0.13.8, W7.6), after
+    /// the mirror is back and the projection rebuilt from what committed. An
+    /// empty `edges` touches nothing. `progress` and `cancel` mean what they
+    /// mean for `bulk_import`.
+    #[pyo3(signature = (edges, *, progress = None, cancel = None))]
+    fn bulk_import_deferred(
+        &self,
+        py: Python<'_>,
+        edges: Vec<PyEdgeAssertion>,
+        progress: Option<Py<PyAny>>,
+        cancel: Option<PyRef<'_, PyCancelToken>>,
+    ) -> PyResult<usize> {
+        let edges: Vec<EdgeAssertion> = edges.into_iter().map(|e| e.inner).collect();
+        let raised = Arc::new(Mutex::new(None));
+        let (control, _token) = bulk_control(progress, cancel, &raised);
+        self.with_db(py, move |db| {
+            bulk_result(
+                runtime().block_on(db.bulk_import_deferred_with(edges, control)),
+                &raised,
+            )
+        })
+    }
+
     /// Upsert many concepts on the background channel, chunked (D-011).
     ///
     /// Every row written here is a **ledger** write: it versions the concept and

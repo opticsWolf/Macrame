@@ -507,7 +507,7 @@ measurement**, with the arm that retired each:
 Ranked by expected value; each names the measurement that would validate it
 before anyone commits code, per this document's own §0 discipline.
 
-1. **F1, the materialization-skipping bulk.** The biggest remaining lever on
+1. **F1, the materialization-skipping bulk.** — **measured and landed as [D-277](architecture/s13-decision-register.md#d-277), 0.16.3** (`bulk_import_deferred`; 16k random-pair: 5.08 s → 2.29 s + 0.19 s rebuild = **2.05×**, audit at zero) The biggest remaining lever on
    the edge path, and the only one with its arithmetic already measured: 16k
    edges at 2.22 s today; `rebuild_current_chunked` at 104 ms for 16K rows plus
    one 46.8 ms swap turn (D-023, D-082); the concept rate at 0.90 s / 20k as
