@@ -213,6 +213,32 @@ pub enum CommandKind {
     ///
     /// [D-197]: ../docs/architecture/s13-decision-register.md#d-197
     ShadowSwap,
+    /// Dropping a model's DiskANN index for a bulk load (0.16.2, D-276).
+    ///
+    /// Half of `bulk_embeddings`' recipe: the drop that makes a bulk load pay
+    /// for table writes only. One `DROP INDEX IF EXISTS` statement — atomic by
+    /// necessity, no smaller unit — and µs-scale in practice, but its kind
+    /// exists for attribution, not cost: a bulk load that went wrong is read
+    /// off these two counters before anything else.
+    ///
+    /// **Exempt**: one statement, no smaller unit. At the end of the
+    /// declaration order, per [`CommandKind::index`].
+    DropEmbeddingIndex,
+    /// The one-pass rebuild of a model's DiskANN index (0.16.2, D-276).
+    ///
+    /// The finish half of `bulk_embeddings`: one `CREATE INDEX` over the
+    /// table's contents, measured at **2.61 / 19.7 / 39.0 s** for 2,000
+    /// vectors at dim 64 / 256 / 512, and ~10 ms/vector at dim 256 — the
+    /// build, not the blob writes, is what a bulk embedding costs.
+    ///
+    /// **Exempt** by the same criterion as [`CommandKind::ShadowSwap`]: one
+    /// statement, atomic by necessity. The difference is that this one is
+    /// caller-scheduled, so a long hold is a choice the caller made knowing
+    /// the number — which is why the docstring on `bulk_embeddings` states it
+    /// rather than arguing it.
+    ///
+    /// At the end of the declaration order, per [`CommandKind::index`].
+    RebuildEmbeddingIndex,
 }
 
 impl CommandKind {
@@ -241,6 +267,8 @@ impl CommandKind {
         CommandKind::Fork,
         CommandKind::ArchiveBranch,
         CommandKind::ShadowSwap,
+        CommandKind::DropEmbeddingIndex,
+        CommandKind::RebuildEmbeddingIndex,
     ];
 
     pub const COUNT: usize = CommandKind::ALL.len();
@@ -293,6 +321,8 @@ impl CommandKind {
             CommandKind::Fork => "fork",
             CommandKind::ArchiveBranch => "archive_branch",
             CommandKind::ShadowSwap => "shadow_swap",
+            CommandKind::DropEmbeddingIndex => "drop_embedding_index",
+            CommandKind::RebuildEmbeddingIndex => "rebuild_embedding_index",
         }
     }
 
@@ -502,6 +532,8 @@ impl CommandKind {
                 | CommandKind::ArchiveBranch
                 | CommandKind::Checkpoint
                 | CommandKind::ShadowSwap
+                | CommandKind::DropEmbeddingIndex
+                | CommandKind::RebuildEmbeddingIndex
         )
     }
 }

@@ -575,7 +575,7 @@ ships as its own patch release** (0.16.2, 0.16.3, …) with its own register
 entry and its own gates run; a measured refutation that changes no code lands
 as a docs commit without a bump.
 
-### 9.1 The vector build — 8.5–10× behind, and superlinear in dimension (F6, engine-side)
+### 9.1 The vector build — 8.5–10× behind, and superlinear in dimension (F6, engine-side) — **measured and landed as [D-276](architecture/s13-decision-register.md#d-276), 0.16.2**
 
 The largest gap in the table: 2k×256 is **29.8 s against ladybug's 3.5 s**, and
 2k×512 is **58 s against 5.6 s**. Within macrame the scaling itself is the

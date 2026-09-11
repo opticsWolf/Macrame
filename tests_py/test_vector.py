@@ -410,3 +410,63 @@ def test_vector_calls_on_a_closed_handle_raise(db_path):
     ):
         with pytest.raises(macrame.MacrameClosedError):
             call()
+
+
+# --------------------------------------------------------------------------
+# bulk_embeddings (0.16.2, D-276): drop → load → rebuild through the actor
+# --------------------------------------------------------------------------
+
+
+def test_a_bulk_load_rebuilds_the_index_and_search_finds_the_rows(db):
+    # Fresh model so the fixture's upsert_embeddings rows stay put.
+    db.register_model("bulkv", DIM)
+    rows = [("a", [0.0, 1.0, 0.0, 0.0]), ("b", [0.0, 0.0, 1.0, 0.0])]
+    written = db.bulk_embeddings("bulkv", rows)
+    assert written == 2
+
+    hits = db.search_vector("bulkv", [0.0, 1.0, 0.0, 0.0], top_k=2)
+    assert hits[0].concept_id == "a", "the rebuilt index answers"
+
+    # Idempotent: a second load over the same ids is an upsert.
+    assert db.bulk_embeddings("bulkv", rows) == 2
+
+
+def test_a_failed_bulk_load_still_rebuilds_the_index(db):
+    db.register_model("bulkv", DIM)
+    rows = [("a", [1.0, 0.0, 0.0, 0.0]), ("b", [0.0, 1.0, 0.0, 0.0])]
+    # chunk_rows::EMBEDDINGS is 30, so a two-row batch is one chunk: the stop
+    # is *inside* it, `written` is 0, and the rebuild still runs.
+    rows.append(("c", [1.0] * (DIM + 4)))
+
+    with pytest.raises(macrame.DimMismatchError) as e:
+        db.bulk_embeddings("bulkv", rows)
+    assert e.value.written == 0, "the two good rows share the failed chunk         (chunks are 30 rows) and roll back with it"
+
+    # The index is back: the search on the re-embedded row answers instead of
+    # reporting a missing index, which is what a dropped index would do.
+    db.upsert_embeddings("bulkv", [("a", [1.0, 0.0, 0.0, 0.0])])
+    hits = db.search_vector("bulkv", [1.0, 0.0, 0.0, 0.0], top_k=1)
+    assert hits[0].concept_id == "a", "the index is back"
+
+
+def test_an_empty_bulk_load_touches_nothing(db):
+    db.register_model("bulkv", DIM)
+    assert db.bulk_embeddings("bulkv", []) == 0
+    # The model never vanished: the index would have been dropped if the
+    # recipe ran at all.
+    hits = db.search_vector("bulkv", [1.0, 0.0, 0.0, 0.0], top_k=1)
+    assert len(hits) == 0, "the new model is empty but searchable"
+
+
+def test_a_wrong_width_first_row_refuses_before_the_drop(db):
+    db.register_model("bulkv", DIM)
+    with pytest.raises(macrame.DimMismatchError):
+        db.bulk_embeddings("bulkv", [("a", [1.0] * (DIM + 4))])
+    # The original fixture's index never went away.
+    hits = db.search_vector("mini", [1.0, 0.0, 0.0, 0.0], top_k=1)
+    assert hits[0].concept_id == "a"
+
+
+def test_a_bulk_load_into_an_unregistered_model_refuses_at_the_dimension_read(db):
+    with pytest.raises(macrame.ModelNotRegisteredError):
+        db.bulk_embeddings("nosuch", [("a", [1.0, 0.0, 0.0, 0.0])])

@@ -1,6 +1,6 @@
 # Macrame — Architecture Quick Reference
 
-**v0.16.1 · A Bitemporal Graph Ledger on libSQL**
+**v0.16.2 · A Bitemporal Graph Ledger on libSQL**
 
 ---
 
@@ -539,6 +539,7 @@ pub struct HybridHit {
 impl Database {
     pub async fn register_model(&self, model: &ModelName, dim: usize) -> Result<()>
     pub async fn upsert_embeddings(&self, model, rows) -> Result<usize>
+    pub async fn bulk_embeddings(&self, model, rows) -> BulkResult<usize>  // 0.16.2, D-276
     pub async fn rebuild_fts(&self) -> Result<()>
 }
 
@@ -838,6 +839,7 @@ The surface itself *is* pinned: `tests/doc_sync_tests.rs` fails the build when t
 | **A chunk floor that misses the bound** | 0.12.0 | Without one the loop shrinks until the import stops finishing; 35 rows is 9.1 ms worst case against a 16.7 ms frame |
 | **Chunking is ~11% slower as throughput** | D-059 | Smaller chunks buy latency and cost throughput on every path |
 | **`low_chunked` deduplicates four bulk loops** | D-086 | Four copies of a yield-critical loop are four places for the yield to be lost |
+| **`bulk_embeddings` drops and rebuilds, on purpose** | D-276 | The one-pass `CREATE INDEX` (1.4–1.8× at every width measured) is indivisible; between drop and rebuild the model is unsearchable and storage-unchecked, the failure path rebuilds before it reports, and it is opt-in by signature — `upsert_embeddings` keeps the storage check at every instant |
 | **`RebuildInterrupted` ≠ `RebuildFailed`** | D-082 | The repair *did not run* is not *the repair did not repair*; action is to retry |
 | **`OverlappingInterval` boxed (168 bytes)** | D-075 | Only variant that is boxed; keeps `DbError` under `clippy::result_large_err` threshold |
 | **NaN is not a schema gap** | D-078 | `weight REAL NOT NULL` rejects NaN; listing it as a gap claimed the schema was silent where it is strict |

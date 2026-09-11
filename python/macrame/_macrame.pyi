@@ -1303,6 +1303,32 @@ class Database:
         want `cancel`. See `bulk_import` for what `written`, `progress` and
         `cancel` mean.
         """
+
+    def bulk_embeddings(
+        self,
+        model: str,
+        rows: Sequence[tuple[str, Embedding]],
+        *,
+        progress: Callable[[BulkProgress], object] | None = None,
+        cancel: CancelToken | None = None,
+    ) -> int:
+        """Load vectors without the DiskANN index in the way, then rebuild it
+        in one pass (0.16.2, D-276).
+
+        Drop → load → rebuild, through the write actor. Measured at 2,000
+        vectors: 2.62 s vs 3.78 s at dim 64, 19.7 s vs 31.0 s at dim 256,
+        39.0 s vs 56.0 s at dim 512; 1.8× at 5,000 × 256.
+
+        The trade, stated: between the drop and the rebuild the model is not
+        searchable and not dimension-checked at the storage layer — the index
+        is that check. The crate-side check still applies to every row this
+        method loads, and a failed or cancelled load still rebuilds, with
+        `written` on the exception, so the file is never left disarmed.
+
+        The rebuild holds the write lock for its whole duration and grows with
+        the corpus (~10 ms/vector at dim 256): budget-exempt by contract, like
+        `checkpoint`, and a choice this signature makes explicit.
+        """
     def search_vector(
         self,
         model: str,

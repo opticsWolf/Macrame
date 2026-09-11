@@ -89,6 +89,57 @@ pub async fn declared_dimension(conn: &libsql::Connection, model: &ModelName) ->
         })
 }
 
+/// Drop a model's DiskANN index, tolerating its absence (bulk-embedding
+/// setup, D-276).
+///
+/// Half of [`crate::Database::bulk_embeddings`]'s recipe, reachable through the
+/// actor and nowhere else: dropping the index is what makes a bulk load pay
+/// for table writes only (~5 µs/row, flat at every dimension measured) instead
+/// of DiskANN maintenance (~10 ms/row at dim 256 and growing with the index).
+/// `IF EXISTS` because the recipe is also the recovery path — a load that
+/// failed before the drop is still a load whose finish rebuilds.
+///
+/// **The window is the caller's to close.** Between this and
+/// [`rebuild_embedding_index`] the model's vectors are not searchable and not
+/// dimension-checked at the storage layer; only the crate's own encode-time
+/// check (`EmbeddingCodec::encode`) stands, and it stands for everything that
+/// reaches storage through the crate. That trade is D-276's measured decision,
+/// not a silent default — see the register entry for the numbers and the
+/// Rejected line for keeping the index during loads.
+#[doc(hidden)]
+pub async fn drop_embedding_index(conn: &libsql::Connection, model: &ModelName) -> Result<()> {
+    conn.execute(
+        &format!("DROP INDEX IF EXISTS {}", model.index()),
+        (),
+    )
+    .await
+    .map(|_| ())
+    .map_err(Into::into)
+}
+
+/// Rebuild a model's DiskANN index in one pass (bulk-embedding finish, D-276).
+///
+/// One `CREATE INDEX` statement over the table's contents — a **one-pass
+/// DiskANN build**, measured at **2.61 s** for 2,000 vectors at dim 64,
+/// **19.7 s** at dim 256 and **39.0 s** at dim 512, versus 3.78 / 31.0 / 56.0 s
+/// for the same rows inserted through the indexed path (this box, release
+/// build, medians of three). It is one statement and has no smaller unit, so
+/// the hold is what it is: the actor is busy for the build's whole duration,
+/// and a search arriving meanwhile reports the missing index rather than
+/// waiting. The same trade [`Database::analyze`] documents for its own
+/// indivisible statement (D-166), priced in bulk-embedding currency.
+///
+/// `IF NOT EXISTS` so the rebuild is idempotent — a caller who bulk-loads twice
+/// without an intervening drop, or a failure path that rebuilds twice, lands
+/// the same index either way.
+#[doc(hidden)]
+pub async fn rebuild_embedding_index(conn: &libsql::Connection, model: &ModelName) -> Result<()> {
+    conn.execute(&ddl::create_embeddings_index(model), ())
+        .await
+        .map(|_| ())
+        .map_err(Into::into)
+}
+
 /// `Ok(None)` when the model has no table; `Ok(Some(dim))` when it has one.
 async fn read_declared_dimension(
     conn: &libsql::Connection,

@@ -446,6 +446,8 @@ fn next_chunk_size(
 /// | [`Database::archive_branch`] | unmeasured; a function of how much one lineage wrote | D-012 again, and D-230's chain: the links, the log entries and the `branches` row leave together or the ledger disagrees with itself about what is currently believed. There is no smaller unit — half a forgotten lineage is a lineage whose reads are answered by its parent |
 /// | the swap turn of [`Database::rebuild_current_chunked`], counted as `shadow_swap` | measured **46.8 ms** at the largest fixture (D-082), and it grows with the table | Index names are global and SQLite has no `ALTER INDEX … RENAME`, so the shadow cannot carry `idx_lc_traversal_cover` while the live table still holds it — all three indexes are built here, under the lock. This is the residual T1.2 could not remove, and there is no smaller unit: half a swapped projection is not a projection. **Exempt since 0.14.16** (W12.16, D-233). The *fill* half keeps its own kind and is deliberately absent from this table, which is what makes a violation there a regression rather than a constant |
 /// | [`Database::checkpoint`] | a function of the WAL's size, which is a function of how long since the last checkpoint — not of anything the caller passes | It is not a transaction at all. `PRAGMA wal_checkpoint` copies frames back into the main file and there is no unit smaller than the frame it is already working in; the caller asked for exactly this, and the alternative to a long checkpoint is a WAL that keeps growing (0.12.13, W5.2, D-156) |
+/// | the drop turn of [`Database::bulk_embeddings`], counted as `drop_embedding_index` (0.16.2, D-276) | µs-scale; one `DROP INDEX IF EXISTS` | One statement, no smaller unit — the same shape as [`Database::checkpoint`] by nature and [`Database::write_bulk_atomic`] by atomicity. Its kind exists for attribution beside `rebuild_embedding_index`, not for cost |
+/// | the rebuild turn of [`Database::bulk_embeddings`], counted as `rebuild_embedding_index` (0.16.2, D-276) | measured **2.61 / 19.7 / 39.0 s** for 2,000 vectors at dim 64 / 256 / 512, ~10 ms/vector at dim 256, growing with the corpus | One `CREATE INDEX` over the whole table — the one-pass DiskANN build is indivisible, exactly the criterion `shadow_swap` and `rebuild_current` meet. The difference is schedule: this hold is caller-scheduled and opt-in, so the docstring states the number instead of arguing it. Counted would add a permanent `N(bulk loads)` to every database that ever bulk-embedded — [`CommandKind::ShadowSwap`]'s argument, unchanged |
 ///
 /// The `archive` figure is end-to-end through this method, so it **includes**
 /// the re-derivation `archive()` runs inside its transaction — but it does not
@@ -825,6 +827,27 @@ pub(crate) enum LowPriCommand {
         model: ModelName,
         chunk: Vec<(String, Vec<f32>)>,
         responder: oneshot::Sender<Result<ChunkOutcome>>,
+    },
+    /// Drop a model's DiskANN index — bulk-embedding setup (D-276).
+    ///
+    /// Low priority like the chunk it serves: it is a caller's bulk load that
+    /// wants the index gone, and nothing interactive should queue behind it.
+    /// One `DROP INDEX IF EXISTS` statement, atomic by nature.
+    DropEmbeddingIndex {
+        model: ModelName,
+        responder: oneshot::Sender<Result<()>>,
+    },
+    /// One-pass rebuild of a model's DiskANN index — bulk-embedding finish
+    /// (D-276).
+    ///
+    /// One `CREATE INDEX` statement, and the indivisible half of the recipe:
+    /// measured at 19.7 s for 2,000 vectors at dim 256 on the reference box.
+    /// Budget-exempt by the same criterion as `ShadowSwap` — atomic by
+    /// necessity — with the difference that this one is *caller-scheduled*, so
+    /// a slow build is a choice the caller made knowingly.
+    RebuildEmbeddingIndex {
+        model: ModelName,
+        responder: oneshot::Sender<Result<()>>,
     },
     BulkImportChunk {
         chunk: Vec<EdgeAssertion>,
@@ -3132,6 +3155,143 @@ impl Database {
         .await
     }
 
+    /// Load embeddings **without the DiskANN index in the way**, then rebuild
+    /// it in one pass (D-276, plan §9.1).
+    ///
+    /// Three actor turns in sequence: drop the index (`DROP INDEX IF EXISTS`,
+    /// µs-scale), load every row through the same chunked path
+    /// [`Self::upsert_embeddings`] uses, rebuild the index in one statement.
+    /// Measured on the reference box, medians of three, 2,000 vectors:
+    ///
+    /// | dim | indexed (`upsert_embeddings`) | `bulk_embeddings` | one-pass build alone |
+    /// |---|---|---|---|
+    /// | 64 | 3.78 s | 2.62 s | 2.61 s |
+    /// | 256 | 31.0 s | 19.7 s | 19.7 s |
+    /// | 512 | 56.0 s | 39.0 s | 39.0 s |
+    ///
+    /// At 5,000 × 256: 89.2 s indexed, 48.6 s here — **1.8×**. The build, not
+    /// the blob writes, is the cost: inserts without the index are flat at
+    /// ~5 µs/row at every dimension measured. The rest of the gap against an
+    /// HNSW writer is DiskANN-vs-HNSW build economics inside libSQL, engine-
+    /// side, and out of scope for a crate that does not fork its engine.
+    ///
+    /// # The trade, stated
+    ///
+    /// Between the drop and the rebuild, the model's vectors are not
+    /// searchable (`vector_top_k` reports the missing index) and **not
+    /// dimension-checked at the storage layer** — the index is that check
+    /// (D-037, `ddl::create_embeddings_index`). The crate-side check
+    /// ([`crate::vector::EmbeddingCodec::encode`]) still applies to everything
+    /// this method loads, and the rebuild restores the storage check at the
+    /// end; what is given up is the check on rows a *different* client inserts
+    /// during the window. That is the measured decision, opt-in by signature:
+    /// the plain path keeps the storage backstop at every instant.
+    ///
+    /// **A failed or cancelled load still rebuilds.** The load's own failure —
+    /// [`BulkInterrupted`] with its `written` count — propagates only after
+    /// the rebuild has run, so a bulk load can never leave the file in the
+    /// disarmed state. An empty `rows` is a no-op: the index is not touched
+    /// for a load of nothing.
+    ///
+    /// The rebuild turn is budget-exempt (atomic by necessity, same criterion
+    /// as `shadow_swap` — [`crate::CHUNK_BUDGET`]'s table), and its hold grows
+    /// with the corpus: ~10 ms/vector at dim 256, ~20 ms at 512. For a very
+    /// large backfill that hold is the price of the recipe; the alternative —
+    /// keep the index and pay the same total spread across rows — is what
+    /// `upsert_embeddings` already is.
+    pub async fn bulk_embeddings(
+        &self,
+        model: &ModelName,
+        rows: Vec<(String, Vec<f32>)>,
+    ) -> BulkResult<usize> {
+        self.bulk_embeddings_with(model, rows, BulkControl::new())
+            .await
+    }
+
+    /// [`Self::bulk_embeddings`] with cancellation and progress, on the load
+    /// half. The drop and the rebuild are single statements; `progress` and
+    /// `cancel` bound the chunked load between them, exactly as they do for
+    /// [`Self::upsert_embeddings_with`].
+    pub async fn bulk_embeddings_with(
+        &self,
+        model: &ModelName,
+        rows: Vec<(String, Vec<f32>)>,
+        control: BulkControl,
+    ) -> BulkResult<usize> {
+        // The table must exist before anything drops its index, and the first
+        // row's width is checked *before* the drop so a wholly wrong batch
+        // fails without ever disarming the storage check.
+        let dim = match crate::vector::declared_dimension(self.read_conn(), model).await {
+            Ok(dim) => dim,
+            Err(cause) => return Err(BulkInterrupted { written: 0, cause }),
+        };
+        if let Some((_, first)) = rows.first() {
+            if first.len() != dim {
+                return Err(BulkInterrupted {
+                    written: 0,
+                    cause: DbError::DimMismatch {
+                        got: first.len(),
+                        expected: dim,
+                        model: model.to_string(),
+                    },
+                });
+            }
+        } else {
+            return Ok(0);
+        }
+
+        if let Err(cause) = self
+            .low(move |responder| LowPriCommand::DropEmbeddingIndex {
+                model: model.clone(),
+                responder,
+            })
+            .await
+        {
+            // A drop that failed has left the index in place — the armed,
+            // searchable state — so stopping here is safe: the load never
+            // ran, and the file is exactly what it was.
+            return Err(BulkInterrupted { written: 0, cause });
+        }
+
+        let loaded = self
+            .low_chunked(rows, chunk_rows::EMBEDDINGS, control, |chunk, responder| {
+                LowPriCommand::UpsertEmbeddingChunk {
+                    model: model.clone(),
+                    chunk,
+                    responder,
+                }
+            })
+            .await;
+
+        // Whether the load committed or was interrupted, the index goes back:
+        // the one state this method must never leave the file in is the state
+        // `drop_embedding_index` documents as unsearchable and unchecked.
+        let rebuilt = self
+            .low(move |responder| LowPriCommand::RebuildEmbeddingIndex {
+                model: model.clone(),
+                responder,
+            })
+            .await;
+
+        // The load's failure is the caller's answer; the rebuild's failure is
+        // worse and takes precedence, because a load that reports success
+        // beside a missing index is the silent half of the same defect. In the
+        // double-failure case the rebuild becomes the cause and the load's
+        // `written` count survives as the count.
+        match (loaded, rebuilt) {
+            (Ok(count), Ok(())) => Ok(count),
+            (Err(e), Ok(())) => Err(e),
+            (Ok(count), Err(e)) => Err(BulkInterrupted {
+                written: count,
+                cause: e,
+            }),
+            (Err(load), Err(rebuild)) => Err(BulkInterrupted {
+                written: load.written,
+                cause: rebuild,
+            }),
+        }
+    }
+
     /// Reconstruct the concept-text search index from the ledger (§5.9, D-036).
     ///
     /// The FTS index is derivative: D-036 promises every derivative table can be
@@ -4698,6 +4858,8 @@ impl LowPriCommand {
             LowPriCommand::WriteConceptsChunk { .. } => K::WriteConceptsChunk,
             LowPriCommand::WriteAnalyticsChunk { .. } => K::WriteAnalyticsChunk,
             LowPriCommand::UpsertEmbeddingChunk { .. } => K::UpsertEmbeddingChunk,
+            LowPriCommand::DropEmbeddingIndex { .. } => K::DropEmbeddingIndex,
+            LowPriCommand::RebuildEmbeddingIndex { .. } => K::RebuildEmbeddingIndex,
             LowPriCommand::BulkImportChunk { .. } => K::BulkImportChunk,
             LowPriCommand::Archive { .. } => K::Archive,
             // Its own counter since 0.12.9 (W4.3, D-152). It reported as
@@ -4789,6 +4951,24 @@ impl LowPriCommand {
                 turn.answer_chunk(
                     responder,
                     crate::vector::search::upsert_embedding_chunk(conn, &model, &chunk).await,
+                );
+            }
+            LowPriCommand::DropEmbeddingIndex { model, responder } => {
+                // Schema work on the actor's own connection, like
+                // RegisterModel: the single-writer invariant is what keeps the
+                // drop and the load on one timeline.
+                turn.answer(
+                    responder,
+                    crate::vector::registry::drop_embedding_index(conn, &model).await,
+                );
+            }
+            LowPriCommand::RebuildEmbeddingIndex { model, responder } => {
+                // One statement, one turn, no smaller unit. Its hold is the
+                // one-pass DiskANN build's and it is budget-exempt by the same
+                // criterion as `ShadowSwap` — see the CommandKind doc.
+                turn.answer(
+                    responder,
+                    crate::vector::registry::rebuild_embedding_index(conn, &model).await,
                 );
             }
             LowPriCommand::Archive {

@@ -36,6 +36,22 @@ fn model() -> ModelName {
     ModelName::new("probe_v1").unwrap()
 }
 
+#[cfg(feature = "metrics")]
+fn turns_for(
+    snap: &macrame::metrics::MetricsSnapshot,
+    kind: macrame::metrics::CommandKind,
+) -> u64 {
+    snap.kinds.iter().find(|k| k.kind == kind).unwrap().turns
+}
+
+#[cfg(feature = "metrics")]
+fn over_budget_for(
+    snap: &macrame::metrics::MetricsSnapshot,
+    kind: macrame::metrics::CommandKind,
+) -> u64 {
+    snap.kinds.iter().find(|k| k.kind == kind).unwrap().over_budget
+}
+
 /// Little-endian F32 bytes, the wire form of an F32_BLOB.
 fn le(v: &[f32]) -> Vec<u8> {
     v.iter().flat_map(|f| f.to_le_bytes()).collect()
@@ -781,4 +797,242 @@ async fn a_retired_concept_is_not_a_vector_search_result() {
         count(&conn, &format!("SELECT COUNT(*) FROM {}", m.table())).await,
         3
     );
+}
+
+/// D-276's recipe end to end: drop → load → rebuild, and the search answers
+/// through the rebuilt index afterwards.
+///
+/// The numbers the docstring states are the probe's job
+/// (`examples/vector_build_probe.rs`); this asserts the contract, not the
+/// clock. It does assert the one counter fact D-276 commits to — that a
+/// rebuild turn is attributed to its own kind and moves no `over_budget`
+/// counter — because that pair is the exemption test, and it is behind
+/// `cfg(feature = "metrics")` because everything it reads is.
+#[tokio::test]
+async fn a_bulk_load_rebuilds_the_index_and_search_finds_the_rows() {
+    use macrame::prelude::*;
+
+    let harness = TestHarness::new();
+    let db = Database::open(&harness.db_path).await.unwrap();
+    let m = ModelName::new("bulk_v1").unwrap();
+
+    for i in 0..40 {
+        db.upsert_concept(ConceptUpsert::new(format!("c{i:03}"), "T").valid_from(TS))
+            .await
+            .unwrap();
+    }
+    db.register_model(&m, 4).await.unwrap();
+
+    // One direction per row: several rows pointing the same way would tie at
+    // cosine distance zero, and the winner would be the engine's choice.
+    let rows: Vec<(String, Vec<f32>)> = (0..40u32)
+        .map(|i| {
+            let mut v = vec![0.0f32; 4];
+            v[(i % 4) as usize] = 1.0;
+            v[((i + 1) % 4) as usize] = i as f32 / 40.0;
+            (format!("c{i:03}"), v)
+        })
+        .collect();
+
+    let written = db.bulk_embeddings(&m, rows.clone()).await.unwrap();
+    assert_eq!(written, 40);
+
+    let hits = search_vector(db.read_conn(), &rows[7].1, &m, 3, None, None)
+        .await
+        .unwrap();
+    assert_eq!(hits[0].concept_id, "c007");
+
+    #[cfg(feature = "metrics")]
+    {
+        let metrics = db.metrics();
+        assert_eq!(
+            turns_for(&metrics, macrame::metrics::CommandKind::DropEmbeddingIndex),
+            1,
+            "the drop turn is attributed to its own kind"
+        );
+        assert_eq!(
+            turns_for(&metrics, macrame::metrics::CommandKind::RebuildEmbeddingIndex),
+            1,
+            "the rebuild turn is attributed to its own kind"
+        );
+        assert_eq!(
+            over_budget_for(&metrics, macrame::metrics::CommandKind::RebuildEmbeddingIndex),
+            0,
+            "a rebuild is exempt by contract: at this fixture size the build \
+             is over the budget in a debug build, and it may not move the \
+             counter. If this breaks, someone un-exempted the kind, and \
+             D-276's table row and the exemption must be re-decided together"
+        );
+    }
+
+    // Idempotent: a second bulk load over the same ids is an upsert.
+    let again = db.bulk_embeddings(&m, rows).await.unwrap();
+    assert_eq!(again, 40);
+    #[cfg(feature = "metrics")]
+    assert_eq!(
+        turns_for(&db.metrics(), macrame::metrics::CommandKind::DropEmbeddingIndex),
+        2,
+        "the second load drops and rebuilds again"
+    );
+
+    db.close().await.unwrap();
+}
+
+/// The state `bulk_embeddings` must never leave the file in is the one
+/// `drop_embedding_index` documents: unsearchable, unchecked. A load that
+/// fails mid-way — a wrong-width row in the last chunk, chunks before it
+/// committed — propagates its error only **after** the index is back, and the
+/// exception carries the count.
+#[tokio::test]
+async fn a_failed_bulk_load_still_rebuilds_the_index() {
+    use macrame::prelude::*;
+
+    let harness = TestHarness::new();
+    let db = Database::open(&harness.db_path).await.unwrap();
+    let m = ModelName::new("bulk_v2").unwrap();
+
+    for i in 0..40 {
+        db.upsert_concept(ConceptUpsert::new(format!("c{i:03}"), "T").valid_from(TS))
+            .await
+            .unwrap();
+    }
+    db.register_model(&m, 4).await.unwrap();
+
+    // More than one chunk (chunk_rows::EMBEDDINGS = 30), so the stop lands in
+    // a later chunk and the prefix that committed is real. One direction per
+    // row, as in the rebuild test: every row `[i, 0, 0, 0]` would be parallel
+    // to every other and the search below would be the engine's choice.
+    let mut rows: Vec<(String, Vec<f32>)> = (0..40u32)
+        .map(|i| {
+            (
+                format!("c{i:03}"),
+                vec![i as f32, 40.0 - i as f32, 0.0, 0.0],
+            )
+        })
+        .collect();
+    let query = rows[0].1.clone();
+    rows.push(("c_bad".to_string(), vec![1.0f32; 8]));
+
+    let err = db.bulk_embeddings(&m, rows).await.unwrap_err();
+    assert_eq!(
+        err.written, 30,
+        "chunk one committed before the stop, and the exception says so \
+         (cause: {}; cancelled: {})",
+        err.cause,
+        err.was_cancelled()
+    );
+    let err: DbError = err.into();
+    assert!(
+        matches!(err, DbError::DimMismatch { .. }),
+        "the load's own failure is the cause, got {err:?}"
+    );
+
+    // The index answers again — which is the assertion that the rebuild ran:
+    // a search against a dropped index is an engine error, not a short list.
+    let hits = search_vector(db.read_conn(), &query, &m, 3, None, None)
+        .await
+        .unwrap();
+    assert_eq!(hits[0].concept_id, "c000");
+
+    // And the row count is the prefix that committed: the failure path
+    // rebuilt the index, it did not roll back what committed.
+    assert_eq!(
+        count(db.read_conn(), &format!("SELECT COUNT(*) FROM {}", m.table())).await,
+        30
+    );
+
+    db.close().await.unwrap();
+}
+
+/// The pre-drop check: a batch whose first row is the wrong width is refused
+/// before the index is touched, so a wholly wrong load costs the caller a
+/// `DimMismatch` and nothing else.
+#[tokio::test]
+async fn a_wrong_width_first_row_refuses_before_the_drop() {
+    use macrame::prelude::*;
+
+    let harness = TestHarness::new();
+    let db = Database::open(&harness.db_path).await.unwrap();
+    let m = ModelName::new("bulk_v3").unwrap();
+    db.upsert_concept(ConceptUpsert::new("c0", "T").valid_from(TS))
+        .await
+        .unwrap();
+    db.register_model(&m, 4).await.unwrap();
+
+    let err = db
+        .bulk_embeddings(&m, vec![("c000".to_string(), vec![1.0f32; 8])])
+        .await
+        .unwrap_err();
+    let err: DbError = err.into();
+    assert!(
+        matches!(err, DbError::DimMismatch { .. }),
+        "refused with the declared dimension, got {err:?}"
+    );
+
+    // Neither half of the recipe ran: the metrics prove the index was never
+    // dropped, not merely that it is back.
+    #[cfg(feature = "metrics")]
+    {
+        let metrics = db.metrics();
+        assert_eq!(turns_for(&metrics, macrame::metrics::CommandKind::DropEmbeddingIndex), 0);
+        assert_eq!(turns_for(&metrics, macrame::metrics::CommandKind::RebuildEmbeddingIndex), 0);
+    }
+
+    db.close().await.unwrap();
+}
+
+/// An empty load touches nothing: no drop, no rebuild, `Ok(0)`. Dropping an
+/// index to load zero rows would put a searchable model into the disarmed
+/// window for nothing.
+#[tokio::test]
+async fn an_empty_bulk_load_touches_nothing() {
+    use macrame::prelude::*;
+
+    let harness = TestHarness::new();
+    let db = Database::open(&harness.db_path).await.unwrap();
+    let m = ModelName::new("bulk_v4").unwrap();
+    db.upsert_concept(ConceptUpsert::new("c0", "T").valid_from(TS))
+        .await
+        .unwrap();
+    db.register_model(&m, 4).await.unwrap();
+
+    let written = db.bulk_embeddings(&m, Vec::new()).await.unwrap();
+    assert_eq!(written, 0);
+    #[cfg(feature = "metrics")]
+    {
+        let metrics = db.metrics();
+        assert_eq!(turns_for(&metrics, macrame::metrics::CommandKind::DropEmbeddingIndex), 0);
+        assert_eq!(turns_for(&metrics, macrame::metrics::CommandKind::RebuildEmbeddingIndex), 0);
+    }
+
+    db.close().await.unwrap();
+}
+
+/// A load into an unregistered model fails at the dimension read, before any
+/// DDL — the same error `upsert_embeddings` gives, with the same `written`
+/// shape (zero: the first chunk can fail, and here nothing ran at all).
+#[tokio::test]
+async fn a_bulk_load_into_an_unregistered_model_refuses_at_the_dimension_read() {
+    use macrame::prelude::*;
+
+    let harness = TestHarness::new();
+    let db = Database::open(&harness.db_path).await.unwrap();
+    let m = ModelName::new("never_registered").unwrap();
+    db.upsert_concept(ConceptUpsert::new("c0", "T").valid_from(TS))
+        .await
+        .unwrap();
+
+    let err = db
+        .bulk_embeddings(&m, vec![("c0".to_string(), vec![1.0f32; 4])])
+        .await
+        .unwrap_err();
+    let err: DbError = err.into();
+    assert!(
+        matches!(err, DbError::ModelNotRegistered { .. }),
+        "the table is the gate, got {err:?}"
+    );
+    #[cfg(feature = "metrics")]
+    assert_eq!(turns_for(&db.metrics(), macrame::metrics::CommandKind::DropEmbeddingIndex), 0);
+
+    db.close().await.unwrap();
 }

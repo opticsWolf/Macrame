@@ -1854,6 +1854,65 @@ impl PyDatabase {
         })
     }
 
+    /// Load embeddings **without the DiskANN index in the way**, then rebuild
+    /// it in one pass (0.16.2, D-276).
+    ///
+    /// Three actor turns: drop the index, load every row through the same
+    /// chunked path `upsert_embeddings` uses, rebuild the index in one
+    /// statement. Measured on the reference box, medians of three, 2,000
+    /// vectors:
+    ///
+    /// | dim | `upsert_embeddings` | `bulk_embeddings` |
+    /// |---|---|---|
+    /// | 64 | 3.78 s | 2.62 s |
+    /// | 256 | 31.0 s | 19.7 s |
+    /// | 512 | 56.0 s | 39.0 s |
+    ///
+    /// At 5,000 × 256: 89.2 s vs 48.6 s — **1.8×**.
+    ///
+    /// **The trade, stated.** Between the drop and the rebuild the model's
+    /// vectors are not searchable and not dimension-checked at the storage
+    /// layer — the index *is* that check. The crate-side check still applies
+    /// to every row this method loads, and the rebuild restores the storage
+    /// check at the end. A failed or cancelled load still rebuilds: the
+    /// exception (with `written` on it) propagates only after the index is
+    /// back, so this path can never leave the file disarmed. An empty `rows`
+    /// touches nothing.
+    ///
+    /// The rebuild turn holds the write lock for its whole duration and grows
+    /// with the corpus (~10 ms/vector at dim 256). It is budget-exempt by
+    /// contract, like `checkpoint` — the hold is the caller's choice, stated
+    /// here rather than argued away.
+    #[pyo3(signature = (model, rows, *, progress = None, cancel = None))]
+    fn bulk_embeddings(
+        &self,
+        py: Python<'_>,
+        model: &str,
+        rows: &Bound<'_, PyAny>,
+        progress: Option<Py<PyAny>>,
+        cancel: Option<PyRef<'_, PyCancelToken>>,
+    ) -> PyResult<usize> {
+        let model = vector::model_name(model)?;
+        let mut decoded: Vec<(String, Vec<f32>)> = Vec::new();
+        for item in rows.try_iter()? {
+            let item = item?;
+            let (id, embedding): (String, Bound<'_, PyAny>) = item.extract().map_err(|_| {
+                pyo3::exceptions::PyTypeError::new_err(
+                    "bulk_embeddings takes a sequence of (concept_id, embedding) pairs",
+                )
+            })?;
+            decoded.push((id, crate::types::coerce_embedding(&embedding)?));
+        }
+        let raised = Arc::new(Mutex::new(None));
+        let (control, _token) = bulk_control(progress, cancel, &raised);
+        self.with_db(py, move |db| {
+            bulk_result(
+                runtime().block_on(db.bulk_embeddings_with(&model, decoded, control)),
+                &raised,
+            )
+        })
+    }
+
     /// Nearest `top_k` concepts to `query` by cosine distance (§5.9).
     ///
     /// Goes through the DiskANN index rather than scanning: an

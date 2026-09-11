@@ -131,6 +131,8 @@ pub fn macrame::connection::Database::archive_path(&self) -> &std::path::Path
 pub async fn macrame::connection::Database::archive_windowed(&self, &str, core::time::Duration) -> macrame::error::Result<alloc::vec::Vec<macrame::temporal::ArchiveReport>>
 pub async fn macrame::connection::Database::assert_edge(&self, macrame::graph::EdgeAssertion) -> macrame::error::Result<()>
 pub async fn macrame::connection::Database::branches(&self) -> macrame::error::Result<alloc::vec::Vec<macrame::branch::Branch>>
+pub async fn macrame::connection::Database::bulk_embeddings(&self, &macrame::vector::ModelName, alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<f32>)>) -> macrame::error::BulkResult<usize>
+pub async fn macrame::connection::Database::bulk_embeddings_with(&self, &macrame::vector::ModelName, alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<f32>)>, macrame::connection::BulkControl) -> macrame::error::BulkResult<usize>
 pub async fn macrame::connection::Database::bulk_import(&self, alloc::vec::Vec<macrame::graph::EdgeAssertion>) -> macrame::error::BulkResult<usize>
 pub async fn macrame::connection::Database::bulk_import_with(&self, alloc::vec::Vec<macrame::graph::EdgeAssertion>, macrame::connection::BulkControl) -> macrame::error::BulkResult<usize>
 pub async fn macrame::connection::Database::checkpoint(&self) -> macrame::error::Result<macrame::connection::CheckpointReport>
@@ -544,9 +546,11 @@ pub macrame::metrics::CommandKind::ArchiveBranch
 pub macrame::metrics::CommandKind::AssertEdge
 pub macrame::metrics::CommandKind::BulkImportChunk
 pub macrame::metrics::CommandKind::Checkpoint
+pub macrame::metrics::CommandKind::DropEmbeddingIndex
 pub macrame::metrics::CommandKind::Fork
 pub macrame::metrics::CommandKind::Optimize
 pub macrame::metrics::CommandKind::RebuildCurrent
+pub macrame::metrics::CommandKind::RebuildEmbeddingIndex
 pub macrame::metrics::CommandKind::RebuildFts
 pub macrame::metrics::CommandKind::RegisterModel
 pub macrame::metrics::CommandKind::Rehydrate
@@ -636,9 +640,11 @@ pub macrame::prelude::CommandKind::ArchiveBranch
 pub macrame::prelude::CommandKind::AssertEdge
 pub macrame::prelude::CommandKind::BulkImportChunk
 pub macrame::prelude::CommandKind::Checkpoint
+pub macrame::prelude::CommandKind::DropEmbeddingIndex
 pub macrame::prelude::CommandKind::Fork
 pub macrame::prelude::CommandKind::Optimize
 pub macrame::prelude::CommandKind::RebuildCurrent
+pub macrame::prelude::CommandKind::RebuildEmbeddingIndex
 pub macrame::prelude::CommandKind::RebuildFts
 pub macrame::prelude::CommandKind::RegisterModel
 pub macrame::prelude::CommandKind::Rehydrate
@@ -920,6 +926,8 @@ pub fn macrame::connection::Database::archive_path(&self) -> &std::path::Path
 pub async fn macrame::connection::Database::archive_windowed(&self, &str, core::time::Duration) -> macrame::error::Result<alloc::vec::Vec<macrame::temporal::ArchiveReport>>
 pub async fn macrame::connection::Database::assert_edge(&self, macrame::graph::EdgeAssertion) -> macrame::error::Result<()>
 pub async fn macrame::connection::Database::branches(&self) -> macrame::error::Result<alloc::vec::Vec<macrame::branch::Branch>>
+pub async fn macrame::connection::Database::bulk_embeddings(&self, &macrame::vector::ModelName, alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<f32>)>) -> macrame::error::BulkResult<usize>
+pub async fn macrame::connection::Database::bulk_embeddings_with(&self, &macrame::vector::ModelName, alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<f32>)>, macrame::connection::BulkControl) -> macrame::error::BulkResult<usize>
 pub async fn macrame::connection::Database::bulk_import(&self, alloc::vec::Vec<macrame::graph::EdgeAssertion>) -> macrame::error::BulkResult<usize>
 pub async fn macrame::connection::Database::bulk_import_with(&self, alloc::vec::Vec<macrame::graph::EdgeAssertion>, macrame::connection::BulkControl) -> macrame::error::BulkResult<usize>
 pub async fn macrame::connection::Database::checkpoint(&self) -> macrame::error::Result<macrame::connection::CheckpointReport>
@@ -1672,6 +1680,8 @@ pub fn macrame::connection::Database::archive_path(&self) -> &std::path::Path
 pub async fn macrame::connection::Database::archive_windowed(&self, &str, core::time::Duration) -> macrame::error::Result<alloc::vec::Vec<macrame::temporal::ArchiveReport>>
 pub async fn macrame::connection::Database::assert_edge(&self, macrame::graph::EdgeAssertion) -> macrame::error::Result<()>
 pub async fn macrame::connection::Database::branches(&self) -> macrame::error::Result<alloc::vec::Vec<macrame::branch::Branch>>
+pub async fn macrame::connection::Database::bulk_embeddings(&self, &macrame::vector::ModelName, alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<f32>)>) -> macrame::error::BulkResult<usize>
+pub async fn macrame::connection::Database::bulk_embeddings_with(&self, &macrame::vector::ModelName, alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<f32>)>, macrame::connection::BulkControl) -> macrame::error::BulkResult<usize>
 pub async fn macrame::connection::Database::bulk_import(&self, alloc::vec::Vec<macrame::graph::EdgeAssertion>) -> macrame::error::BulkResult<usize>
 pub async fn macrame::connection::Database::bulk_import_with(&self, alloc::vec::Vec<macrame::graph::EdgeAssertion>, macrame::connection::BulkControl) -> macrame::error::BulkResult<usize>
 pub async fn macrame::connection::Database::checkpoint(&self) -> macrame::error::Result<macrame::connection::CheckpointReport>
