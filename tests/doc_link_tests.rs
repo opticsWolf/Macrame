@@ -51,6 +51,10 @@ const DOCS: &[(&str, &str)] = &[
         include_str!("../docs/architecture/api-review-0.16.0.md"),
     ),
     (
+        "api-review-0.17.0.md",
+        include_str!("../docs/architecture/api-review-0.17.0.md"),
+    ),
+    (
         "appendices.md",
         include_str!("../docs/architecture/appendices.md"),
     ),
@@ -233,7 +237,12 @@ fn every_document_in_the_directory_is_checked() {
 /// document, and giving one a `previous`/`next` would put a generated file in
 /// the middle of a narrative that has to be read in order.
 /// The documents that are in `DOCS` but not in the narrative chain.
-const OUTSIDE_THE_CHAIN: &[&str] = &["REJOIN.md", "api-review-0.14.0.md", "api-review-0.16.0.md"];
+const OUTSIDE_THE_CHAIN: &[&str] = &[
+    "REJOIN.md",
+    "api-review-0.14.0.md",
+    "api-review-0.16.0.md",
+    "api-review-0.17.0.md",
+];
 
 #[test]
 fn the_navigation_footers_form_a_single_chain() {
