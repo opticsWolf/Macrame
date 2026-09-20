@@ -13,7 +13,7 @@ use crate::schema::ddl::*;
 /// guarantee D-029 buys would be void on it while `user_version` insisted all
 /// was well. Reserving 1 as a value this build refuses by name is what makes
 /// "no legacy support" an enforced property instead of a README sentence.
-pub const SCHEMA_VERSION: u32 = 19;
+pub const SCHEMA_VERSION: u32 = 20;
 
 type StepFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
 
@@ -209,6 +209,18 @@ const STEPS: &[Step] = &[
         // the flag touch the table itself, this one does not.
         suspends_foreign_keys: false,
         apply: |conn| Box::pin(pin_single_open_plan(conn)),
+    },
+    Step {
+        from: 19,
+        to: 20,
+        name: "kv-store",
+        // One `CREATE TABLE` for a table nothing references and which
+        // references nothing -- no foreign key in either direction, no
+        // trigger, no index beyond the `WITHOUT ROWID` key itself. The same
+        // ground the v15 -> v16 rung stood on, minus its seed: a fresh
+        // `kv_store` is empty and there is no prior state to derive one from.
+        suspends_foreign_keys: false,
+        apply: |conn| Box::pin(add_kv_store(conn)),
     },
     Step {
         from: 16,
@@ -492,6 +504,10 @@ async fn baseline(conn: &libsql::Connection) -> Result<()> {
     // disagree (D-035).
     conn.execute(CREATE_LOG_INTEGRITY_TABLE, ()).await?;
     conn.execute(SEED_LOG_INTEGRITY, ()).await?;
+    // v20 (0.18.0, D-280). Outside the ledger: no trigger, no archive
+    // membership, no lineage. Its position here is free -- nothing references
+    // it and it references nothing -- so it sits beside the other sidecar.
+    conn.execute(CREATE_KV_STORE_TABLE, ()).await?;
     // Before the triggers, not after: `trg_concepts_fts_*` name this table, and
     // SQLite resolves a trigger body's tables at CREATE TRIGGER time.
     conn.execute(CREATE_CONCEPTS_FTS, ()).await?;
@@ -504,6 +520,28 @@ async fn baseline(conn: &libsql::Connection) -> Result<()> {
         conn.execute(trigger_ddl, ()).await?;
     }
 
+    Ok(())
+}
+
+/// v19 → v20: operational state gets a table of its own (0.18.0, P3, [D-280]).
+///
+/// One `CREATE TABLE` and nothing else. There is no seed, and that is the
+/// difference from the v15 → v16 rung this one otherwise resembles: the log
+/// integrity bit had to be *derived* because a database arriving at v16 might
+/// already have been archived, whereas a database arriving here has no
+/// operational state at all — the concept did not exist a version ago, so empty
+/// is not an assumption but the only truth available.
+///
+/// Nothing is dropped, nothing is rebuilt, and no existing statement changes.
+/// `kv_store` is absent from `COLD_SCHEMA`, carries no log trigger, and is
+/// invisible to `reconstruct` — the three exclusions [D-280] names, each
+/// enforced by the absence of code rather than by a check. Worth stating,
+/// because an absence is the one kind of property a later edit can undo
+/// without noticing.
+///
+/// [D-280]: ../../docs/architecture/s13-decision-register.md#d-280
+async fn add_kv_store(conn: &libsql::Connection) -> Result<()> {
+    conn.execute(CREATE_KV_STORE_TABLE, ()).await?;
     Ok(())
 }
 
@@ -1647,6 +1685,11 @@ pub(crate) const BASELINE_TABLES: &[&str] = &[
     "concepts_fts",
     // v16 (W14.5, D-249).
     "log_integrity",
+    // v20 (0.18.0, D-280). Required by name like every other baseline table,
+    // even though it is outside the ledger: `verify` is about the absence of
+    // something required, and a v20 database without it would fail the first
+    // `kv_get` with raw engine text instead of at the door.
+    "kv_store",
 ];
 
 /// Confirm the database actually holds what the DDL claims to create.

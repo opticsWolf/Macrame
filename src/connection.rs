@@ -698,6 +698,21 @@ impl Annotation {
     }
 }
 
+/// One write against `kv_store` (0.18.0, P3, [D-280]).
+///
+/// An enum rather than an `Option<String>` on the command, because a `None`
+/// meaning *delete* is exactly the kind of implicit encoding this crate spends
+/// paragraphs undoing elsewhere. Both arms are one small statement against a
+/// `WITHOUT ROWID` sidecar with no trigger and no index beyond its key, so they
+/// share a [`crate::metrics::CommandKind`] under that enum's own rule: one
+/// kind, one structural hold distribution.
+///
+/// [D-280]: ../docs/architecture/s13-decision-register.md#d-280
+pub(crate) enum KvWrite {
+    Put { key: String, value: String },
+    Delete { key: String },
+}
+
 /// Commands sent to the Write Actor on the high-priority channel (UI-driven work).
 pub(crate) enum HighPriCommand {
     AssertEdge {
@@ -763,6 +778,27 @@ pub(crate) enum HighPriCommand {
         name: crate::branch::BranchId,
         parent: crate::branch::BranchId,
         responder: oneshot::Sender<Result<crate::branch::Branch>>,
+    },
+    /// A put or a delete against `kv_store` (0.18.0, P3, [D-280]).
+    ///
+    /// High priority, and the reason is the one [`HighPriCommand::Fork`]
+    /// gives: it is among the cheapest turns the actor takes — one statement
+    /// against a table with no trigger and no secondary index — and the work a
+    /// caller does next usually depends on it having happened. An epoch bump
+    /// queued behind a bulk import stalls the thing it gates.
+    ///
+    /// It goes through the actor rather than a read connection for the
+    /// ordinary reason every write does: this crate has one writer, and a
+    /// sidecar outside the ledger is still inside the file.
+    ///
+    /// The responder carries `bool` rather than `()` so the delete arm can say
+    /// whether there was a row; a put answers `true` always, and the docs on
+    /// [`Database::kv_put`] say so rather than leaving a caller to infer it.
+    ///
+    /// [D-280]: ../docs/architecture/s13-decision-register.md#d-280
+    KvWrite {
+        write: KvWrite,
+        responder: oneshot::Sender<Result<bool>>,
     },
     Shutdown {
         responder: oneshot::Sender<Result<()>>,
@@ -2479,6 +2515,102 @@ impl Database {
             .await
     }
 
+    /// Write a key into `kv_store`, replacing whatever was there (0.18.0, [D-280]).
+    ///
+    /// # This is not a ledger write, and the difference is the point
+    ///
+    /// `kv_store` is operational state — hashes, epochs, counters, cursors —
+    /// and it is outside the ledger entirely: **no log entry, no archive
+    /// membership, no lineage**. Nothing here is reconstructible at a past
+    /// transaction time, because a previous value of a cursor is not a belief
+    /// anyone held. Content and belief belong in
+    /// [`Self::upsert_concept`] and [`Self::assert_edge`]; this is for the
+    /// bookkeeping beside them.
+    ///
+    /// # Branch-global, and that is a semantic rather than an omission
+    ///
+    /// One cursor, one epoch, one counter across every lineage. A value
+    /// written while working on a branch is visible from every other branch and
+    /// survives switching away. If per-lineage operational state is wanted, the
+    /// branch name goes in the key — see [`crate::kv`].
+    ///
+    /// `updated_at` is stamped from the same clock every other write uses and
+    /// is `CHECK`ed canonical on disk.
+    ///
+    /// Answers `Ok(())`: a put always writes, so there is nothing for it to
+    /// report. [`Self::kv_delete`] answers a `bool` because it has something
+    /// to say.
+    ///
+    /// [D-280]: ../docs/architecture/s13-decision-register.md#d-280
+    pub async fn kv_put(&self, key: impl Into<String>, value: impl Into<String>) -> Result<()> {
+        let key = key.into();
+        crate::kv::validate_kv_key(&key)?;
+        let write = KvWrite::Put {
+            key,
+            value: value.into(),
+        };
+        self.high(|responder| HighPriCommand::KvWrite { write, responder })
+            .await
+            .map(|_| ())
+    }
+
+    /// Read one key from `kv_store`, or `None` (0.18.0, [D-280]).
+    ///
+    /// A read: it runs on [`Self::read_conn`] and never touches the Write
+    /// Actor, so a `kv_get` behind a long bulk import answers immediately.
+    ///
+    /// The key is validated before the query rather than passed through, so a
+    /// malformed key is a typed error at the call site rather than a silent
+    /// `None` that reads like an absent value.
+    ///
+    /// [D-280]: ../docs/architecture/s13-decision-register.md#d-280
+    pub async fn kv_get(&self, key: &str) -> Result<Option<String>> {
+        crate::kv::validate_kv_key(key)?;
+        crate::kv::get(&self.read_conn, key).await
+    }
+
+    /// Remove one key, reporting whether there was one (0.18.0, [D-280]).
+    ///
+    /// **A physical delete, and not a
+    /// [Doctrine V](../docs/architecture/s0-s3-foundations.md#doctrine-v)
+    /// violation.** Doctrine V governs the ledger and permits no physical
+    /// delete outside an archive session; this table is not in the ledger —
+    /// nothing logs it, nothing archives it, and there is no past state that
+    /// could later be asked to explain the absence. That exclusion is what buys
+    /// the plain delete, so it is stated here rather than left to be inferred
+    /// from the table not having a guard.
+    ///
+    /// [D-280]: ../docs/architecture/s13-decision-register.md#d-280
+    pub async fn kv_delete(&self, key: impl Into<String>) -> Result<bool> {
+        let key = key.into();
+        crate::kv::validate_kv_key(&key)?;
+        let write = KvWrite::Delete { key };
+        self.high(|responder| HighPriCommand::KvWrite { write, responder })
+            .await
+    }
+
+    /// Every key under `prefix`, in key order, at most `limit` of them
+    /// (0.18.0, [D-280]).
+    ///
+    /// A read, on [`Self::read_conn`], like [`Self::kv_get`].
+    ///
+    /// # `limit` is required, and is not an `Option`
+    ///
+    /// The same reasoning every other bounded read in this crate stands on: how
+    /// many keys an application has put here is the application's business, and
+    /// an unbounded scan is a stall waiting for the database that grew. A
+    /// caller who wants the next page passes a longer prefix or a larger limit,
+    /// both of which are decisions; `None` would be the absence of one.
+    ///
+    /// An empty prefix is legal and means *everything*, still bounded by
+    /// `limit`.
+    ///
+    /// [D-280]: ../docs/architecture/s13-decision-register.md#d-280
+    pub async fn kv_scan(&self, prefix: &str, limit: usize) -> Result<Vec<(String, String)>> {
+        crate::kv::validate_kv_prefix(prefix)?;
+        crate::kv::scan(&self.read_conn, prefix, limit).await
+    }
+
     /// A handle on one lineage (§15.4, 0.14.9, [D-226]).
     ///
     /// Takes `&Arc<Self>` rather than `&self` because the view holds the handle
@@ -2968,10 +3100,7 @@ impl Database {
     /// the state a caller expects: the prefix is committed, the projection is
     /// true, the mirror is on. An empty `edges` is a no-op: no DDL, no
     /// rebuild, nothing attributed.
-    pub async fn bulk_import_deferred(
-        &self,
-        edges: Vec<EdgeAssertion>,
-    ) -> BulkResult<usize> {
+    pub async fn bulk_import_deferred(&self, edges: Vec<EdgeAssertion>) -> BulkResult<usize> {
         self.bulk_import_deferred_with(edges, BulkControl::new())
             .await
     }
@@ -4835,6 +4964,7 @@ impl HighPriCommand {
             HighPriCommand::RebuildCurrent { .. } => K::RebuildCurrent,
             HighPriCommand::RegisterModel { .. } => K::RegisterModel,
             HighPriCommand::Fork { .. } => K::Fork,
+            HighPriCommand::KvWrite { .. } => K::KvWrite,
             HighPriCommand::Checkpoint { .. } => K::Checkpoint,
             HighPriCommand::Shutdown { .. } => K::Shutdown,
         }
@@ -4987,6 +5117,22 @@ impl HighPriCommand {
                 // as it was, so forgetting costs one query and asserting that
                 // it failed cleanly costs an argument (0.15.6, D-248).
                 state.forget_lineages();
+                turn.answer(responder, res);
+            }
+            HighPriCommand::KvWrite { write, responder } => {
+                let res = match write {
+                    KvWrite::Put { key, value } => {
+                        // The same clock every other write on this connection
+                        // uses, which is what makes `updated_at` comparable
+                        // with the ledger's own stamps rather than merely
+                        // well-formed.
+                        let stamp = clock.now();
+                        crate::kv::put(conn, &key, &value, &stamp)
+                            .await
+                            .map(|()| true)
+                    }
+                    KvWrite::Delete { key } => crate::kv::delete(conn, &key).await,
+                };
                 turn.answer(responder, res);
             }
         }

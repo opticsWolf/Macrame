@@ -250,7 +250,7 @@ class ConceptUpsert:
 class EdgeAssertion:
     """An edge to assert.
 
-    `edge_type` must match `[A-Za-z0-9_:.\-]+`, be at most 64 characters, and
+    `edge_type` must match `[A-Za-z0-9_:.-]+`, be at most 64 characters, and
     not mix upper and lower case (D-279). The charset relaxed in 0.18 so
     applications can namespace their own kinds — `okf:links-to`, `myapp.cites` —
     without a rename step; core kinds stay bare and uppercase. One case per
@@ -1284,6 +1284,60 @@ class Database:
         before the parent's own.
         """
 
+    def kv_put(self, key: str, value: str) -> None:
+        """Write a key into `kv_store`, replacing whatever was there (D-280).
+
+        **Not a ledger write.** `kv_store` holds operational state — hashes,
+        epochs, counters, cursors — and is outside the ledger entirely: no log
+        entry, no archive membership, no lineage. Nothing written here is
+        reconstructible at a past transaction time, because a previous value of
+        a cursor is not a belief anyone held. Content and belief belong in
+        `upsert_concept` and `assert_edge`.
+
+        **Branch-global.** One cursor, one epoch, one counter across every
+        lineage: a value written while on a branch is visible from every other
+        branch and survives switching away. Put the branch name in the key if
+        per-lineage state is wanted.
+
+        Carried by a file-level backup of the database, and invisible to
+        `reconstruct` — a snapshot holds a materialized ledger state and never
+        held KV.
+
+        Raises `InvalidKvKeyError` for a key outside `[A-Za-z0-9_:./-]+`,
+        empty, or longer than 256 characters.
+        """
+
+    def kv_get(self, key: str) -> str | None:
+        """Read one key from `kv_store`, or `None` (D-280).
+
+        A read: it never touches the write actor, so this answers immediately
+        behind a long bulk import.
+
+        `None` means *no such key*. A key whose value is the empty string comes
+        back as `""`, and the two are different answers — the column is
+        `NOT NULL`, so there is no third state below them.
+        """
+
+    def kv_delete(self, key: str) -> bool:
+        """Remove one key, reporting whether there was one (D-280).
+
+        A physical delete, and not a Doctrine V violation: Doctrine V governs
+        the ledger and this table is not in it, so there is no past state that
+        could later be asked to explain the absence.
+        """
+
+    def kv_scan(self, prefix: str, limit: int) -> list[tuple[str, str]]:
+        """Every key under `prefix`, in key order, at most `limit` of them.
+
+        `limit` is required rather than optional, on the same reasoning as
+        every other bounded read here: how many keys an application has put in
+        the store is the application's business, and an unbounded scan is a
+        stall waiting for the database that grew.
+
+        An empty prefix is legal and means *everything*, still bounded by
+        `limit`.
+        """
+
     def branches(self) -> list[Branch]:
         """Every lineage, trunk first then creation order.
 
@@ -1641,6 +1695,18 @@ class BulkCancelledError(MacrameError):
 
 class InvalidEdgeTypeError(ValidationError):
     edge_type: str
+
+class InvalidKvKeyError(ValidationError):
+    """A `kv_store` key the ledger cannot accept.
+
+    The rule is `[A-Za-z0-9_:./-]+`, non-empty, at most 256 characters — the
+    edge-kind charset of D-279 plus `/`, because these keys take the shape of
+    paths and namespaced names. Unlike an edge kind, case is not constrained:
+    a key is an application's own identifier and never appears in the ledger,
+    so `okf:Epoch` and `okf:epoch` are simply two keys.
+    """
+
+    key: str
 
 class InvalidIdError(ValidationError):
     id: str

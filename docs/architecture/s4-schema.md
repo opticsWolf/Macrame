@@ -461,7 +461,7 @@ END;
 >
 > **Concept payloads did not carry `embedding_model`, and now do — this note is settled.** Through payload **v1** they carried title, content, valid_from, valid_to and retired, and a reconstruction could not tell which model a concept was embedded under. Payload **v2** adds the field (0.5.6 Wave 1, defect V; `ddl.rs:173`), and `trg_concepts_log_update` writes it too. [Doctrine VII](s0-s3-foundations.md#doctrine-vii) was never at issue — a model *name* is not a vector. **The v1 case survives**, because payloads are never rewritten: a database written before 0.5.6 still holds v1 rows, and folding one loses `embedding_model` from that concept's temporal reads (`ddl.rs:548`). Kept rather than struck, on this document's practice of retaining what a note corrected; retired as a *current* limitation in 0.10.0 (W4.4).
 
-Several details of the log are load-bearing. `AUTOINCREMENT` on `seq_id` guarantees strict monotonicity without rowid reuse, which makes the sequence a trustworthy tie-breaker for entries sharing a `recorded_at` within one transaction. **It does not guarantee a gap-free sequence**, though not for the reason the 0.5.1 text gave — see the DDL comment above and [D-049](s13-decision-register.md#d-049). All replay logic uses inequality comparisons (`seq_id > :anchor`), which skip gaps correctly; no code path may assume `seq_id + 1` is the next event. The composite `entity_id` for links uses `|` as separator, which is safe because ULIDs are Crockford base32 and edge types are validated against `[A-Za-z0-9_:.\-]+` at the API boundary — the separator cannot appear in any component. The charset widened in 0.18 ([D-279](s13-decision-register.md#d-279)) and this property was re-checked against the new one rather than inherited: no character the relaxation admits is `|`. Payloads carry a version field — `'v', 1` for links, `'v', 2` for concepts since 0.5.6 Wave 1 — because the log outlives every schema migration: entries written under schema v1 must still deserialize under v7, so the deserializer branches on version and old payloads are never rewritten. Concept payloads include `content` — a reconstruction that silently drops document text is not a ledger state — but exclude embeddings per [Doctrine VII](s0-s3-foundations.md#doctrine-vii): vectors are large, immutable per version, and reconstructable from the per-model tables, which are themselves not logged.
+Several details of the log are load-bearing. `AUTOINCREMENT` on `seq_id` guarantees strict monotonicity without rowid reuse, which makes the sequence a trustworthy tie-breaker for entries sharing a `recorded_at` within one transaction. **It does not guarantee a gap-free sequence**, though not for the reason the 0.5.1 text gave — see the DDL comment above and [D-049](s13-decision-register.md#d-049). All replay logic uses inequality comparisons (`seq_id > :anchor`), which skip gaps correctly; no code path may assume `seq_id + 1` is the next event. The composite `entity_id` for links uses `|` as separator, which is safe because ULIDs are Crockford base32 and edge types are validated against `[A-Za-z0-9_:.\-]+` at the API boundary — the separator cannot appear in any component. The charset widened in 0.18 (D-279, entered in the register when the release lands) and this property was re-checked against the new one rather than inherited: no character the relaxation admits is `|`. Payloads carry a version field — `'v', 1` for links, `'v', 2` for concepts since 0.5.6 Wave 1 — because the log outlives every schema migration: entries written under schema v1 must still deserialize under v7, so the deserializer branches on version and old payloads are never rewritten. Concept payloads include `content` — a reconstruction that silently drops document text is not a ledger state — but exclude embeddings per [Doctrine VII](s0-s3-foundations.md#doctrine-vii): vectors are large, immutable per version, and reconstructable from the per-model tables, which are themselves not logged.
 
 The delete guards close the loop on [Doctrine V](s0-s3-foundations.md#doctrine-v). The archive process creates the marker table first and drops it last, so the window in which deletion is legal is exactly the window in which the verified archive transaction runs.
 
@@ -748,3 +748,58 @@ need a recursive ancestry walk on **every insert**, on the path
 [D-059](s13-decision-register.md#d-059) exists to keep fast, to constrain callers
 who were going through the actor anyway. The storage layer permits what the API
 refuses, one lineage deep as well as none.
+
+### 4.9 `kv_store` — operational state, outside the ledger entirely (0.18.0, D-280)
+
+Schema **v20** adds one table and changes nothing else. Hashes, epochs,
+counters and cursors are neither belief nor content: they need durability and a
+backup story and have no history worth keeping, so they get a plain key/value
+table with **no log trigger, no archive membership and no `branch_id`** —
+[Doctrine VII](s0-s3-foundations.md#doctrine-vii)'s reasoning about embeddings
+applied to a different derivative.
+
+```sql
+CREATE TABLE IF NOT EXISTS kv_store (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    CHECK (updated_at GLOB '<canonical-ts-glob>')
+) WITHOUT ROWID;
+```
+
+**`WITHOUT ROWID` is straightforwardly right here**: small rows, a text primary
+key, no large payload, so the table is its own index and the rowid indirection
+buys nothing. Worth stating as a decision rather than a default, because the
+same question gets the opposite answer for a table holding multi-megabyte
+values.
+
+**`updated_at` carries `canonical_ts_check!` as every table in this schema that
+stamps a timestamp does** — six uses, not the four [§4.7](#47-what-this-schema-does-not-enforce-056-d-074)'s
+wording names. §4.7 freezes the canonical form as a fact about the disk as well
+as the API, and a column the crate stamps as canonical should be one the file
+enforces; the alternative is a raw writer putting anything there and nothing
+noticing. The **key** is not checked here, and the asymmetry is deliberate:
+lexicographic comparison of timestamps is load-bearing everywhere in this
+schema, while nothing compares keys for anything but equality and prefix, so an
+odd key breaks a convention rather than an invariant.
+
+**No `branch_id` is a semantic, not an omission.** The store is branch-global:
+one cursor, one epoch, one counter across every lineage, unchanged by working on
+a branch, because operational state describes the *process* rather than anything
+the ledger believes. Nothing in the crate trips over that — a branch is a row in
+`branches` plus a label carried on writes ([§4.8](#48-lineage-the-branch-register-and-the-column-that-names-it-0142-d-214)),
+so there is no physical copy and no path that enumerates tables to duplicate
+them — but an application storing per-branch state here is storing it in the
+wrong place, and the key convention is where it would say so.
+
+**What carries it, stated exactly.** A snapshot is a zstd `bincode`
+`MaterializedState` in a snapshots *directory* and contains no KV, so what
+carries this table is a **file-level backup**, while transaction-time
+reconstruction ignores it entirely. That distinction is the whole of the
+exclusion argument, and the draft that proposed the table had it the other way
+round.
+
+The API is `kv_put` / `kv_get` / `kv_delete` / `kv_scan(prefix, limit)`, with
+`limit` a required argument rather than an `Option` on the same reasoning as
+every other bounded read here. Keys are `[A-Za-z0-9_:./-]+`, non-empty, at most
+256 characters — checked at the boundary, not in the file.

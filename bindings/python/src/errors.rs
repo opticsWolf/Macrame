@@ -302,6 +302,13 @@ create_exception!(
 );
 create_exception!(
     macrame,
+    InvalidKvKeyError,
+    ValidationError,
+    "A `kv_store` key outside `[A-Za-z0-9_:./\\-]+`, empty, or longer than 256 \
+     characters. Attribute: `key`."
+);
+create_exception!(
+    macrame,
     InvalidIdError,
     ValidationError,
     "An identifier the crate's encodings cannot represent. Attributes: `id`, `reason`.\n\n\
@@ -680,6 +687,8 @@ fn build(py: Python<'_>, err: DbError) -> PyErr {
             raise::<InvalidEdgeTypeError, _>(py, m, |e| e.setattr("edge_type", t))
         }
 
+        DbError::InvalidKvKey(k) => raise::<InvalidKvKeyError, _>(py, m, |e| e.setattr("key", k)),
+
         DbError::SingleOpenViolation {
             source_id,
             target_id,
@@ -1028,6 +1037,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
         ArchiveSessionLeakedError,
         // validation
         InvalidEdgeTypeError,
+        InvalidKvKeyError,
         InvalidIdError,
         InvalidTimestampError,
         InvalidModelNameError,

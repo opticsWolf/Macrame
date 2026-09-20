@@ -1740,6 +1740,77 @@ impl PyDatabase {
         Ok(branch::PyBranch { inner })
     }
 
+    /// Write a key into `kv_store`, replacing whatever was there (D-280).
+    ///
+    /// **Not a ledger write.** `kv_store` is operational state — hashes,
+    /// epochs, counters, cursors — and it is outside the ledger entirely: no
+    /// log entry, no archive membership, no lineage. Nothing written here is
+    /// reconstructible at a past transaction time, because a previous value of
+    /// a cursor is not a belief anyone held. Content and belief belong in
+    /// `upsert_concept` and `assert_edge`.
+    ///
+    /// **Branch-global.** One cursor, one epoch, one counter across every
+    /// lineage: a value written while on a branch is visible from every other
+    /// branch and survives switching away. Put the branch name in the key if
+    /// per-lineage state is wanted.
+    ///
+    /// Raises `InvalidKvKeyError` for a key outside `[A-Za-z0-9_:./-]+`, empty,
+    /// or longer than 256 characters.
+    fn kv_put(&self, py: Python<'_>, key: &str, value: &str) -> PyResult<()> {
+        let (key, value) = (key.to_string(), value.to_string());
+        self.with_db(py, move |db| {
+            runtime().block_on(db.kv_put(key, value)).map_err(to_py)
+        })
+    }
+
+    /// Read one key from `kv_store`, or `None` (D-280).
+    ///
+    /// A read: it never touches the write actor, so this answers immediately
+    /// behind a long bulk import.
+    ///
+    /// `None` means *no such key*. A key whose value is the empty string comes
+    /// back as `""`, and the two are different answers — the column is
+    /// `NOT NULL`, so there is no third state below them.
+    fn kv_get(&self, py: Python<'_>, key: &str) -> PyResult<Option<String>> {
+        let key = key.to_string();
+        self.with_db(py, move |db| {
+            runtime().block_on(db.kv_get(&key)).map_err(to_py)
+        })
+    }
+
+    /// Remove one key, reporting whether there was one (D-280).
+    ///
+    /// A physical delete, and not a Doctrine V violation: Doctrine V governs
+    /// the ledger and this table is not in it, so there is no past state that
+    /// could later be asked to explain the absence.
+    fn kv_delete(&self, py: Python<'_>, key: &str) -> PyResult<bool> {
+        let key = key.to_string();
+        self.with_db(py, move |db| {
+            runtime().block_on(db.kv_delete(key)).map_err(to_py)
+        })
+    }
+
+    /// Every key under `prefix`, in key order, at most `limit` of them (D-280).
+    ///
+    /// `limit` is required rather than optional, on the same reasoning as every
+    /// other bounded read here: how many keys an application has put in the
+    /// store is the application's business, and an unbounded scan is a stall
+    /// waiting for the database that grew.
+    ///
+    /// An empty prefix is legal and means *everything*, still bounded by
+    /// `limit`.
+    fn kv_scan(
+        &self,
+        py: Python<'_>,
+        prefix: &str,
+        limit: usize,
+    ) -> PyResult<Vec<(String, String)>> {
+        let prefix = prefix.to_string();
+        self.with_db(py, move |db| {
+            runtime().block_on(db.kv_scan(&prefix, limit)).map_err(to_py)
+        })
+    }
+
     /// Every lineage the ledger knows about, trunk first then creation order.
     ///
     /// A database that has never forked returns exactly one `Branch`: the

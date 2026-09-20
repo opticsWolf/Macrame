@@ -486,6 +486,19 @@ let hits = search_vector(db.read_conn(), &query_vec, &model, 10, None).await?;
 let then = search_vector(db.read_conn(), &query_vec, &model, 10, Some(ts)).await?;  // D-192
 let fused = reciprocal_rank_fusion(&vector_ranks, &keyword_ranks, 60);
 
+// -- Operational state: outside the ledger entirely (0.18.0, D-280) --
+// Hashes, epochs, counters, cursors. No log entry, no archive membership, no
+// lineage -- Doctrine VII's argument about embeddings, applied to a different
+// derivative. Branch-global: one cursor across every lineage, which is the
+// semantic and not an omission. Carried by a file-level backup, and invisible
+// to `reconstruct`, because a previous value of a cursor is not a belief.
+db.kv_put("okf:epoch", "7").await?;                    // high-pri, one statement
+db.kv_get("okf:epoch").await?;                         // Option<String>, on read_conn
+db.kv_delete("okf:epoch").await?;                      // bool: was there a row
+db.kv_scan("okf:", 100).await?;                        // Vec<(String, String)>
+// `limit` is required, not an Option: an unbounded scan of a table whose size
+// is the application's business is a stall waiting for the database that grew.
+
 // -- Analytics --
 // Derived output goes to analytics_annotations, never to the ledger (D-041).
 db.write_analytics_annotations(vec![
@@ -720,7 +733,7 @@ New in 0.13.38 ([D-211](s13-decision-register.md#d-211)). [Appendix A](appendice
 
 *Frozen* means a change requires a **major version**.
 
-**1. The public Rust API, item for item and path for path.** [`docs/architecture/public-api.txt`](public-api.txt) is the surface — **1,781 items** (0.16.3, D-277: `Database::bulk_import_deferred` and `_with`, plus `CommandKind::LinksCurrentMirror` — a new enum variant is two items through the flat aliases). No item is removed, no path stops resolving, and no signature narrows. Each item is reachable at exactly one canonical path, plus flat aliases at the crate root and in `macrame::prelude` ([D-208](s13-decision-register.md#d-208)). Held by `scripts/check_public_api.py` in CI and by `tests/public_path_tests.rs` in `cargo test`. The cycle that produced this surface was reviewed against 0.13.0 item by item before it was frozen — [`api-review-0.14.0.md`](api-review-0.14.0.md), [D-212](s13-decision-register.md#d-212) — which is the last release where that review is cheap.
+**1. The public Rust API, item for item and path for path.** [`docs/architecture/public-api.txt`](public-api.txt) is the surface — **1,803 items** (0.18.0, D-280: the four `Database::kv_*` methods, the `macrame::kv` module of `src/kv.rs` with `MAX_KV_KEY` and its two validators, `ddl::CREATE_KV_STORE_TABLE`, `DbError::InvalidKvKey` and `CommandKind::KvWrite` — a new enum variant is two items through the flat aliases). No item is removed, no path stops resolving, and no signature narrows. Each item is reachable at exactly one canonical path, plus flat aliases at the crate root and in `macrame::prelude` ([D-208](s13-decision-register.md#d-208)). Held by `scripts/check_public_api.py` in CI and by `tests/public_path_tests.rs` in `cargo test`. The cycle that produced this surface was reviewed against 0.13.0 item by item before it was frozen — [`api-review-0.14.0.md`](api-review-0.14.0.md), [D-212](s13-decision-register.md#d-212) — which is the last release where that review is cheap.
 
 **2. The ledger tables** — `concepts`, `links`, `transaction_log`. Additive only: `ALTER TABLE ADD COLUMN` and new indexes. A changed primary key, a dropped column or altered bitemporal semantics is a major version with an explicit ETL path, because bitemporal data is the hardest data to migrate: a rebuild means replaying history and recomputing transaction-time boundaries, which is rewriting the past ([D-036](s13-decision-register.md#d-036), [Doctrine III](s0-s3-foundations.md#doctrine-iii)).
 
@@ -742,7 +755,7 @@ Minor-version changes, and several of them are expected rather than merely permi
 
 **3. The derivative tables** — `links_current`, the per-model `embeddings_*` tables, and `concepts_fts`. **No schema-stability guarantee at all.** A minor version needing a different materialization drops the table, recreates it from the DDL and re-derives it inside the same migration step ([D-036](s13-decision-register.md#d-036), [Doctrine VI](s0-s3-foundations.md#doctrine-vi), [Doctrine VII](s0-s3-foundations.md#doctrine-vii)).
 
-**4. The schema version and its migration rungs.** **v19** today. Rungs are forward-only and run at `open()`; adding one is a minor version, and refusing to open a database from a *newer* build is the behaviour, not a bug.
+**4. The schema version and its migration rungs.** **v20** today. Rungs are forward-only and run at `open()`; adding one is a minor version, and refusing to open a database from a *newer* build is the behaviour, not a bug.
 
 **5. The snapshot container format.** **v4** today. A snapshot is a cache of a fold the ledger can always reproduce, so the format is versioned and an unrecognised version is **refused rather than parsed** ([D-043](s13-decision-register.md#d-043)); a build that cannot read an old snapshot folds from the log instead. Losing every snapshot costs time and no information.
 

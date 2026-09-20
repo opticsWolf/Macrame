@@ -6,7 +6,7 @@
 
 ### 6.1 Edge assertion
 
-The application builds an `EdgeAssertion` and calls `db.assert_edge(edge)`. The value is normalized at the boundary — edge type validated against `[A-Za-z0-9_:.\-]+` with a single-case rule and a 64-character cap ([D-279](s13-decision-register.md#d-279)), timestamps widened to the canonical 27-character form ([D-029](s13-decision-register.md#d-029)) — so a malformed edge type or a second-precision timestamp is a typed error at the call site rather than an engine CHECK failure surfacing from the far side of an actor with no context attached ([D-034](s13-decision-register.md#d-034)). The normalized value crosses the high-priority channel as `HighPriCommand::AssertEdge`; the caller awaits its `oneshot`. The actor stamps `recorded_at` from the injected clock, opens `BEGIN IMMEDIATE`, inserts into `links`, and commits. Inside that transaction `trg_links_current_sync` upserts current belief and `trg_links_log_i` appends the log entry. The responder carries `Ok(())` or a typed `DbError` classified through the single boundary of [D-033](s13-decision-register.md#d-033).
+The application builds an `EdgeAssertion` and calls `db.assert_edge(edge)`. The value is normalized at the boundary — edge type validated against `[A-Za-z0-9_:.\-]+` with a single-case rule and a 64-character cap (D-279, entered in the register when the release lands), timestamps widened to the canonical 27-character form ([D-029](s13-decision-register.md#d-029)) — so a malformed edge type or a second-precision timestamp is a typed error at the call site rather than an engine CHECK failure surfacing from the far side of an actor with no context attached ([D-034](s13-decision-register.md#d-034)). The normalized value crosses the high-priority channel as `HighPriCommand::AssertEdge`; the caller awaits its `oneshot`. The actor stamps `recorded_at` from the injected clock, opens `BEGIN IMMEDIATE`, inserts into `links`, and commits. Inside that transaction `trg_links_current_sync` upserts current belief and `trg_links_log_i` appends the log entry. The responder carries `Ok(())` or a typed `DbError` classified through the single boundary of [D-033](s13-decision-register.md#d-033).
 
 ### 6.2 Bulk analytics write-back
 
@@ -66,9 +66,16 @@ pub enum DbError {
     Migration { to: u32, reason: String },
 
     #[error(
-        "invalid edge type {0} (must match [A-Za-z0-9_:.\-]+, be at most 64 characters, \n         and not mix upper and lower case)"
+        "invalid edge type {0} (must match [A-Za-z0-9_:.\\-]+, be at most 64 characters, \
+         and not mix upper and lower case)"
     )]
     InvalidEdgeType(String),
+
+    #[error(
+        "invalid kv key {0} (must match [A-Za-z0-9_:./\\-]+, be non-empty, \
+         and be at most 256 characters)"
+    )]
+    InvalidKvKey(String),
 
     // NOTE: the spec (§7) names these fields `source` / `target`. `source` is a
     // reserved field name for thiserror (it is inferred as the error source and

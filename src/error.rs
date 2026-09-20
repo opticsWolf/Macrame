@@ -174,6 +174,15 @@ pub enum DbError {
     )]
     InvalidEdgeType(String),
 
+    /// A `kv_store` key outside the store's rule (0.18.0, [D-280]).
+    ///
+    /// [D-280]: ../docs/architecture/s13-decision-register.md#d-280
+    #[error(
+        "invalid kv key {0} (must match [A-Za-z0-9_:./\\-]+, be non-empty, \
+         and be at most 256 characters)"
+    )]
+    InvalidKvKey(String),
+
     // NOTE: the spec (§7) names these fields `source` / `target`. `source` is a
     // reserved field name for thiserror (it is inferred as the error source and
     // requires `std::error::Error`), so the schema column names are used instead.
@@ -899,6 +908,7 @@ impl DbError {
             | Self::InvalidBranchId { .. }
             | Self::InvalidEdgeType { .. }
             | Self::InvalidId { .. }
+            | Self::InvalidKvKey { .. }
             | Self::InvalidModelName { .. }
             | Self::InvalidTimestamp { .. } => ErrorKind::Validation,
 

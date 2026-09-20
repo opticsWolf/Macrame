@@ -131,6 +131,7 @@ from ._macrame import (
     IntegrityError,
     Interval,
     InvalidEdgeTypeError,
+    InvalidKvKeyError,
     InvalidBranchIdError,
     InvalidIdError,
     InvalidModelNameError,
@@ -250,6 +251,7 @@ __all__ = [
     "ArchiveSessionLeakedError",
     # validation
     "InvalidEdgeTypeError",
+    "InvalidKvKeyError",
     "InvalidIdError",
     "InvalidTimestampError",
     "InvalidModelNameError",

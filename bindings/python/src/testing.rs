@@ -40,6 +40,7 @@ pub(crate) const DB_ERROR_VARIANTS: &[&str] = &[
     "Engine",
     "Migration",
     "InvalidEdgeType",
+    "InvalidKvKey",
     "SingleOpenViolation",
     "NotFound",
     "DimMismatch",
@@ -109,6 +110,7 @@ fn sample(name: &str) -> Option<DbError> {
             reason: "sample-reason".into(),
         },
         "InvalidEdgeType" => DbError::InvalidEdgeType("bad-type".into()),
+        "InvalidKvKey" => DbError::InvalidKvKey("bad key".into()),
         "SingleOpenViolation" => DbError::SingleOpenViolation {
             source_id: "src-1".into(),
             target_id: "tgt-1".into(),

@@ -39,7 +39,7 @@ const BASELINE: &str = include_str!("../docs/architecture/public-api.txt");
 
 /// Every public module, and adding one is a decision made here.
 ///
-/// The crate root and eleven top-level modules, plus the three inner modules
+/// The crate root and twelve top-level modules, plus the three inner modules
 /// that are the canonical home of what they hold rather than a second path to
 /// it:
 ///
@@ -78,6 +78,19 @@ const BASELINE: &str = include_str!("../docs/architecture/public-api.txt");
 /// caller who never reads SQL never meets the other. `ReadPlan` is re-exported
 /// at the root and in the prelude, which makes this the canonical path and
 /// those the convenience ones — the arrangement the two tests below pin.
+///
+/// `macrame::kv` is the thirteenth and arrived at 0.18.0
+/// ([D-280](../../docs/architecture/s13-decision-register.md#d-280)). It holds
+/// the key rule and nothing else: `MAX_KV_KEY` and the two validators that read
+/// it. The four `kv_*` methods live on `Database` like every other operation, so
+/// this module is not a second path to them — it is the one place a caller can
+/// ask what a legal key *is* before offering one, which is why the constant and
+/// its validators are public at all. Top-level rather than under `schema`
+/// because the rule is about the caller's keys rather than about the file's
+/// shape, and unlike `branch` and `plan` **nothing here is re-exported at the
+/// root or in the prelude**: `MAX_KV_KEY` and `validate_kv_key` are too generic
+/// to be flat names, so the qualification is the point and this is the only
+/// path.
 const PUBLIC_MODULES: &[&str] = &[
     "macrame",
     "macrame::branch",
@@ -86,6 +99,7 @@ const PUBLIC_MODULES: &[&str] = &[
     "macrame::error",
     "macrame::graph",
     "macrame::integrity",
+    "macrame::kv",
     "macrame::metrics",
     "macrame::plan",
     "macrame::prelude",

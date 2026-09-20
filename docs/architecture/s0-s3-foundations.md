@@ -132,6 +132,10 @@ macrame/
 │   │   ├── rebuild.rs          # rebuild_current() — high-priority command
 │   │   └── shadow.rs           # §5.8 — ShadowStep/ShadowOutcome, the chunked
 │   │                           #   shadow-swap rebuild (0.6.0, D-082)
+│   ├── kv.rs                   # §4.9 — kv_store: operational state, outside
+│   │                           #   the ledger entirely. No log trigger, no
+│   │                           #   archive membership, no branch_id (0.18.0,
+│   │                           #   D-280)
 │   ├── metrics.rs              # §5.10 — actor hold-time histogram, behind
 │   │                           #   --features metrics (0.6.0, D-079)
 │   ├── plan.rs                 # §5.12 — ReadPlan: the public shape of a read —

@@ -446,7 +446,7 @@ async fn plan_string(conn: &libsql::Connection, sql: &str) -> String {
 #[test]
 fn a_version_bump_must_bring_its_own_rung_test() {
     assert_eq!(
-        SCHEMA_VERSION, 19,
+        SCHEMA_VERSION, 20,
         "SCHEMA_VERSION moved. Add a test for the new rung — one that starts \
          from a database at the previous version and asserts what the rung is \
          *for*, not merely that `run` reached the top."
@@ -2526,5 +2526,132 @@ async fn a_v18_stamp_over_a_v17_index_set_is_refused_at_open() {
     assert!(
         message.contains("idx_txlog_branch"),
         "the refusal does not name the missing index: {message}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// v19 → v20 — operational state gets a table of its own (0.18.0, P3, D-280)
+// ---------------------------------------------------------------------------
+
+/// Take a v20 database back to v19: drop what the rung adds, and stamp.
+///
+/// The rung adds one table and touches nothing else, so this really is what a
+/// v19 database is — the v15 wind-back's situation rather than the ones below
+/// it that have to rebuild a table to undo a key.
+async fn wind_back_to_v19(conn: &libsql::Connection) {
+    conn.execute("DROP TABLE IF EXISTS kv_store", ())
+        .await
+        .unwrap();
+    conn.execute("PRAGMA user_version = 19", ()).await.unwrap();
+}
+
+/// **v19 → v20: `kv_store` arrives, and it arrives outside the ledger.**
+///
+/// The rung is one `CREATE TABLE`, so "the table exists" is the cheap half of
+/// this test and not the interesting one. What the item is *for* is the three
+/// exclusions — no log entry, no lineage, no history — and each is enforced by
+/// the **absence** of code rather than by a check, which is exactly the kind of
+/// property a later edit can undo without anything going red. So they are
+/// asserted here as absences, at the one place that would notice.
+///
+/// Four assertions, in the order they would break:
+///
+/// 1. **The table is there and is `WITHOUT ROWID`.** Small rows, a text primary
+///    key, no large payload — the table is its own index. Pinned because the
+///    opposite reading is right for `blobs` (D-281) and a later reader may
+///    remember only that one of the two sidecars is a rowid table.
+/// 2. **`updated_at` is `CHECK`ed on disk.** D.1 item 3 freezes the canonical
+///    form as a fact about the file as well as the API, and a raw writer is
+///    precisely what that buys protection from — so the probe is a raw insert
+///    of a second-precision stamp, not a call through the API that would never
+///    have produced one.
+/// 3. **A KV write mints no log entry.** The table carries no log trigger, so
+///    `transaction_log` must not move across one. This is the exclusion a
+///    well-meaning edit is most likely to undo, on the reasoning that every
+///    other table in the schema has one.
+/// 4. **`reconstruct` does not see it.** Transaction-time reconstruction reads
+///    the log, and a table absent from the log is absent from every past state
+///    by construction. Asserted through the public path rather than argued,
+///    because the argument is what a change would keep while breaking the
+///    property.
+#[tokio::test]
+async fn a_v19_database_climbs_to_v20_and_the_kv_table_arrives_outside_the_ledger() {
+    let harness = TestHarness::new();
+    let conn = connect(&harness).await;
+    macrame::schema::run_migrations(&conn).await.unwrap();
+
+    wind_back_to_v19(&conn).await;
+    assert_eq!(
+        scalar(
+            &conn,
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'kv_store'",
+        )
+        .await,
+        0,
+        "the fixture is not starting from a v19 database"
+    );
+
+    macrame::schema::run_migrations(&conn).await.unwrap();
+    assert_eq!(user_version(&conn).await, SCHEMA_VERSION);
+
+    // 1. Present, and its own index.
+    let mut rows = conn
+        .query(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'kv_store'",
+            (),
+        )
+        .await
+        .unwrap();
+    let sql: String = rows
+        .next()
+        .await
+        .unwrap()
+        .expect("the rung did not create kv_store")
+        .get(0)
+        .unwrap();
+    assert!(
+        sql.contains("WITHOUT ROWID"),
+        "kv_store must be WITHOUT ROWID — small rows, a text key, no large \
+         payload, so the rowid indirection buys nothing: {sql}"
+    );
+
+    // 2. The stamp is constrained by the file, not only by the crate.
+    let err = conn
+        .execute(
+            "INSERT INTO kv_store (key, value, updated_at) VALUES ('k', 'v', '2026-01-01T00:00:00Z')",
+            (),
+        )
+        .await
+        .expect_err("a second-precision stamp was accepted into kv_store");
+    assert!(
+        err.to_string().to_lowercase().contains("constraint"),
+        "the refusal is not the CHECK: {err}"
+    );
+
+    // 3. No log trigger: the ledger does not move across a KV write.
+    let before = scalar(&conn, "SELECT COUNT(*) FROM transaction_log").await;
+    conn.execute(
+        "INSERT INTO kv_store (key, value, updated_at) VALUES ('okf:epoch', '7', ?1)",
+        libsql::params![TS],
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        scalar(&conn, "SELECT COUNT(*) FROM transaction_log").await,
+        before,
+        "a kv_store write minted a log entry. The table is outside the ledger \
+         (D-280): no trigger, no archive membership, no lineage."
+    );
+
+    // 4. And it carries no lineage to be reconstructed under.
+    assert_eq!(
+        scalar(
+            &conn,
+            "SELECT COUNT(*) FROM pragma_table_info('kv_store') WHERE name = 'branch_id'",
+        )
+        .await,
+        0,
+        "kv_store gained a branch_id. Branch-global is the semantic (D-280): \
+         one cursor, one epoch, one counter across every lineage."
     );
 }

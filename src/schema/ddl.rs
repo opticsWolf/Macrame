@@ -855,6 +855,47 @@ pub const CREATE_TXLOG_MARK_GAP: &str = r#"
     END;
 "#;
 
+/// Operational state, outside the ledger entirely (§4.9, v20, [D-280]).
+///
+/// Hashes, epochs, counters and cursors: durable, backed up with the file, and
+/// carrying no history anyone wants. **No log trigger, no archive membership
+/// and no `branch_id`** — [Doctrine VII]'s reasoning about embeddings applied
+/// to a different derivative. See [`crate::kv`] for what each of those three
+/// exclusions means and why the third is a semantic rather than an omission.
+///
+/// # `WITHOUT ROWID`, and here it is simply right
+///
+/// Small rows, a text primary key, no large payload: the table is its own index
+/// and the rowid indirection buys nothing. That is the opposite reading from
+/// the one [D-281] reaches for `blobs`, and the difference is the payload size
+/// — an argument worth having in both directions rather than a default.
+///
+/// # `updated_at` is checked on disk like every other stamped column
+///
+/// Six tables in this schema stamp a timestamp and all six carry
+/// `canonical_ts_check!`. D.1 item 3 freezes the canonical form as *a fact
+/// about the disk as well as the API*, and a column the crate stamps as
+/// canonical should be one the file enforces — the alternative is a raw writer
+/// putting anything there and nothing noticing. The **key** is deliberately not
+/// checked here; see [`crate::kv::validate_kv_key`] for why the two columns are
+/// treated differently.
+///
+/// [Doctrine VII]: ../../docs/architecture/s0-s3-foundations.md#doctrine-vii
+/// [D-280]: ../../docs/architecture/s13-decision-register.md#d-280
+/// [D-281]: ../../docs/architecture/s13-decision-register.md#d-281
+pub const CREATE_KV_STORE_TABLE: &str = concat!(
+    r#"
+CREATE TABLE IF NOT EXISTS kv_store (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    "#,
+    canonical_ts_check!("updated_at"),
+    r#"
+) WITHOUT ROWID;
+"#
+);
+
 pub const CREATE_ANALYTICS_ANNOTATIONS_TABLE: &str = concat!(
     r#"
 CREATE TABLE IF NOT EXISTS analytics_annotations (

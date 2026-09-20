@@ -90,6 +90,7 @@ EXPECTED: dict[str, tuple[str, str, dict]] = {
     ),
     # -- validation --
     "InvalidEdgeType": ("InvalidEdgeTypeError", "ValidationError", {"edge_type": "bad-type"}),
+    "InvalidKvKey": ("InvalidKvKeyError", "ValidationError", {"key": "bad key"}),
     "InvalidId": ("InvalidIdError", "ValidationError", {"id": "bad|id", "reason": "sample-reason"}),
     "InvalidTimestamp": (
         "InvalidTimestampError",

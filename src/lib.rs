@@ -3,6 +3,7 @@ pub mod connection;
 pub mod error;
 pub mod graph;
 pub mod integrity;
+pub mod kv;
 pub mod metrics;
 pub mod plan;
 pub mod schema;

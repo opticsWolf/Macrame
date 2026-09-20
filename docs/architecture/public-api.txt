@@ -144,6 +144,10 @@ pub async fn macrame::connection::Database::diagnostic_conn(&self) -> macrame::e
 pub async fn macrame::connection::Database::diff(&self, &macrame::branch::BranchId, &macrame::branch::BranchId) -> macrame::error::Result<alloc::vec::Vec<macrame::branch::Divergence>>
 pub async fn macrame::connection::Database::edges(&self, macrame::plan::ReadPlan) -> macrame::error::Result<alloc::vec::Vec<macrame::temporal::EdgeBelief>>
 pub async fn macrame::connection::Database::fork(&self, macrame::branch::BranchId, macrame::branch::BranchId) -> macrame::error::Result<macrame::branch::Branch>
+pub async fn macrame::connection::Database::kv_delete(&self, impl core::convert::Into<alloc::string::String>) -> macrame::error::Result<bool>
+pub async fn macrame::connection::Database::kv_get(&self, &str) -> macrame::error::Result<core::option::Option<alloc::string::String>>
+pub async fn macrame::connection::Database::kv_put(&self, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> macrame::error::Result<()>
+pub async fn macrame::connection::Database::kv_scan(&self, &str, usize) -> macrame::error::Result<alloc::vec::Vec<(alloc::string::String, alloc::string::String)>>
 pub fn macrame::connection::Database::metrics(&self) -> macrame::metrics::MetricsSnapshot
 pub async fn macrame::connection::Database::open(impl core::convert::AsRef<std::path::Path>) -> macrame::error::Result<Self>
 pub async fn macrame::connection::Database::open_tuned(impl core::convert::AsRef<std::path::Path>, macrame::connection::Tuning) -> macrame::error::Result<Self>
@@ -259,6 +263,7 @@ pub macrame::error::DbError::InvalidEdgeType(alloc::string::String)
 pub macrame::error::DbError::InvalidId
 pub macrame::error::DbError::InvalidId::id: alloc::string::String
 pub macrame::error::DbError::InvalidId::reason: alloc::string::String
+pub macrame::error::DbError::InvalidKvKey(alloc::string::String)
 pub macrame::error::DbError::InvalidModelName(alloc::string::String)
 pub macrame::error::DbError::InvalidTimestamp
 pub macrame::error::DbError::InvalidTimestamp::reason: alloc::string::String
@@ -540,6 +545,10 @@ pub macrame::integrity::RebuildReport::drift_after: usize
 pub macrame::integrity::RebuildReport::rows_rebuilt: usize
 pub async fn macrame::integrity::audit_current(&libsql::connection::Connection) -> macrame::error::Result<usize>
 pub async fn macrame::integrity::rebuild_current(&libsql::connection::Connection) -> macrame::error::Result<macrame::integrity::RebuildReport>
+pub mod macrame::kv
+pub const macrame::kv::MAX_KV_KEY: usize
+pub fn macrame::kv::validate_kv_key(&str) -> macrame::error::Result<()>
+pub fn macrame::kv::validate_kv_prefix(&str) -> macrame::error::Result<()>
 pub mod macrame::metrics
 #[non_exhaustive] #[repr(u8)] pub enum macrame::metrics::CommandKind
 pub macrame::metrics::CommandKind::Analyze
@@ -550,6 +559,7 @@ pub macrame::metrics::CommandKind::BulkImportChunk
 pub macrame::metrics::CommandKind::Checkpoint
 pub macrame::metrics::CommandKind::DropEmbeddingIndex
 pub macrame::metrics::CommandKind::Fork
+pub macrame::metrics::CommandKind::KvWrite
 pub macrame::metrics::CommandKind::LinksCurrentMirror
 pub macrame::metrics::CommandKind::Optimize
 pub macrame::metrics::CommandKind::RebuildCurrent
@@ -645,6 +655,7 @@ pub macrame::prelude::CommandKind::BulkImportChunk
 pub macrame::prelude::CommandKind::Checkpoint
 pub macrame::prelude::CommandKind::DropEmbeddingIndex
 pub macrame::prelude::CommandKind::Fork
+pub macrame::prelude::CommandKind::KvWrite
 pub macrame::prelude::CommandKind::LinksCurrentMirror
 pub macrame::prelude::CommandKind::Optimize
 pub macrame::prelude::CommandKind::RebuildCurrent
@@ -718,6 +729,7 @@ pub macrame::prelude::DbError::InvalidEdgeType(alloc::string::String)
 pub macrame::prelude::DbError::InvalidId
 pub macrame::prelude::DbError::InvalidId::id: alloc::string::String
 pub macrame::prelude::DbError::InvalidId::reason: alloc::string::String
+pub macrame::prelude::DbError::InvalidKvKey(alloc::string::String)
 pub macrame::prelude::DbError::InvalidModelName(alloc::string::String)
 pub macrame::prelude::DbError::InvalidTimestamp
 pub macrame::prelude::DbError::InvalidTimestamp::reason: alloc::string::String
@@ -943,6 +955,10 @@ pub async fn macrame::connection::Database::diagnostic_conn(&self) -> macrame::e
 pub async fn macrame::connection::Database::diff(&self, &macrame::branch::BranchId, &macrame::branch::BranchId) -> macrame::error::Result<alloc::vec::Vec<macrame::branch::Divergence>>
 pub async fn macrame::connection::Database::edges(&self, macrame::plan::ReadPlan) -> macrame::error::Result<alloc::vec::Vec<macrame::temporal::EdgeBelief>>
 pub async fn macrame::connection::Database::fork(&self, macrame::branch::BranchId, macrame::branch::BranchId) -> macrame::error::Result<macrame::branch::Branch>
+pub async fn macrame::connection::Database::kv_delete(&self, impl core::convert::Into<alloc::string::String>) -> macrame::error::Result<bool>
+pub async fn macrame::connection::Database::kv_get(&self, &str) -> macrame::error::Result<core::option::Option<alloc::string::String>>
+pub async fn macrame::connection::Database::kv_put(&self, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> macrame::error::Result<()>
+pub async fn macrame::connection::Database::kv_scan(&self, &str, usize) -> macrame::error::Result<alloc::vec::Vec<(alloc::string::String, alloc::string::String)>>
 pub fn macrame::connection::Database::metrics(&self) -> macrame::metrics::MetricsSnapshot
 pub async fn macrame::connection::Database::open(impl core::convert::AsRef<std::path::Path>) -> macrame::error::Result<Self>
 pub async fn macrame::connection::Database::open_tuned(impl core::convert::AsRef<std::path::Path>, macrame::connection::Tuning) -> macrame::error::Result<Self>
@@ -1234,6 +1250,7 @@ pub const macrame::schema::ddl::CREATE_CONCEPTS_LOG_INSERT: &str
 pub const macrame::schema::ddl::CREATE_CONCEPTS_LOG_UPDATE: &str
 pub const macrame::schema::ddl::CREATE_CONCEPTS_TABLE: &str
 pub const macrame::schema::ddl::CREATE_INDICES: &[&str]
+pub const macrame::schema::ddl::CREATE_KV_STORE_TABLE: &str
 pub const macrame::schema::ddl::CREATE_LINKS_CURRENT_SYNC: &str
 pub const macrame::schema::ddl::CREATE_LINKS_CURRENT_TABLE: &str
 pub const macrame::schema::ddl::CREATE_LINKS_GUARD_DELETE: &str
@@ -1490,6 +1507,7 @@ pub macrame::DbError::InvalidEdgeType(alloc::string::String)
 pub macrame::DbError::InvalidId
 pub macrame::DbError::InvalidId::id: alloc::string::String
 pub macrame::DbError::InvalidId::reason: alloc::string::String
+pub macrame::DbError::InvalidKvKey(alloc::string::String)
 pub macrame::DbError::InvalidModelName(alloc::string::String)
 pub macrame::DbError::InvalidTimestamp
 pub macrame::DbError::InvalidTimestamp::reason: alloc::string::String
@@ -1699,6 +1717,10 @@ pub async fn macrame::connection::Database::diagnostic_conn(&self) -> macrame::e
 pub async fn macrame::connection::Database::diff(&self, &macrame::branch::BranchId, &macrame::branch::BranchId) -> macrame::error::Result<alloc::vec::Vec<macrame::branch::Divergence>>
 pub async fn macrame::connection::Database::edges(&self, macrame::plan::ReadPlan) -> macrame::error::Result<alloc::vec::Vec<macrame::temporal::EdgeBelief>>
 pub async fn macrame::connection::Database::fork(&self, macrame::branch::BranchId, macrame::branch::BranchId) -> macrame::error::Result<macrame::branch::Branch>
+pub async fn macrame::connection::Database::kv_delete(&self, impl core::convert::Into<alloc::string::String>) -> macrame::error::Result<bool>
+pub async fn macrame::connection::Database::kv_get(&self, &str) -> macrame::error::Result<core::option::Option<alloc::string::String>>
+pub async fn macrame::connection::Database::kv_put(&self, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> macrame::error::Result<()>
+pub async fn macrame::connection::Database::kv_scan(&self, &str, usize) -> macrame::error::Result<alloc::vec::Vec<(alloc::string::String, alloc::string::String)>>
 pub fn macrame::connection::Database::metrics(&self) -> macrame::metrics::MetricsSnapshot
 pub async fn macrame::connection::Database::open(impl core::convert::AsRef<std::path::Path>) -> macrame::error::Result<Self>
 pub async fn macrame::connection::Database::open_tuned(impl core::convert::AsRef<std::path::Path>, macrame::connection::Tuning) -> macrame::error::Result<Self>

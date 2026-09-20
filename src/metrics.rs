@@ -251,6 +251,28 @@ pub enum CommandKind {
     /// **Exempt**: one statement, no smaller unit. At the end of the
     /// declaration order, per [`CommandKind::index`].
     LinksCurrentMirror,
+    /// A put or delete against `kv_store` (0.18.0, P3, [D-280]).
+    ///
+    /// Its own kind rather than folded into [`CommandKind::UpsertConcept`],
+    /// though both are one small upsert: a KV write touches one `WITHOUT
+    /// ROWID` sidecar with no trigger, no log entry and no lineage, so its
+    /// hold is the floor an actor turn can have — [`CommandKind::Fork`]'s
+    /// argument, for the same reason. Averaging it into a command that fires
+    /// two triggers and writes a log payload would flatter that command's
+    /// numbers.
+    ///
+    /// **Not exempt.** One statement against an unindexed sidecar is inside
+    /// [`crate::CHUNK_BUDGET`] with room to spare, so an over-budget count on
+    /// this kind is a clean signal rather than a constant — which is the
+    /// property [`CommandKind::ShadowRebuild`] describes and the criterion in
+    /// [`CommandKind::exempt_from_budget`] turns on.
+    ///
+    /// Put and delete share it deliberately: same table, same shape, same
+    /// distribution. **At the end of the declaration order**, per
+    /// [`CommandKind::index`].
+    ///
+    /// [D-280]: ../docs/architecture/s13-decision-register.md#d-280
+    KvWrite,
 }
 
 impl CommandKind {
@@ -282,6 +304,7 @@ impl CommandKind {
         CommandKind::DropEmbeddingIndex,
         CommandKind::RebuildEmbeddingIndex,
         CommandKind::LinksCurrentMirror,
+        CommandKind::KvWrite,
     ];
 
     pub const COUNT: usize = CommandKind::ALL.len();
@@ -337,6 +360,7 @@ impl CommandKind {
             CommandKind::DropEmbeddingIndex => "drop_embedding_index",
             CommandKind::RebuildEmbeddingIndex => "rebuild_embedding_index",
             CommandKind::LinksCurrentMirror => "links_current_mirror",
+            CommandKind::KvWrite => "kv_write",
         }
     }
 
