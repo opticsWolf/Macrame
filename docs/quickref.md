@@ -255,7 +255,7 @@ impl Database {
 }
 ```
 
-**`normalized()`**: Validates and normalizes the concept — edge types are uppercased alphanumeric, identifiers are validated, timestamps are canonicalized.
+**`normalized()`**: Validates and normalizes the concept — edge types are checked against `[A-Za-z0-9_:.\-]+` — one case per kind, 64 characters at most — identifiers are validated, timestamps are canonicalized.
 
 **`write_concepts()`**: Low-priority chunked write for analytics write-back. Each chunk commits under its own `recorded_at`; not transaction-time atomic. Since 0.12.0 the chunk boundaries are machine-dependent, so the number of stamps is not reproducible across runs (§5.1.6).
 

@@ -182,10 +182,17 @@ def test_validation_happens_in_the_constructor():
     "invalid edge type" and no indication which one, from a traceback pointing
     at the write. Here the traceback points at the line that built it.
     """
-    with pytest.raises(macrame.InvalidEdgeTypeError):
-        macrame.EdgeAssertion("a", "b", "lowercase", valid_from=T0)
+    # `"lowercase"` was the case here until 0.18 relaxed the charset (D-279).
+    # It is legal now, and asserted as such so the move is visible.
+    macrame.EdgeAssertion("a", "b", "lowercase", valid_from=T0)
+    macrame.EdgeAssertion("a", "b", "okf:links-to", valid_from=T0)
+
     with pytest.raises(macrame.InvalidEdgeTypeError):
         macrame.EdgeAssertion("a", "b", "HAS|PIPE", valid_from=T0)
+    with pytest.raises(macrame.InvalidEdgeTypeError):
+        macrame.EdgeAssertion("a", "b", "okf:Cites", valid_from=T0)
+    with pytest.raises(macrame.InvalidEdgeTypeError):
+        macrame.EdgeAssertion("a", "b", "A" * 65, valid_from=T0)
 
 
 def test_an_invalid_id_is_refused_at_construction():

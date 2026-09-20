@@ -168,7 +168,10 @@ pub enum DbError {
     #[error("migration to v{to} failed: {reason}")]
     Migration { to: u32, reason: String },
 
-    #[error("invalid edge type {0} (must match [A-Z0-9]+)")]
+    #[error(
+        "invalid edge type {0} (must match [A-Za-z0-9_:.\\-]+, be at most 64 characters, \
+         and not mix upper and lower case)"
+    )]
     InvalidEdgeType(String),
 
     // NOTE: the spec (§7) names these fields `source` / `target`. `source` is a

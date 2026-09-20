@@ -136,11 +136,21 @@ impl EdgeAssertion {
     }
 }
 
-/// Edge types are `[A-Z0-9]+` (§4.1).
+/// The longest edge type this crate will write (D-279).
 ///
-/// The constraint is not cosmetic: edge types are concatenated into
+/// Deliberately not public. The cap is a write-path policy, not a fact about
+/// the file: see [`validate_edge_type`] for why a stored kind that exceeds it
+/// keeps reading.
+const MAX_EDGE_TYPE_LEN: usize = 64;
+
+/// Edge types are `[A-Za-z0-9_:.\-]+`, one case per kind, at most
+/// [`MAX_EDGE_TYPE_LEN`] characters (§4.1, D-279).
+///
+/// The charset is not cosmetic: edge types are concatenated into
 /// `transaction_log.entity_id` with `|` separators, so a type containing a
-/// separator would corrupt the key that replay reads the log back by.
+/// separator would corrupt the key that replay reads the log back by. No
+/// character admitted by the relaxation is `|`, so that property survives it
+/// unchanged.
 ///
 /// This comment used to also claim the constraint protected the traversal CTE,
 /// which spliced edge types in as quoted literals. It did not: this function
@@ -148,41 +158,128 @@ impl EdgeAssertion {
 /// [`super::TraversalBuilder::edge_types`] never called it. The CTE now binds
 /// them as parameters (D-039), so that half of the justification is gone rather
 /// than merely unenforced.
+///
+/// # Why two rules arrive with the wider charset
+///
+/// **One case per kind.** `edge_type` sits inside the primary keys of `links`
+/// and `links_current`, no schema object uses a case-insensitive collation, and
+/// uppercase-only made a case collision impossible by construction. Without the
+/// rule `okf:cites` and `okf:Cites` are two kinds one row apart and
+/// indistinguishable in every log line, error message and diff. The rule
+/// narrows that class; it does not close it — `okf:cites` and `OKF:CITES` both
+/// pass and stay distinct under BINARY collation. What is bought is the
+/// *near-miss*, not collision-impossibility, which the relaxation spends.
+///
+/// **A length cap.** There was no length rule at all, the kind goes into a
+/// primary key and into the composed history identifier, and a relaxed charset
+/// is exactly when kinds start getting longer.
+///
+/// # The cap cannot refuse data already on disk
+///
+/// Not because 64 is generous — the old rule had no length bound, so a database
+/// may legally hold a 100-character kind. Because this function runs on the
+/// *write path only*, as the paragraph above records: nothing re-validates a
+/// stored kind, not the fold, not `verify`, not the archive round-trip, not
+/// rehydration. An over-length kind already on disk keeps reading and
+/// traversing; only a new write of one is refused. That property is
+/// load-bearing for this cap and is asserted in this module's tests, because a
+/// future reader that starts validating on read would silently turn it into a
+/// rule that refuses existing files.
 pub fn validate_edge_type(edge_type: &str) -> Result<()> {
-    let ok = !edge_type.is_empty()
-        && edge_type
-            .bytes()
-            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit());
-    if ok {
-        Ok(())
-    } else {
-        Err(DbError::InvalidEdgeType(edge_type.to_string()))
+    let reject = || Err(DbError::InvalidEdgeType(edge_type.to_string()));
+
+    if edge_type.is_empty() {
+        return reject();
     }
+    // Charset before length, so `len()` is counting characters by the time the
+    // cap reads it: every byte admitted here is ASCII.
+    if !edge_type
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b':' | b'.' | b'-'))
+    {
+        return reject();
+    }
+    if edge_type.len() > MAX_EDGE_TYPE_LEN {
+        return reject();
+    }
+    let mixed_case = edge_type.bytes().any(|b| b.is_ascii_uppercase())
+        && edge_type.bytes().any(|b| b.is_ascii_lowercase());
+    if mixed_case {
+        return reject();
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Three of the seven cases this test used to reject are now legal (D-279).
+    ///
+    /// `"knows"`, `"KNOWS_WELL"` and `"KNOWS-WELL"` moved from the rejection
+    /// list to the acceptance list when the charset relaxed. They are named
+    /// here rather than deleted, so a future reader can see the boundary moved
+    /// on purpose.
     #[test]
-    fn edge_types_are_uppercase_alphanumeric() {
-        assert!(validate_edge_type("KNOWS").is_ok());
-        assert!(validate_edge_type("REL2").is_ok());
-
-        for bad in [
-            "",
+    fn edge_types_admit_a_namespaced_charset() {
+        for good in [
+            "KNOWS",
+            "REL2",
+            // Newly legal, each for a different reason: all-lower,
+            // underscore, hyphen, the namespacing case the relaxation exists
+            // for, dot, and a kind sitting exactly on the cap.
             "knows",
             "KNOWS_WELL",
             "KNOWS-WELL",
-            "A|B",
-            "O'BRIEN",
-            "ÉTAT",
+            "okf:links-to",
+            "myapp.cites",
+            &"A".repeat(MAX_EDGE_TYPE_LEN),
+        ] {
+            assert!(validate_edge_type(good).is_ok(), "{good:?} should be ok");
+        }
+
+        for bad in [
+            "",
+            "A|B",     // the separator the composed entity_id depends on
+            "O'BRIEN", // outside the charset
+            "ÉTAT",    // non-ASCII
+            "HAS SPACE",
+            // Mixed case, and one character past the cap.
+            "okf:Cites",
+            &"A".repeat(MAX_EDGE_TYPE_LEN + 1),
         ] {
             assert!(
                 validate_edge_type(bad).is_err(),
                 "{bad:?} should be rejected"
             );
         }
+    }
+
+    /// The cap is a write-path rule, and that is what lets it exist at all.
+    ///
+    /// The old charset had no length bound, so a pre-0.18 database may hold a
+    /// kind longer than [`MAX_EDGE_TYPE_LEN`]. Nothing re-validates a stored
+    /// kind — not the fold, not `verify`, not the archive round-trip — so such
+    /// a database keeps reading. This asserts the *one* entry point, because a
+    /// future reader that starts calling the validator would turn the cap into
+    /// a rule that refuses existing files, and it would do so silently.
+    #[test]
+    fn validation_is_reachable_only_from_the_write_path() {
+        let long = "A".repeat(MAX_EDGE_TYPE_LEN + 1);
+
+        // The write path refuses it.
+        assert!(EdgeAssertion::new("a", "b", &long)
+            .valid_from("2026-01-01T00:00:00.000000Z")
+            .normalized()
+            .is_err());
+
+        // The read path does not look. A traversal filtering on the same kind
+        // compiles, because `TraversalBuilder` never calls the validator —
+        // which is what keeps an existing over-length row reachable.
+        let sql = crate::graph::TraversalBuilder::new("start")
+            .edge_types(vec![long])
+            .build_sql();
+        assert!(sql.contains("l.edge_type IN ("));
     }
 
     #[test]
@@ -194,7 +291,8 @@ mod tests {
         assert_eq!(e.valid_from, "2026-01-01T00:00:00.000000Z");
         assert_eq!(e.valid_to, OPEN_SENTINEL);
 
-        assert!(EdgeAssertion::new("a", "b", "bad")
+        // `"bad"` stood here until D-279 made all-lower kinds legal.
+        assert!(EdgeAssertion::new("a", "b", "bad|type")
             .valid_from("2026-01-01T00:00:00.000000Z")
             .normalized()
             .is_err());

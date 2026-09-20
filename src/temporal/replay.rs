@@ -106,7 +106,12 @@ impl EdgeBelief {
     /// `source_id || '|' || target_id || '|' || edge_type || '|' || valid_from`
     /// exactly, or a delta row will fail to replace the snapshot row it
     /// supersedes. Safe because ULIDs are Crockford base32 and edge types are
-    /// `[A-Z0-9]+`, so `|` cannot occur inside a component (§4.3).
+    /// `[A-Za-z0-9_:.\-]+`, so `|` cannot occur inside a component (§4.3).
+    ///
+    /// The charset widened in 0.18 (D-279) and this property was checked
+    /// against the new one rather than inherited: no character the relaxation
+    /// admits is `|`. What the old `[A-Z0-9]+` wording bought here was never
+    /// the case rule — only the absence of the separator.
     ///
     /// **This is not a unique key across lineages** and must not be used as one
     /// — see [`Self::belief_key`], which is.

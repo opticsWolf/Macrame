@@ -248,7 +248,15 @@ class ConceptUpsert:
     def __repr__(self) -> str: ...
 
 class EdgeAssertion:
-    """An edge to assert. `edge_type` must match `[A-Z0-9]+` — no underscores.
+    """An edge to assert.
+
+    `edge_type` must match `[A-Za-z0-9_:.\-]+`, be at most 64 characters, and
+    not mix upper and lower case (D-279). The charset relaxed in 0.18 so
+    applications can namespace their own kinds — `okf:links-to`, `myapp.cites` —
+    without a rename step; core kinds stay bare and uppercase. One case per
+    kind, because `edge_type` sits inside a primary key under BINARY collation,
+    and `okf:cites` beside `okf:Cites` would be two kinds no log line, error
+    message or diff could tell apart.
 
     Validated in the constructor (D-100), so an `EdgeAssertion` that exists is
     one the ledger will accept.

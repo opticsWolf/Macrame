@@ -297,7 +297,8 @@ create_exception!(
     macrame,
     InvalidEdgeTypeError,
     ValidationError,
-    "An edge type outside `[A-Z0-9]+`. Attribute: `edge_type`."
+    "An edge type outside `[A-Za-z0-9_:.\\-]+`, longer than 64 characters, or \
+     mixing upper and lower case. Attribute: `edge_type`."
 );
 create_exception!(
     macrame,

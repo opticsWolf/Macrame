@@ -197,7 +197,10 @@ async fn bad_input_is_rejected_at_the_boundary() {
     let db = db_with_nodes(&harness).await;
 
     let err = db
-        .assert_edge(EdgeAssertion::new("A", "B", "knows_well").valid_from(T1))
+        // `"knows_well"` stood here until 0.18 relaxed the charset (D-279) and
+        // made it legal. A kind carrying the `|` the log's composed entity_id
+        // uses as a separator is refused under every version of the rule.
+        .assert_edge(EdgeAssertion::new("A", "B", "KNOWS|WELL").valid_from(T1))
         .await
         .unwrap_err();
     assert!(matches!(err, DbError::InvalidEdgeType(_)), "got {err:?}");
