@@ -284,7 +284,7 @@ const REGISTRY: &[(&str, Justification)] = &[
     (
         "idx_concepts_extra_layer",
         Query {
-            // **The schema's first expression index** (0.18.0, D-278b), and the
+            // **The schema's first expression index** (0.18.0, D-284), and the
             // one registry entry whose reader is outside the crate: core ships
             // the index and the application writes the filter. So the `sql`
             // here is not a copy of a query in `src` — it is the *contract*,
@@ -339,7 +339,7 @@ fn every_index_is_justified() {
 }
 
 /// The expression index is chosen for one spelling and not for the other
-/// (0.18.0, P1 gate 6, [D-278b]).
+/// (0.18.0, P1 gate 6, [D-284]).
 ///
 /// # Why the negative half is the point
 ///
@@ -358,7 +358,7 @@ fn every_index_is_justified() {
 /// and it is what `register_extra_index` builds and what the binding emits. A
 /// caller writing raw SQL against `extra` should spell it the same way.
 ///
-/// [D-278b]: ../../docs/architecture/s13-decision-register.md#d-278b
+/// [D-284]: ../../docs/architecture/s13-decision-register.md#d-284
 #[tokio::test]
 async fn the_extra_index_is_matched_by_expression_and_not_by_meaning() {
     let harness = TestHarness::new();

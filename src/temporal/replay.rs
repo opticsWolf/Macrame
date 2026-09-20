@@ -516,7 +516,7 @@ pub async fn reconstruct_on(
 }
 
 /// The payload ceilings live in `schema::ddl` beside the trigger literals that
-/// write them (0.18.0, [D-282a]).
+/// write them (0.18.0, [D-285]).
 ///
 /// One constant per shape, and it was one constant for both until 0.18. The
 /// marker has been per entry since the log's first release — links write
@@ -525,7 +525,7 @@ pub async fn reconstruct_on(
 /// independently. That was sound while one version existed and stopped being
 /// sound the day Wave 1 took concepts to v2 and left links at 1.
 ///
-/// [D-282a]: ../../docs/architecture/s13-decision-register.md#d-282a
+/// [D-285]: ../../docs/architecture/s13-decision-register.md#d-285
 use crate::schema::ddl::{PAYLOAD_VERSION_CONCEPTS, PAYLOAD_VERSION_LINKS};
 
 /// Every fold partitions on `(table_name, entity_id)`, never `entity_id` alone.
@@ -1788,7 +1788,7 @@ async fn fold_delta(
         // want a match on `v` rather than a ceiling.
         //
         // **The check is per shape and therefore comes after the dispatch**
-        // (0.18.0, D-282a). Reading one ceiling against every row gated two
+        // (0.18.0, D-285). Reading one ceiling against every row gated two
         // shapes that version independently: a links row stamped 2 passed a
         // global ceiling of 2 and then decoded under v1 field names, silently,
         // because `get("source_id")` on a payload that has none yields the

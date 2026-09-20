@@ -29,7 +29,7 @@ macro_rules! canonical_ts_check {
 }
 
 /// The concepts log payload shape, as the trigger literals spell it (0.18.0,
-/// [D-282a]).
+/// [D-285]).
 ///
 /// A macro for [`ts_glob`]'s reason — `concat!` splices it into a trigger body
 /// and takes only literals — and paired with [`PAYLOAD_VERSION_CONCEPTS`],
@@ -43,7 +43,7 @@ macro_rules! canonical_ts_check {
 /// faithfully the row on disk carries it.
 ///
 /// [D-278]: ../../docs/architecture/s13-decision-register.md#d-278
-/// [D-282a]: ../../docs/architecture/s13-decision-register.md#d-282a
+/// [D-285]: ../../docs/architecture/s13-decision-register.md#d-285
 macro_rules! payload_v_concepts {
     () => {
         "3"
@@ -52,7 +52,7 @@ macro_rules! payload_v_concepts {
 
 /// The links log payload shape. See [`payload_v_concepts`].
 ///
-/// **Still 1, and staying there is the point** ([D-282a]): the two shapes
+/// **Still 1, and staying there is the point** ([D-285]): the two shapes
 /// version independently, and a 0.18 binary writing only links mints entries a
 /// 0.17 binary can still fold. Bumping this in sympathy with the concepts
 /// marker would claim a shape change that did not happen and end that property.
@@ -64,13 +64,13 @@ macro_rules! payload_v_links {
 
 /// The highest concepts payload this build writes, and the highest it reads.
 ///
-/// Per shape rather than global since 0.18.0 ([D-282a]). One constant gating
+/// Per shape rather than global since 0.18.0 ([D-285]). One constant gating
 /// two shapes that version independently was sound while one version existed
 /// and stopped being sound the day the concepts marker moved to 2 and links
 /// stayed at 1: from then a links row stamped 2 passed the gate and decoded
 /// under v1 field names.
 ///
-/// [D-282a]: ../../docs/architecture/s13-decision-register.md#d-282a
+/// [D-285]: ../../docs/architecture/s13-decision-register.md#d-285
 pub(crate) const PAYLOAD_VERSION_CONCEPTS: u8 = 3;
 
 /// The highest links payload this build writes, and the highest it reads.
@@ -614,7 +614,7 @@ pub const CREATE_CONCEPTS_GUARD_BRANCH: &str = concat!(
 /// **`NOT NULL DEFAULT '{}'` is load-bearing, not tidiness.** It makes SQL NULL
 /// unreachable, so nothing downstream has to distinguish an absent field from a
 /// JSON `null`: the builder's `Option<String>` means *unstated*, never *null*,
-/// and clearing is `Some("{}")` with no state below it ([D-278a]).
+/// and clearing is `Some("{}")` with no state below it ([D-283]).
 ///
 /// **It is declared last, after `branch_id`, and that is not cosmetic.**
 /// `ALTER TABLE ADD COLUMN` appends, so a database that climbs the v20 → v21
@@ -633,7 +633,7 @@ pub const CREATE_CONCEPTS_GUARD_BRANCH: &str = concat!(
 ///
 /// [D-036]: ../../docs/architecture/s13-decision-register.md#d-036
 /// [D-278]: ../../docs/architecture/s13-decision-register.md#d-278
-/// [D-278a]: ../../docs/architecture/s13-decision-register.md#d-278a
+/// [D-283]: ../../docs/architecture/s13-decision-register.md#d-283
 /// [`register_extra_index`]: crate::connection::Database::register_extra_index
 pub const CREATE_CONCEPTS_TABLE: &str = concat!(
     r#"
@@ -1553,7 +1553,7 @@ pub const CREATE_INDICES: &[&str] = &[
         main_branch!(),
         "';"
     ),
-    // **The schema's first expression index** (0.18.0, [D-278b]). Core ships
+    // **The schema's first expression index** (0.18.0, [D-284]). Core ships
     // the `layer` convention one; everything else an application wants over
     // `extra` it asserts for itself through `register_extra_index`.
     //
@@ -1918,7 +1918,7 @@ mod tests {
     use crate::util::timestamp::{CANONICAL_TS_GLOB, OPEN_SENTINEL};
 
     /// The number the triggers write and the number the folds accept are one
-    /// number, per shape (0.18.0, D-282a).
+    /// number, per shape (0.18.0, D-285).
     ///
     /// Asserted against the *spliced* text rather than against the macro alone,
     /// so this fails if a trigger is ever rewritten with the literal back in

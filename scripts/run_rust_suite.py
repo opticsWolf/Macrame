@@ -488,7 +488,15 @@ def main() -> int:
     )
     parser.add_argument(
         "--docs",
+        "--doc-check",
         action="store_true",
+        # Two spellings for one gate, and the second is not decoration.
+        # D-144 added this because a broken intra-doc link shipped in
+        # 0.10.0; 0.18.0 shipped two more, from a session that had read the
+        # suite command in quickref §8 and not the paragraph under it. The
+        # flag was not missing -- it was not reached for, and `--docs` next
+        # to `--features` reads like a switch that documents something
+        # rather than one that checks. `--doc-check` says what it does.
         help="run ci.yml's rustdoc gate instead of the test suite; not retried",
     )
     parser.add_argument(

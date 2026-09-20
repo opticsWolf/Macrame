@@ -12,7 +12,7 @@ is here:
 - **unstated is not empty**, which is the property most easily lost at a
   boundary where an omitted keyword arrives as ``None``: a re-upsert that says
   nothing about attributes preserves them, and clearing is ``extra="{}"`` said
-  out loud (D-278a).
+  out loud (D-283).
 """
 
 from __future__ import annotations
@@ -80,7 +80,7 @@ def test_the_upsert_reports_what_it_states_and_None_when_it_states_nothing():
 
 
 def test_a_reupsert_that_says_nothing_preserves_the_attributes(db):
-    """The whole point of ``COALESCE`` over ``excluded.extra`` (D-278a).
+    """The whole point of ``COALESCE`` over ``excluded.extra`` (D-283).
 
     Code that knows nothing about attributes — a title fixer, an importer
     written against 0.17 — re-upserts rows all the time. If an omitted keyword

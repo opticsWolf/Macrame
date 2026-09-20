@@ -1764,7 +1764,7 @@ impl PyDatabase {
     }
 
     /// Assert an expression index over a JSON path in `concepts.extra`
-    /// (D-278b).
+    /// (D-284).
     ///
     /// **Call this unconditionally at startup.** It is a create-if-absent and
     /// there is no registry: re-assertion is the mechanism, which answers the

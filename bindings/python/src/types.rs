@@ -139,7 +139,7 @@ impl PyConceptUpsert {
         }
         // `None` stays `None` all the way down, because in the crate it means
         // *unstated* and the upsert preserves whatever the row already has
-        // (D-278a). Defaulting to `"{}"` here would turn every re-upsert that
+        // (D-283). Defaulting to `"{}"` here would turn every re-upsert that
         // omits the argument into a silent wipe — and one the log would record
         // as a deliberate belief change.
         if let Some(extra) = extra {
@@ -192,7 +192,7 @@ impl PyConceptUpsert {
         self.inner.embedding_model.as_deref()
     }
     /// The app-defined attributes this upsert states, or `None` if it states
-    /// none (0.18.0, D-278a).
+    /// none (0.18.0, D-283).
     ///
     /// `None` is *unstated*, not *empty*: the write leaves the column alone.
     /// Clearing is `extra="{}"`.

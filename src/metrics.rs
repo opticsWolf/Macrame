@@ -274,7 +274,7 @@ pub enum CommandKind {
     /// [D-280]: ../docs/architecture/s13-decision-register.md#d-280
     KvWrite,
     /// `CREATE INDEX IF NOT EXISTS` over a JSON path in `concepts.extra`
-    /// (0.18.0, D-278b).
+    /// (0.18.0, D-284).
     ///
     /// Not exempt from `CHUNK_BUDGET`, and unlike most kinds here that is a
     /// statement about a real cost: building an expression index over a large

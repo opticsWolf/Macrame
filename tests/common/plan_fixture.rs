@@ -95,7 +95,7 @@ pub async fn populated_without_statistics(db_path: &std::path::Path) -> libsql::
     conn.execute("BEGIN", ()).await.unwrap();
     for i in 0..CONCEPTS {
         // **`extra` is skewed, for the reason the module note gives about
-        // out-degree** (0.18.0, D-278b). `idx_concepts_extra_layer` is an
+        // out-degree** (0.18.0, D-284). `idx_concepts_extra_layer` is an
         // expression index over `json_extract(extra, '$.layer')`, and a fixture
         // leaving every row at the default `{}` would give it **one distinct
         // key** — at which point `ANALYZE` is right to teach the planner to

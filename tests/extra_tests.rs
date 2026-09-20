@@ -14,11 +14,11 @@
 //! * the upsert's conflict clause, where an omitted argument must not become a
 //!   deletion the log records as an intention;
 //! * and the per-shape ceiling, whose negative control is the only thing that
-//!   distinguishes a gate that refuses from a gate that never fires ([D-282a]).
+//!   distinguishes a gate that refuses from a gate that never fires ([D-285]).
 //!
 //! [D-278]: ../docs/architecture/s13-decision-register.md#d-278
 //! [D-129]: ../docs/architecture/s13-decision-register.md#d-129
-//! [D-282a]: ../docs/architecture/s13-decision-register.md#d-282a
+//! [D-285]: ../docs/architecture/s13-decision-register.md#d-285
 
 #[path = "common/harness.rs"]
 mod harness;
@@ -447,7 +447,7 @@ async fn an_upsert_that_says_nothing_about_attributes_preserves_them() {
 /// that never fires is indistinguishable from one that cannot. This is its
 /// negative control, which is gate 6's lesson applied to the payload gate.
 ///
-/// The ceiling is checked *after* the `table_name` dispatch ([D-282a]). A
+/// The ceiling is checked *after* the `table_name` dispatch ([D-285]). A
 /// single global constant gated two shapes that version independently: from the
 /// day Wave 1 took concepts to v2 and left links at 1, a links row stamped 2
 /// passed the gate and decoded under v1 field names. 0.18 does not open that
@@ -463,7 +463,7 @@ async fn an_upsert_that_says_nothing_about_attributes_preserves_them() {
 /// log's other writers, the ones §4.7 concedes, and it can only ever fire on a
 /// row this crate did not mint.
 ///
-/// [D-282a]: ../docs/architecture/s13-decision-register.md#d-282a
+/// [D-285]: ../docs/architecture/s13-decision-register.md#d-285
 #[tokio::test]
 async fn a_links_payload_above_the_links_ceiling_is_refused() {
     let harness = TestHarness::new();
@@ -492,7 +492,7 @@ async fn a_links_payload_above_the_links_ceiling_is_refused() {
                 max, 1,
                 "the refusal must report the LINKS ceiling. A 3 here would mean \
                  the concepts ceiling gated a links row, which is the drift \
-                 D-282a closed"
+                 D-285 closed"
             );
         }
         other => panic!("expected PayloadVersion, got {other:?}"),

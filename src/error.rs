@@ -197,9 +197,9 @@ pub enum DbError {
     InvalidExtra { id: String, reason: String },
 
     /// A JSON path that `register_extra_index` will not build an index over
-    /// (0.18.0, [D-278b]).
+    /// (0.18.0, [D-284]).
     ///
-    /// [D-278b]: ../docs/architecture/s13-decision-register.md#d-278b
+    /// [D-284]: ../docs/architecture/s13-decision-register.md#d-284
     #[error(
         "invalid extra index path {0} (must be `$.name` or `$.a.b`, with each \
          segment matching [A-Za-z0-9_]+)"

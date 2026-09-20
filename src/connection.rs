@@ -600,7 +600,7 @@ pub struct ConceptUpsert {
     /// is deferred with its reopen trigger named (D-214).
     pub branch: Option<crate::branch::BranchId>,
     /// App-defined attributes, or `None` to leave whatever is there alone
-    /// (0.18.0, [D-278a]).
+    /// (0.18.0, [D-283]).
     ///
     /// **`None` means *unstated*, never *null*.** `Some(v)` replaces the
     /// column wholesale; `None` leaves it exactly as it was, which is why a
@@ -620,7 +620,7 @@ pub struct ConceptUpsert {
     /// construction.
     ///
     /// [D-278]: ../docs/architecture/s13-decision-register.md#d-278
-    /// [D-278a]: ../docs/architecture/s13-decision-register.md#d-278a
+    /// [D-283]: ../docs/architecture/s13-decision-register.md#d-283
     pub extra: Option<String>,
 }
 
@@ -685,11 +685,11 @@ impl ConceptUpsert {
     /// [`extra`](Self::extra) field.
     ///
     /// Wholesale replacement, not a merge. `json_patch` semantics were
-    /// rejected for [D-278a]'s reason: keys would merge automatically, but
+    /// rejected for [D-283]'s reason: keys would merge automatically, but
     /// `extra` could then never be replaced wholesale, and deleting a key
     /// would mean asserting null.
     ///
-    /// [D-278a]: ../docs/architecture/s13-decision-register.md#d-278a
+    /// [D-283]: ../docs/architecture/s13-decision-register.md#d-283
     pub fn extra(mut self, extra: impl Into<String>) -> Self {
         self.extra = Some(extra.into());
         self
@@ -842,13 +842,13 @@ pub(crate) enum HighPriCommand {
         responder: oneshot::Sender<Result<bool>>,
     },
     /// Assert an expression index over a JSON path in `concepts.extra`
-    /// (0.18.0, [D-278b]).
+    /// (0.18.0, [D-284]).
     ///
     /// High priority for `RegisterModel`'s reason and then some: an app calls
     /// it unconditionally at startup, so every read it exists to make fast is
     /// waiting behind it.
     ///
-    /// [D-278b]: ../docs/architecture/s13-decision-register.md#d-278b
+    /// [D-284]: ../docs/architecture/s13-decision-register.md#d-284
     RegisterExtraIndex {
         path: String,
         responder: oneshot::Sender<Result<()>>,
@@ -2643,7 +2643,7 @@ impl Database {
     }
 
     /// Assert an expression index over a JSON path in `concepts.extra`
-    /// (0.18.0, [D-278b]).
+    /// (0.18.0, [D-284]).
     ///
     /// **Call this unconditionally at startup.** It is a create-if-absent and
     /// there is no registry: the mechanism is re-assertion, which is what
@@ -2682,7 +2682,7 @@ impl Database {
     /// that is what building an index costs. It queues as a high-priority
     /// write like [`Self::register_model`], for the same reason.
     ///
-    /// [D-278b]: ../docs/architecture/s13-decision-register.md#d-278b
+    /// [D-284]: ../docs/architecture/s13-decision-register.md#d-284
     pub async fn register_extra_index(&self, path: &str) -> Result<()> {
         validate_extra_path(path)?;
         let path = path.to_string();
@@ -4880,7 +4880,7 @@ const UPSERT_CONCEPT: &str = "INSERT INTO concepts \
          retired = excluded.retired, \
          extra = COALESCE(?10, concepts.extra)";
 // `extra` is in that list and **reads the bind parameter, not `excluded`**
-// (0.18.0, D-278a). `excluded.extra` is what the insert arm would have written
+// (0.18.0, D-283). `excluded.extra` is what the insert arm would have written
 // — `'{}'` when the caller said nothing — so assigning it like every other
 // column would wipe an application's attributes on any re-upsert that forgot
 // one builder call, and D-278 made the column versioned, so the log would

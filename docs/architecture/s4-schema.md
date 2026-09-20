@@ -102,7 +102,7 @@ Deliberately unlike `branch_id`, which the same statement excludes from the
 conflict clause outright ([§4.8](#48-lineage-the-branch-register-and-the-column-that-names-it-0142-d-214)) — a lineage is identity and a bag of attributes is not, so the two
 columns want opposite answers to the same question.
 
-**Expression indexes over it, and the form is pinned here (0.18.0, [D-278b](s13-decision-register.md#d-278b)).**
+**Expression indexes over it, and the form is pinned here (0.18.0, [D-284](s13-decision-register.md#d-284)).**
 The baseline carries one, over `$.layer`:
 
 ```sql

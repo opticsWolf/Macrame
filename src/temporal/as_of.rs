@@ -481,7 +481,7 @@ async fn hydrate_at_time(
                 })?;
 
             // The ceiling is the **concepts** ceiling, not a global one
-            // (0.18.0, D-282a). No dispatch is needed here the way `replay`
+            // (0.18.0, D-285). No dispatch is needed here the way `replay`
             // needs one: this query carries `WHERE table_name = 'concepts'`,
             // so every row it sees is already of one shape.
             let v = payload.get("v").and_then(|v| v.as_u64()).unwrap_or(1);

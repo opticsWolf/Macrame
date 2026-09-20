@@ -143,7 +143,7 @@ async fn a_v1_concept_payload_still_folds() {
 }
 
 /// The payload version the triggers write and the one the readers accept are one
-/// number **per shape** (0.18.0, D-282a). Nothing else would notice them
+/// number **per shape** (0.18.0, D-285). Nothing else would notice them
 /// drifting apart.
 ///
 /// The crate's own unit test in `schema::ddl` holds the literal against the
