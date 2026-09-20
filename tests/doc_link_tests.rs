@@ -55,6 +55,10 @@ const DOCS: &[(&str, &str)] = &[
         include_str!("../docs/architecture/api-review-0.17.0.md"),
     ),
     (
+        "api-review-0.18.0.md",
+        include_str!("../docs/architecture/api-review-0.18.0.md"),
+    ),
+    (
         "appendices.md",
         include_str!("../docs/architecture/appendices.md"),
     ),
@@ -242,6 +246,7 @@ const OUTSIDE_THE_CHAIN: &[&str] = &[
     "api-review-0.14.0.md",
     "api-review-0.16.0.md",
     "api-review-0.17.0.md",
+    "api-review-0.18.0.md",
 ];
 
 #[test]
