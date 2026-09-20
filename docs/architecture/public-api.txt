@@ -469,12 +469,14 @@ pub struct macrame::graph::NodeData
 impl macrame::graph::NodeData
 pub fn macrame::graph::NodeData::content(&self) -> core::option::Option<&str>
 pub fn macrame::graph::NodeData::embedding_model(&self) -> core::option::Option<&str>
+pub fn macrame::graph::NodeData::extra(&self) -> core::option::Option<&str>
 pub fn macrame::graph::NodeData::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn macrame::graph::NodeData::title(&self) -> &str
 pub fn macrame::graph::NodeData::valid_from(&self) -> &str
 pub fn macrame::graph::NodeData::valid_to(&self) -> &str
 pub fn macrame::graph::NodeData::with_content(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn macrame::graph::NodeData::with_embedding_model(self, core::option::Option<alloc::string::String>) -> Self
+pub fn macrame::graph::NodeData::with_extra(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub struct macrame::graph::Subgraph
 impl macrame::graph::Subgraph
 pub fn macrame::graph::Subgraph::add_edge(&mut self, &str, &str, &str, f64, &str, &str) -> usize
@@ -502,6 +504,7 @@ pub macrame::graph::TraversalBuilder::attribute_mode: core::option::Option<macra
 pub macrame::graph::TraversalBuilder::branch: core::option::Option<alloc::string::String>
 pub macrame::graph::TraversalBuilder::content: bool
 pub macrame::graph::TraversalBuilder::edge_types: alloc::vec::Vec<alloc::string::String>
+pub macrame::graph::TraversalBuilder::extra: bool
 pub macrame::graph::TraversalBuilder::limit: core::option::Option<usize>
 pub macrame::graph::TraversalBuilder::max_depth: usize
 pub macrame::graph::TraversalBuilder::min_weight: f64
@@ -516,6 +519,7 @@ pub fn macrame::graph::TraversalBuilder::edge_types(self, alloc::vec::Vec<alloc:
 pub async fn macrame::graph::TraversalBuilder::execute(&self, &libsql::connection::Connection, &str) -> macrame::error::Result<alloc::vec::Vec<macrame::temporal::NodeAttributes>>
 pub async fn macrame::graph::TraversalBuilder::execute_ids(&self, &libsql::connection::Connection, &str) -> macrame::error::Result<alloc::vec::Vec<alloc::string::String>>
 pub async fn macrame::graph::TraversalBuilder::execute_ids_explained(&self, &libsql::connection::Connection, &str) -> macrame::error::Result<(alloc::vec::Vec<alloc::string::String>, macrame::graph::WalkOutcome)>
+pub fn macrame::graph::TraversalBuilder::extra(self, bool) -> Self
 pub fn macrame::graph::TraversalBuilder::limit(self, usize) -> Self
 pub fn macrame::graph::TraversalBuilder::max_depth(self, usize) -> Self
 pub fn macrame::graph::TraversalBuilder::min_weight(self, f64) -> Self
@@ -1171,6 +1175,7 @@ pub macrame::prelude::TraversalBuilder::attribute_mode: core::option::Option<mac
 pub macrame::prelude::TraversalBuilder::branch: core::option::Option<alloc::string::String>
 pub macrame::prelude::TraversalBuilder::content: bool
 pub macrame::prelude::TraversalBuilder::edge_types: alloc::vec::Vec<alloc::string::String>
+pub macrame::prelude::TraversalBuilder::extra: bool
 pub macrame::prelude::TraversalBuilder::limit: core::option::Option<usize>
 pub macrame::prelude::TraversalBuilder::max_depth: usize
 pub macrame::prelude::TraversalBuilder::min_weight: f64
@@ -1185,6 +1190,7 @@ pub fn macrame::graph::TraversalBuilder::edge_types(self, alloc::vec::Vec<alloc:
 pub async fn macrame::graph::TraversalBuilder::execute(&self, &libsql::connection::Connection, &str) -> macrame::error::Result<alloc::vec::Vec<macrame::temporal::NodeAttributes>>
 pub async fn macrame::graph::TraversalBuilder::execute_ids(&self, &libsql::connection::Connection, &str) -> macrame::error::Result<alloc::vec::Vec<alloc::string::String>>
 pub async fn macrame::graph::TraversalBuilder::execute_ids_explained(&self, &libsql::connection::Connection, &str) -> macrame::error::Result<(alloc::vec::Vec<alloc::string::String>, macrame::graph::WalkOutcome)>
+pub fn macrame::graph::TraversalBuilder::extra(self, bool) -> Self
 pub fn macrame::graph::TraversalBuilder::limit(self, usize) -> Self
 pub fn macrame::graph::TraversalBuilder::max_depth(self, usize) -> Self
 pub fn macrame::graph::TraversalBuilder::min_weight(self, f64) -> Self

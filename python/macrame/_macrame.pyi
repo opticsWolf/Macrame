@@ -385,6 +385,25 @@ class NodeData:
         """
         ...
     @property
+    def extra(self) -> str | None:
+        """App-defined attributes, or `None` when the load did not fetch them.
+
+        Not loaded by default since 0.18.0 (D-286), for the reason `content`
+        is not: no graph algorithm reads them and the ledger admits 64 KiB of
+        them per concept, against a budget sized for titles and timestamps.
+        Pass `extra=True` to `load_subgraph` to fetch them.
+
+        `None` means *not requested*; `"{}"` means *requested, and genuinely
+        empty*. `NodeAttributes.extra` on the `traverse` path is a plain
+        `str` because that path always loads it and the column is NOT NULL —
+        the two types describe different contracts and disagree on purpose.
+
+        These are the **live** row's attributes. `attribute_mode` is ignored
+        by `load_subgraph` for every field, and this rides that boundary
+        rather than widening it.
+        """
+        ...
+    @property
     def embedding_model(self) -> str | None: ...
     @property
     def valid_from(self) -> datetime: ...
@@ -1136,6 +1155,7 @@ class Database:
         branch: str | None = None,
         now: Timestamp | None = None,
         content: bool = False,
+        extra: bool = False,
     ) -> Subgraph:
         """Materialise a neighbourhood under a byte budget.
 

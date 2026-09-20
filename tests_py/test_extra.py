@@ -235,3 +235,51 @@ def test_a_path_outside_the_grammar_is_refused(db, path):
     with pytest.raises(macrame.InvalidExtraPathError) as excinfo:
         db.register_extra_index(path)
     assert excinfo.value.path == path
+
+
+# ---------------------------------------------------------------------------
+# The subgraph path is opt-in (0.18.0, D-286)
+# ---------------------------------------------------------------------------
+
+
+def test_subgraph_does_not_carry_attributes_unless_asked(db):
+    """`extra=False` is the default, and it is not a stand-in for empty."""
+    db.upsert_concept(macrame.ConceptUpsert("a", "A", valid_from=T0, extra='{"layer":"note"}'))
+    db.upsert_concept(macrame.ConceptUpsert("b", "B", valid_from=T0))
+    db.assert_edge(macrame.EdgeAssertion("a", "b", "KNOWS", valid_from=T0, weight=1.0))
+
+    plain = db.load_subgraph("a", 3, 1 << 20)
+    assert plain.node("a").extra is None
+    assert plain.node("b").extra is None
+
+
+def test_subgraph_carries_attributes_when_asked(db):
+    """And `"{}"` comes back as a value, not as `None`."""
+    db.upsert_concept(macrame.ConceptUpsert("a", "A", valid_from=T0, extra='{"layer":"note"}'))
+    db.upsert_concept(macrame.ConceptUpsert("b", "B", valid_from=T0))
+    db.assert_edge(macrame.EdgeAssertion("a", "b", "KNOWS", valid_from=T0, weight=1.0))
+
+    loaded = db.load_subgraph("a", 3, 1 << 20, extra=True)
+    assert json.loads(loaded.node("a").extra) == {"layer": "note"}
+    # `b` never stated attributes, so the column holds its default -- which is
+    # a loaded empty object and *not* the absence of a load.
+    assert loaded.node("b").extra == "{}"
+    assert loaded.node("b").extra is not None
+
+
+def test_asking_for_attributes_is_charged_to_the_byte_budget(db):
+    """The budget refuses, rather than truncating, so this is observable."""
+    big = '{"pad":"' + "a" * 4000 + '"}'
+    for i in range(10):
+        db.upsert_concept(macrame.ConceptUpsert(f"n{i}", f"N{i}", valid_from=T0, extra=big))
+    for i in range(9):
+        db.assert_edge(macrame.EdgeAssertion(f"n{i}", f"n{i + 1}", "KNOWS", valid_from=T0, weight=1.0))
+
+    plain = db.load_subgraph("n0", 20, 1 << 24)
+    snug = plain.estimated_bytes() * 2
+
+    # Comfortable without attributes...
+    db.load_subgraph("n0", 20, snug)
+    # ...and refused with them, because they are charged rather than exempt.
+    with pytest.raises(macrame.SubgraphTooLargeError):
+        db.load_subgraph("n0", 20, snug, extra=True)

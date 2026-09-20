@@ -128,6 +128,25 @@ pub struct NodeData {
     /// open interval.
     content: Option<String>,
     embedding_model: Option<String>,
+    /// **`None` means "not requested", not "empty" (0.18.0, D-286).**
+    ///
+    /// App-defined attributes are not loaded unless a caller asks, for
+    /// [D-116](../../docs/architecture/s13-decision-register.md)'s reason
+    /// applied to a second column: none of the six algorithms reads
+    /// `extra`, and at the 64 KiB the ledger admits it is most of the byte
+    /// budget on a path whose contract *is* the budget.
+    ///
+    /// An `Option` rather than `"{}"`, and the type disagreement with
+    /// [`crate::NodeAttributes::extra`] is the point rather than an
+    /// oversight. That type describes the row as the ledger holds it, where
+    /// `NOT NULL DEFAULT '{}'` leaves no third state to represent; this one
+    /// describes what the caller asked the loader to carry, where
+    /// *not requested* and *requested and genuinely empty* are different
+    /// facts. `"{}"` as the not-loaded sentinel would be a valid value of
+    /// the type standing in for the absence of one — the failure the
+    /// `content` field above refuses in the same words. `content` already
+    /// disagrees with `NodeAttributes::content` the same way.
+    extra: Option<String>,
     valid_from: String,
     valid_to: String,
 }
@@ -145,6 +164,7 @@ impl NodeData {
             title: title.into(),
             content: None,
             embedding_model: None,
+            extra: None,
             valid_from: valid_from.into(),
             valid_to: valid_to.into(),
         }
@@ -153,6 +173,18 @@ impl NodeData {
     #[must_use]
     pub fn with_content(mut self, content: impl Into<String>) -> Self {
         self.content = Some(content.into());
+        self
+    }
+
+    /// Attach app-defined attributes (0.18.0, D-286).
+    ///
+    /// Pass the JSON object as the ledger stores it. `"{}"` is a value and
+    /// not an absence: a node built with it reads back `Some("{}")`, which
+    /// is what distinguishes it from a node the loader was never asked to
+    /// carry attributes for.
+    #[must_use]
+    pub fn with_extra(mut self, extra: impl Into<String>) -> Self {
+        self.extra = Some(extra.into());
         self
     }
 
@@ -178,6 +210,17 @@ impl NodeData {
 
     pub fn embedding_model(&self) -> Option<&str> {
         self.embedding_model.as_deref()
+    }
+
+    /// App-defined attributes, or `None` when the load did not ask for
+    /// them (0.18.0, D-286).
+    ///
+    /// `Some("{}")` is a loaded, genuinely empty object. The two are not
+    /// the same answer and a caller deciding whether to go back to the
+    /// database needs them apart.
+    #[must_use]
+    pub fn extra(&self) -> Option<&str> {
+        self.extra.as_deref()
     }
 
     pub fn valid_from(&self) -> &str {
@@ -667,6 +710,7 @@ impl Subgraph {
             + d.title.len()
             + d.content.as_ref().map_or(0, String::len)
             + d.embedding_model.as_ref().map_or(0, String::len)
+            + d.extra.as_ref().map_or(0, String::len)
             + d.valid_from.len()
             + d.valid_to.len()
             + std::mem::size_of::<NodeData>()
@@ -1033,6 +1077,7 @@ ORDER BY l.source_id, l.target_id, l.edge_type
             bytes,
             byte_budget,
             traversal.content,
+            traversal.extra,
         )
         .await?;
         graph.drop_dangling_adjacency();
@@ -1062,6 +1107,7 @@ async fn hydrate(
     bytes_so_far: usize,
     byte_budget: usize,
     with_content: bool,
+    with_extra: bool,
 ) -> Result<()> {
     let mut bytes = bytes_so_far;
 
@@ -1072,8 +1118,8 @@ async fn hydrate(
             .collect::<Vec<_>>()
             .join(", ");
         let sql = format!(
-            "SELECT id, title, content, embedding_model, valid_from, valid_to \
-             FROM concepts WHERE retired = 0 AND id IN ({list})"
+            "SELECT id, title, content, embedding_model, valid_from, valid_to, \
+             extra FROM concepts WHERE retired = 0 AND id IN ({list})"
         );
         let params: Vec<libsql::Value> = chunk
             .iter()
@@ -1087,6 +1133,11 @@ async fn hydrate(
                 title: row.get(1)?,
                 content: if with_content { row.get(2).ok() } else { None },
                 embedding_model: row.get(3).ok(),
+                // Fetched by the same round trip either way, exactly as
+                // `content` is: what the flag governs is whether the bytes
+                // enter the payload and the budget, not whether they cross
+                // the wire (D-286).
+                extra: if with_extra { row.get(6).ok() } else { None },
                 valid_from: row.get(4)?,
                 valid_to: row.get(5)?,
             };

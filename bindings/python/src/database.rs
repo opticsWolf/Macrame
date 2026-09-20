@@ -1295,6 +1295,18 @@ impl PyDatabase {
     /// `traverse` is unaffected: it hydrates by `attribute_mode`, which asks a
     /// different question — *which* text, not *whether* (D-102).
     ///
+    /// # `extra` is off on the same terms (0.18.0, D-286)
+    ///
+    /// `NodeData.extra` is `None` unless `extra=True`. The ledger admits 64
+    /// KiB of app-defined attributes per concept, so loading them unasked
+    /// would spend `byte_budget` two orders of magnitude faster and raise
+    /// `SubgraphTooLargeError` on graphs that used to fit, for callers who
+    /// never touched the column. Ask and pay, or do not and do not.
+    ///
+    /// What arrives is the **live** row's attributes: `attribute_mode` is
+    /// ignored on this path for every field, and `extra` rides that boundary
+    /// rather than widening it.
+    ///
     /// **The instants are honoured here as of 0.13.2 (W7.1, F-35).** They could
     /// not be reached from this binding at all before, and the Rust loader
     /// ignored them when they were set on a builder passed to it — a historical
@@ -1303,7 +1315,7 @@ impl PyDatabase {
     #[pyo3(signature = (
         start_node, max_hops, byte_budget, *, edge_types = None,
         min_weight = None, as_of_valid = None, as_of_recorded = None,
-        branch = None, now = None, content = false
+        branch = None, now = None, content = false, extra = false
     ))]
     #[allow(clippy::too_many_arguments)]
     fn load_subgraph(
@@ -1319,6 +1331,7 @@ impl PyDatabase {
         branch: Option<String>,
         now: Option<&Bound<'_, PyAny>>,
         content: bool,
+        extra: bool,
     ) -> PyResult<graph::PySubgraph> {
         let as_of_valid = as_of_valid.map(|t| to_canonical(Some(t))).transpose()?;
         let as_of_recorded = as_of_recorded.map(|t| to_canonical(Some(t))).transpose()?;
@@ -1339,7 +1352,8 @@ impl PyDatabase {
             // sample that looks like a neighbourhood.
             None,
         )
-        .content(content);
+        .content(content)
+        .extra(extra);
         let inner = self.with_db(py, move |db| {
             runtime()
                 .block_on(db.load_subgraph_with(&b, &now, byte_budget))

@@ -147,6 +147,21 @@ impl PyNodeData {
         self.inner.embedding_model()
     }
     #[getter]
+    /// `None` when the load did not request attributes (0.18.0, D-286).
+    ///
+    /// **Not `"{}"`, for the reason `content` is not `""`.** A concept whose
+    /// attributes are genuinely the empty object reads back `"{}"` here when
+    /// the load asked for them; one the load did not ask about reads `None`.
+    /// Collapsing the two would hide the question a caller is actually
+    /// asking, which is whether it still has to go to the database.
+    ///
+    /// `NodeAttributes.extra` is a plain `str` on the `traverse` path because
+    /// that path always loads it and the column is `NOT NULL DEFAULT '{}'`.
+    /// The two types describe different contracts and disagree on purpose.
+    fn extra(&self) -> Option<&str> {
+        self.inner.extra()
+    }
+    #[getter]
     fn valid_from<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         from_canonical(py, self.inner.valid_from())
     }

@@ -16,9 +16,18 @@
 //! * and the per-shape ceiling, whose negative control is the only thing that
 //!   distinguishes a gate that refuses from a gate that never fires ([D-285]).
 //!
+//! And, from the review that followed the cut, the subgraph path
+//! ([D-286]): `extra` is opt-in there because the loader is bounded by
+//! *bytes* and the column is 64 KiB wide, so loading it unasked would
+//! refuse graphs that used to fit. Both halves are gated — that asking
+//! costs the budget, and that not asking is distinguishable from asking
+//! and finding nothing.
+//!
 //! [D-278]: ../docs/architecture/s13-decision-register.md#d-278
 //! [D-129]: ../docs/architecture/s13-decision-register.md#d-129
 //! [D-285]: ../docs/architecture/s13-decision-register.md#d-285
+//! [D-286]: ../docs/architecture/s13-decision-register.md#d-286
+//! [D-116]: ../docs/architecture/s13-decision-register.md#d-116
 
 #[path = "common/harness.rs"]
 mod harness;
@@ -552,4 +561,194 @@ async fn a_links_payload_at_its_own_ceiling_still_folds() {
     assert_eq!(state.concepts.len(), 2);
 
     db.close().await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// The subgraph path: opt-in, and the two halves of what that means (D-286)
+// ---------------------------------------------------------------------------
+
+/// Seed `n` concepts each carrying `bytes` worth of `extra`, in one chain.
+async fn seeded_chain(db: &Database, n: usize, bytes: usize) {
+    // A real JSON object, padded to a known width: `{"pad":"aaa..."}`.
+    // `{"pad":""}` is ten characters of envelope, so the object is
+    // exactly `bytes` wide and the gate below can say N*K and mean it.
+    let pad = "a".repeat(bytes.saturating_sub(10));
+    let attrs = format!(r#"{{"pad":"{pad}"}}"#);
+    for i in 0..n {
+        db.upsert_concept(
+            ConceptUpsert::new(format!("n{i:03}"), format!("Node {i}"))
+                .extra(attrs.clone())
+                .valid_from(T0),
+        )
+        .await
+        .unwrap();
+    }
+    for i in 0..n.saturating_sub(1) {
+        db.assert_edge(
+            macrame::graph::EdgeAssertion::new(
+                format!("n{i:03}"),
+                format!("n{:03}", i + 1),
+                "KNOWS",
+            )
+            .valid_from(T0)
+            .valid_to(OPEN)
+            .weight(1.0),
+        )
+        .await
+        .unwrap();
+    }
+}
+
+/// **Gate: asking for attributes is what spends the budget.**
+///
+/// The loader's contract is a byte ceiling, so the only honest way to offer a
+/// 64 KiB-per-node column is to charge for it when it is carried and to charge
+/// nothing when it is not. Both directions are asserted here against the same
+/// graph, because either alone is satisfiable by a bug: a loader that always
+/// charged would pass the first, and one that never charged would pass the
+/// second.
+#[tokio::test]
+async fn attributes_cost_the_budget_only_when_the_load_asks_for_them() {
+    let harness = TestHarness::new();
+    let db = Database::open(&harness.db_path).await.unwrap();
+
+    const N: usize = 20;
+    const K: usize = 1024;
+    seeded_chain(&db, N, K).await;
+
+    let plain = db
+        .load_subgraph_with(
+            &macrame::graph::TraversalBuilder::new("n000").max_depth(50),
+            NOW,
+            1 << 24,
+        )
+        .await
+        .unwrap();
+    let loaded = db
+        .load_subgraph_with(
+            &macrame::graph::TraversalBuilder::new("n000")
+                .max_depth(50)
+                .extra(true),
+            NOW,
+            1 << 24,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(plain.node_count(), N);
+    assert_eq!(loaded.node_count(), N);
+
+    // Asking carries the bytes, and the budget sees them.
+    assert!(
+        loaded.estimated_bytes() >= plain.estimated_bytes() + N * K,
+        "loaded {} must exceed plain {} by at least N*K = {}",
+        loaded.estimated_bytes(),
+        plain.estimated_bytes(),
+        N * K
+    );
+
+    // Not asking is free. Every node reports no attributes, so nothing about
+    // this graph's size can depend on a column the caller never named -- which
+    // is the half that keeps 0.17-era callers loading the graphs they used to.
+    assert!(loaded.nodes().all(|(_, d)| d.extra().is_some()));
+    assert!(plain.nodes().all(|(_, d)| d.extra().is_none()));
+
+    // And the ceiling really is the thing that moved: a budget that fits the
+    // plain graph comfortably refuses the same graph with attributes on.
+    let snug = plain.estimated_bytes() * 2;
+    let refused = db
+        .load_subgraph_with(
+            &macrame::graph::TraversalBuilder::new("n000")
+                .max_depth(50)
+                .extra(true),
+            NOW,
+            snug,
+        )
+        .await;
+    assert!(
+        matches!(refused, Err(DbError::SubgraphTooLarge { .. })),
+        "attributes must be charged against the budget, not exempt from it"
+    );
+}
+
+/// **Gate: `None` and `Some("{}")` are different answers.**
+///
+/// [D-116]'s refusal, re-run for a second column. A concept whose attributes
+/// are genuinely the empty object and one the loader was never asked about are
+/// different facts, and they differ exactly when a caller is deciding whether
+/// to go back to the database. `"{}"` as the not-loaded sentinel would be a
+/// valid value of the type standing in for the absence of one.
+#[tokio::test]
+async fn an_empty_object_and_an_unrequested_load_are_not_the_same_answer() {
+    let harness = TestHarness::new();
+    let db = Database::open(&harness.db_path).await.unwrap();
+
+    // Written without ever naming `extra`, so the column holds its default.
+    db.upsert_concept(ConceptUpsert::new("solo", "Solo").valid_from(T0))
+        .await
+        .unwrap();
+
+    let asked = db
+        .load_subgraph_with(
+            &macrame::graph::TraversalBuilder::new("solo").extra(true),
+            NOW,
+            1 << 20,
+        )
+        .await
+        .unwrap();
+    let not_asked = db
+        .load_subgraph_with(
+            &macrame::graph::TraversalBuilder::new("solo"),
+            NOW,
+            1 << 20,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(asked.node("solo").unwrap().extra(), Some("{}"));
+    assert_eq!(not_asked.node("solo").unwrap().extra(), None);
+    assert_ne!(
+        asked.node("solo").unwrap(),
+        not_asked.node("solo").unwrap(),
+        "the two must not compare equal, or nothing downstream can tell them apart"
+    );
+}
+
+/// The loader's running total and `estimated_bytes()` still agree **with
+/// attributes loaded**.
+///
+/// `load_subgraph_totals_agree_with_the_derivation` pins the identity for the
+/// default load; a new term in `node_bytes` is exactly the kind of change that
+/// breaks it on the path the default never takes. The failure it guards is
+/// D-073's: a drift of a few bytes per node is invisible to a half-sized budget
+/// and refuses a graph sized at its own estimate.
+#[tokio::test]
+async fn the_totals_still_agree_when_attributes_are_loaded() {
+    let harness = TestHarness::new();
+    let db = Database::open(&harness.db_path).await.unwrap();
+
+    seeded_chain(&db, 30, 512).await;
+
+    let with_extra = || {
+        macrame::graph::TraversalBuilder::new("n000")
+            .max_depth(50)
+            .extra(true)
+    };
+
+    let graph = db
+        .load_subgraph_with(&with_extra(), NOW, 1 << 24)
+        .await
+        .unwrap();
+    assert_eq!(graph.node_count(), 30);
+
+    let budget = graph.estimated_bytes();
+    db.load_subgraph_with(&with_extra(), NOW, budget)
+        .await
+        .expect("a graph must fit a budget equal to its own estimated_bytes()");
+
+    let refused = db.load_subgraph_with(&with_extra(), NOW, budget / 2).await;
+    assert!(
+        matches!(refused, Err(DbError::SubgraphTooLarge { .. })),
+        "half the graph's own size must not fit"
+    );
 }

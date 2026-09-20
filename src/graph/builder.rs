@@ -156,6 +156,20 @@ pub struct TraversalBuilder {
     /// Ignored by [`crate::Database::load_subgraph`], which has no builder and
     /// never loads content.
     pub content: bool,
+
+    /// Fetch `concepts.extra` into every hydrated node (0.18.0, D-286).
+    ///
+    /// **Default `false`, for the reason `content` is.** None of the six
+    /// algorithms reads app-defined attributes, and the ledger admits 64 KiB
+    /// of them per concept against a budget sized for titles and timestamps,
+    /// so loading them unasked would turn graphs that fit into
+    /// `SubgraphTooLarge` for callers who had never heard of the column.
+    ///
+    /// A caller who does not ask gets `NodeData::extra() == None`, which is
+    /// distinguishable from a concept whose attributes are genuinely `{}`.
+    ///
+    /// Ignored by [`crate::Database::load_subgraph`], which has no builder.
+    pub extra: bool,
 }
 
 impl TraversalBuilder {
@@ -171,6 +185,7 @@ impl TraversalBuilder {
             as_of_recorded: None,
             branch: None,
             content: false,
+            extra: false,
         }
     }
 
@@ -344,6 +359,23 @@ impl TraversalBuilder {
     /// graph, and none of the six algorithms reads it.
     pub fn content(mut self, content: bool) -> Self {
         self.content = content;
+        self
+    }
+
+    /// Fetch `concepts.extra` into every hydrated node (0.18.0, D-286).
+    ///
+    /// Off by default. Turning it on is what the byte budget is then spent
+    /// on, and the arithmetic is worth doing before you do: 64 KiB per node
+    /// against a default node cost of roughly a hundred bytes moves the
+    /// effective ceiling by two orders of magnitude. That trade is the
+    /// caller's to make, which is why it is a flag and not a default.
+    ///
+    /// What arrives is the **live** concept row's attributes. `attribute_mode`
+    /// is ignored on this path, as it already is for every other field a
+    /// `Subgraph` carries, so this asks for attributes and never for
+    /// historical ones.
+    pub fn extra(mut self, extra: bool) -> Self {
+        self.extra = extra;
         self
     }
 
