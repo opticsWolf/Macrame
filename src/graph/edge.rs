@@ -144,7 +144,7 @@ impl EdgeAssertion {
 const MAX_EDGE_TYPE_LEN: usize = 64;
 
 /// Edge types are `[A-Za-z0-9_:.\-]+`, one case per kind, at most
-/// [`MAX_EDGE_TYPE_LEN`] characters (§4.1, D-279).
+/// 64 characters (`MAX_EDGE_TYPE_LEN`, deliberately private) (§4.1, D-279).
 ///
 /// The charset is not cosmetic: edge types are concatenated into
 /// `transaction_log.entity_id` with `|` separators, so a type containing a

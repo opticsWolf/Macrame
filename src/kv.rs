@@ -66,7 +66,8 @@ pub fn validate_kv_key(key: &str) -> Result<()> {
 
 /// [`validate_kv_key`]'s rule with the non-empty clause dropped.
 ///
-/// An empty prefix is a legal argument to [`scan`] — it means *everything*,
+/// An empty prefix is a legal argument to
+/// [`Database::kv_scan`](crate::Database::kv_scan) — it means *everything*,
 /// bounded by the caller's `limit` like every other read here — while an empty
 /// key is not addressable at all.
 pub fn validate_kv_prefix(prefix: &str) -> Result<()> {
