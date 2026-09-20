@@ -148,5 +148,10 @@ fn the_documents_are_shaped_the_way_these_tests_assume() {
     );
     assert!(contract().contains("### D.1 — What 1.0 freezes"));
     assert!(contract().contains("### D.2 — What 1.0 does not freeze"));
-    assert_eq!(const_value(SNAPSHOT_RS, "SNAP_FORMAT_VERSION"), "4");
+    // And that `const_value` still finds a constant it is pointed at: a parser
+    // that returned the empty string would make the check above vacuous. The
+    // literal moves with the container format -- 4 through 0.17, 5 from 0.18
+    // (D-278) -- and the cost of restating it here is the point, because the
+    // alternative is a self-test that reads the value it is testing.
+    assert_eq!(const_value(SNAPSHOT_RS, "SNAP_FORMAT_VERSION"), "5");
 }

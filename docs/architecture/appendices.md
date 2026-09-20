@@ -124,8 +124,32 @@ let concept = ConceptUpsert::new(id, title)
     .embedding_model("nomic_v1")
     .valid_from(vf)
     .valid_to(vt)
-    .retired(false);
+    .retired(false)
+    .extra(r#"{"layer":"note"}"#);   // 0.18.0, D-278: a JSON OBJECT, <= 64 KiB
 db.upsert_concept(concept).await?;
+
+// `extra` is logged like every other column, so changing it is a belief change
+// and `reconstruct` replays it. The ledger reads nothing in it -- no schema, no
+// validation past "is it an object" -- and an object specifically because
+// json_extract has nothing to reach into in an array or a scalar.
+//
+// UNSTATED IS NOT EMPTY. An upsert that omits `extra` preserves whatever the
+// row holds (COALESCE, not excluded.extra), so code that knows nothing about
+// attributes cannot wipe them by re-upserting a row. Clearing is `.extra("{}")`
+// said out loud. This is deliberately unlike `branch_id`, which the upsert
+// excludes from the conflict clause outright, because a lineage is identity and
+// a bag of attributes is not.
+db.register_extra_index("$.layer").await?;             // high-pri: one DDL
+// Create-if-absent, and there is NO REGISTRY: re-assertion is the record, which
+// is what makes a restored backup safe -- call it unconditionally at startup
+// and the next open rebuilds whatever the file came back without.
+//
+// The query has to spell the expression CHARACTER FOR CHARACTER. SQLite matches
+// an expression index by comparing expression trees, so the index above does
+// not serve a filter written `extra ->> '$.layer'`: that query returns exactly
+// the right rows and scans the whole table doing it. Write json_extract.
+// `path` is `$.name` or `$.a.b`, each segment [A-Za-z0-9_]+ -- narrow because
+// the path is interpolated into DDL, an index expression taking no parameter.
 
 // Both singular writes above are one transaction each, and each pays the
 // ~0.8 ms per-transaction floor whole (0.12.7, W3.4, D-090). Correct for one
@@ -733,7 +757,7 @@ New in 0.13.38 ([D-211](s13-decision-register.md#d-211)). [Appendix A](appendice
 
 *Frozen* means a change requires a **major version**.
 
-**1. The public Rust API, item for item and path for path.** [`docs/architecture/public-api.txt`](public-api.txt) is the surface — **1,803 items** (0.18.0, D-280: the four `Database::kv_*` methods, the `macrame::kv` module of `src/kv.rs` with `MAX_KV_KEY` and its two validators, `ddl::CREATE_KV_STORE_TABLE`, `DbError::InvalidKvKey` and `CommandKind::KvWrite` — a new enum variant is two items through the flat aliases). No item is removed, no path stops resolving, and no signature narrows. Each item is reachable at exactly one canonical path, plus flat aliases at the crate root and in `macrame::prelude` ([D-208](s13-decision-register.md#d-208)). Held by `scripts/check_public_api.py` in CI and by `tests/public_path_tests.rs` in `cargo test`. The cycle that produced this surface was reviewed against 0.13.0 item by item before it was frozen — [`api-review-0.14.0.md`](api-review-0.14.0.md), [D-212](s13-decision-register.md#d-212) — which is the last release where that review is cheap.
+**1. The public Rust API, item for item and path for path.** [`docs/architecture/public-api.txt`](public-api.txt) is the surface — **1,830 items** (0.18.0: D-280 added the four `Database::kv_*` methods, the `macrame::kv` module of `src/kv.rs` with `MAX_KV_KEY` and its two validators, `ddl::CREATE_KV_STORE_TABLE`, `DbError::InvalidKvKey` and `CommandKind::KvWrite`; D-278 added `Database::register_extra_index`, the `extra` setter and field on `ConceptUpsert` and `NodeAttributes`, `ddl::EXTRA_LAYER_INDEX`, `connection::MAX_EXTRA_BYTES`, `DbError::InvalidExtra` and `DbError::InvalidExtraPath`, and `CommandKind::RegisterExtraIndex` — a new enum variant is two items through the flat aliases). No item is removed, no path stops resolving, and no signature narrows. Each item is reachable at exactly one canonical path, plus flat aliases at the crate root and in `macrame::prelude` ([D-208](s13-decision-register.md#d-208)). Held by `scripts/check_public_api.py` in CI and by `tests/public_path_tests.rs` in `cargo test`. The cycle that produced this surface was reviewed against 0.13.0 item by item before it was frozen — [`api-review-0.14.0.md`](api-review-0.14.0.md), [D-212](s13-decision-register.md#d-212) — which is the last release where that review is cheap.
 
 **2. The ledger tables** — `concepts`, `links`, `transaction_log`. Additive only: `ALTER TABLE ADD COLUMN` and new indexes. A changed primary key, a dropped column or altered bitemporal semantics is a major version with an explicit ETL path, because bitemporal data is the hardest data to migrate: a rebuild means replaying history and recomputing transaction-time boundaries, which is rewriting the past ([D-036](s13-decision-register.md#d-036), [Doctrine III](s0-s3-foundations.md#doctrine-iii)).
 
@@ -755,9 +779,9 @@ Minor-version changes, and several of them are expected rather than merely permi
 
 **3. The derivative tables** — `links_current`, the per-model `embeddings_*` tables, and `concepts_fts`. **No schema-stability guarantee at all.** A minor version needing a different materialization drops the table, recreates it from the DDL and re-derives it inside the same migration step ([D-036](s13-decision-register.md#d-036), [Doctrine VI](s0-s3-foundations.md#doctrine-vi), [Doctrine VII](s0-s3-foundations.md#doctrine-vii)).
 
-**4. The schema version and its migration rungs.** **v20** today. Rungs are forward-only and run at `open()`; adding one is a minor version, and refusing to open a database from a *newer* build is the behaviour, not a bug.
+**4. The schema version and its migration rungs.** **v21** today. Rungs are forward-only and run at `open()`; adding one is a minor version, and refusing to open a database from a *newer* build is the behaviour, not a bug.
 
-**5. The snapshot container format.** **v4** today. A snapshot is a cache of a fold the ledger can always reproduce, so the format is versioned and an unrecognised version is **refused rather than parsed** ([D-043](s13-decision-register.md#d-043)); a build that cannot read an old snapshot folds from the log instead. Losing every snapshot costs time and no information.
+**5. The snapshot container format.** **v5** today. A snapshot is a cache of a fold the ledger can always reproduce, so the format is versioned and an unrecognised version is **refused rather than parsed** ([D-043](s13-decision-register.md#d-043)); a build that cannot read an old snapshot folds from the log instead. Losing every snapshot costs time and no information.
 
 **6. Performance figures.** [§9](s6-s10-flows-to-dependencies.md#9-performance-budgets)'s budgets are measurements on one machine at one population ([D-055](s13-decision-register.md#d-055)), and R15's rate is a property of the machine rather than of this crate ([D-147](s13-decision-register.md#d-147)). Nothing here is a latency promise to a caller.
 

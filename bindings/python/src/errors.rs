@@ -309,6 +309,26 @@ create_exception!(
 );
 create_exception!(
     macrame,
+    InvalidExtraError,
+    ValidationError,
+    "A `concepts.extra` value that is not a JSON object, or is over the \
+     64 KiB cap. Attributes: `id`, `reason`.\n\n\
+     A JSON *object* specifically: `json_extract(extra, '$.key')` cannot match \
+     a path inside an array or a bare scalar, so an index over one would \
+     answer every query with silence."
+);
+create_exception!(
+    macrame,
+    InvalidExtraPathError,
+    ValidationError,
+    "A JSON path `register_extra_index` will not build an index over. \
+     Attribute: `path`.\n\n\
+     `$.name` or `$.a.b`, with each segment matching `[A-Za-z0-9_]+`. Narrow \
+     because the path is interpolated into DDL rather than bound — an index \
+     expression cannot take a parameter."
+);
+create_exception!(
+    macrame,
     InvalidIdError,
     ValidationError,
     "An identifier the crate's encodings cannot represent. Attributes: `id`, `reason`.\n\n\
@@ -689,6 +709,15 @@ fn build(py: Python<'_>, err: DbError) -> PyErr {
 
         DbError::InvalidKvKey(k) => raise::<InvalidKvKeyError, _>(py, m, |e| e.setattr("key", k)),
 
+        DbError::InvalidExtra { id, reason } => raise::<InvalidExtraError, _>(py, m, |e| {
+            e.setattr("id", id)?;
+            e.setattr("reason", reason)
+        }),
+
+        DbError::InvalidExtraPath(p) => {
+            raise::<InvalidExtraPathError, _>(py, m, |e| e.setattr("path", p))
+        }
+
         DbError::SingleOpenViolation {
             source_id,
             target_id,
@@ -1038,6 +1067,8 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
         // validation
         InvalidEdgeTypeError,
         InvalidKvKeyError,
+        InvalidExtraError,
+        InvalidExtraPathError,
         InvalidIdError,
         InvalidTimestampError,
         InvalidModelNameError,

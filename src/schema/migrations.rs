@@ -13,7 +13,7 @@ use crate::schema::ddl::*;
 /// guarantee D-029 buys would be void on it while `user_version` insisted all
 /// was well. Reserving 1 as a value this build refuses by name is what makes
 /// "no legacy support" an enforced property instead of a README sentence.
-pub const SCHEMA_VERSION: u32 = 20;
+pub const SCHEMA_VERSION: u32 = 21;
 
 type StepFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
 
@@ -221,6 +221,18 @@ const STEPS: &[Step] = &[
         // `kv_store` is empty and there is no prior state to derive one from.
         suspends_foreign_keys: false,
         apply: |conn| Box::pin(add_kv_store(conn)),
+    },
+    Step {
+        from: 20,
+        to: 21,
+        name: "concepts-extra",
+        // One `ADD COLUMN` on `concepts`, two trigger replacements and one
+        // index. The column carries no `REFERENCES` clause -- the v11 -> v12
+        // rung's second reason for the flag does not apply -- and nothing is
+        // rebuilt, so no inbound key is disturbed. The triggers are dropped
+        // and recreated rather than re-issued; see `add_concepts_extra`.
+        suspends_foreign_keys: false,
+        apply: |conn| Box::pin(add_concepts_extra(conn)),
     },
     Step {
         from: 16,
@@ -545,6 +557,61 @@ async fn add_kv_store(conn: &libsql::Connection) -> Result<()> {
     Ok(())
 }
 
+/// v20 -> v21: `concepts.extra`, and the payload that has to carry it
+/// (0.18.0, P1, [D-278]).
+///
+/// # Why the triggers are dropped rather than re-issued
+///
+/// The obvious rung is one `ALTER TABLE` plus a re-run of the baseline's
+/// trigger list, and it would be silently wrong. `CREATE TRIGGER IF NOT EXISTS`
+/// on a name that already exists **keeps the old body** ([D-126], [D-129]), so
+/// a re-issued baseline leaves a v2 trigger on a v21 table: every concept write
+/// mints a log entry describing a row it does not fully describe, and `extra`
+/// is invisible to `reconstruct` and to every `AttributeMode::AtTime` read
+/// while sitting plainly in `concepts`. That is Wave 1's `embedding_model`
+/// defect with a different column, and it is why this rung names both triggers
+/// and replaces them.
+///
+/// `verify` learns the matching probe ([D-282]) so the same mistake made by
+/// hand -- a restore, a stamp written directly, a rung that no-opped -- refuses
+/// the open instead of writing incomplete history.
+///
+/// # What the column means on a database that climbs
+///
+/// `'{}'`, for every row already there. That is not an assumption: no
+/// application could have set an attribute a version ago, so empty is the only
+/// truth available, and `NOT NULL DEFAULT '{}'` makes SQLite fill every
+/// existing row with it as the column is added.
+///
+/// # The index
+///
+/// `idx_concepts_extra_layer` is the schema's first expression index, and it is
+/// created here rather than left to `register_extra_index` because `verify`
+/// requires every index the DDL declares -- a v21 database without it would
+/// refuse to open.
+///
+/// [D-126]: ../../docs/architecture/s13-decision-register.md#d-126
+/// [D-129]: ../../docs/architecture/s13-decision-register.md#d-129
+/// [D-278]: ../../docs/architecture/s13-decision-register.md#d-278
+/// [D-282]: ../../docs/architecture/s13-decision-register.md#d-282
+async fn add_concepts_extra(conn: &libsql::Connection) -> Result<()> {
+    conn.execute(
+        "ALTER TABLE concepts ADD COLUMN extra TEXT NOT NULL DEFAULT '{}'",
+        (),
+    )
+    .await?;
+
+    conn.execute("DROP TRIGGER IF EXISTS trg_concepts_log_insert", ())
+        .await?;
+    conn.execute(CREATE_CONCEPTS_LOG_INSERT, ()).await?;
+    conn.execute("DROP TRIGGER IF EXISTS trg_concepts_log_update", ())
+        .await?;
+    conn.execute(CREATE_CONCEPTS_LOG_UPDATE, ()).await?;
+
+    conn.execute(EXTRA_LAYER_INDEX, ()).await?;
+    Ok(())
+}
+
 /// v15 → v16: the log records whether anything has left it (0.15.7, W14.5, [D-249]).
 ///
 /// Review C-5: the reach guard's intactness test was `COUNT(*)` over the whole
@@ -685,8 +752,8 @@ async fn add_branch_storage(conn: &libsql::Connection) -> Result<()> {
     // first, because `IF NOT EXISTS` would silently keep the pre-v12 body and
     // leave a database the ladder calls v12 that logs without lineage.
     for (name, ddl) in [
-        ("trg_concepts_log_insert", CREATE_CONCEPTS_LOG_INSERT),
-        ("trg_concepts_log_update", CREATE_CONCEPTS_LOG_UPDATE),
+        ("trg_concepts_log_insert", CONCEPTS_LOG_INSERT_V12),
+        ("trg_concepts_log_update", CONCEPTS_LOG_UPDATE_V12),
         ("trg_links_log_insert", CREATE_LINKS_LOG_INSERT),
         ("trg_links_current_sync", CREATE_LINKS_CURRENT_SYNC),
         ("trg_links_single_open", CREATE_LINKS_SINGLE_OPEN),
@@ -1588,6 +1655,89 @@ const CONCEPTS_LOG_INSERT_V9: &str = r#"
     END;
 "#;
 
+/// `trg_concepts_log_insert` **as v10 had it**, and as every version through
+/// v20 had it: marker-gated, no lineage, payload v2 (0.18.0, P1).
+///
+/// # The failure this prevents is not a wrong payload
+///
+/// It is a rung that dies. v21 put `NEW.extra` in both concept log trigger
+/// bodies, and `ALTER TABLE … RENAME TO` **re-parses every trigger in the
+/// schema** to fix up its references — so a v10 database carrying a v21 body
+/// meets the v14 → v15 rung's rename and fails with *error in trigger
+/// trg_concepts_log_insert: no such column: NEW.extra*, four rungs above where
+/// the mistake was made and naming a trigger that rung never touched. Every
+/// climb from below v12 hit it.
+///
+/// So this is [`CONCEPTS_LOG_INSERT_V9`]'s argument, one version up and with a
+/// sharper consequence: a rung installs the triggers **of its own era**, and
+/// today's bodies belong only to the rung that earns them.
+const CONCEPTS_LOG_INSERT_V10: &str = concat!(
+    r#"
+    CREATE TRIGGER IF NOT EXISTS trg_concepts_log_insert
+    AFTER INSERT ON concepts
+    WHEN NOT EXISTS (
+        SELECT 1 FROM sqlite_master
+        WHERE type = 'table' AND name = '"#,
+    "macrame_archive_session",
+    r#"'
+    )
+    BEGIN
+        INSERT INTO transaction_log (table_name, entity_id, operation, payload, recorded_at)
+        VALUES ('concepts', NEW.id, 'I',
+                json_object('v', 2, 'title', NEW.title, 'content', NEW.content,
+                            'valid_from', NEW.valid_from, 'valid_to', NEW.valid_to,
+                            'retired', NEW.retired,
+                            'embedding_model', NEW.embedding_model),
+                NEW.recorded_at);
+    END;
+    "#
+);
+
+/// `trg_concepts_log_insert` **as v12 had it**, and as v20 still had it:
+/// [`CONCEPTS_LOG_INSERT_V10`] plus the lineage column v12 introduced.
+///
+/// Same reason, one rung over. The v11 → v12 rung replaces five trigger bodies
+/// because their columns just changed, and two of those five are these — so
+/// without the pin it installs a v21 body on a v12 database and the climb dies
+/// two rungs later inside a rename.
+const CONCEPTS_LOG_INSERT_V12: &str = concat!(
+    r#"
+    CREATE TRIGGER IF NOT EXISTS trg_concepts_log_insert
+    AFTER INSERT ON concepts
+    WHEN NOT EXISTS (
+        SELECT 1 FROM sqlite_master
+        WHERE type = 'table' AND name = '"#,
+    "macrame_archive_session",
+    r#"'
+    )
+    BEGIN
+        INSERT INTO transaction_log (table_name, entity_id, operation, payload, recorded_at, branch_id)
+        VALUES ('concepts', NEW.id, 'I',
+                json_object('v', 2, 'title', NEW.title, 'content', NEW.content,
+                            'valid_from', NEW.valid_from, 'valid_to', NEW.valid_to,
+                            'retired', NEW.retired,
+                            'embedding_model', NEW.embedding_model),
+                NEW.recorded_at, NEW.branch_id);
+    END;
+    "#
+);
+
+/// `trg_concepts_log_update` **as v12 had it**, and as v20 still had it. See
+/// [`CONCEPTS_LOG_INSERT_V12`].
+const CONCEPTS_LOG_UPDATE_V12: &str = r#"
+    CREATE TRIGGER IF NOT EXISTS trg_concepts_log_update
+    AFTER UPDATE ON concepts
+    BEGIN
+        INSERT INTO transaction_log (table_name, entity_id, operation, payload, recorded_at, branch_id)
+        VALUES ('concepts', NEW.id, 'U',
+                json_object('v', 2, 'title', NEW.title, 'content', NEW.content,
+                            'valid_from', NEW.valid_from, 'valid_to', NEW.valid_to,
+                            'retired', NEW.retired,
+                            'embedding_model', NEW.embedding_model),
+                NEW.recorded_at, NEW.branch_id);
+    END;
+"#;
+
 /// v9 → v10: the concepts insert log trigger becomes marker-gated (C3).
 ///
 /// Two statements, like the rung below, and necessary for a reason that is not
@@ -1597,7 +1747,7 @@ const CONCEPTS_LOG_INSERT_V9: &str = r#"
 async fn gate_concepts_log_insert_on_marker(conn: &libsql::Connection) -> Result<()> {
     conn.execute("DROP TRIGGER IF EXISTS trg_concepts_log_insert", ())
         .await?;
-    conn.execute(CREATE_CONCEPTS_LOG_INSERT, ()).await?;
+    conn.execute(CONCEPTS_LOG_INSERT_V10, ()).await?;
     Ok(())
 }
 
@@ -1836,6 +1986,58 @@ async fn verify(conn: &libsql::Connection) -> Result<()> {
                  should permit; upgrading through the ladder replaces it.",
                 ungated.len(),
                 ungated.join(", ")
+            ),
+        });
+    }
+
+    // The concept log triggers are checked by **payload version** (0.18.0,
+    // [D-282]), and the gap this closes is exact. `verify` reads bodies for the
+    // three delete guards and names only them, so a concept log trigger with
+    // the right name and a v2 body is invisible to everything above: present by
+    // name, ungated-checked only for the guards, and writing a payload that
+    // omits `extra` on every concept write. The fold would then reconstruct a
+    // state the `concepts` table plainly contradicts -- no error, no drift
+    // report -- which is the same shape D-129 closed for the concepts delete
+    // guard, on a trigger that check does not cover.
+    //
+    // The probe is the version marker and not the trigger's whole text, for
+    // D-126's reason: a full-text comparison fails on whitespace and becomes
+    // the kind of check people disable. It reads the same constant the fold
+    // gates on, so the write side, the read side and this check cannot drift
+    // into three numbers.
+    //
+    // Probing the links marker is free and a no-op today. It is here so the
+    // check is complete rather than coincidentally sufficient: when links
+    // eventually versions, the rung that moves it will find this already
+    // asserting the property.
+    let stale: Vec<String> = [
+        ("trg_concepts_log_insert", PAYLOAD_VERSION_CONCEPTS),
+        ("trg_concepts_log_update", PAYLOAD_VERSION_CONCEPTS),
+        ("trg_links_log_insert", PAYLOAD_VERSION_LINKS),
+    ]
+    .iter()
+    .filter(|(name, version)| {
+        let marker = format!("'v', {version}");
+        bodies
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(name))
+            .is_none_or(|(_, sql)| !sql.contains(&marker))
+    })
+    .map(|(name, version)| format!("{name} (expected `'v', {version}`)"))
+    .collect();
+
+    if !stale.is_empty() {
+        return Err(DbError::Migration {
+            to: SCHEMA_VERSION,
+            reason: format!(
+                "schema verification failed: the database is stamped v{SCHEMA_VERSION} \
+                 but {} log trigger(s) write a stale payload version: {}. A trigger \
+                 with the right name and an older body logs a row it does not fully \
+                 describe, so the column it omits is invisible to every \
+                 reconstruction while sitting plainly in the table. Upgrading \
+                 through the ladder replaces it.",
+                stale.len(),
+                stale.join(", ")
             ),
         });
     }

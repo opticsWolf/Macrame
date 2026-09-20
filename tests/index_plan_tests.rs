@@ -281,6 +281,28 @@ const REGISTRY: &[(&str, Justification)] = &[
             )),
         },
     ),
+    (
+        "idx_concepts_extra_layer",
+        Query {
+            // **The schema's first expression index** (0.18.0, D-278b), and the
+            // one registry entry whose reader is outside the crate: core ships
+            // the index and the application writes the filter. So the `sql`
+            // here is not a copy of a query in `src` — it is the *contract*,
+            // the shape a caller has to write to be served, which is why
+            // `source` is the index's own DDL rather than a reader.
+            //
+            // An expression index is matched by expression **tree**, not by
+            // meaning, so that contract is exact to the character. The negative
+            // control is in `the_extra_index_is_matched_by_expression_and_not_by_meaning`
+            // below, and it is the half that makes this entry worth having.
+            label: "an application's filter on the `layer` attribute convention",
+            sql: "SELECT id FROM concepts WHERE json_extract(extra, '$.layer') = ?1",
+            source: Some((
+                include_str!("../src/schema/ddl.rs"),
+                "ON concepts (json_extract(extra, '$.layer'))",
+            )),
+        },
+    ),
 ];
 
 /// Every declared index appears in the registry, and nothing else does.
@@ -314,6 +336,56 @@ fn every_index_is_justified() {
         );
     }
     assert_eq!(declared.len(), REGISTRY.len());
+}
+
+/// The expression index is chosen for one spelling and not for the other
+/// (0.18.0, P1 gate 6, [D-278b]).
+///
+/// # Why the negative half is the point
+///
+/// SQLite matches an expression index by comparing **expression trees**.
+/// `json_extract(extra, '$.layer')` and `extra ->> '$.layer'` mean the same
+/// thing to a reader and parse to different operators, so an index over the
+/// first is unavailable to a query written the second way — the query runs,
+/// returns exactly the right rows, and scans the whole table to do it.
+///
+/// Without the negative control this gate passes while the binding quietly
+/// emits the other spelling and falls back to the scan the item exists to
+/// delete. That is the failure mode this file was built for: a plan that is
+/// correct and slow, with nothing to notice it.
+///
+/// So the exact form is pinned here, in `ddl::EXTRA_LAYER_INDEX`, and in §4.1,
+/// and it is what `register_extra_index` builds and what the binding emits. A
+/// caller writing raw SQL against `extra` should spell it the same way.
+///
+/// [D-278b]: ../../docs/architecture/s13-decision-register.md#d-278b
+#[tokio::test]
+async fn the_extra_index_is_matched_by_expression_and_not_by_meaning() {
+    let harness = TestHarness::new();
+    let conn = populated_and_analysed(&harness.db_path).await;
+
+    let chosen = plan_of(
+        &conn,
+        "SELECT id FROM concepts WHERE json_extract(extra, '$.layer') = ?1",
+    )
+    .await;
+    assert!(
+        chosen.contains("idx_concepts_extra_layer"),
+        "the shipped spelling does not reach the index it was built for: {chosen}"
+    );
+
+    let arrow = plan_of(
+        &conn,
+        "SELECT id FROM concepts WHERE extra ->> '$.layer' = ?1",
+    )
+    .await;
+    assert!(
+        !arrow.contains("idx_concepts_extra_layer"),
+        "`->>` reached the `json_extract` index. If SQLite has started \
+         normalising the two, this gate is now weaker than it reads and the \
+         binding's spelling stops being load-bearing — say so here rather than \
+         deleting the assertion: {arrow}"
+    );
 }
 
 /// Each justified index is the one its query actually gets, **on a database

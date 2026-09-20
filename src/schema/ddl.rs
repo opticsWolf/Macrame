@@ -28,6 +28,58 @@ macro_rules! canonical_ts_check {
     };
 }
 
+/// The concepts log payload shape, as the trigger literals spell it (0.18.0,
+/// [D-282a]).
+///
+/// A macro for [`ts_glob`]'s reason — `concat!` splices it into a trigger body
+/// and takes only literals — and paired with [`PAYLOAD_VERSION_CONCEPTS`],
+/// which is the same number as a value. The unit test at the bottom of this
+/// file holds the two together, because nothing else would notice them
+/// drifting: the trigger would write one version and the fold would accept a
+/// different one, and both would look right in isolation.
+///
+/// **v3 since 0.18.0** ([D-278]): `extra` joined the payload, and a column
+/// absent from the `json_object` list is invisible to `reconstruct` however
+/// faithfully the row on disk carries it.
+///
+/// [D-278]: ../../docs/architecture/s13-decision-register.md#d-278
+/// [D-282a]: ../../docs/architecture/s13-decision-register.md#d-282a
+macro_rules! payload_v_concepts {
+    () => {
+        "3"
+    };
+}
+
+/// The links log payload shape. See [`payload_v_concepts`].
+///
+/// **Still 1, and staying there is the point** ([D-282a]): the two shapes
+/// version independently, and a 0.18 binary writing only links mints entries a
+/// 0.17 binary can still fold. Bumping this in sympathy with the concepts
+/// marker would claim a shape change that did not happen and end that property.
+macro_rules! payload_v_links {
+    () => {
+        "1"
+    };
+}
+
+/// The highest concepts payload this build writes, and the highest it reads.
+///
+/// Per shape rather than global since 0.18.0 ([D-282a]). One constant gating
+/// two shapes that version independently was sound while one version existed
+/// and stopped being sound the day the concepts marker moved to 2 and links
+/// stayed at 1: from then a links row stamped 2 passed the gate and decoded
+/// under v1 field names.
+///
+/// [D-282a]: ../../docs/architecture/s13-decision-register.md#d-282a
+pub(crate) const PAYLOAD_VERSION_CONCEPTS: u8 = 3;
+
+/// The highest links payload this build writes, and the highest it reads.
+///
+/// See [`PAYLOAD_VERSION_CONCEPTS`]. Nothing has ever minted a links payload
+/// above this, which is why the per-shape gate can be a tightening that refuses
+/// no row any version of this crate wrote.
+pub(crate) const PAYLOAD_VERSION_LINKS: u8 = 1;
+
 /// A macro rather than a `const` for the same reason as [`ts_glob`]: `concat!`
 /// splices it into the table DDL and only accepts literals. [`WEIGHT_CHECK`] is
 /// the same text as a value, and carries the reasoning.
@@ -254,10 +306,13 @@ pub const CREATE_CONCEPTS_LOG_INSERT: &str = concat!(
     BEGIN
         INSERT INTO transaction_log (table_name, entity_id, operation, payload, recorded_at, branch_id)
         VALUES ('concepts', NEW.id, 'I',
-                json_object('v', 2, 'title', NEW.title, 'content', NEW.content,
+                json_object('v', "#,
+    payload_v_concepts!(),
+    r#", 'title', NEW.title, 'content', NEW.content,
                             'valid_from', NEW.valid_from, 'valid_to', NEW.valid_to,
                             'retired', NEW.retired,
-                            'embedding_model', NEW.embedding_model),
+                            'embedding_model', NEW.embedding_model,
+                            'extra', json(NEW.extra)),
                 NEW.recorded_at, NEW.branch_id);
     END;
     "#
@@ -547,6 +602,39 @@ pub const CREATE_CONCEPTS_GUARD_BRANCH: &str = concat!(
     "#
 );
 
+/// App-defined attributes ride the concept row (0.18.0, [D-278]).
+///
+/// `extra` is `TEXT NOT NULL DEFAULT '{}'` — a JSON object, opaque to this
+/// crate except for the expression indexes [`register_extra_index`] creates
+/// over it. A column on the row rather than a table of its own, because a
+/// column inherits lineage, retirement and the bitemporal key for free, and
+/// because `ALTER TABLE ADD COLUMN` is what [D-036] permits on a ledger table
+/// even after 1.0.
+///
+/// **`NOT NULL DEFAULT '{}'` is load-bearing, not tidiness.** It makes SQL NULL
+/// unreachable, so nothing downstream has to distinguish an absent field from a
+/// JSON `null`: the builder's `Option<String>` means *unstated*, never *null*,
+/// and clearing is `Some("{}")` with no state below it ([D-278a]).
+///
+/// **It is declared last, after `branch_id`, and that is not cosmetic.**
+/// `ALTER TABLE ADD COLUMN` appends, so a database that climbs the v20 → v21
+/// rung has `extra` at the end — and if the baseline declared it anywhere else,
+/// a fresh file and a migrated one would hold the same schema in two column
+/// orders. Nothing in the crate binds by position, so the bug that causes is
+/// not a crash but a divergence: `PRAGMA table_info` answers differently
+/// depending on how the file got here, and every check written against one
+/// shape silently stops describing the other. `tests/compat_contract_tests.rs`
+/// pins the order for exactly this reason.
+///
+/// No `CHECK (json_valid(extra))`. The cap and the parse both happen at the API
+/// boundary, where the error can name the caller's mistake, and a CHECK here
+/// would be a second place to state the rule that could only ever disagree with
+/// the first — while still admitting whatever §4.7's raw writer put there.
+///
+/// [D-036]: ../../docs/architecture/s13-decision-register.md#d-036
+/// [D-278]: ../../docs/architecture/s13-decision-register.md#d-278
+/// [D-278a]: ../../docs/architecture/s13-decision-register.md#d-278a
+/// [`register_extra_index`]: crate::connection::Database::register_extra_index
 pub const CREATE_CONCEPTS_TABLE: &str = concat!(
     r#"
 CREATE TABLE IF NOT EXISTS concepts (
@@ -562,6 +650,7 @@ CREATE TABLE IF NOT EXISTS concepts (
     "#,
     branch_column!(),
     r#",
+    extra            TEXT NOT NULL DEFAULT '{}',
     "#,
     canonical_ts_check!("valid_from", "valid_to", "recorded_at"),
     r#"
@@ -1464,7 +1553,28 @@ pub const CREATE_INDICES: &[&str] = &[
         main_branch!(),
         "';"
     ),
+    // **The schema's first expression index** (0.18.0, [D-278b]). Core ships
+    // the `layer` convention one; everything else an application wants over
+    // `extra` it asserts for itself through `register_extra_index`.
+    //
+    // The expression is pinned here and reproduced in §4.1, because an
+    // expression index is matched by **expression tree**, not by meaning:
+    // SQLite chooses this index for a `json_extract(extra, '$.layer')` filter
+    // and will not choose it for the `extra ->> '$.layer'` spelling, which
+    // parses to a different operator and falls back to a full scan. That is
+    // not a detail a caller should have to know, so the binding emits the
+    // `json_extract` form and `index_plan_tests` pins both halves — the
+    // positive and the negative control.
+    EXTRA_LAYER_INDEX,
 ];
+
+/// The `extra.layer` expression index, named so a rung can re-issue it.
+///
+/// See the entry in [`CREATE_INDICES`], which is where the reasoning lives.
+/// `register_extra_index` builds the same shape for a caller's own path, so
+/// this is the worked example as much as it is a shipped index.
+pub const EXTRA_LAYER_INDEX: &str =
+    "CREATE INDEX IF NOT EXISTS idx_concepts_extra_layer ON concepts (json_extract(extra, '$.layer'))";
 
 /// Every trigger the schema declares.
 ///
@@ -1595,19 +1705,24 @@ pub const CREATE_LINKS_SINGLE_OPEN: &str = concat!(
 /// correcting a concept it minted would have logged the change against `'main'`,
 /// putting a branch's own history in the trunk's fold and leaving the row
 /// invisible to the abandonment sweep that §15.5's `archive` arm performs.
-pub const CREATE_CONCEPTS_LOG_UPDATE: &str = r#"
+pub const CREATE_CONCEPTS_LOG_UPDATE: &str = concat!(
+    r#"
     CREATE TRIGGER IF NOT EXISTS trg_concepts_log_update
     AFTER UPDATE ON concepts
     BEGIN
         INSERT INTO transaction_log (table_name, entity_id, operation, payload, recorded_at, branch_id)
         VALUES ('concepts', NEW.id, 'U',
-                json_object('v', 2, 'title', NEW.title, 'content', NEW.content,
+                json_object('v', "#,
+    payload_v_concepts!(),
+    r#", 'title', NEW.title, 'content', NEW.content,
                             'valid_from', NEW.valid_from, 'valid_to', NEW.valid_to,
                             'retired', NEW.retired,
-                            'embedding_model', NEW.embedding_model),
+                            'embedding_model', NEW.embedding_model,
+                            'extra', json(NEW.extra)),
                 NEW.recorded_at, NEW.branch_id);
     END;
-"#;
+"#
+);
 
 /// The links log, and the entry whose `entity_id` is composed rather than copied.
 ///
@@ -1624,7 +1739,8 @@ pub const CREATE_CONCEPTS_LOG_UPDATE: &str = r#"
 /// assertions about one edge stay two beliefs. Without it they collapse to
 /// whichever has the higher `seq_id` — no error, no drift report, just one
 /// lineage's belief gone.
-pub const CREATE_LINKS_LOG_INSERT: &str = r#"
+pub const CREATE_LINKS_LOG_INSERT: &str = concat!(
+    r#"
     CREATE TRIGGER IF NOT EXISTS trg_links_log_insert
     AFTER INSERT ON links
     BEGIN
@@ -1632,13 +1748,16 @@ pub const CREATE_LINKS_LOG_INSERT: &str = r#"
         VALUES ('links',
                 NEW.source_id || '|' || NEW.target_id || '|' || NEW.edge_type || '|' || NEW.valid_from,
                 'I',
-                json_object('v', 1, 'source_id', NEW.source_id, 'target_id', NEW.target_id,
+                json_object('v', "#,
+    payload_v_links!(),
+    r#", 'source_id', NEW.source_id, 'target_id', NEW.target_id,
                             'edge_type', NEW.edge_type, 'valid_from', NEW.valid_from,
                             'valid_to', NEW.valid_to, 'weight', NEW.weight,
                             'properties', json(NEW.properties)),
                 NEW.recorded_at, NEW.branch_id);
     END;
-"#;
+"#
+);
 
 /// The ledger's delete guard, named since v15 (0.14.15, [D-232]).
 ///
@@ -1797,6 +1916,41 @@ pub const CREATE_TRIGGERS: &[&str] = &[
 #[cfg(test)]
 mod tests {
     use crate::util::timestamp::{CANONICAL_TS_GLOB, OPEN_SENTINEL};
+
+    /// The number the triggers write and the number the folds accept are one
+    /// number, per shape (0.18.0, D-282a).
+    ///
+    /// Asserted against the *spliced* text rather than against the macro alone,
+    /// so this fails if a trigger is ever rewritten with the literal back in
+    /// place of the macro — which is how the two came to need holding together
+    /// in the first place.
+    #[test]
+    fn each_payload_marker_matches_its_shape_constant() {
+        assert_eq!(
+            payload_v_concepts!(),
+            super::PAYLOAD_VERSION_CONCEPTS.to_string()
+        );
+        assert_eq!(payload_v_links!(), super::PAYLOAD_VERSION_LINKS.to_string());
+
+        let concepts = format!("'v', {}", super::PAYLOAD_VERSION_CONCEPTS);
+        for trigger in [
+            super::CREATE_CONCEPTS_LOG_INSERT,
+            super::CREATE_CONCEPTS_LOG_UPDATE,
+        ] {
+            assert!(
+                trigger.contains(&concepts),
+                "a concept log trigger writes a version the fold does not expect:\n{trigger}"
+            );
+            assert!(
+                trigger.contains("'extra', json(NEW.extra)"),
+                "D-278: the payload omits `extra`, so the column is invisible to \
+                 reconstruct however faithfully the row carries it:\n{trigger}"
+            );
+        }
+
+        assert!(super::CREATE_LINKS_LOG_INSERT
+            .contains(&format!("'v', {}", super::PAYLOAD_VERSION_LINKS)));
+    }
 
     /// The DDL's CHECK pattern and the Rust-side pattern must be the same
     /// pattern. If they drift, one layer accepts what the other rejects and the

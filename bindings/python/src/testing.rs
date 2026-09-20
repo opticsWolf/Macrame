@@ -41,6 +41,8 @@ pub(crate) const DB_ERROR_VARIANTS: &[&str] = &[
     "Migration",
     "InvalidEdgeType",
     "InvalidKvKey",
+    "InvalidExtra",
+    "InvalidExtraPath",
     "SingleOpenViolation",
     "NotFound",
     "DimMismatch",
@@ -111,6 +113,11 @@ fn sample(name: &str) -> Option<DbError> {
         },
         "InvalidEdgeType" => DbError::InvalidEdgeType("bad-type".into()),
         "InvalidKvKey" => DbError::InvalidKvKey("bad key".into()),
+        "InvalidExtra" => DbError::InvalidExtra {
+            id: "c1".into(),
+            reason: "expected a JSON object, got an array".into(),
+        },
+        "InvalidExtraPath" => DbError::InvalidExtraPath("$.a[0]".into()),
         "SingleOpenViolation" => DbError::SingleOpenViolation {
             source_id: "src-1".into(),
             target_id: "tgt-1".into(),

@@ -24,6 +24,7 @@ const SNAP_MAGIC: [u8; 4] = *b"MACR";
 /// * **v2 (0.5.5)** adds the snapshot's own instant to the header (D-054).
 /// * **v3 (0.13.12)** adds both lengths and a checksum (W8.2, D-185).
 /// * **v4 (0.14.5)** labels each edge with the lineage holding it (D-221).
+/// * **v5 (0.18.0)** carries each concept's app-defined attributes (D-278).
 ///
 /// A v2 file meets a v3 build as [`DbError::SnapshotIncompatible`], which is
 /// the case this versioned container was built for: the scan skips it and
@@ -42,7 +43,22 @@ const SNAP_MAGIC: [u8; 4] = *b"MACR";
 /// well, and the two are not redundant: the default is what makes the *field*
 /// additive if the container is ever versioned some other way, and this
 /// constant is what makes the *file* refused today.
-const SNAP_FORMAT_VERSION: u16 = 4;
+///
+/// **v5 is v4's argument again, on a different field and to the letter**
+/// ([D-278], [D-282]). What moved is `MaterializedState::concepts`, which
+/// gained `NodeAttributes::extra`, and the consequence is the same: a v4
+/// payload read as v5 does not fail, it reads one concept's `id` as the
+/// previous one's `extra` and runs off the end of the buffer somewhere later.
+/// `extra` carries `#[serde(default)]` for D-221's reason and it is worth
+/// restating, because it reads as something stronger than it is: **the default
+/// cannot rescue a v4 file**, since serde pads no bytes into a short `bincode`
+/// buffer and the attribute is invisible to that decode. This constant does
+/// all of the protective work. The default buys that the field stays additive
+/// if the container is ever versioned some other way.
+///
+/// [D-278]: ../../docs/architecture/s13-decision-register.md#d-278
+/// [D-282]: ../../docs/architecture/s13-decision-register.md#d-282
+const SNAP_FORMAT_VERSION: u16 = 5;
 
 /// The v3 container header, little-endian throughout:
 ///
@@ -1019,6 +1035,7 @@ mod tests {
                     title: format!("concept number {i}"),
                     content: format!("{i} ").repeat(40),
                     embedding_model: None,
+                    extra: String::from("{}"),
                 },
             );
         }
@@ -1281,6 +1298,14 @@ mod tests {
                     title: format!("concept {i}"),
                     content: format!("some content for {i} ").repeat(3),
                     embedding_model: (i % 2 == 0).then(|| "model-a".to_string()),
+                    // Half carry attributes, so the container's v5 payload is
+                    // exercised by a fixture rather than only by a round-trip
+                    // of empties.
+                    extra: if i % 2 == 0 {
+                        format!(r#"{{"layer":{i}}}"#)
+                    } else {
+                        String::from("{}")
+                    },
                 },
             );
         }

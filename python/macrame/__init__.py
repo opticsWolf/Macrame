@@ -132,6 +132,8 @@ from ._macrame import (
     Interval,
     InvalidEdgeTypeError,
     InvalidKvKeyError,
+    InvalidExtraError,
+    InvalidExtraPathError,
     InvalidBranchIdError,
     InvalidIdError,
     InvalidModelNameError,
@@ -252,6 +254,8 @@ __all__ = [
     # validation
     "InvalidEdgeTypeError",
     "InvalidKvKeyError",
+    "InvalidExtraError",
+    "InvalidExtraPathError",
     "InvalidIdError",
     "InvalidTimestampError",
     "InvalidModelNameError",

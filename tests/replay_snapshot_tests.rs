@@ -349,9 +349,10 @@ async fn cleanup_skips_files_it_cannot_order() {
 
 /// The header length, in one place, so the tests below index it by name.
 ///
-/// Unchanged at container v4 (0.14.5, D-222), which is the point of that bump:
-/// the *payload* changed shape and the header did not, so the offsets below
-/// stay valid while every file written before it is refused.
+/// Unchanged at container v4 (0.14.5, D-222) and again at v5 (0.18.0, D-278),
+/// which is the point of both bumps: the *payload* changed shape and the header
+/// did not, so the offsets below stay valid while every file written before is
+/// refused.
 const HEADER_LEN: usize = 38;
 
 /// A snapshot written by this build must carry the header and round-trip.
@@ -365,10 +366,11 @@ async fn a_snapshot_carries_its_header_and_reloads() {
     assert_eq!(&raw[0..4], b"MACR", "missing magic: {:?}", &raw[0..4]);
     // v2 (D-054) added the snapshot's own instant; v3 (W8.2, D-185) added both
     // lengths and the checksum over them; v4 (D-222) changed the payload's edge
-    // shape and left the header alone. Restated here rather than read from the
-    // crate, deliberately — the constant is private and this is the assertion
-    // that a bump was intended rather than incidental.
-    assert_eq!(u16::from_le_bytes([raw[4], raw[5]]), 4, "format version");
+    // shape and left the header alone; v5 (0.18.0, D-278) did the same to the
+    // *concept* shape, which gained `extra`. Restated here rather than read
+    // from the crate, deliberately — the constant is private and this is the
+    // assertion that a bump was intended rather than incidental.
+    assert_eq!(u16::from_le_bytes([raw[4], raw[5]]), 5, "format version");
     assert_eq!(
         u32::from_le_bytes([raw[6], raw[7], raw[8], raw[9]]),
         macrame::schema::SCHEMA_VERSION,
@@ -555,6 +557,68 @@ async fn a_corrupt_snapshot_is_skipped_and_the_fold_still_answers() {
         3,
         "the fold from genesis must still find every concept"
     );
+}
+
+/// **Acceptance gate 4 (0.18.0, P1, D-278): a v4 snapshot meets a v5 build.**
+///
+/// Refused, and then *survived* — the two halves are one gate because either
+/// alone would be misleading. A build that refuses the file and then fails the
+/// read has converted a stale cache into an outage; a build that folds from the
+/// log without having refused the file never proved the header was consulted.
+///
+/// The reason this cannot be left to `bincode` is D-221's: the format is not
+/// self-describing, so a v4 payload decoded as v5 does not reliably fail. A
+/// `MaterializedState` whose `NodeAttributes` grew a field decodes from the old
+/// bytes into *some* value, and a snapshot is the first thing a restart reaches
+/// for. `#[serde(default)]` cannot rescue it either, for the same reason: there
+/// is no field name in the stream to be absent. The constant does every bit of
+/// the protective work here, which is why the bump is the change and the
+/// `default` is only for JSON.
+#[tokio::test]
+async fn a_v4_snapshot_is_refused_and_the_fold_runs_from_the_log() {
+    let harness = TestHarness::new();
+    let db = composed_db(&harness).await;
+    let snaps = harness.temp_dir.path().join("snaps");
+
+    let ts = max_recorded_at(&db).await;
+    let base = reconstruct(db.read_conn(), &ts, None, None).await.unwrap();
+    let path = save_snapshot(&snaps, &base).unwrap();
+
+    // Byte-identical payload, one changed header field: the only thing that can
+    // reject this file is the version check.
+    let mut raw = std::fs::read(&path).unwrap();
+    raw[4..6].copy_from_slice(&4u16.to_le_bytes());
+    std::fs::write(&path, &raw).unwrap();
+
+    match macrame::temporal::load_snapshot(&path).unwrap_err() {
+        DbError::SnapshotIncompatible { reason, .. } => {
+            assert!(
+                reason.contains("format v4"),
+                "the refusal should name the version it found: {reason}"
+            );
+        }
+        other => panic!("expected SnapshotIncompatible, got {other:?}"),
+    }
+
+    // And the ordinary upgrade path: the scan skips the file it cannot read and
+    // folds from the ledger, which is the authority and is untouched. A stale
+    // cache costs time and no information (Doctrine VI).
+    let state = reconstruct(db.read_conn(), &ts, None, Some(&snaps))
+        .await
+        .expect("a snapshot from an older format must not fail a read the log can answer");
+    assert_eq!(
+        state.concepts.len(),
+        3,
+        "the fold from genesis must still find every concept"
+    );
+    for id in ["A", "B", "C"] {
+        assert_eq!(
+            state.concepts.get(id).map(|c| c.extra.as_str()),
+            Some("{}"),
+            "the log fold should give every concept the empty object the column \
+             defaults to, not a missing or null value"
+        );
+    }
 }
 
 /// **The failure the header exists to prevent.**

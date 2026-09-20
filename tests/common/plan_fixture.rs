@@ -94,10 +94,32 @@ pub async fn populated_without_statistics(db_path: &std::path::Path) -> libsql::
 
     conn.execute("BEGIN", ()).await.unwrap();
     for i in 0..CONCEPTS {
+        // **`extra` is skewed, for the reason the module note gives about
+        // out-degree** (0.18.0, D-278b). `idx_concepts_extra_layer` is an
+        // expression index over `json_extract(extra, '$.layer')`, and a fixture
+        // leaving every row at the default `{}` would give it **one distinct
+        // key** — at which point `ANALYZE` is right to teach the planner to
+        // scan, and the gate pinning the index would assert a plan no caller
+        // with real attributes ever gets.
+        //
+        // Three layers over 260 rows, unevenly, because that is the shape an
+        // application's convention actually has: one layer holds most of the
+        // graph and the others are the interesting minority.
+        let layer = match i % 10 {
+            0..=6 => "note",
+            7 | 8 => "source",
+            _ => "scratch",
+        };
         conn.execute(
             "INSERT INTO concepts (id, title, content, valid_from, valid_to, \
-             recorded_at, retired) VALUES (?1, ?2, '', ?3, ?4, ?3, 0)",
-            libsql::params![format!("c{i:04}"), format!("C{i}"), TS, OPEN],
+             recorded_at, retired, extra) VALUES (?1, ?2, '', ?3, ?4, ?3, 0, ?5)",
+            libsql::params![
+                format!("c{i:04}"),
+                format!("C{i}"),
+                TS,
+                OPEN,
+                format!(r#"{{"layer":"{layer}"}}"#)
+            ],
         )
         .await
         .unwrap();

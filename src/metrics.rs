@@ -273,6 +273,14 @@ pub enum CommandKind {
     ///
     /// [D-280]: ../docs/architecture/s13-decision-register.md#d-280
     KvWrite,
+    /// `CREATE INDEX IF NOT EXISTS` over a JSON path in `concepts.extra`
+    /// (0.18.0, D-278b).
+    ///
+    /// Not exempt from `CHUNK_BUDGET`, and unlike most kinds here that is a
+    /// statement about a real cost: building an expression index over a large
+    /// `concepts` table reads every row. An app that calls this
+    /// unconditionally at startup pays it once, on the open after a restore.
+    RegisterExtraIndex,
 }
 
 impl CommandKind {
@@ -305,6 +313,7 @@ impl CommandKind {
         CommandKind::RebuildEmbeddingIndex,
         CommandKind::LinksCurrentMirror,
         CommandKind::KvWrite,
+        CommandKind::RegisterExtraIndex,
     ];
 
     pub const COUNT: usize = CommandKind::ALL.len();
@@ -361,6 +370,7 @@ impl CommandKind {
             CommandKind::RebuildEmbeddingIndex => "rebuild_embedding_index",
             CommandKind::LinksCurrentMirror => "links_current_mirror",
             CommandKind::KvWrite => "kv_write",
+            CommandKind::RegisterExtraIndex => "register_extra_index",
         }
     }
 

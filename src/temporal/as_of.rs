@@ -3,7 +3,7 @@ use std::collections::HashMap;
 
 use crate::error::{DbError, Result};
 use crate::graph::builder::AttributeMode;
-use crate::temporal::replay::PAYLOAD_VERSION;
+use crate::schema::ddl::PAYLOAD_VERSION_CONCEPTS;
 
 /// The instant pair a temporal read is taken at (0.13.2, W7.1, D-174).
 ///
@@ -61,6 +61,35 @@ pub struct NodeAttributes {
     pub title: String,
     pub content: String,
     pub embedding_model: Option<String>,
+    /// App-defined attributes as a JSON object, `{}` when none (0.18.0,
+    /// [D-278]).
+    ///
+    /// `#[serde(default)]` because this type is what the snapshot container
+    /// holds, and a field added to a `bincode` payload is additive only if the
+    /// decoder can supply it. **The default does not rescue a v4 snapshot** —
+    /// `bincode` is not self-describing, so a short buffer is a decode error
+    /// or a misparse, not a missing field, and `SNAP_FORMAT_VERSION` is what
+    /// refuses that file ([D-282]). What the attribute buys is that the
+    /// *field* stays additive if the container is ever versioned some other
+    /// way, which is exactly how [D-221] put it for `EdgeBelief::branch_id`.
+    ///
+    /// Never SQL NULL and never JSON `null`: the column is `NOT NULL DEFAULT
+    /// '{}'`, so the empty object is the bottom of the range.
+    ///
+    /// [D-221]: ../../docs/architecture/s13-decision-register.md#d-221
+    /// [D-278]: ../../docs/architecture/s13-decision-register.md#d-278
+    /// [D-282]: ../../docs/architecture/s13-decision-register.md#d-282
+    #[serde(default = "empty_extra")]
+    pub extra: String,
+}
+
+/// `{}` — the value of an unstated [`NodeAttributes::extra`].
+///
+/// A function because `#[serde(default)]` takes one, and named rather than
+/// inline so the empty object has one spelling here, in the DDL default, and
+/// in the builder.
+fn empty_extra() -> String {
+    "{}".to_string()
 }
 
 impl NodeAttributes {
@@ -86,7 +115,20 @@ impl NodeAttributes {
             title: title.into(),
             content: content.into(),
             embedding_model: None,
+            extra: empty_extra(),
         }
+    }
+
+    /// App-defined attributes for this node — the [`extra`](Self::extra) field.
+    ///
+    /// A setter rather than a `new` parameter, on the crate's usual split: what
+    /// a value cannot be without goes in `new`, and what it can goes here.
+    /// Callers fabricate these into a `MaterializedState` bound for
+    /// `save_snapshot` or as the expected value of an assertion, and both
+    /// usually want `{}`.
+    pub fn extra(mut self, extra: impl Into<String>) -> Self {
+        self.extra = extra.into();
+        self
     }
 
     /// Record which model embedded this node — the
@@ -308,7 +350,7 @@ async fn hydrate_current(
             None => (1, ""),
         };
         let sql = format!(
-            "SELECT id, title, content, embedding_model FROM concepts \
+            "SELECT id, title, content, embedding_model, extra FROM concepts \
              WHERE retired = 0{valid_filter} AND id IN ({})",
             placeholders(first, chunk.len())
         );
@@ -328,6 +370,10 @@ async fn hydrate_current(
                     title: row.get(1)?,
                     content: row.get(2)?,
                     embedding_model: row.get(3).ok(),
+                    // Read from the column rather than defaulted: this is the
+                    // live read, and `NOT NULL DEFAULT '{}'` means the column
+                    // always has a value to give.
+                    extra: row.get(4)?,
                 },
             );
         }
@@ -434,11 +480,15 @@ async fn hydrate_at_time(
                     reason: format!("Failed to parse payload JSON: {e}"),
                 })?;
 
+            // The ceiling is the **concepts** ceiling, not a global one
+            // (0.18.0, D-282a). No dispatch is needed here the way `replay`
+            // needs one: this query carries `WHERE table_name = 'concepts'`,
+            // so every row it sees is already of one shape.
             let v = payload.get("v").and_then(|v| v.as_u64()).unwrap_or(1);
-            if v > PAYLOAD_VERSION as u64 {
+            if v > PAYLOAD_VERSION_CONCEPTS as u64 {
                 return Err(DbError::PayloadVersion {
                     got: v as u8,
-                    max: PAYLOAD_VERSION,
+                    max: PAYLOAD_VERSION_CONCEPTS,
                 });
             }
 
@@ -487,6 +537,16 @@ async fn hydrate_at_time(
                         .get("embedding_model")
                         .and_then(|s| s.as_str())
                         .map(|s| s.to_string()),
+                    // Absent below v3, and absent means `{}` rather than an
+                    // error: the entry was minted before the column existed,
+                    // so there is nothing it could be hiding. The payload
+                    // carries a JSON *object*, not a string, because the
+                    // trigger writes `json(NEW.extra)` — so it is re-rendered
+                    // here rather than read as `as_str`.
+                    extra: payload
+                        .get("extra")
+                        .map(|e| e.to_string())
+                        .unwrap_or_else(empty_extra),
                 },
             );
         }

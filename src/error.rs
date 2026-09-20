@@ -183,6 +183,29 @@ pub enum DbError {
     )]
     InvalidKvKey(String),
 
+    /// A `concepts.extra` value that is not a JSON object, or is over the cap
+    /// (0.18.0, [D-278]).
+    ///
+    /// The column is opaque to this crate apart from the expression indexes
+    /// built over it, so the rule is the narrowest one those indexes need: a
+    /// JSON **object**, because `json_extract(extra, '$.layer')` on an array or
+    /// a bare scalar is a path that cannot match, and a caller who passes one
+    /// has made a mistake the index would answer with silence.
+    ///
+    /// [D-278]: ../docs/architecture/s13-decision-register.md#d-278
+    #[error("invalid extra for concept {id}: {reason}")]
+    InvalidExtra { id: String, reason: String },
+
+    /// A JSON path that `register_extra_index` will not build an index over
+    /// (0.18.0, [D-278b]).
+    ///
+    /// [D-278b]: ../docs/architecture/s13-decision-register.md#d-278b
+    #[error(
+        "invalid extra index path {0} (must be `$.name` or `$.a.b`, with each \
+         segment matching [A-Za-z0-9_]+)"
+    )]
+    InvalidExtraPath(String),
+
     // NOTE: the spec (§7) names these fields `source` / `target`. `source` is a
     // reserved field name for thiserror (it is inferred as the error source and
     // requires `std::error::Error`), so the schema column names are used instead.
@@ -907,6 +930,8 @@ impl DbError {
             | Self::HalfLifeWithoutInstant
             | Self::InvalidBranchId { .. }
             | Self::InvalidEdgeType { .. }
+            | Self::InvalidExtra { .. }
+            | Self::InvalidExtraPath { .. }
             | Self::InvalidId { .. }
             | Self::InvalidKvKey { .. }
             | Self::InvalidModelName { .. }

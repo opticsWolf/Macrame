@@ -162,6 +162,7 @@ fn every_public_database_method_appears_in_appendix_a() {
         ("valid_from", "builder setter"),
         ("valid_to", "builder setter"),
         ("retired", "`ConceptUpsert` builder setter"),
+        ("extra", "`ConceptUpsert` builder setter"),
         ("normalized", "builder finaliser, described in prose"),
         ("chunk_rows", "module, not a method"),
     ];

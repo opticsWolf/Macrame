@@ -139,6 +139,7 @@ async fn refuses_a_pre_canonical_v1_database() {
     let harness = TestHarness::new();
     let conn = connect(&harness).await;
     macrame::schema::run_migrations(&conn).await.unwrap();
+    v11_schema::wind_back_to_v20(&conn).await;
     conn.execute("PRAGMA user_version = 1", ()).await.unwrap();
 
     let reason = refusal_reason(macrame::schema::run_migrations(&conn).await.unwrap_err());
@@ -287,6 +288,7 @@ async fn a_v2_database_climbs_to_v3_and_gains_the_annotations_table() {
     for trigger_ddl in v11_schema::triggers_v11() {
         conn.execute(trigger_ddl, ()).await.unwrap();
     }
+    v11_schema::wind_back_to_v20(&conn).await;
     conn.execute("PRAGMA user_version = 2", ()).await.unwrap();
 
     macrame::schema::run_migrations(&conn).await.unwrap();
@@ -333,6 +335,7 @@ async fn a_v5_database_climbs_to_v6_and_gains_the_open_interval_index() {
     conn.execute("DROP INDEX idx_lc_open_interval", ())
         .await
         .unwrap();
+    v11_schema::wind_back_to_v20(&conn).await;
     conn.execute("PRAGMA user_version = 5", ()).await.unwrap();
 
     macrame::schema::run_migrations(&conn).await.unwrap();
@@ -380,6 +383,7 @@ async fn a_v10_database_climbs_to_v11_and_the_archive_read_stops_scanning_links(
     conn.execute("DROP INDEX idx_links_target", ())
         .await
         .unwrap();
+    v11_schema::wind_back_to_v20(&conn).await;
     conn.execute("PRAGMA user_version = 10", ()).await.unwrap();
 
     // The archiving SELECT, reproduced from `LINKS_ARCHIVABLE`. Bounded against
@@ -446,7 +450,7 @@ async fn plan_string(conn: &libsql::Connection, sql: &str) -> String {
 #[test]
 fn a_version_bump_must_bring_its_own_rung_test() {
     assert_eq!(
-        SCHEMA_VERSION, 20,
+        SCHEMA_VERSION, 21,
         "SCHEMA_VERSION moved. Add a test for the new rung — one that starts \
          from a database at the previous version and asserts what the rung is \
          *for*, not merely that `run` reached the top."
@@ -519,6 +523,7 @@ async fn a_v12_database_climbs_to_v13_and_its_branches_guard_learns_the_marker()
         .await
         .unwrap();
     conn.execute(V12_BRANCHES_GUARD_DELETE, ()).await.unwrap();
+    v11_schema::wind_back_to_v20(&conn).await;
     conn.execute("PRAGMA user_version = 12", ()).await.unwrap();
 
     register_branch(&conn, "before").await;
@@ -617,6 +622,7 @@ async fn a_v6_database_climbs_to_v7_and_gains_the_weight_check() {
     for trigger_ddl in v11_schema::triggers_v11() {
         conn.execute(trigger_ddl, ()).await.unwrap();
     }
+    v11_schema::wind_back_to_v20(&conn).await;
     conn.execute("PRAGMA user_version = 6", ()).await.unwrap();
 
     for id in ["c0", "c1"] {
@@ -922,6 +928,7 @@ async fn a_negative_weight_already_stored_blocks_the_v7_rung_with_an_explanation
     ] {
         conn.execute(stmt, ()).await.unwrap();
     }
+    v11_schema::wind_back_to_v20(&conn).await;
     conn.execute("PRAGMA user_version = 6", ()).await.unwrap();
 
     for id in ["c0", "c1"] {
@@ -1324,6 +1331,7 @@ async fn a_v13_database_climbs_to_v14_and_the_lineage_read_stops_building_its_ow
     conn.execute("DROP INDEX idx_lc_lineage_cut", ())
         .await
         .unwrap();
+    v11_schema::wind_back_to_v20(&conn).await;
     conn.execute("PRAGMA user_version = 13", ()).await.unwrap();
 
     let before = plan_string(&conn, &branched).await;
@@ -1375,6 +1383,7 @@ async fn a_v14_stamp_over_a_v13_index_set_is_refused_at_open() {
     conn.execute("DROP INDEX idx_lc_lineage_cut", ())
         .await
         .unwrap();
+    v11_schema::wind_back_to_v20(&conn).await;
     conn.execute("PRAGMA user_version = 14", ()).await.unwrap();
 
     let err = macrame::schema::run_migrations(&conn)
@@ -1513,6 +1522,7 @@ async fn a_v14_database_climbs_to_v15_and_two_lineages_may_assert_one_edge_at_on
     .unwrap();
 
     wind_links_back_to_v14(&conn).await;
+    v11_schema::wind_back_to_v20(&conn).await;
     conn.execute("PRAGMA user_version = 14", ()).await.unwrap();
 
     let insert = |branch: &'static str| {
@@ -1620,6 +1630,7 @@ async fn a_v15_stamp_over_a_v14_links_key_is_refused_at_open() {
     macrame::schema::run_migrations(&conn).await.unwrap();
 
     wind_links_back_to_v14(&conn).await;
+    v11_schema::wind_back_to_v20(&conn).await;
     conn.execute("PRAGMA user_version = 15", ()).await.unwrap();
 
     let err = macrame::schema::run_migrations(&conn)
@@ -1654,12 +1665,14 @@ const V15_INTACT: &str = "SELECT CASE \
 /// is what a v15 database is — unlike the wind-backs below it, which have to
 /// rebuild a table to undo a key.
 async fn wind_back_to_v15(conn: &libsql::Connection) {
+    v11_schema::wind_back_to_v20(conn).await;
     conn.execute("DROP TRIGGER IF EXISTS trg_txlog_mark_gap", ())
         .await
         .unwrap();
     conn.execute("DROP TABLE IF EXISTS log_integrity", ())
         .await
         .unwrap();
+    v11_schema::wind_back_to_v20(conn).await;
     conn.execute("PRAGMA user_version = 15", ()).await.unwrap();
 }
 
@@ -1881,6 +1894,7 @@ async fn downgrade_guard_to_v8(conn: &libsql::Connection) {
         .await
         .unwrap();
     conn.execute(CONCEPTS_GUARD_V8, ()).await.unwrap();
+    v11_schema::wind_back_to_v20(conn).await;
     conn.execute("PRAGMA user_version = 8", ()).await.unwrap();
 }
 
@@ -1994,6 +2008,7 @@ async fn a_v7_database_climbs_all_the_way_to_the_top_with_a_working_guard() {
     let harness = TestHarness::new();
     let conn = connect(&harness).await;
     seeded_v7(&conn, &["c1", "c2"]).await;
+    v11_schema::wind_back_to_v20(&conn).await;
     conn.execute("PRAGMA user_version = 7", ()).await.unwrap();
 
     macrame::schema::run_migrations(&conn).await.unwrap();
@@ -2082,6 +2097,8 @@ async fn a_v9_database_climbs_to_v10_and_the_insert_log_becomes_marker_gated() {
     conn.execute(CONCEPTS_LOG_INSERT_V9_FIXTURE, ())
         .await
         .unwrap();
+    // No `wind_back_to_v20` here: `wind_back_to_v11` above has already run it,
+    // and running it again would drop the v9 trigger this fixture just laid.
     conn.execute("PRAGMA user_version = 9", ()).await.unwrap();
 
     assert!(
@@ -2212,6 +2229,7 @@ async fn a_v16_database_climbs_to_v17_and_the_log_fold_stops_sorting() {
     conn.execute("DROP INDEX idx_txlog_fold_partition", ())
         .await
         .unwrap();
+    v11_schema::wind_back_to_v20(&conn).await;
     conn.execute("PRAGMA user_version = 16", ()).await.unwrap();
 
     let before = plan_string(&conn, FOLD).await;
@@ -2308,8 +2326,7 @@ async fn a_v17_database_climbs_to_v18_and_the_branch_archive_stops_scanning_the_
     // `archive_branch_session` and `EXPLAIN QUERY PLAN` cannot reach them.
     // `index_plan_tests` bounds the same copies against their source with
     // `include_str!` fragments, so a divergence is caught there.
-    const LINEAGE_LINKS: &str =
-        "DELETE FROM links WHERE branch_id = ?1 AND branch_id <> 'main'";
+    const LINEAGE_LINKS: &str = "DELETE FROM links WHERE branch_id = ?1 AND branch_id <> 'main'";
     const LINEAGE_LOG: &str =
         "DELETE FROM transaction_log WHERE branch_id = ?1 AND branch_id <> 'main'";
 
@@ -2318,8 +2335,11 @@ async fn a_v17_database_climbs_to_v18_and_the_branch_archive_stops_scanning_the_
     macrame::schema::run_migrations(&conn).await.unwrap();
 
     for index in ["idx_links_branch", "idx_txlog_branch"] {
-        conn.execute(&format!("DROP INDEX {index}"), ()).await.unwrap();
+        conn.execute(&format!("DROP INDEX {index}"), ())
+            .await
+            .unwrap();
     }
+    v11_schema::wind_back_to_v20(&conn).await;
     conn.execute("PRAGMA user_version = 17", ()).await.unwrap();
 
     for (label, sql) in [("links", LINEAGE_LINKS), ("the log", LINEAGE_LOG)] {
@@ -2421,8 +2441,11 @@ async fn a_v18_database_climbs_to_v19_and_the_single_open_probe_stops_scanning_t
     macrame::schema::run_migrations(&conn).await.unwrap();
 
     // Downgrade to v18 honestly: the pre-`+` body, the v18 stamp.
-    conn.execute("DROP TRIGGER trg_links_single_open", ()).await.unwrap();
+    conn.execute("DROP TRIGGER trg_links_single_open", ())
+        .await
+        .unwrap();
     conn.execute(SINGLE_OPEN_V18, ()).await.unwrap();
+    v11_schema::wind_back_to_v20(&conn).await;
     conn.execute("PRAGMA user_version = 18", ()).await.unwrap();
 
     // Rows first — the plan is only wrong where the index has rows — then
@@ -2480,7 +2503,13 @@ async fn a_v18_database_climbs_to_v19_and_the_single_open_probe_stops_scanning_t
         )
         .await
         .unwrap();
-    let body = rows.next().await.unwrap().unwrap().get::<String>(0).unwrap();
+    let body = rows
+        .next()
+        .await
+        .unwrap()
+        .unwrap()
+        .get::<String>(0)
+        .unwrap();
     assert!(
         body.contains("+branch_id = NEW.branch_id"),
         "the climbed database does not carry the pinned body: {body}"
@@ -2517,7 +2546,9 @@ async fn a_v18_stamp_over_a_v17_index_set_is_refused_at_open() {
     let conn = connect(&harness).await;
     macrame::schema::run_migrations(&conn).await.unwrap();
 
-    conn.execute("DROP INDEX idx_txlog_branch", ()).await.unwrap();
+    conn.execute("DROP INDEX idx_txlog_branch", ())
+        .await
+        .unwrap();
 
     let err = macrame::schema::run_migrations(&conn)
         .await
@@ -2539,9 +2570,11 @@ async fn a_v18_stamp_over_a_v17_index_set_is_refused_at_open() {
 /// v19 database is — the v15 wind-back's situation rather than the ones below
 /// it that have to rebuild a table to undo a key.
 async fn wind_back_to_v19(conn: &libsql::Connection) {
+    v11_schema::wind_back_to_v20(conn).await;
     conn.execute("DROP TABLE IF EXISTS kv_store", ())
         .await
         .unwrap();
+    v11_schema::wind_back_to_v20(conn).await;
     conn.execute("PRAGMA user_version = 19", ()).await.unwrap();
 }
 
@@ -2653,5 +2686,328 @@ async fn a_v19_database_climbs_to_v20_and_the_kv_table_arrives_outside_the_ledge
         0,
         "kv_store gained a branch_id. Branch-global is the semantic (D-280): \
          one cursor, one epoch, one counter across every lineage."
+    );
+}
+
+/// Wind a v21 database back to v20. See [`v11_schema::wind_back_to_v20`], which
+/// is where the three statements and their order are argued; this is the stamp.
+async fn wind_back_to_v20(conn: &libsql::Connection) {
+    v11_schema::wind_back_to_v20(conn).await;
+    // The v20 bodies go back, because a v20 database logs concepts and this
+    // fixture has to be able to. Without them the climb starts from a database
+    // with no concept log at all, which is not v20 and would make the rung's
+    // "the payload moved" assertion vacuous.
+    conn.execute(CONCEPTS_LOG_INSERT_V20_FIXTURE, ())
+        .await
+        .unwrap();
+    conn.execute(CONCEPTS_LOG_UPDATE_V20_FIXTURE, ())
+        .await
+        .unwrap();
+    conn.execute("PRAGMA user_version = 20", ()).await.unwrap();
+}
+
+/// **Acceptance gate 5 (0.18.0, P1, [D-282]): a stale trigger body fails
+/// `verify`, and the message names the trigger.**
+///
+/// The gap this closes is exact, and it is not hypothetical — it is D-129's
+/// defect on a trigger D-129's fix does not cover. `verify` checks presence by
+/// name, and reads *bodies* only for the three delete guards. A concept log
+/// trigger with the right name and a v2 body is therefore invisible to every
+/// check above: present, named, and writing a payload that omits `extra` on
+/// every concept write. The fold would then reconstruct a state the `concepts`
+/// table plainly contradicts, with no error and no drift report, which is the
+/// worst available failure shape — silent, and about the past.
+///
+/// The fixture leaves `user_version` at the current version deliberately. A
+/// stale body under an *old* stamp is just a database that has not climbed yet
+/// and the ladder fixes it; the case worth catching is the one that claims to
+/// be current, because nothing else will look again.
+///
+/// The probe is the version marker and not the whole body, for [D-126]'s
+/// reason: a full-text comparison fails on whitespace and becomes the kind of
+/// check people disable.
+///
+/// [D-126]: ../docs/architecture/s13-decision-register.md#d-126
+/// [D-282]: ../docs/architecture/s13-decision-register.md#d-282
+#[tokio::test]
+async fn a_stale_concept_log_trigger_fails_verification_by_name() {
+    let harness = TestHarness::new();
+    let conn = connect(&harness).await;
+    macrame::schema::run_migrations(&conn).await.unwrap();
+
+    conn.execute("DROP TRIGGER trg_concepts_log_insert", ())
+        .await
+        .unwrap();
+    conn.execute(CONCEPTS_LOG_INSERT_V20_FIXTURE, ())
+        .await
+        .unwrap();
+
+    // Precondition, asserted rather than assumed: the database still says it is
+    // current, so nothing but the body check can refuse it.
+    assert_eq!(user_version(&conn).await, SCHEMA_VERSION);
+
+    let err = macrame::schema::run_migrations(&conn)
+        .await
+        .expect_err("a v2 body under a current stamp must not verify");
+
+    match err {
+        DbError::Migration { to, reason } => {
+            assert_eq!(to, SCHEMA_VERSION);
+            assert!(
+                reason.contains("trg_concepts_log_insert"),
+                "the refusal has to name the trigger -- a count tells you a \
+                 number and a name tells you where to look: {reason}"
+            );
+            assert!(
+                reason.contains("'v', 3"),
+                "and what it should have been: {reason}"
+            );
+            // The two triggers that are fine must not be dragged in with it.
+            assert!(
+                !reason.contains("trg_concepts_log_update"),
+                "the update trigger is current and should not be named: {reason}"
+            );
+            assert!(
+                !reason.contains("trg_links_log_insert"),
+                "the links trigger is current and should not be named: {reason}"
+            );
+        }
+        other => panic!("expected Migration, got {other:?}"),
+    }
+}
+
+/// The links half of the same probe, which is a no-op today and is here so the
+/// check is complete rather than coincidentally sufficient.
+///
+/// Links are still at payload v1 and nothing in 0.18 moves them. The assertion
+/// is that the probe *would* fire — so that when links eventually versions, the
+/// rung that moves it finds this already asserting the property rather than
+/// discovering afterwards that the check only ever covered concepts.
+#[tokio::test]
+async fn a_stale_links_log_trigger_fails_verification_too() {
+    let harness = TestHarness::new();
+    let conn = connect(&harness).await;
+    macrame::schema::run_migrations(&conn).await.unwrap();
+
+    let body: String = conn
+        .query(
+            "SELECT sql FROM sqlite_master WHERE type = 'trigger' \
+             AND name = 'trg_links_log_insert'",
+            (),
+        )
+        .await
+        .unwrap()
+        .next()
+        .await
+        .unwrap()
+        .expect("the links log trigger should exist")
+        .get(0)
+        .unwrap();
+    assert!(
+        body.contains("'v', 1"),
+        "the fixture assumes links are at payload v1: {body}"
+    );
+
+    conn.execute("DROP TRIGGER trg_links_log_insert", ())
+        .await
+        .unwrap();
+    conn.execute(&body.replace("'v', 1", "'v', 9"), ())
+        .await
+        .unwrap();
+
+    match macrame::schema::run_migrations(&conn).await {
+        Err(DbError::Migration { reason, .. }) => {
+            assert!(
+                reason.contains("trg_links_log_insert"),
+                "the links probe did not name the trigger: {reason}"
+            );
+        }
+        other => panic!("expected Migration naming the links trigger, got {other:?}"),
+    }
+}
+
+/// `trg_concepts_log_insert` as v20 had it: payload v2, no `extra`.
+const CONCEPTS_LOG_INSERT_V20_FIXTURE: &str = "
+    CREATE TRIGGER trg_concepts_log_insert
+    AFTER INSERT ON concepts
+    WHEN NOT EXISTS (
+        SELECT 1 FROM sqlite_master
+        WHERE type = 'table' AND name = 'macrame_archive_session'
+    )
+    BEGIN
+        INSERT INTO transaction_log (table_name, entity_id, operation, payload, recorded_at, branch_id)
+        VALUES ('concepts', NEW.id, 'I',
+                json_object('v', 2, 'title', NEW.title, 'content', NEW.content,
+                            'valid_from', NEW.valid_from, 'valid_to', NEW.valid_to,
+                            'retired', NEW.retired,
+                            'embedding_model', NEW.embedding_model),
+                NEW.recorded_at, NEW.branch_id);
+    END;
+";
+
+/// `trg_concepts_log_update` as v20 had it. See the insert half above.
+const CONCEPTS_LOG_UPDATE_V20_FIXTURE: &str = "
+    CREATE TRIGGER trg_concepts_log_update
+    AFTER UPDATE ON concepts
+    BEGIN
+        INSERT INTO transaction_log (table_name, entity_id, operation, payload, recorded_at, branch_id)
+        VALUES ('concepts', NEW.id, 'U',
+                json_object('v', 2, 'title', NEW.title, 'content', NEW.content,
+                            'valid_from', NEW.valid_from, 'valid_to', NEW.valid_to,
+                            'retired', NEW.retired,
+                            'embedding_model', NEW.embedding_model),
+                NEW.recorded_at, NEW.branch_id);
+    END;
+";
+
+/// **v20 → v21: `concepts.extra`, and the payload that has to carry it.**
+///
+/// The `ALTER TABLE` is the cheap half. What the item is *for* is that the
+/// column reaches the **log**, and the proposal that produced it assumed the
+/// opposite — that riding the concept row meant history covered it with no
+/// trigger work. That is false for the reason Wave 1 already established: the
+/// triggers emit an explicit `json_object`, not `SELECT *`, so a column absent
+/// from that list is invisible to `reconstruct` and to every `AtTime` read
+/// while sitting plainly on disk.
+///
+/// Five assertions, in the order they would break:
+///
+/// 1. **The column is there, and every row that predates it reads `{}`.** Not
+///    an assumption — no application could have set an attribute a version ago,
+///    so empty is the only truth available.
+/// 2. **Both log triggers were *replaced*, not re-issued.** `CREATE TRIGGER IF
+///    NOT EXISTS` on an existing name keeps the old body (D-126, D-129), so a
+///    rung that re-runs the baseline leaves a v2 trigger on a v21 table and
+///    passes every other check here. This is the assertion the rung exists for.
+/// 3. **A concept written after the rung logs its `extra`,** at v3, and the
+///    fold reads it back. The behaviour, not the DDL text.
+/// 4. **A concept written *before* the rung still folds,** with `extra` absent
+///    rather than an error: a v2 payload is a payload from before the column,
+///    and refusing it would make the rung a rewrite of the past.
+/// 5. **The expression index is there.** `verify` requires every index the DDL
+///    declares, so a v21 database without it does not open — and it is the
+///    schema's first expression index, so its absence is the likely failure
+///    rather than the surprising one.
+#[tokio::test]
+async fn a_v20_database_climbs_to_v21_and_the_concept_payload_carries_extra() {
+    let harness = TestHarness::new();
+    let conn = connect(&harness).await;
+    macrame::schema::run_migrations(&conn).await.unwrap();
+
+    wind_back_to_v20(&conn).await;
+    assert_eq!(
+        scalar(
+            &conn,
+            "SELECT COUNT(*) FROM pragma_table_info('concepts') WHERE name = 'extra'",
+        )
+        .await,
+        0,
+        "the fixture is not starting from a v20 database"
+    );
+
+    // One concept minted at v20, so the rung has a row to widen and the fold
+    // has a v2 payload to read afterwards.
+    conn.execute(
+        "INSERT INTO concepts (id, title, content, valid_from, valid_to, recorded_at) \
+         VALUES ('before', 'Before', '', ?1, ?2, ?1)",
+        libsql::params![TS, OPEN],
+    )
+    .await
+    .unwrap();
+
+    macrame::schema::run_migrations(&conn).await.unwrap();
+    assert_eq!(user_version(&conn).await, SCHEMA_VERSION);
+
+    // 1. The column, and what it holds for a row that predates it.
+    assert_eq!(
+        scalar(
+            &conn,
+            "SELECT COUNT(*) FROM concepts WHERE id = 'before' AND extra = '{}'",
+        )
+        .await,
+        1,
+        "a row that predates the column must read as the empty object"
+    );
+
+    // 2. Replaced, not re-issued. The failure this catches is silent: a
+    // trigger with the right name and a v2 body logs a row it does not fully
+    // describe, and nothing else in this file would notice.
+    for trigger in ["trg_concepts_log_insert", "trg_concepts_log_update"] {
+        let sql: String = conn
+            .query(
+                "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?1",
+                libsql::params![trigger],
+            )
+            .await
+            .unwrap()
+            .next()
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("{trigger} is missing after the rung"))
+            .get(0)
+            .unwrap();
+        assert!(
+            sql.contains("'v', 3") && sql.contains("NEW.extra"),
+            "{trigger} still carries a pre-v21 body. `CREATE TRIGGER IF NOT \
+             EXISTS` keeps the old body, so the rung must DROP first (D-126, \
+             D-129):\n{sql}"
+        );
+    }
+
+    // 3. The behaviour: a write after the rung reaches the log and folds back.
+    conn.execute(
+        "INSERT INTO concepts (id, title, content, valid_from, valid_to, recorded_at, extra) \
+         VALUES ('after', 'After', '', ?1, ?2, ?1, '{\"layer\":\"note\"}')",
+        libsql::params![TS, OPEN],
+    )
+    .await
+    .unwrap();
+
+    let payload: String = conn
+        .query(
+            "SELECT payload FROM transaction_log WHERE entity_id = 'after'",
+            (),
+        )
+        .await
+        .unwrap()
+        .next()
+        .await
+        .unwrap()
+        .expect("the write minted no log entry")
+        .get(0)
+        .unwrap();
+    assert!(
+        payload.contains("\"layer\":\"note\"") && payload.contains("\"v\":3"),
+        "the payload does not carry `extra` at v3: {payload}"
+    );
+
+    let state = macrame::temporal::reconstruct(&conn, OPEN, None, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        state.concepts.get("after").map(|c| c.extra.as_str()),
+        Some(r#"{"layer":"note"}"#),
+        "the fold did not read `extra` back"
+    );
+
+    // 4. And the v2 entry still folds, with `extra` absent rather than fatal.
+    assert_eq!(
+        state.concepts.get("before").map(|c| c.extra.as_str()),
+        Some("{}"),
+        "a v2 payload must fold with `extra` empty — it is an entry from before \
+         the column, not a corrupt one"
+    );
+
+    // 5. The schema's first expression index.
+    assert_eq!(
+        scalar(
+            &conn,
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' \
+             AND name = 'idx_concepts_extra_layer'",
+        )
+        .await,
+        1,
+        "the rung did not create the expression index, so `verify` would \
+         refuse the database it just stamped"
     );
 }

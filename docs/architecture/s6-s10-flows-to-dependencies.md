@@ -77,6 +77,15 @@ pub enum DbError {
     )]
     InvalidKvKey(String),
 
+    #[error("invalid extra for concept {id}: {reason}")]
+    InvalidExtra { id: String, reason: String },
+
+    #[error(
+        "invalid extra index path {0} (must be `$.name` or `$.a.b`, with each \
+         segment matching [A-Za-z0-9_]+)"
+    )]
+    InvalidExtraPath(String),
+
     // NOTE: the spec (§7) names these fields `source` / `target`. `source` is a
     // reserved field name for thiserror (it is inferred as the error source and
     // requires `std::error::Error`), so the schema column names are used instead.

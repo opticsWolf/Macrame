@@ -285,6 +285,11 @@ pub fn tables_v11() -> Vec<String> {
 /// The exclusion is by name and not by position, so a v15 index appended after
 /// this one does not silently rejoin the v11 set.
 ///
+/// **`idx_concepts_extra_layer` is the third case and the first over a column
+/// rather than beside one** (0.18.0, D-278). It is an *expression* index over
+/// `concepts.extra`, which arrives at v21, and the fixture fails identically —
+/// `no such column: extra`, in the fixture, before the rung under test runs.
+///
 /// **`idx_txlog_fold_partition` is the second exclusion and it is the same
 /// case, one table over.** It is declared over `transaction_log.branch_id`, and
 /// that column also arrives at v12 — `wind_back_to_v11` drops it by name a few
@@ -300,6 +305,7 @@ pub fn indices_v11() -> Vec<&'static str> {
                 && !sql.contains("idx_txlog_fold_partition")
                 && !sql.contains("idx_links_branch")
                 && !sql.contains("idx_txlog_branch")
+                && !sql.contains("idx_concepts_extra_layer")
         })
         .collect()
 }
@@ -340,7 +346,53 @@ pub async fn v11_schema(conn: &libsql::Connection) {
 /// `branch_id`, and the live `trg_links_current_sync` then fails with
 /// `no such column: NEW.branch_id`. A rung is a statement about a shape, so the
 /// shape has to be there.
+/// Undo v21 on a database built from today's baseline (0.18.0, D-278).
+///
+/// **Every fixture below v21 needs this, which is why it is here and not in
+/// each of them.** A wind-back builds today's schema and takes away what the
+/// rung under test is supposed to add — so a `concepts` still carrying `extra`
+/// meets `add_concepts_extra` and dies with `duplicate column name`, in the
+/// ladder rather than in the fixture, on a rung the test never mentions.
+///
+/// Three statements and the order is forced. The expression index names the
+/// column, so SQLite refuses the `DROP COLUMN` while it exists — the same
+/// refusal `idx_txlog_fold_partition` produces below, one release later. The
+/// two log triggers name `NEW.extra`, and although SQLite tolerates that until
+/// something fires them, it re-parses every trigger during an `ALTER TABLE …
+/// RENAME` and refuses that instead: a failure several rungs above the cause.
+///
+/// Idempotent, so a caller that winds back through more than one of the
+/// helpers here is not the caller's problem.
+pub async fn wind_back_to_v20(conn: &libsql::Connection) {
+    conn.execute("DROP INDEX IF EXISTS idx_concepts_extra_layer", ())
+        .await
+        .unwrap();
+    for trigger in ["trg_concepts_log_insert", "trg_concepts_log_update"] {
+        conn.execute(&format!("DROP TRIGGER IF EXISTS {trigger}"), ())
+            .await
+            .unwrap();
+    }
+
+    let mut rows = conn.query("PRAGMA table_info(concepts)", ()).await.unwrap();
+    let mut has_extra = false;
+    while let Some(row) = rows.next().await.unwrap() {
+        if row.get::<String>(1).is_ok_and(|name| name == "extra") {
+            has_extra = true;
+        }
+    }
+    if has_extra {
+        conn.execute("ALTER TABLE concepts DROP COLUMN extra", ())
+            .await
+            .unwrap_or_else(|e| panic!("DROP COLUMN extra: {e}"));
+    }
+}
+
 pub async fn wind_back_to_v11(conn: &libsql::Connection) {
+    // v21 first: its index and its two triggers name a column this function is
+    // about to have to drop, and one of them would survive into the rebuild
+    // below and refuse the rename.
+    wind_back_to_v20(conn).await;
+
     for trigger in V12_ONLY_TRIGGERS
         .iter()
         .chain(V12_CHANGED_TRIGGERS)

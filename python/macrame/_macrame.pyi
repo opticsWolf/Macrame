@@ -215,6 +215,7 @@ class ConceptUpsert:
         valid_to: Timestamp | None = None,
         retired: bool = False,
         branch: str | None = None,
+        extra: str | None = None,
     ) -> None: ...
     def on_branch(self, branch: str) -> ConceptUpsert:
         """This upsert on `branch`, as a **new** object (0.14.9).
@@ -237,6 +238,23 @@ class ConceptUpsert:
     def content(self) -> str: ...
     @property
     def embedding_model(self) -> str | None: ...
+    @property
+    def extra(self) -> str | None:
+        """App-defined attributes as a JSON object string, or None (0.18.0).
+
+        A JSON **object**, at most 64 KiB; anything else raises
+        `InvalidExtraError` here in the constructor, like every other
+        validation on this class.
+
+        `None` is *unstated*, not *empty*, and the difference is the whole
+        design: an upsert that omits `extra` leaves whatever the row already
+        holds alone, so a re-upsert written by code that knows nothing about
+        attributes cannot wipe them. Clearing is `extra="{}"`, said out loud.
+
+        The value is opaque to the ledger — no schema, no validation past
+        *is it an object* — but it is logged like every other column, so a
+        change to it is a belief change and `reconstruct` replays it.
+        """
     @property
     def retired(self) -> bool: ...
     @property
@@ -334,6 +352,19 @@ class NodeAttributes:
     def content(self) -> str: ...
     @property
     def embedding_model(self) -> str | None: ...
+    @property
+    def extra(self) -> str:
+        """App-defined attributes as a JSON string, `"{}"` when none (0.18.0).
+
+        A `str` and not a parsed `dict`: the ledger stores the caller's own
+        JSON and is opaque to it, so parsing here would impose a round-trip on
+        every traversal for a value the reader may not look at. `json.loads` is
+        the caller's one line.
+
+        Never None — the column is `NOT NULL DEFAULT '{}'`, so a concept
+        written before 0.18.0 and one written without attributes are the same
+        answer.
+        """
     def __eq__(self, other: object) -> bool: ...
     def __hash__(self) -> int: ...
     def __repr__(self) -> str: ...
@@ -1284,6 +1315,32 @@ class Database:
         before the parent's own.
         """
 
+    def register_extra_index(self, path: str) -> None:
+        """Assert an expression index over a JSON path in `extra` (0.18.0).
+
+        **Call it unconditionally at startup.** It is a create-if-absent and
+        there is no registry table: re-assertion *is* the record, which is what
+        makes a restored backup safe — a file that came back without the index
+        gets it on the next open, and nothing has to remember that it should
+        have been there.
+
+        The query has to spell the expression the same way, character for
+        character. SQLite picks an expression index by comparing expression
+        trees, so an index over `json_extract(extra, '$.layer')` does not serve
+        a filter written `extra ->> '$.layer'`: that query returns exactly the
+        right rows and scans the whole table doing it. Write the
+        `json_extract` form.
+
+        `path` is `$.name` or `$.a.b`, each segment `[A-Za-z0-9_]+`. Array
+        subscripts are rejected. The path is interpolated into DDL rather than
+        bound — an index expression cannot take a parameter — and the narrow
+        grammar is what makes that safe. Anything else raises
+        `InvalidExtraPathError`.
+
+        Queued as a write, and the first assertion reads every row of
+        `concepts`, which is what building an index costs.
+        """
+
     def kv_put(self, key: str, value: str) -> None:
         """Write a key into `kv_store`, replacing whatever was there (D-280).
 
@@ -1707,6 +1764,31 @@ class InvalidKvKeyError(ValidationError):
     """
 
     key: str
+
+class InvalidExtraError(ValidationError):
+    """A `concepts.extra` value the ledger will not store.
+
+    A JSON **object**, at most 64 KiB. An object specifically, because
+    `json_extract(extra, '$.key')` has nothing to reach into in an array or a
+    bare scalar — an index over one would answer every query with silence
+    rather than an error. The cap is on the encoded bytes.
+
+    Raised by `ConceptUpsert(...)`, not by the write (D-100).
+    """
+
+    id: str
+    reason: str
+
+class InvalidExtraPathError(ValidationError):
+    """A JSON path `register_extra_index` will not build an index over.
+
+    `$.name` or `$.a.b`, with each segment matching `[A-Za-z0-9_]+`. The
+    grammar is deliberately narrower than SQLite's: the path goes into DDL by
+    interpolation, because an index expression cannot take a bound parameter,
+    and this is what keeps that from being a hole.
+    """
+
+    path: str
 
 class InvalidIdError(ValidationError):
     id: str

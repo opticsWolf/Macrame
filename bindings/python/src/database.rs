@@ -1763,6 +1763,37 @@ impl PyDatabase {
         })
     }
 
+    /// Assert an expression index over a JSON path in `concepts.extra`
+    /// (D-278b).
+    ///
+    /// **Call this unconditionally at startup.** It is a create-if-absent and
+    /// there is no registry: re-assertion is the mechanism, which answers the
+    /// one worry a registry table was considered for — a restored backup
+    /// silently losing an index nothing records. The next open rebuilds
+    /// whatever the file is missing.
+    ///
+    /// The expression has to match the query's **character for character**.
+    /// SQLite chooses an expression index by comparing expression trees, so an
+    /// index over `json_extract(extra, '$.layer')` is not available to a filter
+    /// written `extra ->> '$.layer'` — that query runs, returns exactly the
+    /// right rows, and scans the whole table to do it. Spell it the
+    /// `json_extract` way.
+    ///
+    /// `path` is `$.name` or `$.a.b`, each segment `[A-Za-z0-9_]+`. Anything
+    /// else raises `InvalidExtraPathError`: the path is interpolated into DDL
+    /// rather than bound, because an index expression cannot take a parameter.
+    ///
+    /// It reads every row of `concepts` the first time — that is what building
+    /// an index costs — and queues as a write like `register_model`.
+    fn register_extra_index(&self, py: Python<'_>, path: &str) -> PyResult<()> {
+        let path = path.to_string();
+        self.with_db(py, move |db| {
+            runtime()
+                .block_on(db.register_extra_index(&path))
+                .map_err(to_py)
+        })
+    }
+
     /// Read one key from `kv_store`, or `None` (D-280).
     ///
     /// A read: it never touches the write actor, so this answers immediately
@@ -1807,7 +1838,9 @@ impl PyDatabase {
     ) -> PyResult<Vec<(String, String)>> {
         let prefix = prefix.to_string();
         self.with_db(py, move |db| {
-            runtime().block_on(db.kv_scan(&prefix, limit)).map_err(to_py)
+            runtime()
+                .block_on(db.kv_scan(&prefix, limit))
+                .map_err(to_py)
         })
     }
 

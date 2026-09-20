@@ -515,12 +515,18 @@ pub async fn reconstruct_on(
     Ok(out)
 }
 
-/// The newest log payload shape this build writes and the highest it can read.
+/// The payload ceilings live in `schema::ddl` beside the trigger literals that
+/// write them (0.18.0, [D-282a]).
 ///
-/// Kept beside the folds because they are the only readers, and bumped in step
-/// with the `json_object('v', …)` literals in `schema::ddl` — a test asserts the
-/// two agree, since nothing else would notice them drifting apart.
-pub(crate) const PAYLOAD_VERSION: u8 = 2;
+/// One constant per shape, and it was one constant for both until 0.18. The
+/// marker has been per entry since the log's first release — links write
+/// `'v', 1`, concepts `'v', 3` — and checking a single number against every row
+/// *before* dispatching on `table_name` gated two shapes that version
+/// independently. That was sound while one version existed and stopped being
+/// sound the day Wave 1 took concepts to v2 and left links at 1.
+///
+/// [D-282a]: ../../docs/architecture/s13-decision-register.md#d-282a
+use crate::schema::ddl::{PAYLOAD_VERSION_CONCEPTS, PAYLOAD_VERSION_LINKS};
 
 /// Every fold partitions on `(table_name, entity_id)`, never `entity_id` alone.
 ///
@@ -1775,19 +1781,32 @@ async fn fold_delta(
                 reason: format!("Failed to parse payload JSON: {e}"),
             })?;
 
-        // v1 and v2 differ by one added field, so v1 folds by reading it as
-        // absent — which is what `Option` already means here. A future shape
-        // that *removes* or *retypes* a field would not be able to share this
-        // path, and would want a match on `v` rather than a ceiling.
+        // v1, v2 and v3 differ by added fields only, so an older payload folds
+        // by reading each as absent — which is what `Option` and the `{}`
+        // default already mean below. A future shape that *removes* or
+        // *retypes* a field would not be able to share this path, and would
+        // want a match on `v` rather than a ceiling.
+        //
+        // **The check is per shape and therefore comes after the dispatch**
+        // (0.18.0, D-282a). Reading one ceiling against every row gated two
+        // shapes that version independently: a links row stamped 2 passed a
+        // global ceiling of 2 and then decoded under v1 field names, silently,
+        // because `get("source_id")` on a payload that has none yields the
+        // empty string rather than an error. No such row exists, since nothing
+        // but this crate writes links versions and it has never written one
+        // above 1 — so the tightening refuses only rows that were already
+        // being mis-folded, and refuses no row any version of this crate
+        // minted.
         let v = payload.get("v").and_then(|v| v.as_u64()).unwrap_or(1);
-        if v > PAYLOAD_VERSION as u64 {
-            return Err(DbError::PayloadVersion {
-                got: v as u8,
-                max: PAYLOAD_VERSION,
-            });
-        }
+        let ceiling = |max: u8| -> Result<()> {
+            if v > max as u64 {
+                return Err(DbError::PayloadVersion { got: v as u8, max });
+            }
+            Ok(())
+        };
 
         if table_name == "concepts" {
+            ceiling(PAYLOAD_VERSION_CONCEPTS)?;
             let id = _entity_id;
             let retired = payload.get("retired").and_then(|r| r.as_i64()).unwrap_or(0);
             if retired == 0 {
@@ -1805,6 +1824,15 @@ async fn fold_delta(
                     .get("embedding_model")
                     .and_then(|s| s.as_str())
                     .map(|s| s.to_string());
+                // Absent below v3, and absent means `{}`: the entry was minted
+                // before the column existed, so there is nothing it could be
+                // hiding. The trigger writes `json(NEW.extra)`, so the payload
+                // carries an object rather than a string — re-rendered here,
+                // not read as `as_str`.
+                let extra = payload
+                    .get("extra")
+                    .map(|e| e.to_string())
+                    .unwrap_or_else(|| "{}".to_string());
                 concepts.insert(
                     id.clone(),
                     NodeAttributes {
@@ -1812,6 +1840,7 @@ async fn fold_delta(
                         title,
                         content,
                         embedding_model,
+                        extra,
                     },
                 );
             } else {
@@ -1821,6 +1850,7 @@ async fn fold_delta(
                 d.concepts_gone.insert(id);
             }
         } else if table_name == "links" {
+            ceiling(PAYLOAD_VERSION_LINKS)?;
             let src = payload
                 .get("source_id")
                 .and_then(|s| s.as_str())

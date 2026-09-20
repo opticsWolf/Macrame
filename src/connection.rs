@@ -599,6 +599,29 @@ pub struct ConceptUpsert {
     /// parent about a concept's content is asking for the overlay design, which
     /// is deferred with its reopen trigger named (D-214).
     pub branch: Option<crate::branch::BranchId>,
+    /// App-defined attributes, or `None` to leave whatever is there alone
+    /// (0.18.0, [D-278a]).
+    ///
+    /// **`None` means *unstated*, never *null*.** `Some(v)` replaces the
+    /// column wholesale; `None` leaves it exactly as it was, which is why a
+    /// caller who re-upserts a concept without calling
+    /// [`extra`](Self::extra) does not silently wipe the application's
+    /// attributes. That erasure would be recorded as a deliberate belief
+    /// change rather than as a mistake, because [D-278] made the column
+    /// versioned — the log would say the app meant it.
+    ///
+    /// The comparison worth drawing is with [`branch`](Self::branch), whose
+    /// column is deliberately *not* in the update list either, and for the
+    /// opposite reason: `branch_id` is provenance and is left where it was
+    /// minted, while `extra` is content and must be correctable.
+    ///
+    /// **Clearing is `Some("{}")`, and there is no state below it.** The
+    /// column is `NOT NULL DEFAULT '{}'`, so SQL NULL is unreachable by
+    /// construction.
+    ///
+    /// [D-278]: ../docs/architecture/s13-decision-register.md#d-278
+    /// [D-278a]: ../docs/architecture/s13-decision-register.md#d-278a
+    pub extra: Option<String>,
 }
 
 impl ConceptUpsert {
@@ -612,6 +635,7 @@ impl ConceptUpsert {
             valid_to: timestamp::OPEN_SENTINEL.to_string(),
             retired: false,
             branch: None,
+            extra: None,
         }
     }
 
@@ -657,9 +681,26 @@ impl ConceptUpsert {
         self
     }
 
+    /// Set this concept's app-defined attributes — the
+    /// [`extra`](Self::extra) field.
+    ///
+    /// Wholesale replacement, not a merge. `json_patch` semantics were
+    /// rejected for [D-278a]'s reason: keys would merge automatically, but
+    /// `extra` could then never be replaced wholesale, and deleting a key
+    /// would mean asserting null.
+    ///
+    /// [D-278a]: ../docs/architecture/s13-decision-register.md#d-278a
+    pub fn extra(mut self, extra: impl Into<String>) -> Self {
+        self.extra = Some(extra.into());
+        self
+    }
+
     /// Put the timestamps in canonical form (D-029) before they cross the channel.
     pub fn normalized(mut self) -> Result<Self> {
         crate::util::ids::validate_id(&self.id)?;
+        if let Some(extra) = &self.extra {
+            validate_extra(&self.id, extra)?;
+        }
         self.valid_from = timestamp::normalize(&self.valid_from)?;
         self.valid_to = timestamp::normalize(&self.valid_to)?;
         Ok(self)
@@ -799,6 +840,18 @@ pub(crate) enum HighPriCommand {
     KvWrite {
         write: KvWrite,
         responder: oneshot::Sender<Result<bool>>,
+    },
+    /// Assert an expression index over a JSON path in `concepts.extra`
+    /// (0.18.0, [D-278b]).
+    ///
+    /// High priority for `RegisterModel`'s reason and then some: an app calls
+    /// it unconditionally at startup, so every read it exists to make fast is
+    /// waiting behind it.
+    ///
+    /// [D-278b]: ../docs/architecture/s13-decision-register.md#d-278b
+    RegisterExtraIndex {
+        path: String,
+        responder: oneshot::Sender<Result<()>>,
     },
     Shutdown {
         responder: oneshot::Sender<Result<()>>,
@@ -2586,6 +2639,54 @@ impl Database {
         crate::kv::validate_kv_key(&key)?;
         let write = KvWrite::Delete { key };
         self.high(|responder| HighPriCommand::KvWrite { write, responder })
+            .await
+    }
+
+    /// Assert an expression index over a JSON path in `concepts.extra`
+    /// (0.18.0, [D-278b]).
+    ///
+    /// **Call this unconditionally at startup.** It is a create-if-absent and
+    /// there is no registry: the mechanism is re-assertion, which is what
+    /// answers the one worry a registry table was considered for — a restored
+    /// backup silently losing an index nothing records. The next open rebuilds
+    /// whatever the file is missing, without a table, without a question about
+    /// whether that table is lineage-scoped, and without a second thing to keep
+    /// true.
+    ///
+    /// # The expression has to match the query's, character for character
+    ///
+    /// SQLite chooses an expression index by comparing **expression trees**,
+    /// not meanings. An index over `json_extract(extra, '$.layer')` is not
+    /// available to a query filtering on `extra ->> '$.layer'`, which parses to
+    /// a different operator — the query runs, returns the right rows, and
+    /// scans the whole table to do it. So this builds the `json_extract` form,
+    /// §4.1 records it, and the binding emits it; a caller writing raw SQL
+    /// against `extra` should spell it the same way.
+    ///
+    /// # What `path` may be
+    ///
+    /// `$.name` or `$.a.b` — segments of `[A-Za-z0-9_]+`, dot-separated, under
+    /// a leading `$.`. Narrow on purpose: the path is interpolated into DDL
+    /// rather than bound, because an index expression cannot take a parameter,
+    /// so the validator is what stands between a caller's string and the
+    /// statement. Anything else is [`DbError::InvalidExtraPath`].
+    ///
+    /// Array subscripts are not admitted. `json_extract(extra, '$.tags[0]')`
+    /// is a legal SQLite expression, but an index over one position of a list
+    /// answers a question nobody has asked, and admitting `[` widens the
+    /// interpolated charset for it.
+    ///
+    /// # Latency
+    ///
+    /// One statement, but it reads every row of `concepts` the first time —
+    /// that is what building an index costs. It queues as a high-priority
+    /// write like [`Self::register_model`], for the same reason.
+    ///
+    /// [D-278b]: ../docs/architecture/s13-decision-register.md#d-278b
+    pub async fn register_extra_index(&self, path: &str) -> Result<()> {
+        validate_extra_path(path)?;
+        let path = path.to_string();
+        self.high(|responder| HighPriCommand::RegisterExtraIndex { path, responder })
             .await
     }
 
@@ -4767,8 +4868,8 @@ fn edge_params<'a>(edge: &'a EdgeAssertion, stamp: &'a str) -> [libsql::Value; 9
 /// statement text it can prepare once (D-056).
 const UPSERT_CONCEPT: &str = "INSERT INTO concepts \
      (id, title, content, embedding_model, valid_from, valid_to, recorded_at, retired, \
-      branch_id) \
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
+      branch_id, extra) \
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, COALESCE(?10, '{}')) \
      ON CONFLICT(id) DO UPDATE SET \
          title = excluded.title, \
          content = excluded.content, \
@@ -4776,7 +4877,24 @@ const UPSERT_CONCEPT: &str = "INSERT INTO concepts \
          valid_from = excluded.valid_from, \
          valid_to = excluded.valid_to, \
          recorded_at = excluded.recorded_at, \
-         retired = excluded.retired";
+         retired = excluded.retired, \
+         extra = COALESCE(?10, concepts.extra)";
+// `extra` is in that list and **reads the bind parameter, not `excluded`**
+// (0.18.0, D-278a). `excluded.extra` is what the insert arm would have written
+// — `'{}'` when the caller said nothing — so assigning it like every other
+// column would wipe an application's attributes on any re-upsert that forgot
+// one builder call, and D-278 made the column versioned, so the log would
+// record that wipe as a deliberate belief change.
+//
+// `COALESCE(?10, concepts.extra)` is preserve-on-omission: a bound value
+// replaces, and NULL leaves the row's own value in place. The insert arm needs
+// its own `COALESCE` because there is no prior row to preserve from, and `'{}'`
+// is the column's default spelled where the statement can see it.
+//
+// Done inside the **one shared statement** rather than by branching in Rust, so
+// the single and chunked write paths still cannot drift (D-056). And no gap in
+// the history: the log trigger fires `AFTER UPDATE` and reads `NEW.extra`, so
+// the payload records the resulting value rather than the supplied one.
 // `branch_id` is deliberately **not** in that `DO UPDATE` list. The column is
 // provenance and minting happened once (D-214), and
 // `trg_concepts_branch_immutable` would abort an update that moved it — so
@@ -4785,7 +4903,7 @@ const UPSERT_CONCEPT: &str = "INSERT INTO concepts \
 // leaves the row where it was minted.
 
 /// The parameter row for [`UPSERT_CONCEPT`], in one place for the same reason.
-fn concept_params<'a>(concept: &'a ConceptUpsert, stamp: &'a str) -> [libsql::Value; 9] {
+fn concept_params<'a>(concept: &'a ConceptUpsert, stamp: &'a str) -> [libsql::Value; 10] {
     [
         concept.id.as_str().into(),
         concept.title.as_str().into(),
@@ -4799,7 +4917,127 @@ fn concept_params<'a>(concept: &'a ConceptUpsert, stamp: &'a str) -> [libsql::Va
         stamp.into(),
         (concept.retired as i64).into(),
         concept.branch_name().into(),
+        // NULL is *unstated*, which the statement's two `COALESCE`s read as
+        // "default on insert, preserve on update". It never reaches the column.
+        concept
+            .extra
+            .as_deref()
+            .map_or(libsql::Value::Null, Into::into),
     ]
+}
+
+/// The `CREATE INDEX` for one validated JSON path.
+///
+/// The index name is the path with its punctuation replaced, so
+/// `register_extra_index("$.layer")` and the shipped
+/// [`EXTRA_LAYER_INDEX`](crate::schema::ddl::EXTRA_LAYER_INDEX) are the same
+/// name and the second call is the no-op it should be. That equality is
+/// asserted by test rather than by this comment.
+///
+/// Interpolated, not bound: an index expression cannot take a parameter.
+/// [`validate_extra_path`] is what makes the interpolation safe, and it runs at
+/// the API boundary so the refusal names the caller's string.
+fn extra_index_ddl(path: &str) -> String {
+    let suffix = path
+        .trim_start_matches("$.")
+        .replace('.', "_")
+        .to_ascii_lowercase();
+    format!(
+        "CREATE INDEX IF NOT EXISTS idx_concepts_extra_{suffix} \
+         ON concepts (json_extract(extra, '{path}'))"
+    )
+}
+
+/// Check a JSON path against what [`Database::register_extra_index`] will build.
+///
+/// `$.` then one or more `[A-Za-z0-9_]+` segments separated by `.`. The rule is
+/// narrow because the result is interpolated into DDL, and a validator that is
+/// hard to read is one nobody can check.
+fn validate_extra_path(path: &str) -> Result<()> {
+    let reject = || Err(DbError::InvalidExtraPath(path.to_string()));
+    let Some(rest) = path.strip_prefix("$.") else {
+        return reject();
+    };
+    if rest.is_empty() {
+        return reject();
+    }
+    for segment in rest.split('.') {
+        if segment.is_empty()
+            || !segment
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        {
+            return reject();
+        }
+    }
+    Ok(())
+}
+
+/// The largest `extra` this build accepts, in bytes (0.18.0, [D-278]).
+///
+/// **Provisional.** Bulk bytes are [D-281]'s problem — a blob store, in 0.19 —
+/// and an attribute that approaches this is data wearing an attribute's shape.
+/// The number is a boundary check and not a storage limit: SQLite would hold
+/// far more, and what this protects is the log, since every byte here is
+/// written again into the payload of every concept write.
+///
+/// [D-278]: ../docs/architecture/s13-decision-register.md#d-278
+/// [D-281]: ../docs/architecture/s13-decision-register.md#d-281
+pub const MAX_EXTRA_BYTES: usize = 64 * 1024;
+
+/// Check an `extra` value against the column's rule: a JSON object, under
+/// [`MAX_EXTRA_BYTES`].
+///
+/// # Why an object and not any JSON value
+///
+/// The narrowest rule the expression indexes need. `json_extract(extra,
+/// '$.layer')` over an array or a bare scalar is a path that cannot match, so a
+/// caller who stores one gets an index that answers every query with silence —
+/// and silence on a read path is what this crate spends its checks on.
+///
+/// # Why at the boundary and not as a `CHECK`
+///
+/// The error can name the concept and say what was wrong with the value, which
+/// `CHECK (json_valid(extra))` cannot. A CHECK would also be a second statement
+/// of the rule that could only ever disagree with this one, while still
+/// admitting whatever §4.7's raw writer put there — so it would buy a
+/// duplicate, not a guarantee.
+fn validate_extra(id: &str, extra: &str) -> Result<()> {
+    if extra.len() > MAX_EXTRA_BYTES {
+        return Err(DbError::InvalidExtra {
+            id: id.to_string(),
+            reason: format!(
+                "{} bytes is over the {MAX_EXTRA_BYTES}-byte cap; bulk bytes belong \
+                 in a blob, not in an attribute that is rewritten into the log on \
+                 every concept write",
+                extra.len()
+            ),
+        });
+    }
+
+    match serde_json::from_str::<serde_json::Value>(extra) {
+        Ok(serde_json::Value::Object(_)) => Ok(()),
+        Ok(other) => Err(DbError::InvalidExtra {
+            id: id.to_string(),
+            reason: format!(
+                "expected a JSON object, got {}. `json_extract(extra, '$.key')` \
+                 cannot match a path inside anything else, so an index over it \
+                 would answer every query with silence",
+                match other {
+                    serde_json::Value::Null => "null",
+                    serde_json::Value::Bool(_) => "a boolean",
+                    serde_json::Value::Number(_) => "a number",
+                    serde_json::Value::String(_) => "a string",
+                    serde_json::Value::Array(_) => "an array",
+                    serde_json::Value::Object(_) => unreachable!("matched above"),
+                }
+            ),
+        }),
+        Err(e) => Err(DbError::InvalidExtra {
+            id: id.to_string(),
+            reason: format!("not JSON: {e}"),
+        }),
+    }
 }
 
 /// Check every lineage a write names, and decide which shape its guard takes.
@@ -4963,6 +5201,7 @@ impl HighPriCommand {
             HighPriCommand::WriteBulkAtomic { .. } => K::WriteBulkAtomic,
             HighPriCommand::RebuildCurrent { .. } => K::RebuildCurrent,
             HighPriCommand::RegisterModel { .. } => K::RegisterModel,
+            HighPriCommand::RegisterExtraIndex { .. } => K::RegisterExtraIndex,
             HighPriCommand::Fork { .. } => K::Fork,
             HighPriCommand::KvWrite { .. } => K::KvWrite,
             HighPriCommand::Checkpoint { .. } => K::Checkpoint,
@@ -5089,6 +5328,14 @@ impl HighPriCommand {
             }
             HighPriCommand::RebuildCurrent { responder } => {
                 turn.answer(responder, rebuild_current(conn).await);
+            }
+            HighPriCommand::RegisterExtraIndex { path, responder } => {
+                let res = conn
+                    .execute(&extra_index_ddl(&path), ())
+                    .await
+                    .map(|_| ())
+                    .map_err(Into::into);
+                turn.answer(responder, res);
             }
             HighPriCommand::RegisterModel {
                 model,

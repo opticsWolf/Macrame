@@ -112,7 +112,8 @@ impl PyConceptUpsert {
     #[new]
     #[pyo3(signature = (
         id, title, *, valid_from, content = String::new(),
-        embedding_model = None, valid_to = None, retired = false, branch = None
+        embedding_model = None, valid_to = None, retired = false, branch = None,
+        extra = None
     ))]
     fn new(
         id: String,
@@ -123,6 +124,7 @@ impl PyConceptUpsert {
         valid_to: Option<&Bound<'_, PyAny>>,
         retired: bool,
         branch: Option<String>,
+        extra: Option<String>,
     ) -> PyResult<Self> {
         let mut c = ConceptUpsert::new(id, title)
             .content(content)
@@ -134,6 +136,14 @@ impl PyConceptUpsert {
         }
         if let Some(name) = branch {
             c = c.on_branch(crate::branch::branch_id(&name)?);
+        }
+        // `None` stays `None` all the way down, because in the crate it means
+        // *unstated* and the upsert preserves whatever the row already has
+        // (D-278a). Defaulting to `"{}"` here would turn every re-upsert that
+        // omits the argument into a silent wipe — and one the log would record
+        // as a deliberate belief change.
+        if let Some(extra) = extra {
+            c = c.extra(extra);
         }
         Ok(Self {
             inner: c.normalized().map_err(to_py)?,
@@ -180,6 +190,15 @@ impl PyConceptUpsert {
     #[getter]
     fn embedding_model(&self) -> Option<&str> {
         self.inner.embedding_model.as_deref()
+    }
+    /// The app-defined attributes this upsert states, or `None` if it states
+    /// none (0.18.0, D-278a).
+    ///
+    /// `None` is *unstated*, not *empty*: the write leaves the column alone.
+    /// Clearing is `extra="{}"`.
+    #[getter]
+    fn extra(&self) -> Option<&str> {
+        self.inner.extra.as_deref()
     }
     #[getter]
     fn retired(&self) -> bool {

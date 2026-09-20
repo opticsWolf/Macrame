@@ -165,6 +165,13 @@ async fn the_ledger_tables_have_the_shape_the_contract_freezes() {
             // reason this entry is additive where a widened uniqueness would
             // not have been.
             ("branch_id".into(), "TEXT".into(), 1, 0),
+            // v21, and **last because `ALTER TABLE ADD COLUMN` appends**
+            // (0.18.0, D-278). The baseline declares it in this position so a
+            // fresh database and one that climbed the rung hold the same shape
+            // in the same order; nothing binds by position, so the divergence
+            // that would cause is not a crash but a `PRAGMA table_info` that
+            // answers differently depending on how the file got here.
+            ("extra".into(), "TEXT".into(), 1, 0),
         ],
         "concepts is a frozen ledger table"
     );

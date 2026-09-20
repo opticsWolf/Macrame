@@ -89,6 +89,20 @@ impl PyNodeAttributes {
     fn embedding_model(&self) -> Option<&str> {
         self.inner.embedding_model.as_deref()
     }
+    /// App-defined attributes as a JSON string, `"{}"` when none (0.18.0,
+    /// D-278).
+    ///
+    /// A `str` rather than a parsed `dict`: the crate stores the caller's own
+    /// JSON and is opaque to it apart from the expression indexes built over
+    /// it, so parsing here would impose a round-trip the caller may not want
+    /// and would have to guess at for a value it did not write. `json.loads`
+    /// is one line and is the caller's choice.
+    ///
+    /// Never `None` and never `null` — the column is `NOT NULL DEFAULT '{}'`.
+    #[getter]
+    fn extra(&self) -> &str {
+        &self.inner.extra
+    }
     fn __repr__(&self) -> String {
         format!(
             "<macrame.NodeAttributes id={:?} title={:?}>",

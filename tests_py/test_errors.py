@@ -91,6 +91,12 @@ EXPECTED: dict[str, tuple[str, str, dict]] = {
     # -- validation --
     "InvalidEdgeType": ("InvalidEdgeTypeError", "ValidationError", {"edge_type": "bad-type"}),
     "InvalidKvKey": ("InvalidKvKeyError", "ValidationError", {"key": "bad key"}),
+    "InvalidExtra": (
+        "InvalidExtraError",
+        "ValidationError",
+        {"id": "c1", "reason": "expected a JSON object, got an array"},
+    ),
+    "InvalidExtraPath": ("InvalidExtraPathError", "ValidationError", {"path": "$.a[0]"}),
     "InvalidId": ("InvalidIdError", "ValidationError", {"id": "bad|id", "reason": "sample-reason"}),
     "InvalidTimestamp": (
         "InvalidTimestampError",

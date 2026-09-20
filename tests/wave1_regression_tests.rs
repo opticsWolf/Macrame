@@ -143,7 +143,13 @@ async fn a_v1_concept_payload_still_folds() {
 }
 
 /// The payload version the triggers write and the one the readers accept are one
-/// number. Nothing else would notice them drifting apart.
+/// number **per shape** (0.18.0, D-282a). Nothing else would notice them
+/// drifting apart.
+///
+/// The crate's own unit test in `schema::ddl` holds the literal against the
+/// constant; this holds it against what defect V was about — that the payload
+/// must carry every column the row does, since the trigger emits an explicit
+/// `json_object` rather than `SELECT *`.
 #[test]
 fn the_trigger_payload_version_matches_the_reader_ceiling() {
     let concept_triggers: Vec<&&str> = macrame::schema::ddl::CREATE_TRIGGERS
@@ -154,12 +160,18 @@ fn the_trigger_payload_version_matches_the_reader_ceiling() {
 
     for t in concept_triggers {
         assert!(
-            t.contains("'v', 2"),
+            t.contains("'v', 3"),
             "concept log trigger writes a payload version the reader does not expect:\n{t}"
         );
         assert!(
             t.contains("'embedding_model'"),
             "defect V: the payload omits embedding_model again:\n{t}"
+        );
+        assert!(
+            t.contains("'extra'"),
+            "defect V with a different column (D-278): the payload omits \
+             `extra`, so it is invisible to every reconstruction while sitting \
+             plainly in `concepts`:\n{t}"
         );
     }
 }

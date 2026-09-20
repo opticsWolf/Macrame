@@ -22,6 +22,13 @@ CREATE TABLE concepts (
     valid_to         TEXT NOT NULL DEFAULT '9999-12-31T23:59:59.999999Z',
     recorded_at      TEXT NOT NULL,             -- transaction time, crate-stamped
     retired          INTEGER NOT NULL DEFAULT 0, -- soft-delete flag (see note below)
+    -- branch_id is declared here in the baseline (v12, D-214; see 4.8), and
+    -- extra after it (v21, D-278) -- physically LAST, because ALTER TABLE ADD
+    -- COLUMN appends and a fresh file and a climbed one must hold the same
+    -- shape in the same order. Nothing binds by position, so the divergence
+    -- that would cause is not a crash but a silent disagreement about what
+    -- PRAGMA table_info says.
+    extra            TEXT NOT NULL DEFAULT '{}', -- v21: app-defined attributes
 
     -- Canonical timestamp form, 0.5.4 (D-029). Fixed width is what makes
     -- lexicographic comparison equal chronological comparison; the 'Z' suffix
@@ -58,6 +65,71 @@ CREATE TABLE concepts (
 **Archivability is the first thing that reads all three of these columns at once (0.9.0, [D-128](s13-decision-register.md#d-128), C1).** The orthogonality note above is what makes that worth stating here rather than only in [§5.7](s5-modules.md#57-temporalarchivers--cold-storage): `valid_to` and `retired` answer different questions and serve different query paths, so a predicate requiring **both** — plus `recorded_at` behind the cutoff, plus no surviving hot `links` row naming the concept — is a conjunction across two axes that this schema otherwise keeps apart. It is deliberate. A concept still visible to the application (`retired = 0`) must not go cold whatever its valid time says, and a concept the user trashed while it is still temporally valid must not either. Only the corner where all three agree, and nothing points at the row, is archivable.
 
 Nothing in this section changes for it: `CONCEPTS_ARCHIVABLE` is a query over the columns above, not a constraint on them, and no DDL moves until C2 adds `cold.concepts` and makes `trg_concepts_guard_delete` conditional ([§4.6](#46-triggers), [D-126](s13-decision-register.md#d-126)).
+
+#### `extra` — app-defined attributes the ledger stores and does not read (0.18.0, v21, D-278)
+
+A JSON object, at most 64 KiB, defaulting to `'{}'`. The ledger validates that
+it *is* an object and that it fits, and reads nothing inside it. That is the
+whole contract, and it is narrower than it looks: an object specifically,
+because `json_extract(extra, '$.key')` on an array or a bare scalar is a path
+that cannot match, so an index over one would answer every query with silence
+rather than an error — which is the report a caller who passed an array would
+never act on.
+
+**`NOT NULL DEFAULT '{}'`, so there is no third state below the empty object.**
+A concept written before v21 and one written without attributes are the same
+answer, and every reader can call `json_extract` unconditionally.
+
+**No `CHECK (json_valid(extra))`.** The validation is in `ConceptUpsert`
+([D-100](s13-decision-register.md#d-100)): a caller gets the error at the line
+that built the bad value, not at a bulk write ten thousand rows later. A CHECK
+would additionally be evaluated on every rehydration of every archived row,
+which is a cost paid forever for a boundary crossed once.
+
+**It is in the log, so changing it is a belief change.** The payload carries it
+(`'extra', json(NEW.extra)`) and the concept payload version moves 2 → 3 for
+it. A column sitting plainly in `concepts` that no reconstruction could explain
+is defect V, and the reason the trigger emits an explicit `json_object` rather
+than `SELECT *` is that the explicit list is the thing that can fall behind.
+
+**Unstated is not empty, and the upsert says so.** The conflict clause reads
+`extra = COALESCE(?10, concepts.extra)` — not `excluded.extra` — so an upsert
+that omits attributes preserves whatever the row holds. Code that knows nothing
+about attributes re-upserts rows all the time, and a wipe there would be
+recorded by the log as a deliberate belief change: irreversible by design and
+indistinguishable from an intention. Clearing is `.extra("{}")`, said out loud.
+Deliberately unlike `branch_id`, which the same statement excludes from the
+conflict clause outright ([§4.8](#48-lineage-the-branch-register-and-the-column-that-names-it-0142-d-214)) — a lineage is identity and a bag of attributes is not, so the two
+columns want opposite answers to the same question.
+
+**Expression indexes over it, and the form is pinned here (0.18.0, D-278b).**
+The baseline carries one, over `$.layer`:
+
+```sql
+CREATE INDEX IF NOT EXISTS idx_concepts_extra_layer
+    ON concepts (json_extract(extra, '$.layer'));
+```
+
+`Database::register_extra_index(path)` asserts further ones. It is
+create-if-absent and there is no registry table: **re-assertion is the record**,
+which is what makes a restored backup safe — a file that came back without the
+index gets it on the next open, and nothing has to have remembered that it
+should have been there. Call it unconditionally at startup.
+
+**A query has to spell the expression character for character.** SQLite matches
+an expression index by comparing expression *trees*, so the index above does not
+serve a filter written `extra ->> '$.layer'`: that query returns exactly the
+right rows and scans the whole table doing it. Write the `json_extract` form.
+This is pinned by an `EXPLAIN` test with a negative control
+(`tests/index_plan_tests.rs`), because without the negative half the gate passes
+while a caller quietly emits the other spelling and falls back to the scan the
+index exists to delete.
+
+`path` is `$.name` or `$.a.b`, each segment `[A-Za-z0-9_]+`. Narrower than
+SQLite's own grammar, and deliberately: the path is interpolated into DDL rather
+than bound, because an index expression cannot take a parameter, and the grammar
+is what stands between a caller's string and the schema. Anything else is
+`DbError::InvalidExtraPath`.
 
 Per-model embedding tables are not part of the baseline schema: `register_model` creates each one, with its DiskANN index, in a single transaction ([§5.9](s5-modules.md#59-vector--embeddings-the-model-registry-and-search), [D-037](s13-decision-register.md#d-037)). The shape is fixed and the name is derived from a validated [`ModelName`](s5-modules.md#59-vector--embeddings-the-model-registry-and-search):
 

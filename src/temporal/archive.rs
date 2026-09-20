@@ -108,7 +108,8 @@ const COLD_SCHEMA: &[&str] = &[
         valid_to         TEXT NOT NULL,
         recorded_at      TEXT NOT NULL,
         retired          INTEGER NOT NULL DEFAULT 0,
-        branch_id        TEXT NOT NULL DEFAULT 'main'
+        branch_id        TEXT NOT NULL DEFAULT 'main',
+        extra            TEXT NOT NULL DEFAULT '{}'
     )"#,
     // seq_id is carried over verbatim from the hot log, so it is a plain
     // INTEGER PRIMARY KEY -- never AUTOINCREMENT, which would renumber history.
@@ -621,6 +622,21 @@ const COLD_LINEAGE_INDICES: &[&str] = &[
 /// forgetting a branch an ordinary operation, and a cold row stamped with a
 /// name nothing resolves is the shape that falls out of it.
 async fn upgrade_cold_lineage(tx: &libsql::Transaction) -> Result<()> {
+    // `extra` first, and on one table only (0.18.0, D-278). Same mechanism and
+    // same safety argument as the lineage columns below -- probe SS12-13
+    // measured that cold DDL inside `BEGIN IMMEDIATE` is visible to the
+    // inserts that follow and is taken back by `ROLLBACK` -- so the upgrade
+    // rides along with an archive instead of needing a migration of its own.
+    // Detection is column presence, because a cold file carries no version
+    // stamp worth trusting.
+    if !cold_has_column(tx, "concepts", "extra").await? {
+        tx.execute(
+            "ALTER TABLE cold.concepts ADD COLUMN extra TEXT NOT NULL DEFAULT '{}'",
+            (),
+        )
+        .await?;
+    }
+
     for table in ["links", "concepts", "transaction_log"] {
         if !cold_has_branch(tx, table).await? {
             tx.execute(
@@ -714,11 +730,24 @@ async fn cold_links_keyed_by_lineage(conn: &libsql::Connection) -> Result<bool> 
 /// **avoid** upgrading. A cold file may be read-only media or sit on a share,
 /// and a read path that mutates it is a new failure class.
 async fn cold_has_branch(conn: &libsql::Connection, table: &str) -> Result<bool> {
+    cold_has_column(conn, table, "branch_id").await
+}
+
+/// Whether one cold table carries one column.
+///
+/// [`cold_has_branch`] was this function with the name baked in, and 0.18
+/// needed the same question asked about `extra` ([D-278]): a pre-0.18 cold file
+/// must be **readable** without being touched, and **upgradable** by the writer
+/// inside its own transaction. Generalised rather than copied, because two
+/// probes reading the same pragma for two columns is the drift D-124 is about.
+///
+/// [D-278]: ../../docs/architecture/s13-decision-register.md#d-278
+async fn cold_has_column(conn: &libsql::Connection, table: &str, column: &str) -> Result<bool> {
     let mut rows = conn
         .query(&format!("PRAGMA cold.table_info({table})"), ())
         .await?;
     while let Some(row) = rows.next().await? {
-        if row.get::<String>(1).is_ok_and(|name| name == "branch_id") {
+        if row.get::<String>(1).is_ok_and(|name| name == column) {
             return Ok(true);
         }
     }
@@ -964,9 +993,9 @@ async fn archive_concepts(
             &format!(
                 "INSERT OR IGNORE INTO cold.concepts
                      (rowid_pk, id, title, content, embedding_model,
-                      valid_from, valid_to, recorded_at, retired, branch_id)
+                      valid_from, valid_to, recorded_at, retired, branch_id, extra)
                  SELECT rowid_pk, id, title, content, embedding_model,
-                        valid_from, valid_to, recorded_at, retired, branch_id
+                        valid_from, valid_to, recorded_at, retired, branch_id, extra
                  FROM concepts WHERE {CONCEPTS_ARCHIVABLE}"
             ),
             libsql::named_params! {":cutoff": cutoff},
@@ -1428,9 +1457,9 @@ async fn archive_branch_concepts(
         .execute(
             "INSERT OR IGNORE INTO cold.concepts
                  (rowid_pk, id, title, content, embedding_model,
-                  valid_from, valid_to, recorded_at, retired, branch_id)
+                  valid_from, valid_to, recorded_at, retired, branch_id, extra)
              SELECT rowid_pk, id, title, content, embedding_model,
-                    valid_from, valid_to, recorded_at, retired, branch_id
+                    valid_from, valid_to, recorded_at, retired, branch_id, extra
              FROM concepts WHERE branch_id = :branch",
             libsql::named_params! {":branch": branch},
         )
@@ -1483,7 +1512,7 @@ async fn archive_branch_concepts(
 
 /// One cold concept row, read as part of a chunk (0.15.19, review C-22).
 ///
-/// A named struct rather than a tuple because the insert below binds ten
+/// A named struct rather than a tuple because the insert below binds eleven
 /// columns in an order the reader has to be able to check against the DDL, and
 /// `row.4` is not checkable. `Clone` is one row's worth of strings, taken so
 /// the loop can destructure by value while the map keeps the chunk alive for
@@ -1499,6 +1528,16 @@ struct ColdConcept {
     recorded_at: String,
     retired: i64,
     branch_id: String,
+    /// `{}` when the cold file predates the column (0.18.0, [D-278]).
+    ///
+    /// Carried because [D-130] requires a concept to move **column for
+    /// column**: a move that drops one is a rewrite, and
+    /// [Doctrine V](../../docs/architecture/s0-s3-foundations.md#doctrine-v)
+    /// permits no absence the ledger cannot explain.
+    ///
+    /// [D-130]: ../../docs/architecture/s13-decision-register.md#d-130
+    /// [D-278]: ../../docs/architecture/s13-decision-register.md#d-278
+    extra: String,
 }
 
 /// Outcome of one rehydration (0.9.0, C3).
@@ -1625,6 +1664,19 @@ async fn rehydrate_session(conn: &libsql::Connection, ids: &[&str]) -> Result<Re
         "'main' AS branch_id"
     };
 
+    // The same question for `extra`, asked for the same reason and answered
+    // with the same literal (0.18.0, D-278). A cold file written before 0.18
+    // has no such column, and `'{}'` is what those rows *were*: no application
+    // could have set an attribute before the column existed. The reader does
+    // not upgrade the file -- only the archive writer does, inside its own
+    // transaction -- because a cold file can be read-only media or sit on a
+    // share.
+    let attributes = if cold_has_column(&tx, "concepts", "extra").await? {
+        "extra"
+    } else {
+        "'{}' AS extra"
+    };
+
     // Every lineage the hot ledger still registers, read once (0.15.11, W15.1,
     // C-3). One query for the whole call rather than one per id: the set is
     // bounded by how many lineages exist, not by how many concepts are being
@@ -1675,7 +1727,7 @@ async fn rehydrate_session(conn: &libsql::Connection, ids: &[&str]) -> Result<Re
             .query(
                 &format!(
                     "SELECT rowid_pk, id, title, content, embedding_model, \
-                     valid_from, valid_to, recorded_at, retired, {lineage} \
+                     valid_from, valid_to, recorded_at, retired, {lineage}, {attributes} \
                      FROM cold.concepts WHERE id IN ({placeholders})"
                 ),
                 libsql::params_from_iter(bind),
@@ -1698,6 +1750,7 @@ async fn rehydrate_session(conn: &libsql::Connection, ids: &[&str]) -> Result<Re
                     recorded_at: row.get(7)?,
                     retired: row.get(8)?,
                     branch_id: row.get(9)?,
+                    extra: row.get(10)?,
                 },
             );
         }
@@ -1721,6 +1774,7 @@ async fn rehydrate_session(conn: &libsql::Connection, ids: &[&str]) -> Result<Re
                 recorded_at,
                 retired,
                 branch_id,
+                extra,
             } = cold.clone();
 
             // The lineage has to exist before the row that names it can go back
@@ -1758,8 +1812,8 @@ async fn rehydrate_session(conn: &libsql::Connection, ids: &[&str]) -> Result<Re
                 // The clean move back: same row, same rowid, no side effects.
                 tx.execute(
                     "INSERT INTO concepts (rowid_pk, id, title, content, embedding_model, \
-                 valid_from, valid_to, recorded_at, retired, branch_id) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                 valid_from, valid_to, recorded_at, retired, branch_id, extra) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                     libsql::params![
                         old_rowid,
                         *id,
@@ -1770,7 +1824,8 @@ async fn rehydrate_session(conn: &libsql::Connection, ids: &[&str]) -> Result<Re
                         valid_to,
                         recorded_at,
                         retired,
-                        branch_id
+                        branch_id,
+                        extra
                     ],
                 )
                 .await?;
@@ -1783,8 +1838,8 @@ async fn rehydrate_session(conn: &libsql::Connection, ids: &[&str]) -> Result<Re
                 // could not remove because the row it described had already gone.
                 tx.execute(
                     "INSERT INTO concepts (id, title, content, embedding_model, \
-                 valid_from, valid_to, recorded_at, retired, branch_id) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                 valid_from, valid_to, recorded_at, retired, branch_id, extra) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                     libsql::params![
                         *id,
                         title.clone(),
@@ -1794,7 +1849,8 @@ async fn rehydrate_session(conn: &libsql::Connection, ids: &[&str]) -> Result<Re
                         valid_to,
                         recorded_at,
                         retired,
-                        branch_id
+                        branch_id,
+                        extra
                     ],
                 )
                 .await?;

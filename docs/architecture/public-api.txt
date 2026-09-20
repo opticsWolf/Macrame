@@ -107,6 +107,7 @@ pub fn macrame::connection::CheckpointReport::is_complete(&self) -> bool
 pub macrame::connection::ConceptUpsert::branch: core::option::Option<macrame::branch::BranchId>
 pub macrame::connection::ConceptUpsert::content: alloc::string::String
 pub macrame::connection::ConceptUpsert::embedding_model: core::option::Option<alloc::string::String>
+pub macrame::connection::ConceptUpsert::extra: core::option::Option<alloc::string::String>
 pub macrame::connection::ConceptUpsert::id: alloc::string::String
 pub macrame::connection::ConceptUpsert::retired: bool
 pub macrame::connection::ConceptUpsert::title: alloc::string::String
@@ -115,6 +116,7 @@ pub macrame::connection::ConceptUpsert::valid_to: alloc::string::String
 impl macrame::connection::ConceptUpsert
 pub fn macrame::connection::ConceptUpsert::content(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn macrame::connection::ConceptUpsert::embedding_model(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn macrame::connection::ConceptUpsert::extra(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn macrame::connection::ConceptUpsert::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn macrame::connection::ConceptUpsert::normalized(self) -> macrame::error::Result<Self>
 pub fn macrame::connection::ConceptUpsert::on_branch(self, macrame::branch::BranchId) -> Self
@@ -161,6 +163,7 @@ pub async fn macrame::connection::Database::rebuild_current_chunked(&self) -> ma
 pub async fn macrame::connection::Database::rebuild_fts(&self) -> macrame::error::Result<()>
 pub async fn macrame::connection::Database::reconstruct(&self, &str) -> macrame::error::Result<macrame::temporal::MaterializedState>
 pub async fn macrame::connection::Database::reconstruct_on(&self, &str, &str) -> macrame::error::Result<macrame::temporal::MaterializedState>
+pub async fn macrame::connection::Database::register_extra_index(&self, &str) -> macrame::error::Result<()>
 pub async fn macrame::connection::Database::register_model(&self, &macrame::vector::ModelName, usize) -> macrame::error::Result<()>
 pub async fn macrame::connection::Database::rehydrate(&self, &[&str]) -> macrame::error::Result<macrame::temporal::RehydrateReport>
 pub async fn macrame::connection::Database::retire_edge(&self, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, &str, &str) -> macrame::error::Result<()>
@@ -204,6 +207,7 @@ pub fn macrame::connection::Tuning::fmt(&self, &mut core::fmt::Formatter<'_>) ->
 pub const macrame::connection::BULK_ATOMIC_WARN_HOLD: core::time::Duration
 pub const macrame::connection::CHUNK_BUDGET: core::time::Duration
 pub const macrame::connection::MAX_ARCHIVE_SESSIONS: usize
+pub const macrame::connection::MAX_EXTRA_BYTES: usize
 pub fn macrame::connection::estimated_bulk_hold(&[macrame::graph::EdgeAssertion]) -> core::time::Duration
 pub mod macrame::error
 #[non_exhaustive] pub enum macrame::error::AbortKind
@@ -260,6 +264,10 @@ pub macrame::error::DbError::FutureRecordedAt::stamp: alloc::string::String
 pub macrame::error::DbError::HalfLifeWithoutInstant
 pub macrame::error::DbError::InvalidBranchId(alloc::string::String)
 pub macrame::error::DbError::InvalidEdgeType(alloc::string::String)
+pub macrame::error::DbError::InvalidExtra
+pub macrame::error::DbError::InvalidExtra::id: alloc::string::String
+pub macrame::error::DbError::InvalidExtra::reason: alloc::string::String
+pub macrame::error::DbError::InvalidExtraPath(alloc::string::String)
 pub macrame::error::DbError::InvalidId
 pub macrame::error::DbError::InvalidId::id: alloc::string::String
 pub macrame::error::DbError::InvalidId::reason: alloc::string::String
@@ -565,6 +573,7 @@ pub macrame::metrics::CommandKind::Optimize
 pub macrame::metrics::CommandKind::RebuildCurrent
 pub macrame::metrics::CommandKind::RebuildEmbeddingIndex
 pub macrame::metrics::CommandKind::RebuildFts
+pub macrame::metrics::CommandKind::RegisterExtraIndex
 pub macrame::metrics::CommandKind::RegisterModel
 pub macrame::metrics::CommandKind::Rehydrate
 pub macrame::metrics::CommandKind::RetireEdge
@@ -661,6 +670,7 @@ pub macrame::prelude::CommandKind::Optimize
 pub macrame::prelude::CommandKind::RebuildCurrent
 pub macrame::prelude::CommandKind::RebuildEmbeddingIndex
 pub macrame::prelude::CommandKind::RebuildFts
+pub macrame::prelude::CommandKind::RegisterExtraIndex
 pub macrame::prelude::CommandKind::RegisterModel
 pub macrame::prelude::CommandKind::Rehydrate
 pub macrame::prelude::CommandKind::RetireEdge
@@ -726,6 +736,10 @@ pub macrame::prelude::DbError::FutureRecordedAt::stamp: alloc::string::String
 pub macrame::prelude::DbError::HalfLifeWithoutInstant
 pub macrame::prelude::DbError::InvalidBranchId(alloc::string::String)
 pub macrame::prelude::DbError::InvalidEdgeType(alloc::string::String)
+pub macrame::prelude::DbError::InvalidExtra
+pub macrame::prelude::DbError::InvalidExtra::id: alloc::string::String
+pub macrame::prelude::DbError::InvalidExtra::reason: alloc::string::String
+pub macrame::prelude::DbError::InvalidExtraPath(alloc::string::String)
 pub macrame::prelude::DbError::InvalidId
 pub macrame::prelude::DbError::InvalidId::id: alloc::string::String
 pub macrame::prelude::DbError::InvalidId::reason: alloc::string::String
@@ -904,6 +918,7 @@ pub fn macrame::connection::CheckpointReport::is_complete(&self) -> bool
 pub macrame::prelude::ConceptUpsert::branch: core::option::Option<macrame::branch::BranchId>
 pub macrame::prelude::ConceptUpsert::content: alloc::string::String
 pub macrame::prelude::ConceptUpsert::embedding_model: core::option::Option<alloc::string::String>
+pub macrame::prelude::ConceptUpsert::extra: core::option::Option<alloc::string::String>
 pub macrame::prelude::ConceptUpsert::id: alloc::string::String
 pub macrame::prelude::ConceptUpsert::retired: bool
 pub macrame::prelude::ConceptUpsert::title: alloc::string::String
@@ -912,6 +927,7 @@ pub macrame::prelude::ConceptUpsert::valid_to: alloc::string::String
 impl macrame::connection::ConceptUpsert
 pub fn macrame::connection::ConceptUpsert::content(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn macrame::connection::ConceptUpsert::embedding_model(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn macrame::connection::ConceptUpsert::extra(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn macrame::connection::ConceptUpsert::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn macrame::connection::ConceptUpsert::normalized(self) -> macrame::error::Result<Self>
 pub fn macrame::connection::ConceptUpsert::on_branch(self, macrame::branch::BranchId) -> Self
@@ -972,6 +988,7 @@ pub async fn macrame::connection::Database::rebuild_current_chunked(&self) -> ma
 pub async fn macrame::connection::Database::rebuild_fts(&self) -> macrame::error::Result<()>
 pub async fn macrame::connection::Database::reconstruct(&self, &str) -> macrame::error::Result<macrame::temporal::MaterializedState>
 pub async fn macrame::connection::Database::reconstruct_on(&self, &str, &str) -> macrame::error::Result<macrame::temporal::MaterializedState>
+pub async fn macrame::connection::Database::register_extra_index(&self, &str) -> macrame::error::Result<()>
 pub async fn macrame::connection::Database::register_model(&self, &macrame::vector::ModelName, usize) -> macrame::error::Result<()>
 pub async fn macrame::connection::Database::rehydrate(&self, &[&str]) -> macrame::error::Result<macrame::temporal::RehydrateReport>
 pub async fn macrame::connection::Database::retire_edge(&self, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, &str, &str) -> macrame::error::Result<()>
@@ -1261,6 +1278,7 @@ pub const macrame::schema::ddl::CREATE_LOG_INTEGRITY_TABLE: &str
 pub const macrame::schema::ddl::CREATE_TRANSACTION_LOG_TABLE: &str
 pub const macrame::schema::ddl::CREATE_TRIGGERS: &[&str]
 pub const macrame::schema::ddl::CREATE_TXLOG_MARK_GAP: &str
+pub const macrame::schema::ddl::EXTRA_LAYER_INDEX: &str
 pub const macrame::schema::ddl::MAIN_BRANCH: &str
 pub const macrame::schema::ddl::OPTIMIZE: &str
 pub const macrame::schema::ddl::REBUILD_CONCEPTS_FTS: &str
@@ -1340,10 +1358,12 @@ pub fn macrame::temporal::MaterializedState::empty(&str) -> Self
 #[non_exhaustive] pub struct macrame::temporal::NodeAttributes
 pub macrame::temporal::NodeAttributes::content: alloc::string::String
 pub macrame::temporal::NodeAttributes::embedding_model: core::option::Option<alloc::string::String>
+pub macrame::temporal::NodeAttributes::extra: alloc::string::String
 pub macrame::temporal::NodeAttributes::id: alloc::string::String
 pub macrame::temporal::NodeAttributes::title: alloc::string::String
 impl macrame::temporal::NodeAttributes
 pub fn macrame::temporal::NodeAttributes::embedding_model(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn macrame::temporal::NodeAttributes::extra(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn macrame::temporal::NodeAttributes::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
 #[non_exhaustive] pub struct macrame::temporal::RehydrateReport
 pub macrame::temporal::RehydrateReport::concepts_rehydrated: usize
@@ -1504,6 +1524,10 @@ pub macrame::DbError::FutureRecordedAt::stamp: alloc::string::String
 pub macrame::DbError::HalfLifeWithoutInstant
 pub macrame::DbError::InvalidBranchId(alloc::string::String)
 pub macrame::DbError::InvalidEdgeType(alloc::string::String)
+pub macrame::DbError::InvalidExtra
+pub macrame::DbError::InvalidExtra::id: alloc::string::String
+pub macrame::DbError::InvalidExtra::reason: alloc::string::String
+pub macrame::DbError::InvalidExtraPath(alloc::string::String)
 pub macrame::DbError::InvalidId
 pub macrame::DbError::InvalidId::id: alloc::string::String
 pub macrame::DbError::InvalidId::reason: alloc::string::String
@@ -1680,6 +1704,7 @@ pub fn macrame::connection::CheckpointReport::is_complete(&self) -> bool
 pub macrame::ConceptUpsert::branch: core::option::Option<macrame::branch::BranchId>
 pub macrame::ConceptUpsert::content: alloc::string::String
 pub macrame::ConceptUpsert::embedding_model: core::option::Option<alloc::string::String>
+pub macrame::ConceptUpsert::extra: core::option::Option<alloc::string::String>
 pub macrame::ConceptUpsert::id: alloc::string::String
 pub macrame::ConceptUpsert::retired: bool
 pub macrame::ConceptUpsert::title: alloc::string::String
@@ -1688,6 +1713,7 @@ pub macrame::ConceptUpsert::valid_to: alloc::string::String
 impl macrame::connection::ConceptUpsert
 pub fn macrame::connection::ConceptUpsert::content(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn macrame::connection::ConceptUpsert::embedding_model(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn macrame::connection::ConceptUpsert::extra(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn macrame::connection::ConceptUpsert::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn macrame::connection::ConceptUpsert::normalized(self) -> macrame::error::Result<Self>
 pub fn macrame::connection::ConceptUpsert::on_branch(self, macrame::branch::BranchId) -> Self
@@ -1734,6 +1760,7 @@ pub async fn macrame::connection::Database::rebuild_current_chunked(&self) -> ma
 pub async fn macrame::connection::Database::rebuild_fts(&self) -> macrame::error::Result<()>
 pub async fn macrame::connection::Database::reconstruct(&self, &str) -> macrame::error::Result<macrame::temporal::MaterializedState>
 pub async fn macrame::connection::Database::reconstruct_on(&self, &str, &str) -> macrame::error::Result<macrame::temporal::MaterializedState>
+pub async fn macrame::connection::Database::register_extra_index(&self, &str) -> macrame::error::Result<()>
 pub async fn macrame::connection::Database::register_model(&self, &macrame::vector::ModelName, usize) -> macrame::error::Result<()>
 pub async fn macrame::connection::Database::rehydrate(&self, &[&str]) -> macrame::error::Result<macrame::temporal::RehydrateReport>
 pub async fn macrame::connection::Database::retire_edge(&self, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, &str, &str) -> macrame::error::Result<()>
