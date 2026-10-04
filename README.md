@@ -8,6 +8,7 @@
 [![Python versions](https://img.shields.io/pypi/pyversions/macrame-db.svg)](https://pypi.org/project/macrame-db/)
 [![MSRV](https://img.shields.io/crates/msrv/macrame-db.svg)](#minimum-supported-rust-version)
 [![License](https://img.shields.io/crates/l/macrame-db.svg)](#license)
+[![Website](https://img.shields.io/badge/website-Macrame-blue)](https://opticswolf.github.io/Macrame/)
 
 **A bitemporal graph ledger for knowledge management — embedded, single-file, no server.**
 
