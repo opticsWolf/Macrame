@@ -13,7 +13,7 @@ use crate::schema::ddl::*;
 /// guarantee D-029 buys would be void on it while `user_version` insisted all
 /// was well. Reserving 1 as a value this build refuses by name is what makes
 /// "no legacy support" an enforced property instead of a README sentence.
-pub const SCHEMA_VERSION: u32 = 21;
+pub const SCHEMA_VERSION: u32 = 22;
 
 type StepFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
 
@@ -233,6 +233,17 @@ const STEPS: &[Step] = &[
         // and recreated rather than re-issued; see `add_concepts_extra`.
         suspends_foreign_keys: false,
         apply: |conn| Box::pin(add_concepts_extra(conn)),
+    },
+    Step {
+        from: 21,
+        to: 22,
+        name: "blob-store",
+        // One `CREATE TABLE`, one index and two triggers, all on a table
+        // nothing references and which references nothing. The v19 -> v20
+        // rung's ground again: a fresh `blobs` is empty, so there is no seed
+        // and no row for a constraint to disagree with.
+        suspends_foreign_keys: false,
+        apply: |conn| Box::pin(add_blob_store(conn)),
     },
     Step {
         from: 16,
@@ -520,6 +531,9 @@ async fn baseline(conn: &libsql::Connection) -> Result<()> {
     // membership, no lineage. Its position here is free -- nothing references
     // it and it references nothing -- so it sits beside the other sidecar.
     conn.execute(CREATE_KV_STORE_TABLE, ()).await?;
+    // v22 (0.19.0, D-288). Before the index and trigger loops, which both name
+    // it; references nothing and is referenced by nothing.
+    conn.execute(CREATE_BLOBS_TABLE, ()).await?;
     // Before the triggers, not after: `trg_concepts_fts_*` name this table, and
     // SQLite resolves a trigger body's tables at CREATE TRIGGER time.
     conn.execute(CREATE_CONCEPTS_FTS, ()).await?;
@@ -554,6 +568,27 @@ async fn baseline(conn: &libsql::Connection) -> Result<()> {
 /// [D-280]: ../../docs/architecture/s13-decision-register.md#d-280
 async fn add_kv_store(conn: &libsql::Connection) -> Result<()> {
     conn.execute(CREATE_KV_STORE_TABLE, ()).await?;
+    Ok(())
+}
+
+/// v21 → v22: content-addressed bytes (0.19.0, P4, [D-281], [D-288]).
+///
+/// The table, its `put_at` index and its two triggers, issued from the same
+/// constants the baseline uses. `IF NOT EXISTS` is safe here for the reason it
+/// is not safe in the v20 → v21 rung: no earlier version created any of these
+/// names, so there is no older body for the statement to silently keep.
+///
+/// `COLD_SCHEMA` gains its `blobs` table lazily, inside the first archive
+/// session that runs on this build, like every other cold table — a cold file
+/// is never opened by a migration.
+///
+/// [D-281]: ../../docs/architecture/s13-decision-register.md#d-281
+/// [D-288]: ../../docs/architecture/s13-decision-register.md#d-288
+async fn add_blob_store(conn: &libsql::Connection) -> Result<()> {
+    conn.execute(CREATE_BLOBS_TABLE, ()).await?;
+    conn.execute(BLOBS_PUT_AT_INDEX, ()).await?;
+    conn.execute(CREATE_BLOBS_GUARD_UPDATE, ()).await?;
+    conn.execute(CREATE_BLOBS_GUARD_DELETE, ()).await?;
     Ok(())
 }
 
@@ -826,7 +861,16 @@ const V12_TRIGGERS: &[&str] = &[
 /// It failed loudly rather than quietly, which is the one mercy: the v6 → v7
 /// rung deletes log rows, so the trigger fired against a missing table and the
 /// climb stopped.
-const LATER_TRIGGERS: &[&str] = &["trg_txlog_mark_gap"];
+///
+/// The two blob guards joined it in 0.19.0 (v22, D-288) for the same reason, a
+/// longer way off: they name `blobs`, which arrives seventeen rungs above the
+/// first one that restores this set, and the v4 → v5 rung was the first to
+/// trip on them.
+const LATER_TRIGGERS: &[&str] = &[
+    "trg_txlog_mark_gap",
+    "trg_blobs_frozen_update",
+    "trg_blobs_guard_delete",
+];
 
 /// The five redefined triggers **as v11 had them** (§15.2, D-214).
 ///
@@ -1840,6 +1884,8 @@ pub(crate) const BASELINE_TABLES: &[&str] = &[
     // something required, and a v20 database without it would fail the first
     // `kv_get` with raw engine text instead of at the door.
     "kv_store",
+    // v22 (0.19.0, D-288).
+    "blobs",
 ];
 
 /// Confirm the database actually holds what the DDL claims to create.
@@ -2085,6 +2131,9 @@ const DELETE_GUARDS: &[&str] = &[
     // v12 database's stale unconditional guard a refusal at open rather than a
     // trigger abort in the middle of the first abandonment.
     "trg_branches_frozen_delete",
+    // v22 (0.19.0, D-288). Not a ledger table, but the archive deletes from it
+    // and nothing else may: an ungated body would refuse every blob reclaim.
+    "trg_blobs_guard_delete",
 ];
 
 /// The object names the DDL creates, recovered from the DDL itself.

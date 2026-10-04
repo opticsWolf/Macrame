@@ -8,6 +8,18 @@
 #     cargo +nightly public-api --all-features --omit blanket-impls,auto-trait-impls,auto-derived-impls
 #
 pub mod macrame
+pub mod macrame::blob
+#[non_exhaustive] pub enum macrame::blob::BlobLocation
+pub macrame::blob::BlobLocation::Cold
+pub macrame::blob::BlobLocation::Hot
+#[non_exhaustive] pub struct macrame::blob::BlobStat
+pub macrame::blob::BlobStat::location: macrame::blob::BlobLocation
+pub macrame::blob::BlobStat::put_at: alloc::string::String
+pub macrame::blob::BlobStat::sha256: alloc::string::String
+pub macrame::blob::BlobStat::size: u64
+pub const macrame::blob::DEFAULT_MAX_BLOB_BYTES: usize
+pub const macrame::blob::DIGEST_HEX_LEN: usize
+pub fn macrame::blob::validate_digest(&str) -> macrame::error::Result<()>
 pub mod macrame::branch
 #[non_exhaustive] pub struct macrame::branch::Ancestor
 pub macrame::branch::Ancestor::branch_id: alloc::string::String
@@ -132,6 +144,9 @@ pub async fn macrame::connection::Database::archive_branch(&self, macrame::branc
 pub fn macrame::connection::Database::archive_path(&self) -> &std::path::Path
 pub async fn macrame::connection::Database::archive_windowed(&self, &str, core::time::Duration) -> macrame::error::Result<alloc::vec::Vec<macrame::temporal::ArchiveReport>>
 pub async fn macrame::connection::Database::assert_edge(&self, macrame::graph::EdgeAssertion) -> macrame::error::Result<()>
+pub async fn macrame::connection::Database::blob_get(&self, &str) -> macrame::error::Result<core::option::Option<alloc::vec::Vec<u8>>>
+pub async fn macrame::connection::Database::blob_put(&self, &[u8]) -> macrame::error::Result<alloc::string::String>
+pub async fn macrame::connection::Database::blob_stat(&self, &str) -> macrame::error::Result<core::option::Option<macrame::blob::BlobStat>>
 pub async fn macrame::connection::Database::branches(&self) -> macrame::error::Result<alloc::vec::Vec<macrame::branch::Branch>>
 pub async fn macrame::connection::Database::bulk_embeddings(&self, &macrame::vector::ModelName, alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<f32>)>) -> macrame::error::BulkResult<usize>
 pub async fn macrame::connection::Database::bulk_embeddings_with(&self, &macrame::vector::ModelName, alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<f32>)>, macrame::connection::BulkControl) -> macrame::error::BulkResult<usize>
@@ -192,6 +207,7 @@ pub fn macrame::connection::Database::drop(&mut self)
 pub macrame::connection::Tuning::cadence: macrame::connection::CadencePolicy
 pub macrame::connection::Tuning::clock: core::option::Option<alloc::sync::Arc<dyn macrame::util::Clock>>
 pub macrame::connection::Tuning::future_stamps: macrame::FutureStampPolicy
+pub macrame::connection::Tuning::max_blob_bytes: core::option::Option<usize>
 pub macrame::connection::Tuning::reader_cache_size: core::option::Option<i32>
 pub macrame::connection::Tuning::wal_autocheckpoint: macrame::connection::WalCheckpointPolicy
 pub macrame::connection::Tuning::writer_cache_size: core::option::Option<i32>
@@ -199,11 +215,13 @@ impl macrame::connection::Tuning
 pub fn macrame::connection::Tuning::cadence(self, macrame::connection::CadencePolicy) -> Self
 pub fn macrame::connection::Tuning::clock(self, alloc::sync::Arc<dyn macrame::util::Clock>) -> Self
 pub fn macrame::connection::Tuning::future_stamps(self, macrame::FutureStampPolicy) -> Self
+pub fn macrame::connection::Tuning::max_blob_bytes(self, usize) -> Self
 pub fn macrame::connection::Tuning::reader_cache_size(self, i32) -> Self
 pub fn macrame::connection::Tuning::wal_autocheckpoint(self, macrame::connection::WalCheckpointPolicy) -> Self
 pub fn macrame::connection::Tuning::writer_cache_size(self, i32) -> Self
 impl core::fmt::Debug for macrame::connection::Tuning
 pub fn macrame::connection::Tuning::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub const macrame::connection::BLOB_WARN_HOLD: core::time::Duration
 pub const macrame::connection::BULK_ATOMIC_WARN_HOLD: core::time::Duration
 pub const macrame::connection::CHUNK_BUDGET: core::time::Duration
 pub const macrame::connection::MAX_ARCHIVE_SESSIONS: usize
@@ -211,6 +229,7 @@ pub const macrame::connection::MAX_EXTRA_BYTES: usize
 pub fn macrame::connection::estimated_bulk_hold(&[macrame::graph::EdgeAssertion]) -> core::time::Duration
 pub mod macrame::error
 #[non_exhaustive] pub enum macrame::error::AbortKind
+pub macrame::error::AbortKind::BlobImmutable
 pub macrame::error::AbortKind::BranchImmutable
 pub macrame::error::AbortKind::BranchesFrozen
 pub macrame::error::AbortKind::CrossLineage
@@ -228,6 +247,9 @@ pub macrame::error::DbError::ArchiveWindow::reason: alloc::string::String
 pub macrame::error::DbError::ArchiveWindow::window: core::time::Duration
 pub macrame::error::DbError::AttributeModeUnstated
 pub macrame::error::DbError::AttributeModeUnstated::instants: macrame::error::StatedInstants
+pub macrame::error::DbError::BlobTooLarge
+pub macrame::error::DbError::BlobTooLarge::max: usize
+pub macrame::error::DbError::BlobTooLarge::size: usize
 pub macrame::error::DbError::BranchArchived
 pub macrame::error::DbError::BranchArchived::branch: alloc::string::String
 pub macrame::error::DbError::BranchArchived::concept: alloc::string::String
@@ -263,6 +285,7 @@ pub macrame::error::DbError::FutureRecordedAt::limit: alloc::string::String
 pub macrame::error::DbError::FutureRecordedAt::stamp: alloc::string::String
 pub macrame::error::DbError::HalfLifeWithoutInstant
 pub macrame::error::DbError::InvalidBranchId(alloc::string::String)
+pub macrame::error::DbError::InvalidDigest(alloc::string::String)
 pub macrame::error::DbError::InvalidEdgeType(alloc::string::String)
 pub macrame::error::DbError::InvalidExtra
 pub macrame::error::DbError::InvalidExtra::id: alloc::string::String
@@ -567,6 +590,7 @@ pub macrame::metrics::CommandKind::Analyze
 pub macrame::metrics::CommandKind::Archive
 pub macrame::metrics::CommandKind::ArchiveBranch
 pub macrame::metrics::CommandKind::AssertEdge
+pub macrame::metrics::CommandKind::BlobPut
 pub macrame::metrics::CommandKind::BulkImportChunk
 pub macrame::metrics::CommandKind::Checkpoint
 pub macrame::metrics::CommandKind::DropEmbeddingIndex
@@ -649,6 +673,9 @@ pub mod macrame::prelude
 pub macrame::prelude::AttributeMode::AtTime
 pub macrame::prelude::AttributeMode::Current
 pub macrame::prelude::AttributeMode::Omit
+#[non_exhaustive] pub enum macrame::prelude::BlobLocation
+pub macrame::prelude::BlobLocation::Cold
+pub macrame::prelude::BlobLocation::Hot
 #[non_exhaustive] pub enum macrame::prelude::CadencePolicy
 pub macrame::prelude::CadencePolicy::Default
 pub macrame::prelude::CadencePolicy::Disabled
@@ -664,6 +691,7 @@ pub macrame::prelude::CommandKind::Analyze
 pub macrame::prelude::CommandKind::Archive
 pub macrame::prelude::CommandKind::ArchiveBranch
 pub macrame::prelude::CommandKind::AssertEdge
+pub macrame::prelude::CommandKind::BlobPut
 pub macrame::prelude::CommandKind::BulkImportChunk
 pub macrame::prelude::CommandKind::Checkpoint
 pub macrame::prelude::CommandKind::DropEmbeddingIndex
@@ -704,6 +732,9 @@ pub macrame::prelude::DbError::ArchiveWindow::reason: alloc::string::String
 pub macrame::prelude::DbError::ArchiveWindow::window: core::time::Duration
 pub macrame::prelude::DbError::AttributeModeUnstated
 pub macrame::prelude::DbError::AttributeModeUnstated::instants: macrame::error::StatedInstants
+pub macrame::prelude::DbError::BlobTooLarge
+pub macrame::prelude::DbError::BlobTooLarge::max: usize
+pub macrame::prelude::DbError::BlobTooLarge::size: usize
 pub macrame::prelude::DbError::BranchArchived
 pub macrame::prelude::DbError::BranchArchived::branch: alloc::string::String
 pub macrame::prelude::DbError::BranchArchived::concept: alloc::string::String
@@ -739,6 +770,7 @@ pub macrame::prelude::DbError::FutureRecordedAt::limit: alloc::string::String
 pub macrame::prelude::DbError::FutureRecordedAt::stamp: alloc::string::String
 pub macrame::prelude::DbError::HalfLifeWithoutInstant
 pub macrame::prelude::DbError::InvalidBranchId(alloc::string::String)
+pub macrame::prelude::DbError::InvalidDigest(alloc::string::String)
 pub macrame::prelude::DbError::InvalidEdgeType(alloc::string::String)
 pub macrame::prelude::DbError::InvalidExtra
 pub macrame::prelude::DbError::InvalidExtra::id: alloc::string::String
@@ -863,10 +895,18 @@ pub macrame::prelude::Annotation::value: alloc::string::String
 impl macrame::connection::Annotation
 pub fn macrame::connection::Annotation::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
 #[non_exhaustive] pub struct macrame::prelude::ArchiveReport
+pub macrame::prelude::ArchiveReport::blob_scan_bytes: u64
+pub macrame::prelude::ArchiveReport::blobs_archived: usize
+pub macrame::prelude::ArchiveReport::blobs_restored: usize
 pub macrame::prelude::ArchiveReport::concepts_archived: usize
 pub macrame::prelude::ArchiveReport::horizon: core::option::Option<i64>
 pub macrame::prelude::ArchiveReport::links_archived: usize
 pub macrame::prelude::ArchiveReport::log_entries_archived: usize
+#[non_exhaustive] pub struct macrame::prelude::BlobStat
+pub macrame::prelude::BlobStat::location: macrame::blob::BlobLocation
+pub macrame::prelude::BlobStat::put_at: alloc::string::String
+pub macrame::prelude::BlobStat::sha256: alloc::string::String
+pub macrame::prelude::BlobStat::size: u64
 #[non_exhaustive] pub struct macrame::prelude::Branch
 pub macrame::prelude::Branch::created_at: alloc::string::String
 pub macrame::prelude::Branch::forked_at: core::option::Option<alloc::string::String>
@@ -961,6 +1001,9 @@ pub async fn macrame::connection::Database::archive_branch(&self, macrame::branc
 pub fn macrame::connection::Database::archive_path(&self) -> &std::path::Path
 pub async fn macrame::connection::Database::archive_windowed(&self, &str, core::time::Duration) -> macrame::error::Result<alloc::vec::Vec<macrame::temporal::ArchiveReport>>
 pub async fn macrame::connection::Database::assert_edge(&self, macrame::graph::EdgeAssertion) -> macrame::error::Result<()>
+pub async fn macrame::connection::Database::blob_get(&self, &str) -> macrame::error::Result<core::option::Option<alloc::vec::Vec<u8>>>
+pub async fn macrame::connection::Database::blob_put(&self, &[u8]) -> macrame::error::Result<alloc::string::String>
+pub async fn macrame::connection::Database::blob_stat(&self, &str) -> macrame::error::Result<core::option::Option<macrame::blob::BlobStat>>
 pub async fn macrame::connection::Database::branches(&self) -> macrame::error::Result<alloc::vec::Vec<macrame::branch::Branch>>
 pub async fn macrame::connection::Database::bulk_embeddings(&self, &macrame::vector::ModelName, alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<f32>)>) -> macrame::error::BulkResult<usize>
 pub async fn macrame::connection::Database::bulk_embeddings_with(&self, &macrame::vector::ModelName, alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<f32>)>, macrame::connection::BulkControl) -> macrame::error::BulkResult<usize>
@@ -1202,6 +1245,7 @@ pub fn macrame::graph::TraversalBuilder::read_plan(&self) -> macrame::error::Res
 pub macrame::prelude::Tuning::cadence: macrame::connection::CadencePolicy
 pub macrame::prelude::Tuning::clock: core::option::Option<alloc::sync::Arc<dyn macrame::util::Clock>>
 pub macrame::prelude::Tuning::future_stamps: macrame::FutureStampPolicy
+pub macrame::prelude::Tuning::max_blob_bytes: core::option::Option<usize>
 pub macrame::prelude::Tuning::reader_cache_size: core::option::Option<i32>
 pub macrame::prelude::Tuning::wal_autocheckpoint: macrame::connection::WalCheckpointPolicy
 pub macrame::prelude::Tuning::writer_cache_size: core::option::Option<i32>
@@ -1209,6 +1253,7 @@ impl macrame::connection::Tuning
 pub fn macrame::connection::Tuning::cadence(self, macrame::connection::CadencePolicy) -> Self
 pub fn macrame::connection::Tuning::clock(self, alloc::sync::Arc<dyn macrame::util::Clock>) -> Self
 pub fn macrame::connection::Tuning::future_stamps(self, macrame::FutureStampPolicy) -> Self
+pub fn macrame::connection::Tuning::max_blob_bytes(self, usize) -> Self
 pub fn macrame::connection::Tuning::reader_cache_size(self, i32) -> Self
 pub fn macrame::connection::Tuning::wal_autocheckpoint(self, macrame::connection::WalCheckpointPolicy) -> Self
 pub fn macrame::connection::Tuning::writer_cache_size(self, i32) -> Self
@@ -1217,9 +1262,11 @@ pub fn macrame::connection::Tuning::fmt(&self, &mut core::fmt::Formatter<'_>) ->
 #[non_exhaustive] pub struct macrame::prelude::VectorSearchResult
 pub macrame::prelude::VectorSearchResult::concept_id: alloc::string::String
 pub macrame::prelude::VectorSearchResult::score: f32
+pub const macrame::prelude::BLOB_WARN_HOLD: core::time::Duration
 pub const macrame::prelude::BULK_ATOMIC_WARN_HOLD: core::time::Duration
 pub const macrame::prelude::CHUNK_BUDGET: core::time::Duration
 pub const macrame::prelude::DEFAULT_FUTURE_STAMP_TOLERANCE: core::time::Duration
+pub const macrame::prelude::DEFAULT_MAX_BLOB_BYTES: usize
 pub const macrame::prelude::MAX_ARCHIVE_SESSIONS: usize
 pub const macrame::prelude::MAX_BRANCH_ID: usize
 pub const macrame::prelude::RRF_K: usize
@@ -1251,6 +1298,7 @@ pub type macrame::prelude::BulkResult<T> = core::result::Result<T, macrame::erro
 pub type macrame::prelude::Result<T> = core::result::Result<T, macrame::error::DbError>
 pub mod macrame::schema
 pub mod macrame::schema::ddl
+pub const macrame::schema::ddl::ABORT_BLOB_IMMUTABLE: &str
 pub const macrame::schema::ddl::ABORT_BRANCHES_FROZEN: &str
 pub const macrame::schema::ddl::ABORT_BRANCH_IMMUTABLE: &str
 pub const macrame::schema::ddl::ABORT_CROSS_LINEAGE: &str
@@ -1260,8 +1308,12 @@ pub const macrame::schema::ddl::ABORT_SINGLE_OPEN: &str
 pub const macrame::schema::ddl::ANALYSIS_LIMIT: &str
 pub const macrame::schema::ddl::ANALYZE: &str
 pub const macrame::schema::ddl::ARCHIVE_SESSION_MARKER: &str
+pub const macrame::schema::ddl::BLOBS_PUT_AT_INDEX: &str
 pub const macrame::schema::ddl::BRANCH_COLUMN: &str
 pub const macrame::schema::ddl::CREATE_ANALYTICS_ANNOTATIONS_TABLE: &str
+pub const macrame::schema::ddl::CREATE_BLOBS_GUARD_DELETE: &str
+pub const macrame::schema::ddl::CREATE_BLOBS_GUARD_UPDATE: &str
+pub const macrame::schema::ddl::CREATE_BLOBS_TABLE: &str
 pub const macrame::schema::ddl::CREATE_BRANCHES_GUARD_DELETE: &str
 pub const macrame::schema::ddl::CREATE_BRANCHES_GUARD_UPDATE: &str
 pub const macrame::schema::ddl::CREATE_BRANCHES_TABLE: &str
@@ -1305,6 +1357,9 @@ pub async fn macrame::schema::run_migrations(&libsql::connection::Connection) ->
 pub async fn macrame::schema::seed_bootstrap(&libsql::connection::Connection) -> macrame::error::Result<()>
 pub mod macrame::temporal
 #[non_exhaustive] pub struct macrame::temporal::ArchiveReport
+pub macrame::temporal::ArchiveReport::blob_scan_bytes: u64
+pub macrame::temporal::ArchiveReport::blobs_archived: usize
+pub macrame::temporal::ArchiveReport::blobs_restored: usize
 pub macrame::temporal::ArchiveReport::concepts_archived: usize
 pub macrame::temporal::ArchiveReport::horizon: core::option::Option<i64>
 pub macrame::temporal::ArchiveReport::links_archived: usize
@@ -1480,6 +1535,9 @@ pub async fn macrame::vector::keyword_search(&libsql::connection::Connection, &s
 pub fn macrame::vector::reciprocal_rank_fusion(&[alloc::string::String], &[alloc::string::String], usize) -> alloc::vec::Vec<(alloc::string::String, f64)>
 pub async fn macrame::vector::registered_models(&libsql::connection::Connection) -> macrame::error::Result<alloc::vec::Vec<macrame::vector::ModelName>>
 pub async fn macrame::vector::search_vector(&libsql::connection::Connection, &[f32], &macrame::vector::ModelName, usize, core::option::Option<&str>, core::option::Option<core::time::Duration>) -> macrame::error::Result<alloc::vec::Vec<macrame::vector::VectorSearchResult>>
+#[non_exhaustive] pub enum macrame::BlobLocation
+pub macrame::BlobLocation::Cold
+pub macrame::BlobLocation::Hot
 #[non_exhaustive] pub enum macrame::CadencePolicy
 pub macrame::CadencePolicy::Default
 pub macrame::CadencePolicy::Disabled
@@ -1494,6 +1552,9 @@ pub macrame::DbError::ArchiveWindow::reason: alloc::string::String
 pub macrame::DbError::ArchiveWindow::window: core::time::Duration
 pub macrame::DbError::AttributeModeUnstated
 pub macrame::DbError::AttributeModeUnstated::instants: macrame::error::StatedInstants
+pub macrame::DbError::BlobTooLarge
+pub macrame::DbError::BlobTooLarge::max: usize
+pub macrame::DbError::BlobTooLarge::size: usize
 pub macrame::DbError::BranchArchived
 pub macrame::DbError::BranchArchived::branch: alloc::string::String
 pub macrame::DbError::BranchArchived::concept: alloc::string::String
@@ -1529,6 +1590,7 @@ pub macrame::DbError::FutureRecordedAt::limit: alloc::string::String
 pub macrame::DbError::FutureRecordedAt::stamp: alloc::string::String
 pub macrame::DbError::HalfLifeWithoutInstant
 pub macrame::DbError::InvalidBranchId(alloc::string::String)
+pub macrame::DbError::InvalidDigest(alloc::string::String)
 pub macrame::DbError::InvalidEdgeType(alloc::string::String)
 pub macrame::DbError::InvalidExtra
 pub macrame::DbError::InvalidExtra::id: alloc::string::String
@@ -1637,6 +1699,11 @@ pub macrame::Annotation::label: alloc::string::String
 pub macrame::Annotation::value: alloc::string::String
 impl macrame::connection::Annotation
 pub fn macrame::connection::Annotation::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
+#[non_exhaustive] pub struct macrame::BlobStat
+pub macrame::BlobStat::location: macrame::blob::BlobLocation
+pub macrame::BlobStat::put_at: alloc::string::String
+pub macrame::BlobStat::sha256: alloc::string::String
+pub macrame::BlobStat::size: u64
 #[non_exhaustive] pub struct macrame::Branch
 pub macrame::Branch::created_at: alloc::string::String
 pub macrame::Branch::forked_at: core::option::Option<alloc::string::String>
@@ -1735,6 +1802,9 @@ pub async fn macrame::connection::Database::archive_branch(&self, macrame::branc
 pub fn macrame::connection::Database::archive_path(&self) -> &std::path::Path
 pub async fn macrame::connection::Database::archive_windowed(&self, &str, core::time::Duration) -> macrame::error::Result<alloc::vec::Vec<macrame::temporal::ArchiveReport>>
 pub async fn macrame::connection::Database::assert_edge(&self, macrame::graph::EdgeAssertion) -> macrame::error::Result<()>
+pub async fn macrame::connection::Database::blob_get(&self, &str) -> macrame::error::Result<core::option::Option<alloc::vec::Vec<u8>>>
+pub async fn macrame::connection::Database::blob_put(&self, &[u8]) -> macrame::error::Result<alloc::string::String>
+pub async fn macrame::connection::Database::blob_stat(&self, &str) -> macrame::error::Result<core::option::Option<macrame::blob::BlobStat>>
 pub async fn macrame::connection::Database::branches(&self) -> macrame::error::Result<alloc::vec::Vec<macrame::branch::Branch>>
 pub async fn macrame::connection::Database::bulk_embeddings(&self, &macrame::vector::ModelName, alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<f32>)>) -> macrame::error::BulkResult<usize>
 pub async fn macrame::connection::Database::bulk_embeddings_with(&self, &macrame::vector::ModelName, alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<f32>)>, macrame::connection::BulkControl) -> macrame::error::BulkResult<usize>
@@ -1826,6 +1896,7 @@ pub fn macrame::plan::ReadPlan::valid_at(self, impl core::convert::Into<alloc::s
 pub macrame::Tuning::cadence: macrame::connection::CadencePolicy
 pub macrame::Tuning::clock: core::option::Option<alloc::sync::Arc<dyn macrame::util::Clock>>
 pub macrame::Tuning::future_stamps: macrame::FutureStampPolicy
+pub macrame::Tuning::max_blob_bytes: core::option::Option<usize>
 pub macrame::Tuning::reader_cache_size: core::option::Option<i32>
 pub macrame::Tuning::wal_autocheckpoint: macrame::connection::WalCheckpointPolicy
 pub macrame::Tuning::writer_cache_size: core::option::Option<i32>
@@ -1833,6 +1904,7 @@ impl macrame::connection::Tuning
 pub fn macrame::connection::Tuning::cadence(self, macrame::connection::CadencePolicy) -> Self
 pub fn macrame::connection::Tuning::clock(self, alloc::sync::Arc<dyn macrame::util::Clock>) -> Self
 pub fn macrame::connection::Tuning::future_stamps(self, macrame::FutureStampPolicy) -> Self
+pub fn macrame::connection::Tuning::max_blob_bytes(self, usize) -> Self
 pub fn macrame::connection::Tuning::reader_cache_size(self, i32) -> Self
 pub fn macrame::connection::Tuning::wal_autocheckpoint(self, macrame::connection::WalCheckpointPolicy) -> Self
 pub fn macrame::connection::Tuning::writer_cache_size(self, i32) -> Self
@@ -1840,6 +1912,7 @@ impl core::fmt::Debug for macrame::connection::Tuning
 pub fn macrame::connection::Tuning::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub const macrame::CHUNK_BUDGET: core::time::Duration
 pub const macrame::DEFAULT_FUTURE_STAMP_TOLERANCE: core::time::Duration
+pub const macrame::DEFAULT_MAX_BLOB_BYTES: usize
 pub const macrame::MAX_BRANCH_ID: usize
 pub type macrame::BulkResult<T> = core::result::Result<T, macrame::error::BulkInterrupted>
 pub type macrame::Result<T> = core::result::Result<T, macrame::error::DbError>

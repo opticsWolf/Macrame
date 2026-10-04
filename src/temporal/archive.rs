@@ -18,6 +18,25 @@ pub struct ArchiveReport {
     /// Oldest `transaction_log.seq_id` still present in the hot file after the
     /// session, i.e. the new horizon (see glossary). `None` if the hot log is empty.
     pub horizon: Option<i64>,
+    /// Blobs moved to `cold.blobs`: last put before the cutoff and named by no
+    /// hot log entry (0.19.0, [D-281]). Always `0` from `archive_branch`,
+    /// which has no cutoff to apply the age guard with.
+    ///
+    /// [D-281]: ../../docs/architecture/s13-decision-register.md#d-281
+    pub blobs_archived: usize,
+    /// Cold-only blobs a hot entry names, copied back to `blobs` with `put_at`
+    /// set to the session's `archived_at` (0.19.0, [D-288]). The cold copy
+    /// stays.
+    ///
+    /// [D-288]: ../../docs/architecture/s13-decision-register.md#d-288
+    pub blobs_restored: usize,
+    /// Hot log payload bytes the reference scan read (0.19.0, [D-287]). `0`
+    /// when there was nothing to decide — no hot blob older than the cutoff and
+    /// no cold-only blob — which is the zero-cost-when-unused property, stated
+    /// as a number rather than left to timing.
+    ///
+    /// [D-287]: ../../docs/architecture/s13-decision-register.md#d-287
+    pub blob_scan_bytes: u64,
 }
 
 /// Schema of the cold database. Deliberately trigger-free and FK-free.
@@ -151,6 +170,21 @@ const COLD_SCHEMA: &[&str] = &[
         forked_at   TEXT,
         created_at  TEXT NOT NULL,
         archived_at TEXT NOT NULL
+    )"#,
+    // Blobs, as of 0.19.0 (D-288). The hot table's shape without its guards —
+    // the cold file receives rows and has no delete path to protect — and
+    // without the `size = length(bytes)` and `typeof` CHECKs: a cold file must
+    // not re-validate old rows against a rule a later version tightens. The
+    // `sha256` CHECK stays, because the copy-back reads it into a hot table
+    // that has one, and `UNIQUE` is what makes `INSERT OR IGNORE` the
+    // already-there answer for a blob that goes cold twice.
+    r#"CREATE TABLE IF NOT EXISTS cold.blobs (
+        blob_id INTEGER PRIMARY KEY,
+        sha256  TEXT    NOT NULL UNIQUE
+                CHECK (length(sha256) = 64 AND sha256 NOT GLOB '*[^0-9a-f]*'),
+        size    INTEGER NOT NULL,
+        bytes   BLOB    NOT NULL,
+        put_at  TEXT    NOT NULL
     )"#,
     r#"CREATE TABLE IF NOT EXISTS cold.archive_horizon (
         archived_at TEXT NOT NULL,
@@ -927,6 +961,11 @@ async fn archive_session(
     )
     .await?;
 
+    // Blobs, and **only now** — after the log delete, for D-128's reason one
+    // level down: a blob is eligible when no *hot* entry names it, so the scan
+    // must read the log the session has just made as small as it will get.
+    let blobs = archive_blobs(&tx, conn, cutoff, archived_at).await?;
+
     // Record the new horizon in the cold file so a pre-horizon reconstruct can
     // tell "archived" from "never existed" (glossary; R14).
     let horizon: Option<i64> = tx
@@ -953,7 +992,161 @@ async fn archive_session(
         concepts_archived,
         log_entries_archived,
         horizon,
+        blobs_archived: blobs.archived,
+        blobs_restored: blobs.restored,
+        blob_scan_bytes: blobs.scan_bytes,
     })
+}
+
+/// What the blob step did, for [`ArchiveReport`].
+#[derive(Default)]
+struct BlobStep {
+    archived: usize,
+    restored: usize,
+    scan_bytes: u64,
+}
+
+/// Rows per `IN (…)` list in the blob step. Well under SQLite's default
+/// 32,766-parameter ceiling, and small enough that one statement's list is
+/// never the cost.
+const BLOB_IN_CHUNK: usize = 500;
+
+/// The blob step of an archive session ([D-281], [D-287], [D-288]).
+///
+/// 1. `C` — hot blobs last put before the cutoff: the only ones the age guard
+///    lets go.
+/// 2. `K` — cold-only blobs: archived earlier, not hot now. Copy-back
+///    candidates.
+/// 3. **If both are empty the step ends**, before any payload is read. A
+///    ledger that never stored a blob pays one indexed probe of each table.
+/// 4. Otherwise the hot log's payloads are streamed once through
+///    [`crate::blob::ReferenceScan`] against `C ∪ K`, stopping early once
+///    every member has been seen. `R` is what it found.
+/// 5. `C \ R` moves cold: `INSERT OR IGNORE` (a blob that went cold before
+///    and came back is already there), then the guarded delete.
+/// 6. `K ∩ R` is copied back with `put_at = archived_at`. Copied, not moved:
+///    the cold side has no delete path, and two rows under one content
+///    address cannot disagree.
+///
+/// [D-281]: ../../docs/architecture/s13-decision-register.md#d-281
+/// [D-287]: ../../docs/architecture/s13-decision-register.md#d-287
+/// [D-288]: ../../docs/architecture/s13-decision-register.md#d-288
+async fn archive_blobs(
+    tx: &libsql::Transaction,
+    conn: &libsql::Connection,
+    cutoff: &str,
+    archived_at: &str,
+) -> Result<BlobStep> {
+    use std::collections::HashSet;
+
+    let candidates = collect_strings(
+        tx,
+        "SELECT sha256 FROM main.blobs WHERE put_at < ?1",
+        libsql::params![cutoff],
+    )
+    .await?;
+    let cold_only = collect_strings(
+        tx,
+        "SELECT c.sha256 FROM cold.blobs c \
+         WHERE NOT EXISTS (SELECT 1 FROM main.blobs b WHERE b.sha256 = c.sha256)",
+        (),
+    )
+    .await?;
+    if candidates.is_empty() && cold_only.is_empty() {
+        return Ok(BlobStep::default());
+    }
+
+    let wanted: HashSet<String> = candidates.union(&cold_only).cloned().collect();
+    let mut scan = crate::blob::ReferenceScan::new(&wanted);
+    {
+        let mut rows = tx
+            .query("SELECT payload FROM main.transaction_log", ())
+            .await?;
+        while let Some(row) = rows.next().await? {
+            match row.get_value(0)? {
+                libsql::Value::Text(t) => scan.feed(t.as_bytes()),
+                libsql::Value::Blob(b) => scan.feed(&b),
+                _ => {}
+            }
+            if scan.complete() {
+                break;
+            }
+        }
+    }
+    let scan_bytes = scan.bytes_scanned;
+    let referenced = scan.into_found();
+
+    let eligible: Vec<&String> = candidates.difference(&referenced).collect();
+    let mut archived = 0usize;
+    for chunk in eligible.chunks(BLOB_IN_CHUNK) {
+        let list = in_list(chunk.len());
+        let params: Vec<libsql::Value> = chunk.iter().map(|s| (*s).clone().into()).collect();
+        tx.execute(
+            &format!(
+                "INSERT OR IGNORE INTO cold.blobs (sha256, size, bytes, put_at) \
+                 SELECT sha256, size, bytes, put_at FROM main.blobs WHERE sha256 IN ({list})"
+            ),
+            params.clone(),
+        )
+        .await?;
+        archived += delete_guarded(
+            tx,
+            conn,
+            &format!("DELETE FROM main.blobs WHERE sha256 IN ({list})"),
+            params,
+            "blobs",
+        )
+        .await? as usize;
+    }
+
+    let restore: Vec<&String> = cold_only.intersection(&referenced).collect();
+    let mut restored = 0usize;
+    for chunk in restore.chunks(BLOB_IN_CHUNK) {
+        // `?1` is the stamp; the digests follow it.
+        let list = (2..chunk.len() + 2)
+            .map(|i| format!("?{i}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut params: Vec<libsql::Value> = vec![archived_at.to_string().into()];
+        params.extend(chunk.iter().map(|s| libsql::Value::from((*s).clone())));
+        restored += tx
+            .execute(
+                &format!(
+                    "INSERT INTO main.blobs (sha256, size, bytes, put_at) \
+                     SELECT sha256, size, bytes, ?1 FROM cold.blobs WHERE sha256 IN ({list})"
+                ),
+                params,
+            )
+            .await? as usize;
+    }
+
+    Ok(BlobStep {
+        archived,
+        restored,
+        scan_bytes,
+    })
+}
+
+/// `?1,?2,…,?n`.
+fn in_list(n: usize) -> String {
+    (1..=n)
+        .map(|i| format!("?{i}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// One text column, collected into a set.
+async fn collect_strings(
+    tx: &libsql::Transaction,
+    sql: &str,
+    params: impl libsql::params::IntoParams,
+) -> Result<std::collections::HashSet<String>> {
+    let mut rows = tx.query(sql, params).await?;
+    let mut out = std::collections::HashSet::new();
+    while let Some(row) = rows.next().await? {
+        out.insert(row.get::<String>(0)?);
+    }
+    Ok(out)
 }
 
 /// Move every concept [`CONCEPTS_ARCHIVABLE`] admits into `cold.concepts`, and
@@ -1432,6 +1625,14 @@ async fn archive_branch_session(
         concepts_archived,
         log_entries_archived,
         horizon,
+        // No blob step here, and deliberately: the age guard needs a cutoff
+        // and this session has none — using `archived_at` as one is the Wave
+        // 4.5 two-clock defect `archive_horizon`'s note describes. The blobs a
+        // forgotten lineage named go cold at the next `archive`, whose scan no
+        // longer sees its entries.
+        blobs_archived: 0,
+        blobs_restored: 0,
+        blob_scan_bytes: 0,
     })
 }
 

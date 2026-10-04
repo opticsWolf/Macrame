@@ -34,3 +34,6 @@ __pycache__/
 .venv/
 dist/
 *.egg-info/
+
+# Local working list, not published
+docs/documentation_fix.md

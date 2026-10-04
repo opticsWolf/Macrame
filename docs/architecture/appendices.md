@@ -523,6 +523,16 @@ db.kv_scan("okf:", 100).await?;                        // Vec<(String, String)>
 // `limit` is required, not an Option: an unbounded scan of a table whose size
 // is the application's business is a stall waiting for the database that grew.
 
+// -- Blobs: content-addressed bytes (0.19.0, D-281, D-287, D-288) --
+// The address is SHA-256 as 64 lowercase hex characters -- what hashlib and
+// sha256sum print. Store it anywhere in a concept or link; the archive keeps a
+// blob hot while a hot log entry contains that text, sends it cold once none
+// does and it was last put before the cutoff, and copies it back if a hot entry
+// names it again. Capped by Tuning::max_blob_bytes (8 MiB by default).
+let addr = db.blob_put(&bytes).await?;                 // String; high-pri, exempt
+db.blob_get(&addr).await?;                             // Option<Vec<u8>>, hot then cold
+db.blob_stat(&addr).await?;                            // Option<BlobStat>: size, put_at, location
+
 // -- Analytics --
 // Derived output goes to analytics_annotations, never to the ledger (D-041).
 db.write_analytics_annotations(vec![
@@ -757,7 +767,7 @@ New in 0.13.38 ([D-211](s13-decision-register.md#d-211)). [Appendix A](appendice
 
 *Frozen* means a change requires a **major version**.
 
-**1. The public Rust API, item for item and path for path.** [`docs/architecture/public-api.txt`](public-api.txt) is the surface — **1,836 items** (0.18.0: [D-280](s13-decision-register.md#d-280) added the four `Database::kv_*` methods, the `macrame::kv` module of `src/kv.rs` with `MAX_KV_KEY` and its two validators, `ddl::CREATE_KV_STORE_TABLE`, `DbError::InvalidKvKey` and `CommandKind::KvWrite`; [D-278](s13-decision-register.md#d-278) added `Database::register_extra_index`, the `extra` setter and field on `ConceptUpsert` and `NodeAttributes`, `ddl::EXTRA_LAYER_INDEX`, `connection::MAX_EXTRA_BYTES`, `DbError::InvalidExtra` and `DbError::InvalidExtraPath`, and `CommandKind::RegisterExtraIndex`; [D-286](s13-decision-register.md#d-286) added `NodeData::extra` and `NodeData::with_extra` with the `TraversalBuilder::extra` flag and its setter — a new enum variant is two items through the flat aliases). No item is removed, no path stops resolving, and no signature narrows. Each item is reachable at exactly one canonical path, plus flat aliases at the crate root and in `macrame::prelude` ([D-208](s13-decision-register.md#d-208)). Held by `scripts/check_public_api.py` in CI and by `tests/public_path_tests.rs` in `cargo test`. The cycle that produced this surface was reviewed against 0.13.0 item by item before it was frozen — [`api-review-0.14.0.md`](api-review-0.14.0.md), [D-212](s13-decision-register.md#d-212) — which is the last release where that review is cheap.
+**1. The public Rust API, item for item and path for path.** [`docs/architecture/public-api.txt`](public-api.txt) is the surface — **1,909 items** (0.19.0: [D-281](s13-decision-register.md#d-281) added the `macrame::blob` module of `src/blob.rs` with `BlobStat`, `BlobLocation`, `DEFAULT_MAX_BLOB_BYTES`, `DIGEST_HEX_LEN` and `validate_digest`, the three `Database::blob_*` methods, `Tuning::max_blob_bytes` and its setter, `connection::BLOB_WARN_HOLD`, the three blob fields of `ArchiveReport`, `DbError::BlobTooLarge`, `DbError::InvalidDigest` and `CommandKind::BlobPut`, and five `ddl` constants — the table, its index, its two guards and the update guard's abort message; [D-288](s13-decision-register.md#d-288) added `AbortKind::BlobImmutable` — +73, none removed. 0.18.0: [D-280](s13-decision-register.md#d-280) added the four `Database::kv_*` methods, the `macrame::kv` module of `src/kv.rs` with `MAX_KV_KEY` and its two validators, `ddl::CREATE_KV_STORE_TABLE`, `DbError::InvalidKvKey` and `CommandKind::KvWrite`; [D-278](s13-decision-register.md#d-278) added `Database::register_extra_index`, the `extra` setter and field on `ConceptUpsert` and `NodeAttributes`, `ddl::EXTRA_LAYER_INDEX`, `connection::MAX_EXTRA_BYTES`, `DbError::InvalidExtra` and `DbError::InvalidExtraPath`, and `CommandKind::RegisterExtraIndex`; [D-286](s13-decision-register.md#d-286) added `NodeData::extra` and `NodeData::with_extra` with the `TraversalBuilder::extra` flag and its setter — a new enum variant is two items through the flat aliases). No item is removed, no path stops resolving, and no signature narrows. Each item is reachable at exactly one canonical path, plus flat aliases at the crate root and in `macrame::prelude` ([D-208](s13-decision-register.md#d-208)). Held by `scripts/check_public_api.py` in CI and by `tests/public_path_tests.rs` in `cargo test`. The cycle that produced this surface was reviewed against 0.13.0 item by item before it was frozen — [`api-review-0.14.0.md`](api-review-0.14.0.md), [D-212](s13-decision-register.md#d-212) — which is the last release where that review is cheap.
 
 **2. The ledger tables** — `concepts`, `links`, `transaction_log`. Additive only: `ALTER TABLE ADD COLUMN` and new indexes. A changed primary key, a dropped column or altered bitemporal semantics is a major version with an explicit ETL path, because bitemporal data is the hardest data to migrate: a rebuild means replaying history and recomputing transaction-time boundaries, which is rewriting the past ([D-036](s13-decision-register.md#d-036), [Doctrine III](s0-s3-foundations.md#doctrine-iii)).
 
@@ -779,7 +789,7 @@ Minor-version changes, and several of them are expected rather than merely permi
 
 **3. The derivative tables** — `links_current`, the per-model `embeddings_*` tables, and `concepts_fts`. **No schema-stability guarantee at all.** A minor version needing a different materialization drops the table, recreates it from the DDL and re-derives it inside the same migration step ([D-036](s13-decision-register.md#d-036), [Doctrine VI](s0-s3-foundations.md#doctrine-vi), [Doctrine VII](s0-s3-foundations.md#doctrine-vii)).
 
-**4. The schema version and its migration rungs.** **v21** today. Rungs are forward-only and run at `open()`; adding one is a minor version, and refusing to open a database from a *newer* build is the behaviour, not a bug.
+**4. The schema version and its migration rungs.** **v22** today. Rungs are forward-only and run at `open()`; adding one is a minor version, and refusing to open a database from a *newer* build is the behaviour, not a bug.
 
 **5. The snapshot container format.** **v5** today. A snapshot is a cache of a fold the ledger can always reproduce, so the format is versioned and an unrecognised version is **refused rather than parsed** ([D-043](s13-decision-register.md#d-043)); a build that cannot read an old snapshot folds from the log instead. Losing every snapshot costs time and no information.
 

@@ -281,6 +281,18 @@ pub enum CommandKind {
     /// `concepts` table reads every row. An app that calls this
     /// unconditionally at startup pays it once, on the open after a restore.
     RegisterExtraIndex,
+    /// One [`crate::Database::blob_put`] turn (0.19.0, D-281): a `put_at`
+    /// refresh, or the insert of a new content address with its bytes.
+    ///
+    /// **Exempt**, and the bound is the cap: the hold is a function of the
+    /// blob's size, up to [`crate::Tuning::max_blob_bytes`], and there is no
+    /// unit smaller than the value — libSQL 0.9.30 exposes no incremental blob
+    /// I/O, so the bytes enter the file in one statement or not at all. The
+    /// re-put arm is a single indexed `UPDATE` and sits well inside the budget;
+    /// counting the kind would make every large first put a violation by
+    /// construction, which is `Analyze`'s problem and not a signal.
+    /// **At the end of the declaration order**, per [`CommandKind::index`].
+    BlobPut,
 }
 
 impl CommandKind {
@@ -314,6 +326,7 @@ impl CommandKind {
         CommandKind::LinksCurrentMirror,
         CommandKind::KvWrite,
         CommandKind::RegisterExtraIndex,
+        CommandKind::BlobPut,
     ];
 
     pub const COUNT: usize = CommandKind::ALL.len();
@@ -371,6 +384,7 @@ impl CommandKind {
             CommandKind::LinksCurrentMirror => "links_current_mirror",
             CommandKind::KvWrite => "kv_write",
             CommandKind::RegisterExtraIndex => "register_extra_index",
+            CommandKind::BlobPut => "blob_put",
         }
     }
 
@@ -583,6 +597,7 @@ impl CommandKind {
                 | CommandKind::DropEmbeddingIndex
                 | CommandKind::RebuildEmbeddingIndex
                 | CommandKind::LinksCurrentMirror
+                | CommandKind::BlobPut
         )
     }
 }

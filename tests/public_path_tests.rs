@@ -91,8 +91,19 @@ const BASELINE: &str = include_str!("../docs/architecture/public-api.txt");
 /// root or in the prelude**: `MAX_KV_KEY` and `validate_kv_key` are too generic
 /// to be flat names, so the qualification is the point and this is the only
 /// path.
+///
+/// `macrame::blob` is the fourteenth and arrived at 0.19.0
+/// ([D-281](../../docs/architecture/s13-decision-register.md#d-281)). It holds
+/// the address rule — `DIGEST_HEX_LEN` and `validate_digest` — beside the cap
+/// and the two types `blob_stat` returns. Like `kv`, the three `blob_*` methods
+/// live on `Database`; unlike `kv`, `BlobStat`, `BlobLocation` and
+/// `DEFAULT_MAX_BLOB_BYTES` are also re-exported at the root and in the
+/// prelude, because they are names a caller of `blob_stat` and `Tuning` meets
+/// anyway and none of them is generic. The validator is not: it stays
+/// qualified, so the module is its canonical and only path.
 const PUBLIC_MODULES: &[&str] = &[
     "macrame",
+    "macrame::blob",
     "macrame::branch",
     "macrame::connection",
     "macrame::connection::chunk_rows",

@@ -339,6 +339,12 @@ const REGISTRY: &[Growable] = &[
         why: "what the archive session moved, and where the horizon ended up.",
     },
     Growable {
+        name: "BlobStat",
+        entry: Entry::Returned,
+        why: "a blob's size, age and which file answered — returned by \
+              `blob_stat` and never built by a caller (0.19.0, D-281).",
+    },
+    Growable {
         name: "HybridHit",
         entry: Entry::Returned,
         why: "a search result carrying both of its ranks.",
@@ -387,6 +393,7 @@ const SOURCES: &[(&str, &str)] = &[
 /// searching the text for it. Adding a file here is cheaper than being wrong
 /// about which file a type moved to.
 const CRATE_SOURCES: &[&str] = &[
+    include_str!("../src/blob.rs"),
     include_str!("../src/branch.rs"),
     include_str!("../src/connection.rs"),
     include_str!("../src/error.rs"),

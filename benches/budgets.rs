@@ -1327,6 +1327,131 @@ fn archive_cost(c: &mut Criterion) {
     group.finish();
 }
 
+/// The three blob sizes gate 12 names: a small attachment, a typical one, and
+/// the default cap.
+const BLOB_SIZES: [(&str, usize); 3] = [
+    ("64KiB", 64 * 1024),
+    ("1MiB", 1024 * 1024),
+    ("8MiB", DEFAULT_MAX_BLOB_BYTES),
+];
+
+/// Put and get at gate 12's three sizes, with **the hash timed on its own**
+/// (0.19.0, D-281 amendment 3).
+///
+/// The split is the point. `blob_put` hashes on the caller's side and then
+/// queues a write, so `put - hash` is roughly what the writer holds — the
+/// number `BLOB_WARN_HOLD` has to sit above — and `hash / put` is the share
+/// the choice of SHA-256 over a faster hash could ever have saved.
+///
+/// Every put writes **distinct bytes** (a counter in the first eight), because
+/// a re-put of the same bytes takes the `UPDATE put_at` path and would time
+/// the refresh rather than the insert. That makes the file grow with every
+/// iteration, so the put arms run flat sampling at ten samples: about 80 MiB
+/// of 8 MiB blobs rather than criterion's default linear ladder's half a
+/// gigabyte.
+fn blob_io(c: &mut Criterion) {
+    use sha2::{Digest, Sha256};
+
+    let rt = runtime();
+    let mut group = controlled_group(c, "blob");
+    group.sample_size(10);
+    group.sampling_mode(criterion::SamplingMode::Flat);
+    group.warm_up_time(std::time::Duration::from_millis(200));
+
+    for (label, size) in BLOB_SIZES {
+        let data: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+
+        group.bench_with_input(BenchmarkId::new("sha256_only", label), &data, |b, d| {
+            b.iter(|| Sha256::digest(d))
+        });
+
+        let fx = rt.block_on(fixture());
+        let mut payload = data.clone();
+        let mut n: u64 = 0;
+        group.bench_function(BenchmarkId::new("put_new", label), |b| {
+            b.iter(|| {
+                n += 1;
+                payload[..8].copy_from_slice(&n.to_le_bytes());
+                rt.block_on(fx.db.blob_put(&payload)).unwrap()
+            })
+        });
+
+        let digest = rt.block_on(fx.db.blob_put(&data)).unwrap();
+        group.bench_function(BenchmarkId::new("get_hot", label), |b| {
+            b.iter(|| {
+                let got = rt.block_on(fx.db.blob_get(&digest)).unwrap();
+                assert_eq!(got.map(|g| g.len()), Some(size));
+            })
+        });
+        rt.block_on(fx.db.close()).unwrap();
+    }
+    group.finish();
+}
+
+/// The archive session's blob step at `|C|` of 0, 10 and 10,000 (gate 12,
+/// D-287).
+///
+/// Each arm archives a ledger of `2,000 × scale` hot log entries — none
+/// superseded, so all of them stay hot and the reference scan reads every one
+/// — plus `|C|` small unreferenced blobs, all older than the cutoff. Nothing
+/// names any of them, so the scan finds nothing and cannot stop early: the
+/// worst case for the scan, and every candidate moves. The step's cost is
+/// the difference from the `|C| = 0` arm, which pays one indexed probe and no
+/// scan (gate 11 asserts that by counter).
+///
+/// The blobs are inserted with one statement on a second connection rather
+/// than ten thousand `blob_put` round trips, which would make the setup the
+/// whole of the run. Their addresses are random hex rather than the hashes of
+/// their bytes; the archive never rehashes, so the step does the same work.
+fn blob_archive(c: &mut Criterion) {
+    let rt = runtime();
+    let log = 2_000 * scale();
+
+    let mut group = controlled_group(c, "blob_archive");
+    group.sample_size(10);
+    // See `exempt_kinds`: the setup is free against warm-up's budget.
+    group.warm_up_time(std::time::Duration::from_millis(100));
+
+    for candidates in [0usize, 10, 10_000] {
+        group.bench_function(BenchmarkId::new("archive_with_blobs", candidates), |b| {
+            b.iter_batched(
+                || {
+                    rt.block_on(async {
+                        let fx = fixture().await;
+                        seed_concepts(&fx.db, log).await;
+                        if candidates > 0 {
+                            let raw = libsql::Builder::new_local(&fx.path)
+                                .build()
+                                .await
+                                .unwrap()
+                                .connect()
+                                .unwrap();
+                            raw.execute(
+                                "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 \
+                                 FROM n WHERE i < ?1) \
+                                 INSERT INTO blobs (sha256, size, bytes, put_at) \
+                                 SELECT lower(hex(randomblob(32))), 64, randomblob(64), ?2 \
+                                 FROM n",
+                                libsql::params![candidates as i64, TS],
+                            )
+                            .await
+                            .unwrap();
+                        }
+                        fx
+                    })
+                },
+                |fx| {
+                    let report = rt.block_on(fx.db.archive(FUTURE)).unwrap();
+                    assert_eq!(report.blobs_archived, candidates);
+                    report
+                },
+                BatchSize::PerIteration,
+            )
+        });
+    }
+    group.finish();
+}
+
 /// A concept that [`macrame::temporal::archivable_concepts`] will admit: retired,
 /// its valid interval closed before the cutoff, and — the clause that does the
 /// real work here — named by no edge in `links` (C1, D-128).
@@ -2020,6 +2145,9 @@ criterion_group!(
     // T4.1.
     fixture_matrix,
     // A-5 Part 3.
-    exempt_kinds
+    exempt_kinds,
+    // 0.19.0, gate 12.
+    blob_io,
+    blob_archive
 );
 criterion_main!(budgets);

@@ -263,7 +263,7 @@ object raises and what pytest surfaces.
 ### 14.3 Errors
 
 `DbError` has **33 variants** — the count was published as 24, then 27, and
-[D-207](s13-decision-register.md#d-207) is where it was finally read off the enum — and every one maps to its own Python class, with its
+[D-207](s13-decision-register.md#d-207) is where it was finally read off the enum; it is **47** at 0.19.0 — and every one maps to its own Python class, with its
 structured fields set as attributes and `str(e)` still the `#[error]` rendering verbatim
 ([D-099](s13-decision-register.md#d-099)).
 
@@ -272,11 +272,11 @@ MacrameError
 ├── EngineError, MigrationError, NotFoundError, DiagnosticConnError, MacrameClosedError
 ├── CloseTimeoutError  (0.15.23; like MacrameClosedError, no DbError behind it)
 ├── IntegrityError    overlaps, drift, rebuild, recorded_at, weights, leaked archive session
-├── ValidationError   edge types, ids, timestamps, model names, attribute mode
+├── ValidationError   edge types, ids, timestamps, model names, attribute mode, kv keys, extra and its paths, blob digests
 ├── VectorError       dimensions, unregistered models
 ├── TemporalError     replay, snapshots, payload versions, archive
 ├── WriterError       the write actor
-└── BudgetError       subgraph size
+└── BudgetError       subgraph size, blob size (0.19.0)
 ```
 
 **Flattening was the risk, and it is the reason this is not one class with a string.**
@@ -953,6 +953,40 @@ So `BranchArchivedError` carries `branch` and `concept` as attributes and hangs 
 **The attributes are the interesting half, not the message.** A caller handling this in a loop wants `e.concept` to drop from its list and `e.branch` to feed the `fork()` that fixes it — the message is for the log. That is the reasoning [§14.3](s14-python-bindings.md#143-errors)'s one-class-per-variant rule rests on, and the sample table in `testing.rs` plus `test_errors.py`'s `EXPECTED` both carry the new variant, so the class, its base and its two attribute names are asserted from outside the code that sets them.
 
 **Nothing is written when it raises, ids ahead of the refused one included.** `rehydrate()` was already one transaction — the Rust documentation calls a half-happened rehydration impossible — and the refusal returns from inside it, so the rollback covers the ids the call had already moved. `test_a_refused_call_writes_nothing` pins that from Python rather than trusting the Rust test, because the binding is free to loop over ids itself and a version that called through once per id would pass every other assertion in the file.
+
+### 14.24 `extra`, and the two types that disagree on purpose (0.18.0, P1, [D-278](s13-decision-register.md#d-278), [D-283](s13-decision-register.md#d-283), [D-284](s13-decision-register.md#d-284), [D-286](s13-decision-register.md#d-286))
+
+The seventh holding of W6's convention, shipped in the release that created the feature: `ConceptUpsert(extra=...)`, `register_extra_index`, `load_subgraph(extra=True)`, `InvalidExtraError` and `InvalidExtraPathError`, all in `tests_py/test_extra.py`.
+
+**`extra` is a JSON-text `str`, not a `dict`, in both directions.** The ledger stores the caller's own JSON and is opaque to it, so a `dict` would make every read parse a value the reader may never look at and every write re-serialise one the caller already holds as text. `json.loads` is the caller's one line. The constructor checks that the text is a JSON **object** of at most 64 KiB and raises `InvalidExtraError` there, like every other validation on that class.
+
+**`None` is *unstated*, not *empty*, and that is the whole design ([D-283](s13-decision-register.md#d-283)).** An upsert that omits `extra` leaves whatever the row holds alone, so a re-upsert written by code that knows nothing about attributes cannot wipe them; clearing is `extra="{}"`, said out loud. The Rust side spells the same rule as an `Option`, and Python's `None` default is the same state.
+
+**The two read types disagree, and the stub says so.** `NodeAttributes.extra` on the `traverse` path is a plain `str`, because that path always loads it and the column is `NOT NULL`. `SubgraphNode.extra` is `str | None`, because the subgraph path does not load it unless asked ([D-286](s13-decision-register.md#d-286)): `None` means *not requested*, `"{}"` means *requested and genuinely empty*. Two contracts, two types — unifying them would make one lie.
+
+**`register_extra_index(path)` is a write, queued like one, and is meant to be called unconditionally at startup ([D-284](s13-decision-register.md#d-284)).** It is create-if-absent with no registry table: re-assertion is the record, so a restored backup gets its index back on the next open. The path grammar (`$.name` or `$.a.b`, segments `[A-Za-z0-9_]+`) is what makes interpolating it into DDL safe, and anything else raises `InvalidExtraPathError` before any SQL exists. The binding adds no Python-side path validator: the check lives in the crate, and a second copy would be a second grammar.
+
+### 14.25 `kv_*`, and a surface with no Python-side validator (0.18.0, P3, [D-280](s13-decision-register.md#d-280))
+
+Four methods — `kv_put`, `kv_get`, `kv_delete`, `kv_scan` — and `InvalidKvKeyError`, in `tests_py/test_kv.py`. Everything about the store's meaning (outside the ledger, no log entry, no archive membership, branch-global, invisible to `reconstruct`) is in the Rust and stub docstrings and is the same on both sides; what is recorded here is only where the spellings differ.
+
+**There is no `validate_kv_key` in Python, deliberately.** The crate's validator runs inside `kv_put` and `kv_scan`'s prefix, so a bad key raises `InvalidKvKeyError` from the call that would have used it. Exposing the function would invite pre-checking, which duplicates a grammar (`[A-Za-z0-9_:./-]+`, 1–256 characters) in a second language to save one exception.
+
+**`kv_get` returns `None` for *no such key* and `""` for an empty value**, and a caller must not collapse them: the column is `NOT NULL`, so there is no third state below them. **`kv_scan` requires `limit`** with no default, the same reasoning as every other bounded read: how many keys an application has put in is the application's business, and an unbounded scan is a stall waiting for the database that grew. **`kv_get` and `kv_scan` are reads and never touch the write actor**, so they answer behind a long bulk import; `kv_put` and `kv_delete` are queued writes.
+
+### 14.26 `blob_*`, and an address that is the standard library's (0.19.0, P4, [D-281](s13-decision-register.md#d-281), [D-287](s13-decision-register.md#d-287), [D-288](s13-decision-register.md#d-288))
+
+`blob_put`, `blob_get`, `blob_stat`, `BlobStat`, `open(max_blob_bytes=)`, `InvalidDigestError`, `BlobTooLargeError` and three fields on `ArchiveReport`, in `tests_py/test_blob.py` and `test_errors.py`. [§5.13](s5-modules.md#513-blobrs--content-addressed-bytes-0190-d-281-d-287-d-288) is the engine's account; this is the seam's.
+
+**`bytes` in, `bytes` out, and the address is a `str`.** The digest is the 64 lowercase hex characters `hashlib.sha256(data).hexdigest()` prints, and that equality is the interoperability argument for SHA-256 ([D-281](s13-decision-register.md#d-281), amendment 3). **There is no digest helper in the binding** — `hashlib` is the helper, and `test_the_address_is_what_hashlib_prints` asserts the two agree for arbitrary bytes, so the claim is tested and not just stated. A wrapper class would make a caller convert a digest they already hold into one they can pass, and would validate at construction rather than at the call, which is the same instant with one more name.
+
+**`BlobStat.location` is `"hot"` or `"cold"`, a string and not an enum class.** It is two values a caller compares against and never constructs, the reasoning `Branch.parent` already uses for a lineage name. The Rust `BlobLocation` is `#[non_exhaustive]`, so the binding's conversion has a wildcard arm that returns `"unknown"`; a third location would be a release that changed that file in the same commit. `BlobStat` is `frozen`, a snapshot of a row.
+
+**`InvalidDigestError` exists so that a malformed address is not an absent blob.** `blob_get` and `blob_stat` raise it for anything but 64 lowercase hex characters — uppercase is refused rather than folded, because it is not the address `blob_put` returns — and return `None` only for a well-formed digest nothing holds. It sits under `ValidationError`, like `InvalidKvKeyError` and the two `Invalid…Extra…` classes; [§14.3](s14-python-bindings.md#143-errors)'s tree gloss was widened in the same pass.
+
+**`BlobTooLargeError` is a `BudgetError`, and `max_blob_bytes` is an `open()` keyword.** libSQL takes a blob only as a whole `Vec<u8>`, so a blob is in memory on both sides of the call and the cap (8 MiB, `DEFAULT_MAX_BLOB_BYTES`) is a memory bound as much as a size one. `None` is the default. The size is checked in the crate before the hash is taken and before the command is queued, so a refused put costs the caller one `len()`. The writer's hold for an accepted put is the put minus the hash, ~44 ms at the cap against `BLOB_WARN_HOLD` ([§9](s6-s10-flows-to-dependencies.md#9-performance-budgets)); the call releases the GIL for its whole wait like every other queued write.
+
+**The archive's side of the contract is visible from Python only through `ArchiveReport`.** Its three blob fields (`blobs_archived`, `blobs_restored`, `blob_scan_bytes`) are read-only counters on a returned value, and `blob_scan_bytes == 0` is how a caller sees that the step found nothing to decide and read no payload.
 
 <!--nav-->
 ← [previous](s13-decision-register.md) · [index](README.md) · [next](appendices.md) →

@@ -112,6 +112,8 @@ from ._macrame import (
     ConceptUpsert,
     CurrentDriftError,
     Database,
+    BlobStat,
+    DEFAULT_MAX_BLOB_BYTES,
     Branch,
     Divergence,
     BranchError,
@@ -132,6 +134,7 @@ from ._macrame import (
     Interval,
     InvalidEdgeTypeError,
     InvalidKvKeyError,
+    InvalidDigestError,
     InvalidExtraError,
     InvalidExtraPathError,
     InvalidBranchIdError,
@@ -163,6 +166,7 @@ from ._macrame import (
     SnapshotIncompatibleError,
     Subgraph,
     SubgraphTooLargeError,
+    BlobTooLargeError,
     TemporalError,
     UnknownBranchError,
     VectorHit,
@@ -201,6 +205,9 @@ __all__ = [
     # lineage (W12.7)
     "Branch",
     "Divergence",
+    # blobs (0.19.0, D-281)
+    "BlobStat",
+    "DEFAULT_MAX_BLOB_BYTES",
     # temporal (P4.3)
     "MaterializedState",
     "ArchiveReport",
@@ -254,6 +261,7 @@ __all__ = [
     # validation
     "InvalidEdgeTypeError",
     "InvalidKvKeyError",
+    "InvalidDigestError",
     "InvalidExtraError",
     "InvalidExtraPathError",
     "InvalidIdError",
@@ -292,6 +300,7 @@ __all__ = [
     "WriterStoppedError",
     # budget
     "SubgraphTooLargeError",
+    "BlobTooLargeError",
     # module
     "__version__",
     "chunk_budget_ms",

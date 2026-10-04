@@ -55,6 +55,9 @@ EdgeBelief = tuple[str, str, str, datetime, datetime, str]
 OPEN: Final[str]
 #: RRF's rank constant. Hybrid fusion scores `1/(k + rank)`.
 RRF_K: Final[int]
+# The largest blob `blob_put` accepts unless `open(max_blob_bytes=)` says
+# otherwise: 8 MiB (0.19.0, D-281).
+DEFAULT_MAX_BLOB_BYTES: Final[int]
 #: The hold above which `write_bulk_atomic` warns (D-081). A `timedelta`, so an
 #: `estimate_bulk_hold` result can be compared against it directly.
 BULK_ATOMIC_WARN_HOLD: Final[timedelta]
@@ -531,6 +534,19 @@ class ArchiveReport:
     def log_entries_archived(self) -> int: ...
     @property
     def horizon(self) -> int | None: ...
+    @property
+    def blobs_archived(self) -> int:
+        """Blobs moved cold: no hot log entry names them and they were last
+        put before the cutoff (0.19.0, D-281). Always ``0`` from
+        ``archive_branch``, which leaves blobs to the next ``archive``."""
+    @property
+    def blobs_restored(self) -> int:
+        """Cold-only blobs copied back because a hot entry names them again.
+        The cold copy stays."""
+    @property
+    def blob_scan_bytes(self) -> int:
+        """Bytes of hot log payload read looking for references — ``0`` when
+        there was no blob to decide about (D-287)."""
     def __repr__(self) -> str: ...
 
 class RehydrateReport:
@@ -596,6 +612,23 @@ class Divergence:
         diff. Two siblings disagree through rows their common ancestor wrote.
         """
 
+    def __repr__(self) -> str: ...
+
+class BlobStat:
+    """What the store knows about one blob, without its bytes (0.19.0, D-281)."""
+
+    @property
+    def sha256(self) -> str:
+        """The address: 64 lowercase hex characters, as ``hexdigest()`` prints."""
+    @property
+    def size(self) -> int: ...
+    @property
+    def put_at(self) -> datetime:
+        """When the blob was last put — or, for one the archive copied back,
+        when that session ran. The archive's age guard reads this."""
+    @property
+    def location(self) -> str:
+        """``"hot"`` or ``"cold"``: which file answered."""
     def __repr__(self) -> str: ...
 
 class Branch:
@@ -884,6 +917,7 @@ class Database:
         writer_cache_size: int | None = None,
         reader_cache_size: int | None = None,
         future_stamps: float | str | None = None,
+        max_blob_bytes: int | None = None,
     ) -> Database:
         """Open a ledger, running migrations and starting the write actor.
 
@@ -906,6 +940,10 @@ class Database:
         the future is inherited by every write that follows and written back
         into rows the next open reads — the one bad value in the file that
         manufactures more of itself. Raises `FutureRecordedAtError`.
+
+        `max_blob_bytes` is the largest blob `blob_put` accepts; `None` is
+        `DEFAULT_MAX_BLOB_BYTES` (8 MiB). A blob is held whole in memory on
+        both sides of the call, so this bounds memory as much as size.
         """
 
     def close(self, timeout: float | None = None) -> None:
@@ -1415,6 +1453,31 @@ class Database:
         `limit`.
         """
 
+    def blob_put(self, data: bytes) -> str:
+        """Store bytes under their SHA-256 address and return it (D-281).
+
+        The address equals ``hashlib.sha256(data).hexdigest()``, so it can be
+        computed without the database. A re-put adds no row and refreshes
+        ``put_at``. The archive moves a blob cold once no hot log entry
+        contains its address and it was last put before the cutoff, and
+        copies it back if a hot entry names it again — superseding the concept
+        that named it does not release it while the old version is still in
+        the hot log.
+
+        Raises `BlobTooLargeError` over ``max_blob_bytes`` (8 MiB by default).
+        """
+
+    def blob_get(self, sha256: str) -> bytes | None:
+        """The bytes under ``sha256``, hot file first then cold, or ``None``.
+
+        Raises `InvalidDigestError` for anything but 64 lowercase hex
+        characters, so a malformed address is not mistaken for an absent blob.
+        """
+
+    def blob_stat(self, sha256: str) -> BlobStat | None:
+        """Size, ``put_at`` and location without the bytes, or ``None``.
+        Raises `InvalidDigestError` as `blob_get` does."""
+
     def branches(self) -> list[Branch]:
         """Every lineage, trunk first then creation order.
 
@@ -1785,6 +1848,15 @@ class InvalidKvKeyError(ValidationError):
 
     key: str
 
+class InvalidDigestError(ValidationError):
+    """A blob address that is not 64 lowercase hex characters.
+
+    Uppercase is refused rather than folded: it is not the address `blob_put`
+    returned, and the archive does not count it as a reference.
+    """
+
+    digest: str
+
 class InvalidExtraError(ValidationError):
     """A `concepts.extra` value the ledger will not store.
 
@@ -1984,6 +2056,13 @@ class WriterStoppedError(WriterError):
 class SubgraphTooLargeError(BudgetError):
     n: int
     budget: int
+
+class BlobTooLargeError(BudgetError):
+    """A blob over `Tuning.max_blob_bytes` (8 MiB by default), refused before
+    anything was hashed or written."""
+
+    size: int
+    max: int
 
 # ------------------------------------------------------------------ private ---
 #

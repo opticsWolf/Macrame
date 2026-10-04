@@ -18,7 +18,9 @@ The application loads a subgraph, runs Louvain in memory ([§5.4](s5-modules.md#
 
 ### 6.4 Archive session
 
-The application's idle scheduler calls `db.archive(cutoff)`, which normalizes the cutoff and sends `LowPriCommand::Archive`. The actor ATTACHes the cold file, opens `BEGIN IMMEDIATE`, creates the session marker, ensures the cold schema exists, copies archivable `links` and `transaction_log` rows, verifies counts, re-derives `links_current` via `rebuild_within` ([D-035](s13-decision-register.md#d-035)), records the horizon in `cold.archive_horizon`, drops the marker, commits, and DETACHes on the way out regardless of outcome. Deletion is legal only inside the marker window; a crash anywhere rolls the transaction back, leaving hot and cold mutually consistent. Concepts are never archived ([D-022](s13-decision-register.md#d-022)).
+The application's idle scheduler calls `db.archive(cutoff)`, which normalizes the cutoff and sends `LowPriCommand::Archive`. The actor ATTACHes the cold file, opens `BEGIN IMMEDIATE`, creates the session marker, ensures the cold schema exists, copies archivable `links` and `transaction_log` rows, verifies counts, re-derives `links_current` via `rebuild_within` ([D-035](s13-decision-register.md#d-035)), settles blobs (below), records the horizon in `cold.archive_horizon`, drops the marker, commits, and DETACHes on the way out regardless of outcome. Deletion is legal only inside the marker window; a crash anywhere rolls the transaction back, leaving hot and cold mutually consistent. Concepts are never archived ([D-022](s13-decision-register.md#d-022)).
+
+**Blobs are settled inside the same session, after the log and before the horizon (0.19.0, [D-288](s13-decision-register.md#d-288)).** The actor reads two sets: hot blobs last put before the cutoff (the candidates) and digests held only in `cold.blobs`. If both are empty the step ends there and reads no payload — `blob_scan_bytes` is `0`. Otherwise one pass over the hot `transaction_log` payloads finds which of those digests are still named ([D-287](s13-decision-register.md#d-287)); unnamed candidates are copied cold and deleted under the marker, and named cold-only blobs are copied back hot with `put_at` set to the session's time, the cold copy kept. `archive_branch` has no blob step: the next `archive` finds what it released ([§5.13](s5-modules.md#513-blobrs--content-addressed-bytes-0190-d-281-d-287-d-288)).
 
 ### 6.5 Priority interleaving under bulk write
 
@@ -76,6 +78,12 @@ pub enum DbError {
          and be at most 256 characters)"
     )]
     InvalidKvKey(String),
+
+    #[error("invalid blob digest {0:?} (must be 64 lowercase hex characters, as blob_put returns)")]
+    InvalidDigest(String),
+
+    #[error("blob of {size} bytes is over the {max}-byte cap (Tuning::max_blob_bytes)")]
+    BlobTooLarge { size: usize, max: usize },
 
     #[error("invalid extra for concept {id}: {reason}")]
     InvalidExtra { id: String, reason: String },
@@ -441,6 +449,24 @@ That earlier reading now needs qualifying. **2.96 ms is the budget**, to within 
 
 **The concept-write rows were re-measured for 0.18.0, against a control at the previous commit rather than against the figures above ([D-278](s13-decision-register.md#d-278), acceptance gate 8).** `extra` rides every concept write whether a caller uses it or not — a wider row, a wider log payload, and `idx_concepts_extra_layer` maintained on every insert — so the question is what that costs the caller who never touches it. Two criterion sessions each side, same box, same session: `upsert_concept` **310.9 / 312.9 µs → 333.8 / 341.2 µs** (+8%), `bulk_chunks/concepts_500` **21.36 / 20.53 ms → 23.88 / 23.06 ms** (+12%), and `chunk_budget/concepts/70` **3.337 / 3.370 ms → 3.452 / 3.344 ms**, which is inside this project's session noise. The shape is what the mechanism predicts: the per-row index maintenance shows up where the rows are, and the 70-row chunk is dominated by the per-transaction floor. **No row in the table above moves from met to missed because of P1**, and one row is missed on this machine in both arms: `Chunk commit, concepts, 70 rows` reads 3.34 ms *before* the change against a ≤ 3 ms budget and a recorded 2.35 ms. That is a fact about this laptop against [D-055](s13-decision-register.md#d-055)'s reference hardware, which is exactly why the control was run — without it the reading would have been published as P1's regression, which is [D-088](s13-decision-register.md#d-088)'s error in its usual direction. The budget is not amended to match a fresh measurement, for [D-055](s13-decision-register.md#d-055)'s reason.
 
+**The blob store was measured for 0.19.0 by two new bench groups, `blob` and `blob_archive` ([D-281](s13-decision-register.md#d-281), [D-287](s13-decision-register.md#d-287), acceptance gate 12).** Release build, one session on the reference machine.
+
+| size | SHA-256 alone | `blob_put` | hash share | `blob_get` (hot) |
+|---|---|---|---|---|
+| 64 KiB | 29 µs | 471 µs | 6 % | 14 µs |
+| 1 MiB | 455 µs | 5.97 ms | 8 % | 747 µs |
+| 8 MiB | 3.72 ms | 47.9 ms | 8 % | 10.3 ms |
+
+The hash runs on the caller's side before the command is queued, so the writer holds a put for the put minus the hash: **~44 ms at the 8 MiB cap**, against `BLOB_WARN_HOLD`'s 100 ms. The archive's blob step, over a hot log nothing leaves, with unreferenced 64-byte blobs so the scan cannot stop early:
+
+| candidates | 2,000 entries | 20,000 entries |
+|---|---|---|
+| 0 | 8.3 ms | 38.6 ms |
+| 10 | 10.5 ms | 49.8 ms |
+| 10,000 | 282 ms | not run |
+
+The scan is the 0 → 10 difference, ~2 ms and ~11 ms — about a fifth of the session at the larger size, and linear in hot payload bytes by construction. The 10,000 row is the move (~27 µs a blob), not the scan.
+
 **The fixed cost is 3.71 ms and the marginal cost is ~74 µs per concept — until it isn't.** Between n=10 and n=1,000 the slope is flat (71.9 then 74.2 µs), and from 1,000 to 10,000 it rises to 114.2 µs: ten times the rows cost **14.2×** the time. That is the superlinearity [D-058](s13-decision-register.md#d-058) found in two of the four bulk-write paths, in a fifth place, and the reason the row above budgets a *rate* rather than a total.
 
 **The cause is named rather than inferred, and the trigger-free column is what names it.** The only trigger still firing on a rehydration insert is `trg_concepts_fts_insert` — the log trigger is marker-gated at v10 ([D-131](s13-decision-register.md#d-131)) and there is nothing else — so dropping it isolates FTS5 index maintenance from the row movement, the same control [D-056](s13-decision-register.md#d-056) used to attribute 92% of the chunk-commit cost to triggers. Without it the path is **linear**: ten times the rows cost 9.79× the time, and the per-concept figure is 48.9 µs at n=1,000 against 49.4 µs at n=10,000. So the row movement scales and FTS5 does not. The index is **32%** of the cost at n=1,000 and **53%** at n=10,000.
@@ -465,6 +491,7 @@ That earlier reading now needs qualifying. **2.96 ms is the budget**, to within 
 | thiserror | MIT / Apache-2.0 | Error derive |
 | tracing | MIT | Structured diagnostics |
 | ulid | MIT / Apache-2.0 | Entity ID generation |
+| sha2 | MIT / Apache-2.0 | Blob addresses, SHA-256 (0.19.0, [D-281](s13-decision-register.md#d-281)); adds seven packages, none shared with libsql |
 
 No GPL-licensed component appears in the dependency tree. The libSQL engine is used unmodified as a compiled dependency; no C source is vendored or patched ([Doctrine I](s0-s3-foundations.md#doctrine-i)). Timestamp parsing is implemented in-crate (~20 lines, [§5.1.2](s5-modules.md#512-handle-shape-and-the-clock-contract)); no chrono/time dependency is introduced for that single call site.
 

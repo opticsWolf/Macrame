@@ -14,6 +14,7 @@
 //! - [`vector`] — embeddings, search, and the filter planner (P4.4)
 //! - [`testing`] — underscore-prefixed hooks the Python suite drives
 
+mod blob;
 mod branch;
 mod database;
 mod errors;
@@ -122,6 +123,8 @@ fn _macrame(m: &Bound<'_, PyModule>) -> PyResult<()> {
     observe::register(m)?;
     vector::register(m)?;
 
+    m.add_class::<blob::PyBlobStat>()?;
+    m.add("DEFAULT_MAX_BLOB_BYTES", macrame::DEFAULT_MAX_BLOB_BYTES)?;
     m.add_class::<branch::PyBranch>()?;
     m.add_class::<branch::PyDivergence>()?;
     m.add_class::<database::PyDatabase>()?;

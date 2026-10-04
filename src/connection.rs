@@ -449,6 +449,7 @@ fn next_chunk_size(
 /// | the drop turn of [`Database::bulk_embeddings`], counted as `drop_embedding_index` (0.16.2, D-276) | µs-scale; one `DROP INDEX IF EXISTS` | One statement, no smaller unit — the same shape as [`Database::checkpoint`] by nature and [`Database::write_bulk_atomic`] by atomicity. Its kind exists for attribution beside `rebuild_embedding_index`, not for cost |
 /// | the rebuild turn of [`Database::bulk_embeddings`], counted as `rebuild_embedding_index` (0.16.2, D-276) | measured **2.61 / 19.7 / 39.0 s** for 2,000 vectors at dim 64 / 256 / 512, ~10 ms/vector at dim 256, growing with the corpus | One `CREATE INDEX` over the whole table — the one-pass DiskANN build is indivisible, exactly the criterion `shadow_swap` and `rebuild_current` meet. The difference is schedule: this hold is caller-scheduled and opt-in, so the docstring states the number instead of arguing it. Counted would add a permanent `N(bulk loads)` to every database that ever bulk-embedded — `shadow_swap`'s own argument, unchanged |
 /// | the toggle turn of [`Database::bulk_import_deferred`], counted as `links_current_mirror` (0.16.3, D-277) | µs-scale; one DDL statement either direction | Same shape as `drop_embedding_index`: one statement, no smaller unit, and its kind exists for attribution beside the load it wraps. The window's *cost* is the chunked rebuild that follows, which keeps its own counted kinds rather than hiding behind the toggle's exemption — the toggle is not where the time goes |
+/// | [`Database::blob_put`], counted as `blob_put` (0.19.0, D-281) | a function of the blob's size, capped by [`Tuning::max_blob_bytes`]; warns above [`BLOB_WARN_HOLD`] | libSQL 0.9.30 has no incremental blob I/O, so the bytes enter the file in one statement or not at all — there is no smaller unit than the value. The cap is the bound, and it is the caller's to raise |
 ///
 /// The `archive` figure is end-to-end through this method, so it **includes**
 /// the re-derivation `archive()` runs inside its transaction — but it does not
@@ -494,6 +495,16 @@ pub const CHUNK_BUDGET: std::time::Duration = std::time::Duration::from_millis(3
 /// contract, so warning at 3 ms would fire on batches that are working exactly
 /// as designed and train the reader to filter the message out.
 pub const BULK_ATOMIC_WARN_HOLD: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Measured hold above which [`Database::blob_put`] warns (0.19.0, D-281).
+///
+/// Measured rather than predicted, unlike [`BULK_ATOMIC_WARN_HOLD`]: a put's
+/// hold is one statement whose cost is the blob's size, so the actor times the
+/// turn and warns after it rather than estimating before it. 100 ms is six
+/// frames at 60 Hz — a visible hitch for every high-priority write queued
+/// behind it — and is well above what an 8 MiB put at the default cap costs,
+/// so a warning here means a raised cap or a slow disk, not an ordinary put.
+pub const BLOB_WARN_HOLD: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// Roughly how long [`Database::write_bulk_atomic`] will hold the actor for
 /// this batch (T1.3, D-081; re-fitted 0.13.6, W7.5, D-179).
@@ -852,6 +863,23 @@ pub(crate) enum HighPriCommand {
     RegisterExtraIndex {
         path: String,
         responder: oneshot::Sender<Result<()>>,
+    },
+    /// Store one blob, or refresh its `put_at` (0.19.0, [D-281]).
+    ///
+    /// High priority for [`HighPriCommand::KvWrite`]'s reason — the write a
+    /// caller does next usually names the digest — and despite the size: the
+    /// cap bounds the hold, and queueing an attachment behind a bulk import
+    /// stalls the save it belongs to. The digest arrives computed; hashing up
+    /// to 8 MiB is caller-side work and is kept out of the lock.
+    ///
+    /// The responder carries whether a row was inserted, which is what the
+    /// hold warning needs to say which arm was slow.
+    ///
+    /// [D-281]: ../docs/architecture/s13-decision-register.md#d-281
+    BlobPut {
+        sha256: String,
+        bytes: Vec<u8>,
+        responder: oneshot::Sender<Result<bool>>,
     },
     Shutdown {
         responder: oneshot::Sender<Result<()>>,
@@ -1269,6 +1297,30 @@ pub struct Database {
     /// [D-256]: ../../docs/architecture/s13-decision-register.md#d-256
     /// [D-257]: ../../docs/architecture/s13-decision-register.md#d-257
     diagnostic_conn: tokio::sync::Mutex<Option<libsql::Connection>>,
+    /// A `SQLITE_OPEN_READ_ONLY` connection to the **archive** file, for
+    /// [`Database::blob_get`]'s read-through (0.19.0, [D-288]); opened on the
+    /// first cold lookup that finds the file present.
+    ///
+    /// # Why not `ATTACH` on `read_conn`, as `reconstruct` does
+    ///
+    /// The ATTACH region is per-connection state and is not synchronised —
+    /// the hazard the cadence's own connection was split off to remove
+    /// (Wave 4.1, in `open_inner`). `reconstruct` reaches the cold file
+    /// rarely; a blob read can be every frame, and each one would widen that
+    /// window and add a `detach_stale_cold` that could pull the handle from
+    /// under a concurrent fold. A connection of its own has no region to race
+    /// on. And it opens the file read-only, so "a reader never writes the cold
+    /// file" is a flag rather than a discipline — which a `read_conn` ATTACH
+    /// also gets, but this one gets without sharing.
+    ///
+    /// One connection per handle, opened lazily and sequentially, so R15's
+    /// concurrent-open fault does not apply. Cleared on any failed query, so a
+    /// cold file that was replaced underneath is reopened on the next call.
+    ///
+    /// [D-288]: ../../docs/architecture/s13-decision-register.md#d-288
+    cold_blob_reader: tokio::sync::Mutex<Option<libsql::Connection>>,
+    /// [`Tuning::max_blob_bytes`], resolved.
+    max_blob_bytes: usize,
     writer: Option<tokio::task::JoinHandle<()>>,
     /// Stops the snapshot cadence. Dropping it stops the task too, which is what
     /// keeps a `Database` that is dropped rather than closed from leaving a task
@@ -1550,6 +1602,16 @@ pub struct Tuning {
     /// guards an invariant, and a `None` that switches it off would switch it
     /// off for every caller who never heard of it.
     pub future_stamps: FutureStampPolicy,
+    /// The largest blob [`Database::blob_put`] accepts, in bytes (0.19.0,
+    /// [D-281]). `None` is [`crate::DEFAULT_MAX_BLOB_BYTES`], 8 MiB.
+    ///
+    /// An `Option` for [`Self::writer_cache_size`]'s reason: the default is a
+    /// value, and leaving it alone means using it. Raising it raises the
+    /// longest write-lock hold a put can take, one-for-one with the bytes —
+    /// libSQL 0.9.30 has no incremental blob I/O to spread it with.
+    ///
+    /// [D-281]: ../../docs/architecture/s13-decision-register.md#d-281
+    pub max_blob_bytes: Option<usize>,
 }
 
 impl Tuning {
@@ -1610,6 +1672,13 @@ impl Tuning {
         self
     }
 
+    /// The largest blob a put accepts — the
+    /// [`max_blob_bytes`](Self::max_blob_bytes) field.
+    pub fn max_blob_bytes(mut self, bytes: usize) -> Self {
+        self.max_blob_bytes = Some(bytes);
+        self
+    }
+
     /// The `Option<SnapshotCadence>` the three older constructors take, mapped
     /// onto the tri-state. `None` there means *disabled*, which is why
     /// [`CadencePolicy`] exists — see its docs.
@@ -1624,6 +1693,7 @@ impl Tuning {
             writer_cache_size: None,
             reader_cache_size: None,
             future_stamps: FutureStampPolicy::default(),
+            max_blob_bytes: None,
         }
     }
 }
@@ -1640,6 +1710,7 @@ impl std::fmt::Debug for Tuning {
             .field("wal_autocheckpoint", &self.wal_autocheckpoint)
             .field("writer_cache_size", &self.writer_cache_size)
             .field("reader_cache_size", &self.reader_cache_size)
+            .field("max_blob_bytes", &self.max_blob_bytes)
             .finish()
     }
 }
@@ -1719,7 +1790,9 @@ impl Database {
             writer_cache_size,
             reader_cache_size,
             future_stamps,
+            max_blob_bytes,
         } = tuning;
+        let max_blob_bytes = max_blob_bytes.unwrap_or(crate::blob::DEFAULT_MAX_BLOB_BYTES);
         let cadence = cadence.resolve();
         let db = libsql::Builder::new_local(path).build().await?;
         let write_conn = configure(db.connect()?, writer_cache_size).await?;
@@ -1814,6 +1887,8 @@ impl Database {
             schema_version: migrations::current_version(),
             reader_cache_size,
             diagnostic_conn: tokio::sync::Mutex::new(None),
+            cold_blob_reader: tokio::sync::Mutex::new(None),
+            max_blob_bytes,
             writer: Some(writer),
             cadence_stop,
             cadence,
@@ -2710,6 +2785,147 @@ impl Database {
     pub async fn kv_scan(&self, prefix: &str, limit: usize) -> Result<Vec<(String, String)>> {
         crate::kv::validate_kv_prefix(prefix)?;
         crate::kv::scan(&self.read_conn, prefix, limit).await
+    }
+
+    /// Store `bytes` and return their address: the SHA-256 digest as 64
+    /// lowercase hex characters (0.19.0, [D-281]).
+    ///
+    /// The address is what any SHA-256 implementation computes —
+    /// `hashlib.sha256(data).hexdigest()`, `sha256sum` — so a caller can ask
+    /// *do I already have this* without sending the bytes.
+    ///
+    /// # Referencing a blob
+    ///
+    /// Write the returned digest anywhere in a concept or link: `extra`,
+    /// `content`, a link's `properties`, inside a URL. The archive keeps a blob
+    /// hot while any hot log entry contains that text ([D-287]). **Only the
+    /// lowercase hex text counts** — an uppercase, base64 or truncated digest
+    /// is not a reference, and a blob named only that way may go cold.
+    ///
+    /// # Re-putting
+    ///
+    /// A put of bytes already stored adds no row and advances `put_at`. That
+    /// matters: the archive only considers blobs last put before its cutoff, so
+    /// a re-put is how an application says *I still want this* without naming
+    /// it in the ledger.
+    ///
+    /// # Cost
+    ///
+    /// Refused with [`DbError::BlobTooLarge`] above [`Tuning::max_blob_bytes`]
+    /// (8 MiB by default) before anything is hashed. The hash runs on the
+    /// caller's task; the insert is one high-priority actor turn whose hold
+    /// grows with the size and is exempt from [`CHUNK_BUDGET`] — see the table
+    /// there. A turn past [`BLOB_WARN_HOLD`] logs a warning.
+    ///
+    /// [D-281]: ../docs/architecture/s13-decision-register.md#d-281
+    /// [D-287]: ../docs/architecture/s13-decision-register.md#d-287
+    pub async fn blob_put(&self, bytes: &[u8]) -> Result<String> {
+        if bytes.len() > self.max_blob_bytes {
+            return Err(DbError::BlobTooLarge {
+                size: bytes.len(),
+                max: self.max_blob_bytes,
+            });
+        }
+        let sha256 = crate::blob::sha256_hex(bytes);
+        let bytes = bytes.to_vec();
+        let address = sha256.clone();
+        self.high(|responder| HighPriCommand::BlobPut {
+            sha256,
+            bytes,
+            responder,
+        })
+        .await?;
+        Ok(address)
+    }
+
+    /// The bytes stored under `sha256`, or `None` (0.19.0, [D-288]).
+    ///
+    /// A read, on [`Self::read_conn`]; it never touches the Write Actor. A miss
+    /// in the hot file falls through to the archive when one exists, so an
+    /// archived blob is still readable — through a read-only connection of its
+    /// own that never writes the cold file. An archive written before 0.19
+    /// holds no blobs and answers `None`.
+    ///
+    /// The digest is validated first: a malformed one is
+    /// [`DbError::InvalidDigest`], not a silent `None`.
+    ///
+    /// [D-288]: ../docs/architecture/s13-decision-register.md#d-288
+    pub async fn blob_get(&self, sha256: &str) -> Result<Option<Vec<u8>>> {
+        crate::blob::validate_digest(sha256)?;
+        if let Some(bytes) = crate::blob::get(&self.read_conn, sha256).await? {
+            return Ok(Some(bytes));
+        }
+        self.with_cold_blobs(|conn| {
+            let sha256 = sha256.to_string();
+            async move { crate::blob::get(&conn, &sha256).await }
+        })
+        .await
+        .map(Option::flatten)
+    }
+
+    /// A blob's size, `put_at` and which file holds it, without its bytes
+    /// (0.19.0, [D-288]).
+    ///
+    /// Hot first, then the archive, as [`Self::blob_get`] does;
+    /// [`crate::BlobStat::location`] says which answered.
+    ///
+    /// [D-288]: ../docs/architecture/s13-decision-register.md#d-288
+    pub async fn blob_stat(&self, sha256: &str) -> Result<Option<crate::BlobStat>> {
+        crate::blob::validate_digest(sha256)?;
+        if let Some(stat) =
+            crate::blob::stat(&self.read_conn, sha256, crate::BlobLocation::Hot).await?
+        {
+            return Ok(Some(stat));
+        }
+        self.with_cold_blobs(|conn| {
+            let sha256 = sha256.to_string();
+            async move { crate::blob::stat(&conn, &sha256, crate::BlobLocation::Cold).await }
+        })
+        .await
+        .map(Option::flatten)
+    }
+
+    /// Run `f` against the cold reader, or answer `None` when there is no
+    /// archive or the archive has no `blobs` table.
+    ///
+    /// `archive_present` is asked first, because opening a missing file is an
+    /// error here and an *absence* is the honest answer. The table probe runs
+    /// on every call rather than being cached with the connection: the archive
+    /// writer creates `cold.blobs` in its first 0.19 session, and a reader that
+    /// cached "no table" would miss every blob from then on.
+    async fn with_cold_blobs<T, F, Fut>(&self, f: F) -> Result<Option<T>>
+    where
+        F: FnOnce(libsql::Connection) -> Fut,
+        Fut: std::future::Future<Output = Result<T>>,
+    {
+        if !crate::temporal::archive::archive_present(&self.archive_path) {
+            return Ok(None);
+        }
+        let mut slot = self.cold_blob_reader.lock().await;
+        let conn = match slot.as_ref() {
+            Some(conn) => conn.clone(),
+            None => {
+                let db = libsql::Builder::new_local(&self.archive_path)
+                    .flags(libsql::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                    .build()
+                    .await?;
+                let conn = db.connect()?;
+                configure_common(&conn, self.reader_cache_size).await?;
+                *slot = Some(conn.clone());
+                conn
+            }
+        };
+        let res = async {
+            if !crate::blob::has_blobs_table(&conn).await? {
+                return Ok(None);
+            }
+            f(conn).await.map(Some)
+        }
+        .await;
+        if res.is_err() {
+            *slot = None;
+        }
+        res
     }
 
     /// A handle on one lineage (§15.4, 0.14.9, [D-226]).
@@ -5204,6 +5420,7 @@ impl HighPriCommand {
             HighPriCommand::RegisterExtraIndex { .. } => K::RegisterExtraIndex,
             HighPriCommand::Fork { .. } => K::Fork,
             HighPriCommand::KvWrite { .. } => K::KvWrite,
+            HighPriCommand::BlobPut { .. } => K::BlobPut,
             HighPriCommand::Checkpoint { .. } => K::Checkpoint,
             HighPriCommand::Shutdown { .. } => K::Shutdown,
         }
@@ -5380,6 +5597,27 @@ impl HighPriCommand {
                     }
                     KvWrite::Delete { key } => crate::kv::delete(conn, &key).await,
                 };
+                turn.answer(responder, res);
+            }
+            HighPriCommand::BlobPut {
+                sha256,
+                bytes,
+                responder,
+            } => {
+                let stamp = clock.now();
+                let started = std::time::Instant::now();
+                let res = crate::blob::put(conn, &sha256, &bytes, &stamp).await;
+                let held = started.elapsed();
+                if held > BLOB_WARN_HOLD {
+                    tracing::warn!(
+                        sha256 = %sha256,
+                        size = bytes.len(),
+                        inserted = ?res.as_ref().ok(),
+                        held_ms = held.as_secs_f64() * 1e3,
+                        "blob_put held the write lock past BLOB_WARN_HOLD ({:?})",
+                        BLOB_WARN_HOLD
+                    );
+                }
                 turn.answer(responder, res);
             }
         }

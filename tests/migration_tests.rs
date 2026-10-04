@@ -450,7 +450,7 @@ async fn plan_string(conn: &libsql::Connection, sql: &str) -> String {
 #[test]
 fn a_version_bump_must_bring_its_own_rung_test() {
     assert_eq!(
-        SCHEMA_VERSION, 21,
+        SCHEMA_VERSION, 22,
         "SCHEMA_VERSION moved. Add a test for the new rung — one that starts \
          from a database at the previous version and asserts what the rung is \
          *for*, not merely that `run` reached the top."
@@ -3009,5 +3009,149 @@ async fn a_v20_database_climbs_to_v21_and_the_concept_payload_carries_extra() {
         1,
         "the rung did not create the expression index, so `verify` would \
          refuse the database it just stamped"
+    );
+}
+
+/// **Acceptance gate 13 (0.19.0, P4, [D-288]): v21 → v22 on a populated
+/// database, and `verify` clean.**
+///
+/// What the rung is *for*: a table whose disk constraints carry the address
+/// rule, an index for the archive's candidate query, an update guard that
+/// admits `put_at` alone, and a delete guard gated on the archive session.
+/// Each is asserted by behaviour rather than by text, except the last, which
+/// gate 10 below checks the way `verify` does.
+///
+/// The forward half — a v22 file handed to a 0.18 binary is refused on schema
+/// version — is the ladder's ordinary refusal of a future stamp, tested where
+/// that refusal is; it is release-noted rather than re-proven here.
+///
+/// [D-288]: ../docs/architecture/s13-decision-register.md#d-288
+#[tokio::test]
+async fn a_v21_database_climbs_to_v22_and_gains_a_guarded_blob_store() {
+    let harness = TestHarness::new();
+    let conn = connect(&harness).await;
+    macrame::schema::run_migrations(&conn).await.unwrap();
+
+    v11_schema::wind_back_to_v21(&conn).await;
+    conn.execute("PRAGMA user_version = 21", ()).await.unwrap();
+    assert_eq!(
+        scalar(
+            &conn,
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'blobs'",
+        )
+        .await,
+        0,
+        "the fixture is not starting from a v21 database"
+    );
+
+    // Populated: a concept and its log entry, so the climb runs over a ledger.
+    conn.execute(
+        "INSERT INTO concepts (id, title, content, valid_from, valid_to, recorded_at) \
+         VALUES ('before', 'Before', '', ?1, ?2, ?1)",
+        libsql::params![TS, OPEN],
+    )
+    .await
+    .unwrap();
+
+    // `run_migrations` ends in `verify`, so reaching the top is "verify clean".
+    macrame::schema::run_migrations(&conn).await.unwrap();
+    assert_eq!(user_version(&conn).await, SCHEMA_VERSION);
+    assert_eq!(scalar(&conn, "SELECT COUNT(*) FROM concepts").await, 1);
+
+    // 1. The address rule is on the disk.
+    let digest = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    for bad in [digest.to_uppercase(), digest[..63].to_string()] {
+        conn.execute(
+            "INSERT INTO blobs (sha256, size, bytes, put_at) VALUES (?1, 0, x'', ?2)",
+            libsql::params![bad.as_str(), TS],
+        )
+        .await
+        .expect_err("a malformed address was accepted into blobs");
+    }
+    // `size` must be the bytes' length, and the bytes must be bytes.
+    conn.execute(
+        "INSERT INTO blobs (sha256, size, bytes, put_at) VALUES (?1, 3, x'00', ?2)",
+        libsql::params![digest, TS],
+    )
+    .await
+    .expect_err("a size that disagrees with the bytes was accepted");
+    conn.execute(
+        "INSERT INTO blobs (sha256, size, bytes, put_at) VALUES (?1, 3, 'abc', ?2)",
+        libsql::params![digest, TS],
+    )
+    .await
+    .expect_err("text was accepted as blob bytes");
+    conn.execute(
+        "INSERT INTO blobs (sha256, size, bytes, put_at) VALUES (?1, 0, x'', ?2)",
+        libsql::params![digest, TS],
+    )
+    .await
+    .unwrap();
+
+    // 2. The update guard: `put_at` may move, nothing else may.
+    conn.execute(
+        "UPDATE blobs SET put_at = ?1 WHERE sha256 = ?2",
+        libsql::params!["2026-02-01T00:00:00.000000Z", digest],
+    )
+    .await
+    .expect("a put_at refresh must be admitted");
+    let err = conn
+        .execute(
+            "UPDATE blobs SET bytes = x'01', size = 1 WHERE sha256 = ?1",
+            libsql::params![digest],
+        )
+        .await
+        .expect_err("a blob's bytes were rewritten under its address");
+    assert_eq!(
+        macrame::error::abort_kind(&err),
+        macrame::error::AbortKind::BlobImmutable
+    );
+
+    // 3. The delete guard, outside a session.
+    let err = conn
+        .execute("DELETE FROM blobs", ())
+        .await
+        .expect_err("a blob was deleted outside an archive session");
+    assert_eq!(
+        macrame::error::abort_kind(&err),
+        macrame::error::AbortKind::DeleteOutsideArchive
+    );
+
+    // 4. The candidate index exists, so `verify` will keep requiring it.
+    assert_eq!(
+        scalar(
+            &conn,
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' \
+             AND name = 'idx_blobs_put_at'",
+        )
+        .await,
+        1
+    );
+}
+
+/// **Acceptance gate 10's `verify` half (0.19.0, [D-288]).** A blob delete
+/// guard with the right name and an unconditional body refuses every archive
+/// that should reclaim a blob; `verify` must refuse the file and name it.
+#[tokio::test]
+async fn an_ungated_blob_delete_guard_is_refused_at_open() {
+    let harness = TestHarness::new();
+    let conn = connect(&harness).await;
+    macrame::schema::run_migrations(&conn).await.unwrap();
+
+    conn.execute("DROP TRIGGER trg_blobs_guard_delete", ())
+        .await
+        .unwrap();
+    conn.execute(
+        "CREATE TRIGGER trg_blobs_guard_delete BEFORE DELETE ON blobs \
+         BEGIN SELECT RAISE(ABORT, 'no'); END;",
+        (),
+    )
+    .await
+    .unwrap();
+
+    let reason = refusal_reason(macrame::schema::run_migrations(&conn).await.unwrap_err());
+    assert!(
+        reason.contains("trg_blobs_guard_delete"),
+        "the refusal must name the guard whose body is ungated: {reason}"
     );
 }

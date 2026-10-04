@@ -309,6 +309,16 @@ create_exception!(
 );
 create_exception!(
     macrame,
+    InvalidDigestError,
+    ValidationError,
+    "A blob address that is not 64 lowercase hex characters (0.19.0). \
+     Attribute: `digest`.\n\n\
+     Uppercase is refused rather than folded: it is not the address \
+     `blob_put` returned, and the archive does not recognise it as a \
+     reference."
+);
+create_exception!(
+    macrame,
     InvalidExtraError,
     ValidationError,
     "A `concepts.extra` value that is not a JSON object, or is over the \
@@ -615,6 +625,13 @@ create_exception!(
     BudgetError,
     "A subgraph exceeded its byte budget. Attributes: `n`, `budget`."
 );
+create_exception!(
+    macrame,
+    BlobTooLargeError,
+    BudgetError,
+    "A blob over `Tuning.max_blob_bytes`, 8 MiB by default (0.19.0). \
+     Attributes: `size`, `max`. Refused before anything is hashed or written."
+);
 
 /// Build an exception of type `T` carrying `message`, then let `set` attach the
 /// structured fields.
@@ -708,6 +725,15 @@ fn build(py: Python<'_>, err: DbError) -> PyErr {
         }
 
         DbError::InvalidKvKey(k) => raise::<InvalidKvKeyError, _>(py, m, |e| e.setattr("key", k)),
+
+        DbError::InvalidDigest(d) => {
+            raise::<InvalidDigestError, _>(py, m, |e| e.setattr("digest", d))
+        }
+
+        DbError::BlobTooLarge { size, max } => raise::<BlobTooLargeError, _>(py, m, |e| {
+            e.setattr("size", size)?;
+            e.setattr("max", max)
+        }),
 
         DbError::InvalidExtra { id, reason } => raise::<InvalidExtraError, _>(py, m, |e| {
             e.setattr("id", id)?;
@@ -1067,6 +1093,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
         // validation
         InvalidEdgeTypeError,
         InvalidKvKeyError,
+        InvalidDigestError,
         InvalidExtraError,
         InvalidExtraPathError,
         InvalidIdError,
@@ -1102,6 +1129,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
         WriterStoppedError,
         // budget
         SubgraphTooLargeError,
+        BlobTooLargeError,
     );
     Ok(())
 }

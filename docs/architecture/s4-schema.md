@@ -875,3 +875,80 @@ The API is `kv_put` / `kv_get` / `kv_delete` / `kv_scan(prefix, limit)`, with
 `limit` a required argument rather than an `Option` on the same reasoning as
 every other bounded read here. Keys are `[A-Za-z0-9_:./-]+`, non-empty, at most
 256 characters — checked at the boundary, not in the file.
+
+### 4.10 `blobs` — content-addressed bytes, reclaimed by the archive (0.19.0, D-281, D-287, D-288)
+
+Schema **v22** adds one table, one index and two guards, and changes nothing
+else. `extra` ([§4.1](#41-concepts-and-per-model-embeddings)) holds attributes;
+this is where the bulk bytes those attributes point at live. A blob's address
+is the **SHA-256 of its bytes, as 64 lowercase hex characters** — exactly what
+`hashlib.sha256(data).hexdigest()` and `sha256sum` print, so an application can
+compute it without the database ([D-281](s13-decision-register.md#d-281)
+amendment 3).
+
+```sql
+CREATE TABLE IF NOT EXISTS blobs (
+    blob_id INTEGER PRIMARY KEY,
+    sha256  TEXT    NOT NULL UNIQUE
+            CHECK (length(sha256) = 64 AND sha256 NOT GLOB '*[^0-9a-f]*'),
+    size    INTEGER NOT NULL CHECK (size = length(bytes)),
+    bytes   BLOB    NOT NULL CHECK (typeof(bytes) = 'blob'),
+    put_at  TEXT    NOT NULL,
+    CHECK (put_at GLOB '<canonical-ts-glob>')
+);
+CREATE INDEX IF NOT EXISTS idx_blobs_put_at ON blobs (put_at);
+-- trg_blobs_frozen_update: BEFORE UPDATE OF sha256, size, bytes — always aborts
+-- trg_blobs_guard_delete:  BEFORE DELETE — aborts outside an archive session
+```
+
+**A rowid table, which is §4.9's question answered the other way.** `kv_store`
+is `WITHOUT ROWID` because its rows are small; here a row is up to 8 MiB, and in
+a `WITHOUT ROWID` table the payload would hang off the key b-tree as an overflow
+chain on every probe of the address. The `UNIQUE` index on `sha256` is the
+lookup; the rowid b-tree holds the bytes.
+
+**The address rule is on the disk, not only at the API.** The archive's
+reference scan ([D-287](s13-decision-register.md#d-287)) matches lowercase hex
+only, so a raw writer storing an uppercase address would hold a blob the scan
+can never name. `size = length(bytes)` and `typeof(bytes) = 'blob'` close the
+two other ways a raw writer could make a row lie about itself. `put_at` carries
+`canonical_ts_check!` — the macro's eighth call site in `schema::ddl`.
+
+**Not in the ledger, and not outside the archive.** No log trigger and no
+`branch_id`: a blob is not a belief, and a put records nothing about the world.
+But unlike `kv_store` it **is** an archive participant, because what names a
+blob is the log — a concept's `extra`, `content`, or a link's `properties` —
+and a past state that named it must stay readable. So the table follows the
+ledger's physical rules rather than `kv_store`'s:
+
+* **Immutable.** `trg_blobs_frozen_update` aborts any change to `sha256`,
+  `size` or `bytes`, unconditionally — no session needs to rewrite bytes under
+  an address. `put_at` is the one column an update may touch: a re-put
+  refreshes it, and the age guard reads it ([D-288](s13-decision-register.md#d-288)).
+* **Deleted only by an archive session.** `trg_blobs_guard_delete` is gated on
+  the session marker, exactly as `links` and `concepts` are; `verify` requires
+  both guards and body-probes this one for the marker.
+* **Moved, never dropped.** A session moves a blob to `cold.blobs` when no hot
+  `transaction_log` payload contains its address and its `put_at` is before the
+  cutoff, and copies a cold blob back when a hot entry names it again. History
+  is a reference: superseding the concept that named a blob does not release
+  it while the superseded entry is still hot, which a reference count would get
+  wrong ([D-281](s13-decision-register.md#d-281)).
+
+`cold.blobs` has the same columns and the `sha256` address check, and **no
+guards and no `size`/`typeof` checks**: a cold file is append-only by the
+session's construction, and must not re-validate old rows against a rule a
+later release adds. A cold file written before 0.19 has no `blobs` table; a
+reader treats that as *absent*, and only the archive writer creates the table,
+inside its own transaction.
+
+**What carries it.** A snapshot holds `extra`, and so digests, never bytes. A
+file-level backup of the hot file **and** the cold file carries the blobs —
+[§4.9](#49-kv_store--operational-state-outside-the-ledger-entirely-0180-d-280)'s
+sentence with the cold file added, because a blob may be in either.
+
+The API is `blob_put(&[u8]) -> String`, `blob_get(&str) -> Option<Vec<u8>>`
+and `blob_stat(&str) -> Option<BlobStat>`, capped at
+`Tuning::max_blob_bytes` (8 MiB by default): libsql 0.9.30 passes a blob only
+as a whole `Vec<u8>`, so every operation holds the full value in memory two or
+three times.

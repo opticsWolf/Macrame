@@ -71,10 +71,11 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyTuple, PyType};
+use pyo3::types::{PyBytes, PyDict, PyTuple, PyType};
 
 use macrame::prelude::*;
 
+use crate::blob;
 use crate::branch;
 use crate::errors::{close_timeout_error, closed_error, to_py, to_py_bulk};
 use crate::graph;
@@ -476,6 +477,10 @@ impl PyDatabase {
     ///   ([D-158](../../../docs/architecture/s13-decision-register.md)), so one
     ///   number would mean either starving the writer or multiplying the
     ///   readers' footprint.
+    /// - `max_blob_bytes`: the largest blob `blob_put` accepts (0.19.0,
+    ///   D-281). `None` is the 8 MiB default, `DEFAULT_MAX_BLOB_BYTES`; a
+    ///   blob is held in memory whole on both sides of the call, so this is a
+    ///   memory bound as much as a size one.
     #[staticmethod]
     #[pyo3(signature = (
         path,
@@ -486,6 +491,7 @@ impl PyDatabase {
         writer_cache_size = None,
         reader_cache_size = None,
         future_stamps = None,
+        max_blob_bytes = None,
     ))]
     // Keyword-only tuning knobs, one per thing that can be tuned: the same
     // reason the other signatures in this file carry this allow.
@@ -499,6 +505,7 @@ impl PyDatabase {
         writer_cache_size: Option<i32>,
         reader_cache_size: Option<i32>,
         future_stamps: Option<&Bound<'_, PyAny>>,
+        max_blob_bytes: Option<usize>,
     ) -> PyResult<Self> {
         let cadence = to_cadence(snapshot_every_entries, snapshot_poll_seconds)?;
         // The two cache sizes arrive from Python as `Option<i32>` where the
@@ -517,6 +524,9 @@ impl PyDatabase {
         }
         if let Some(size) = reader_cache_size {
             tuning = tuning.reader_cache_size(size);
+        }
+        if let Some(bytes) = max_blob_bytes {
+            tuning = tuning.max_blob_bytes(bytes);
         }
         let tuning = tuning;
 
@@ -1854,6 +1864,61 @@ impl PyDatabase {
         self.with_db(py, move |db| {
             runtime()
                 .block_on(db.kv_scan(&prefix, limit))
+                .map_err(to_py)
+        })
+    }
+
+    /// Store bytes under their SHA-256 address and return it (D-281).
+    ///
+    /// The address is 64 lowercase hex characters — exactly what
+    /// `hashlib.sha256(data).hexdigest()` prints — so a caller can compute it
+    /// without the database and put it in a concept or link before or after
+    /// the put. Putting the same bytes again adds no row; it refreshes the
+    /// blob's `put_at`, which is what the archive's age guard reads.
+    ///
+    /// **Kept while anything names it.** The archive moves a blob to the cold
+    /// file once no hot log entry contains its address and it was last put
+    /// before the cutoff, and brings it back if a hot entry names it again.
+    /// History is a reference: superseding the concept that named a blob does
+    /// not release it while the old version is still in the hot log.
+    ///
+    /// Raises `BlobTooLargeError` over `max_blob_bytes` (8 MiB unless `open`
+    /// raised it). The hash runs before the write is queued, so a large put
+    /// does not hold the writer while it hashes.
+    fn blob_put(&self, py: Python<'_>, data: &[u8]) -> PyResult<String> {
+        self.with_db(py, move |db| {
+            runtime().block_on(db.blob_put(data)).map_err(to_py)
+        })
+    }
+
+    /// The bytes stored under `sha256`, or `None` (D-281).
+    ///
+    /// Reads the hot file, then the cold one: a blob the archive moved is
+    /// still answered, just from the other file. A read — it never waits on
+    /// the write actor.
+    ///
+    /// Raises `InvalidDigestError` for anything but 64 lowercase hex
+    /// characters, so a malformed address is not mistaken for an absent blob.
+    fn blob_get<'py>(
+        &self,
+        py: Python<'py>,
+        sha256: &str,
+    ) -> PyResult<Option<Bound<'py, PyBytes>>> {
+        let sha256 = sha256.to_string();
+        let bytes = self.with_db(py, move |db| {
+            runtime().block_on(db.blob_get(&sha256)).map_err(to_py)
+        })?;
+        Ok(bytes.map(|b| PyBytes::new(py, &b)))
+    }
+
+    /// Size, `put_at` and location of a blob, without reading its bytes, or
+    /// `None` (D-281). Raises `InvalidDigestError` as `blob_get` does.
+    fn blob_stat(&self, py: Python<'_>, sha256: &str) -> PyResult<Option<blob::PyBlobStat>> {
+        let sha256 = sha256.to_string();
+        self.with_db(py, move |db| {
+            runtime()
+                .block_on(db.blob_stat(&sha256))
+                .map(|s| s.map(|inner| blob::PyBlobStat { inner }))
                 .map_err(to_py)
         })
     }

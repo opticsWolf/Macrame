@@ -148,6 +148,8 @@ recent log                detached on archive
 | `analytics_annotations` | Second derivative (analytics output) | `concept_id`, `label`, `value` |
 | `concepts_fts` | FTS5 external-content index | Tokenized text, no duplication |
 | `embeddings_*` | Per-model vector tables | `F32_BLOB(n)` with DiskANN index |
+| `kv_store` | Operational state, outside the ledger (0.18.0) | `key TEXT PK`, `value`, `updated_at` |
+| `blobs` | Content-addressed bytes, archived when unnamed (0.19.0) | `sha256 TEXT UNIQUE`, `size`, `bytes`, `put_at` |
 
 ### 4.2 Timestamp Form (normative)
 
@@ -181,6 +183,9 @@ Every temporal column is exactly 27 characters: `YYYY-MM-DDTHH:MM:SS.ffffffZ`
 | v17 | `idx_txlog_fold_partition` — the fold's own partition, and **not** the index review item C-4 asked for, which was never measured faster than no index at all ([D-254](architecture/s13-decision-register.md#d-254)) |
 | v18 | `idx_links_branch` and `idx_txlog_branch` — the lineage's own indexes on the two tables `archive_branch` scans, **partial** over `branch_id <> 'main'` because the trunk is never archivable, so they hold what branches wrote and cost the write path nothing ([D-273](architecture/s13-decision-register.md#d-273)) |
 | v19 | `trg_links_single_open`'s body re-pinned: the branch predicate carries a unary `+`, so on a statistics-free database the probe seeks `idx_lc_open_interval` instead of scanning a lineage per trigger firing — the fresh-file bulk import was 3.9× wall at 16k edges. Trigger-only; no table touched ([D-274](architecture/s13-decision-register.md#d-274)) |
+| v20 | `kv_store` — operational state with no log trigger, no archive membership and no `branch_id` ([D-280](architecture/s13-decision-register.md#d-280)) |
+| v21 | `concepts.extra`, a JSON object logged like every other column; concepts payload v3 ([D-278](architecture/s13-decision-register.md#d-278)) |
+| v22 | `blobs`, `idx_blobs_put_at`, an unconditional update guard and a marker-gated delete guard; `cold.blobs` arrives with the first session ([D-281](architecture/s13-decision-register.md#d-281), [D-288](architecture/s13-decision-register.md#d-288)) |
 
 **This table stopped at v10 for seven rungs and fourteen releases** (corrected while writing the 0.16.0 release note). `tests/doc_currency_tests.rs` gates `docs/architecture/README.md`'s revision history and the register's `D-001…D-NNN` line; it does not read this file, which is why the drift here ran longer than anywhere the gate looks. The authority on the ladder is `src/schema/migrations.rs`'s `STEPS`, and `SCHEMA_VERSION` is the number to trust over this table.
 
@@ -729,6 +734,27 @@ pub fn estimated_bulk_hold(edges: &[EdgeAssertion]) -> Duration  // ~33 ms / 500
 **`util/limits.rs`**: Holds only the ceilings **SQLite imposes**, which is the distinction the module exists for — `HYDRATE_CHUNK` (400) is a bind-variable ceiling and `SQLITE_MAX_VARIABLE_NUMBER` (999) is the limit it stays under. Nothing here is a tuning choice, and no amount of measurement will move either number.
 
 **The tuning constants are in `connection.rs`**, beside the actor they bound: `CHUNK_BUDGET` (3 ms), the duration bound all chunking is derived from; `CHUNK_FLOOR` (35), the smallest chunk the adaptive loop will fall to; `chunk_rows` (90/70/600/30), the per-path ceilings; `BULK_ATOMIC_WARN_HOLD` (250 ms), above which `write_bulk_atomic` warns; and `MAX_ARCHIVE_SESSIONS` (4,096), bounding `archive_windowed`. `SAMPLE_LIMIT` (32), which caps `ChainCheck` disagreement lists, is in `temporal/replay.rs`. *This paragraph read "`util/limits.rs` centralises chunking and operational constants" and listed all of the above as living there; none of them ever did.*
+
+### 5.10 Blobs (0.19.0)
+
+```rust
+impl Database {
+    pub async fn blob_put(&self, bytes: &[u8]) -> Result<String>              // the address
+    pub async fn blob_get(&self, sha256: &str) -> Result<Option<Vec<u8>>>      // hot, then cold
+    pub async fn blob_stat(&self, sha256: &str) -> Result<Option<BlobStat>>    // no bytes read
+}
+#[non_exhaustive]
+pub struct BlobStat { pub sha256: String, pub size: u64, pub put_at: String, pub location: BlobLocation }
+pub enum BlobLocation { Hot, Cold }                     // #[non_exhaustive]
+pub const DEFAULT_MAX_BLOB_BYTES: usize = 8 * 1024 * 1024;   // Tuning::max_blob_bytes overrides
+pub const BLOB_WARN_HOLD: Duration = Duration::from_millis(100);
+```
+
+**The address is SHA-256 as 64 lowercase hex characters** — what `hashlib.sha256(data).hexdigest()` prints, so it can be computed without the database ([D-281](architecture/s13-decision-register.md#d-281)). Put it anywhere in a concept or link: `extra`, `content`, link `properties`, a URL. **That text is the reference** ([D-287](architecture/s13-decision-register.md#d-287)); uppercase, base64 or a truncated prefix is not one.
+
+**Reclaimed by the archive, never deleted.** A session moves a blob to `cold.blobs` once no hot log entry contains its address and it was last put before the cutoff, and copies it back if a hot entry names it again ([D-288](architecture/s13-decision-register.md#d-288)). History counts: superseding the concept that named a blob does not release it while the old version's entry is hot. A re-put refreshes `put_at` and adds no row. `ArchiveReport` gains `blobs_archived`, `blobs_restored` and `blob_scan_bytes` (`0` when there was no blob to decide about).
+
+**Errors**: `BlobTooLarge { size, max }` (Budget) over the cap; `InvalidDigest` (Validation) for a malformed address, so it is not mistaken for an absent blob. `BlobPut` is exempt from `CHUNK_BUDGET` and warns above `BLOB_WARN_HOLD`.
 
 ---
 

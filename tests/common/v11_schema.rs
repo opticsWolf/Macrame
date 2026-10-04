@@ -64,7 +64,12 @@ const V12_ONLY_TRIGGERS: &[&str] = &[
 /// version above it, and it is the one a future release has to extend.
 ///
 /// [D-249]: ../../docs/architecture/s13-decision-register.md#d-249
-const POST_V12_TRIGGERS: &[&str] = &["trg_txlog_mark_gap"];
+const POST_V12_TRIGGERS: &[&str] = &[
+    "trg_txlog_mark_gap",
+    // v22 (0.19.0, D-288): both name `blobs`, which no fixture below v22 has.
+    "trg_blobs_frozen_update",
+    "trg_blobs_guard_delete",
+];
 
 /// The five triggers v12 redefines, by name. Their v11 bodies are below.
 const V12_CHANGED_TRIGGERS: &[&str] = &[
@@ -306,6 +311,7 @@ pub fn indices_v11() -> Vec<&'static str> {
                 && !sql.contains("idx_links_branch")
                 && !sql.contains("idx_txlog_branch")
                 && !sql.contains("idx_concepts_extra_layer")
+                && !sql.contains("idx_blobs_put_at")
         })
         .collect()
 }
@@ -346,6 +352,23 @@ pub async fn v11_schema(conn: &libsql::Connection) {
 /// `branch_id`, and the live `trg_links_current_sync` then fails with
 /// `no such column: NEW.branch_id`. A rung is a statement about a shape, so the
 /// shape has to be there.
+/// Undo v22 on a database built from today's baseline (0.19.0, D-288).
+///
+/// The blob store is a table, an index and two triggers that nothing else
+/// names, so the order is only "triggers and index before the table" — and
+/// `DROP TABLE` would take them anyway. Spelled out so the wind-back says what
+/// v22 added. Idempotent, like the rest.
+pub async fn wind_back_to_v21(conn: &libsql::Connection) {
+    for stmt in [
+        "DROP TRIGGER IF EXISTS trg_blobs_frozen_update",
+        "DROP TRIGGER IF EXISTS trg_blobs_guard_delete",
+        "DROP INDEX IF EXISTS idx_blobs_put_at",
+        "DROP TABLE IF EXISTS blobs",
+    ] {
+        conn.execute(stmt, ()).await.unwrap();
+    }
+}
+
 /// Undo v21 on a database built from today's baseline (0.18.0, D-278).
 ///
 /// **Every fixture below v21 needs this, which is why it is here and not in
@@ -364,6 +387,9 @@ pub async fn v11_schema(conn: &libsql::Connection) {
 /// Idempotent, so a caller that winds back through more than one of the
 /// helpers here is not the caller's problem.
 pub async fn wind_back_to_v20(conn: &libsql::Connection) {
+    // v22 first, so every caller below v21 is also below v22.
+    wind_back_to_v21(conn).await;
+
     conn.execute("DROP INDEX IF EXISTS idx_concepts_extra_layer", ())
         .await
         .unwrap();

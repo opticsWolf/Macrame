@@ -4,7 +4,7 @@
 # keeps the import path `use macrame::…` unchanged, so this is a registry name
 # and not a rename of the crate anyone writes against.
 name = "macrame-db"
-version = "0.18.0"
+version = "0.19.0"
 edition = "2021"
 # Measured, not declared: `cargo +1.88.0 check --all-features --all-targets`
 # passes and 1.85 does not.
@@ -92,6 +92,11 @@ zstd = "0.13"
 thiserror = "1.0"
 tracing = "0.1"
 ulid = "1.1"
+# The blob store's content address (0.19.0, D-281 amendment 3). SHA-256 because
+# the address is permanent and callers compute it too (`hashlib.sha256`,
+# `sha256sum`); this crate rather than `ring`, which is only in the tree through
+# libsql's default TLS features and would vanish with them.
+sha2 = "0.11"
 
 [dev-dependencies]
 tempfile = "3.8"

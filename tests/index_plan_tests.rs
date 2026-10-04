@@ -303,6 +303,21 @@ const REGISTRY: &[(&str, Justification)] = &[
             )),
         },
     ),
+    (
+        "idx_blobs_put_at",
+        Query {
+            // The blob step's candidate set (0.19.0, D-281): the first query
+            // of the step and the one every archive session runs, blobs or
+            // not. Without the index it reads every row of the table whose
+            // rows are the largest in the file.
+            label: "the archive's blob candidates, older than the cutoff",
+            sql: "SELECT sha256 FROM main.blobs WHERE put_at < ?1",
+            source: Some((
+                include_str!("../src/temporal/archive.rs"),
+                "SELECT sha256 FROM main.blobs WHERE put_at < ?1",
+            )),
+        },
+    ),
 ];
 
 /// Every declared index appears in the registry, and nothing else does.

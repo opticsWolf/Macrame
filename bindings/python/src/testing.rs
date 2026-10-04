@@ -41,6 +41,8 @@ pub(crate) const DB_ERROR_VARIANTS: &[&str] = &[
     "Migration",
     "InvalidEdgeType",
     "InvalidKvKey",
+    "InvalidDigest",
+    "BlobTooLarge",
     "InvalidExtra",
     "InvalidExtraPath",
     "SingleOpenViolation",
@@ -113,6 +115,14 @@ fn sample(name: &str) -> Option<DbError> {
         },
         "InvalidEdgeType" => DbError::InvalidEdgeType("bad-type".into()),
         "InvalidKvKey" => DbError::InvalidKvKey("bad key".into()),
+        // Uppercase: the one spelling of a real digest the API refuses.
+        "InvalidDigest" => DbError::InvalidDigest(
+            "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855".into(),
+        ),
+        "BlobTooLarge" => DbError::BlobTooLarge {
+            size: 4242,
+            max: 1000,
+        },
         "InvalidExtra" => DbError::InvalidExtra {
             id: "c1".into(),
             reason: "expected a JSON object, got an array".into(),

@@ -126,6 +126,10 @@ macrame/
 │   │   ├── registry.rs         # §5.9 — register_model, declared_dimension
 │   │   ├── search.rs           # §5.9 — top-k, RRF fusion
 │   │   └── hybrid.rs           # §5.9 — hybrid vector + FTS, RRF (D-051)
+│   ├── blob.rs                 # §4.10 — blobs: content-addressed bytes by
+│   │                           #   SHA-256, reclaimed by the archive's
+│   │                           #   reference scan (0.19.0, D-281, D-287,
+│   │                           #   D-288)
 │   ├── integrity/
 │   │   ├── mod.rs              # LATEST_BELIEF_PROJECTION — the single definition (D-077)
 │   │   ├── audit.rs            # audit_current() — read-side

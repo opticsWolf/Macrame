@@ -183,6 +183,30 @@ pub enum DbError {
     )]
     InvalidKvKey(String),
 
+    /// A blob address that is not 64 lowercase hex characters (0.19.0,
+    /// [D-281]).
+    ///
+    /// Refused rather than lowercased: an uppercase digest is not the address
+    /// [`crate::Database::blob_put`] returned, and [D-287]'s reference scan does
+    /// not recognise one either, so silently normalising it here would make a
+    /// read succeed for a spelling the archive treats as no reference at all.
+    ///
+    /// [D-281]: ../docs/architecture/s13-decision-register.md#d-281
+    /// [D-287]: ../docs/architecture/s13-decision-register.md#d-287
+    #[error("invalid blob digest {0:?} (must be 64 lowercase hex characters, as blob_put returns)")]
+    InvalidDigest(String),
+
+    /// A blob over [`crate::Tuning::max_blob_bytes`] (0.19.0, [D-281]).
+    ///
+    /// Checked before the bytes are hashed or sent to the actor, so a refused
+    /// put costs nothing but the comparison. The cap exists because libSQL
+    /// 0.9.30 has no incremental blob I/O: a put is one statement holding the
+    /// whole value, under the write lock, and so is every read of it.
+    ///
+    /// [D-281]: ../docs/architecture/s13-decision-register.md#d-281
+    #[error("blob of {size} bytes is over the {max}-byte cap (Tuning::max_blob_bytes)")]
+    BlobTooLarge { size: usize, max: usize },
+
     /// A `concepts.extra` value that is not a JSON object, or is over the cap
     /// (0.18.0, [D-278]).
     ///
@@ -929,6 +953,7 @@ impl DbError {
             Self::AttributeModeUnstated { .. }
             | Self::HalfLifeWithoutInstant
             | Self::InvalidBranchId { .. }
+            | Self::InvalidDigest { .. }
             | Self::InvalidEdgeType { .. }
             | Self::InvalidExtra { .. }
             | Self::InvalidExtraPath { .. }
@@ -952,7 +977,7 @@ impl DbError {
             | Self::WriterStopped { .. }
             | Self::WriterUnavailable { .. } => ErrorKind::Writer,
 
-            Self::SubgraphTooLarge { .. } => ErrorKind::Budget,
+            Self::BlobTooLarge { .. } | Self::SubgraphTooLarge { .. } => ErrorKind::Budget,
 
             Self::BranchArchived { .. }
             | Self::BranchExists { .. }
@@ -1051,6 +1076,9 @@ pub enum AbortKind {
     BranchImmutable,
     /// Any write to `branches` other than an insert (v12, §15.2).
     BranchesFrozen,
+    /// An `UPDATE` of a blob's address, size or bytes (v22, D-288). Only
+    /// `put_at` may change.
+    BlobImmutable,
     /// Not one of our guards — an ordinary engine error.
     NotAGuard,
 }
@@ -1095,8 +1123,8 @@ const SQLITE_CONSTRAINT_TRIGGER: std::ffi::c_int = 1811;
 /// triggers themselves, so guard and classifier cannot drift.
 pub fn abort_kind(err: &libsql::Error) -> AbortKind {
     use crate::schema::ddl::{
-        ABORT_BRANCHES_FROZEN, ABORT_BRANCH_IMMUTABLE, ABORT_CROSS_LINEAGE, ABORT_DELETE_GUARD,
-        ABORT_MONOTONIC_RA, ABORT_SINGLE_OPEN,
+        ABORT_BLOB_IMMUTABLE, ABORT_BRANCHES_FROZEN, ABORT_BRANCH_IMMUTABLE, ABORT_CROSS_LINEAGE,
+        ABORT_DELETE_GUARD, ABORT_MONOTONIC_RA, ABORT_SINGLE_OPEN,
     };
 
     let text = match err {
@@ -1121,6 +1149,8 @@ pub fn abort_kind(err: &libsql::Error) -> AbortKind {
         AbortKind::BranchImmutable
     } else if text.contains(ABORT_BRANCHES_FROZEN) {
         AbortKind::BranchesFrozen
+    } else if text.contains(ABORT_BLOB_IMMUTABLE) {
+        AbortKind::BlobImmutable
     } else {
         AbortKind::NotAGuard
     }

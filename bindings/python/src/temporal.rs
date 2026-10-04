@@ -231,15 +231,37 @@ impl PyArchiveReport {
     fn horizon(&self) -> Option<i64> {
         self.inner.horizon
     }
+    /// Blobs moved to the cold file because no hot log entry names them and
+    /// they were last put before the cutoff (0.19.0, D-281). Always `0` from
+    /// `archive_branch`, which leaves blobs to the next `archive`.
+    #[getter]
+    fn blobs_archived(&self) -> usize {
+        self.inner.blobs_archived
+    }
+    /// Cold-only blobs copied back because a hot entry names them again. The
+    /// cold copy stays.
+    #[getter]
+    fn blobs_restored(&self) -> usize {
+        self.inner.blobs_restored
+    }
+    /// Bytes of hot log payload the blob step read looking for references —
+    /// `0` when there was no blob to decide about, which is the cost of the
+    /// feature to a ledger that never stored one (D-287).
+    #[getter]
+    fn blob_scan_bytes(&self) -> u64 {
+        self.inner.blob_scan_bytes
+    }
     fn __repr__(&self) -> String {
         // `{:?}` on the Option would render `Some(1)` / `None`, which is Rust
         // leaking into a Python repr. The horizon is a Python `int | None` and
         // should read as one.
         format!(
-            "<macrame.ArchiveReport links={} concepts={} log={} horizon={}>",
+            "<macrame.ArchiveReport links={} concepts={} log={} blobs={} restored={} horizon={}>",
             self.inner.links_archived,
             self.inner.concepts_archived,
             self.inner.log_entries_archived,
+            self.inner.blobs_archived,
+            self.inner.blobs_restored,
             match self.inner.horizon {
                 Some(h) => h.to_string(),
                 None => "None".to_string(),

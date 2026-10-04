@@ -91,6 +91,11 @@ EXPECTED: dict[str, tuple[str, str, dict]] = {
     # -- validation --
     "InvalidEdgeType": ("InvalidEdgeTypeError", "ValidationError", {"edge_type": "bad-type"}),
     "InvalidKvKey": ("InvalidKvKeyError", "ValidationError", {"key": "bad key"}),
+    "InvalidDigest": (
+        "InvalidDigestError",
+        "ValidationError",
+        {"digest": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"},
+    ),
     "InvalidExtra": (
         "InvalidExtraError",
         "ValidationError",
@@ -223,6 +228,7 @@ EXPECTED: dict[str, tuple[str, str, dict]] = {
     "WriterStopped": ("WriterStoppedError", "WriterError", {"reason": "sample-reason"}),
     # -- budget --
     "SubgraphTooLarge": ("SubgraphTooLargeError", "BudgetError", {"n": 4242, "budget": 1000}),
+    "BlobTooLarge": ("BlobTooLargeError", "BudgetError", {"size": 4242, "max": 1000}),
 }
 
 

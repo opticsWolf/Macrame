@@ -180,6 +180,11 @@ macro_rules! abort_branches_frozen {
         "macrame: branch records are append-only"
     };
 }
+macro_rules! abort_blob_immutable {
+    () => {
+        "macrame: a blob is its content address; only put_at may change"
+    };
+}
 
 pub const ABORT_SINGLE_OPEN: &str = abort_single_open!();
 pub const ABORT_MONOTONIC_RA: &str = abort_monotonic_ra!();
@@ -187,6 +192,7 @@ pub const ABORT_DELETE_GUARD: &str = abort_delete_guard!();
 pub const ABORT_CROSS_LINEAGE: &str = abort_cross_lineage!();
 pub const ABORT_BRANCH_IMMUTABLE: &str = abort_branch_immutable!();
 pub const ABORT_BRANCHES_FROZEN: &str = abort_branches_frozen!();
+pub const ABORT_BLOB_IMMUTABLE: &str = abort_blob_immutable!();
 
 /// The root lineage every pre-v12 row is stamped with (§15.2, v12, D-214).
 ///
@@ -985,6 +991,109 @@ CREATE TABLE IF NOT EXISTS kv_store (
 "#
 );
 
+/// Content-addressed bytes, reclaimed by the archive and by nothing else
+/// (§4.10, v22, [D-281]).
+///
+/// # A rowid table, and here that is the point
+///
+/// [`CREATE_KV_STORE_TABLE`] is `WITHOUT ROWID` because its rows are small and
+/// its key is the table. This one is the opposite case: a row may carry
+/// megabytes, and in a `WITHOUT ROWID` table the payload lives in the key
+/// b-tree, so every lookup by digest would walk past overflow chains to get to
+/// the next key. A rowid table keeps the bytes out of the index; the `UNIQUE`
+/// on `sha256` is a separate, narrow b-tree of 64-character keys.
+///
+/// # What is checked on disk, and why each clause is there
+///
+/// * **`sha256` is 64 lowercase hex characters.** Not only an API rule:
+///   [D-287]'s reference scan matches lowercase hex, so a raw writer storing an
+///   uppercase digest would hold a blob the scan can never name, and the
+///   archive would send it cold while a hot entry pointed at it.
+/// * **`size = length(bytes)`**, so the column a caller reads from
+///   [`crate::BlobStat`] without fetching the bytes cannot disagree with them.
+/// * **`typeof(bytes) = 'blob'`.** `length()` of a TEXT value counts
+///   characters, so without this a text value would satisfy the clause above
+///   with a size that is not its byte length. [`WEIGHT_CHECK`]'s reasoning:
+///   affinity is not a type.
+/// * **`put_at` is canonical**, like every stamped column, because the
+///   archive compares it against a cutoff lexicographically ([D-281]
+///   amendment 1).
+///
+/// No `branch_id` and no log trigger. A blob is not a belief and has no
+/// lineage: the *reference* to it is what is versioned, inside a concept's or a
+/// link's payload, and the bytes behind one address are the same on every
+/// branch by construction.
+///
+/// [D-281]: ../../docs/architecture/s13-decision-register.md#d-281
+/// [D-287]: ../../docs/architecture/s13-decision-register.md#d-287
+pub const CREATE_BLOBS_TABLE: &str = concat!(
+    r#"
+CREATE TABLE IF NOT EXISTS blobs (
+    blob_id INTEGER PRIMARY KEY,
+    sha256  TEXT    NOT NULL UNIQUE
+            CHECK (length(sha256) = 64 AND sha256 NOT GLOB '*[^0-9a-f]*'),
+    size    INTEGER NOT NULL CHECK (size = length(bytes)),
+    bytes   BLOB    NOT NULL CHECK (typeof(bytes) = 'blob'),
+    put_at  TEXT    NOT NULL,
+    "#,
+    canonical_ts_check!("put_at"),
+    r#"
+);
+"#
+);
+
+/// A blob's address is its content, so nothing that defines it may change
+/// (v22, [D-288]).
+///
+/// **Unconditional**, unlike [`CREATE_BLOBS_GUARD_DELETE`]: no session of any
+/// kind needs to rewrite bytes under an address, and a content address that can
+/// be rewritten is not one. `put_at` is deliberately absent from the column
+/// list — a re-put refreshes it ([D-281] amendment 1), and that is the one
+/// update this table takes.
+///
+/// [D-281]: ../../docs/architecture/s13-decision-register.md#d-281
+/// [D-288]: ../../docs/architecture/s13-decision-register.md#d-288
+pub const CREATE_BLOBS_GUARD_UPDATE: &str = concat!(
+    r#"
+    CREATE TRIGGER IF NOT EXISTS trg_blobs_frozen_update
+    BEFORE UPDATE OF sha256, size, bytes ON blobs
+    BEGIN
+        SELECT RAISE(ABORT, '"#,
+    abort_blob_immutable!(),
+    r#"');
+    END;
+    "#
+);
+
+/// Bytes leave the hot file only inside an archive session (v22, [D-288]).
+///
+/// The same shape, marker and message as the four ledger guards, and `verify`
+/// carries the name in its body probe for the same reason they are there: a
+/// guard with the right name and an unconditional body refuses the archive it
+/// should permit. [Doctrine V] is about the ledger and `blobs` is not a ledger
+/// table, but it is what the ledger's payloads point at, and a blob deleted
+/// outside a session is a reference that silently stops resolving.
+///
+/// [Doctrine V]: ../../docs/architecture/s0-s3-foundations.md#doctrine-v
+/// [D-288]: ../../docs/architecture/s13-decision-register.md#d-288
+pub const CREATE_BLOBS_GUARD_DELETE: &str = concat!(
+    r#"
+    CREATE TRIGGER IF NOT EXISTS trg_blobs_guard_delete
+    BEFORE DELETE ON blobs
+    WHEN NOT EXISTS (
+        SELECT 1 FROM sqlite_master
+        WHERE type = 'table' AND name = '"#,
+    "macrame_archive_session",
+    r#"'
+    )
+    BEGIN
+        SELECT RAISE(ABORT, '"#,
+    abort_delete_guard!(),
+    r#"');
+    END;
+    "#
+);
+
 pub const CREATE_ANALYTICS_ANNOTATIONS_TABLE: &str = concat!(
     r#"
 CREATE TABLE IF NOT EXISTS analytics_annotations (
@@ -1566,7 +1675,18 @@ pub const CREATE_INDICES: &[&str] = &[
     // `json_extract` form and `index_plan_tests` pins both halves — the
     // positive and the negative control.
     EXTRA_LAYER_INDEX,
+    // The archive's candidate set (0.19.0, [D-288]): `WHERE put_at < :cutoff`
+    // is the blob step's first query, and without this it reads every row of a
+    // table whose rows are the largest in the file.
+    //
+    // [D-288]: ../../docs/architecture/s13-decision-register.md#d-288
+    BLOBS_PUT_AT_INDEX,
 ];
+
+/// `blobs (put_at)`, named so the v21 → v22 rung issues the same text the
+/// baseline does.
+pub const BLOBS_PUT_AT_INDEX: &str =
+    "CREATE INDEX IF NOT EXISTS idx_blobs_put_at ON blobs (put_at);";
 
 /// The `extra.layer` expression index, named so a rung can re-issue it.
 ///
@@ -1911,6 +2031,10 @@ pub const CREATE_TRIGGERS: &[&str] = &[
         VALUES ('delete', OLD.rowid_pk, OLD.title, OLD.content);
     END;
     "#,
+    // v22 (0.19.0, D-288). Last because `blobs` is the newest table; the
+    // baseline creates it before this array runs.
+    CREATE_BLOBS_GUARD_UPDATE,
+    CREATE_BLOBS_GUARD_DELETE,
 ];
 
 #[cfg(test)]
@@ -2051,6 +2175,7 @@ mod tests {
             super::ABORT_SINGLE_OPEN,
             super::ABORT_MONOTONIC_RA,
             super::ABORT_DELETE_GUARD,
+            super::ABORT_BLOB_IMMUTABLE,
         ] {
             assert!(
                 super::CREATE_TRIGGERS.iter().any(|t| t.contains(msg)),
