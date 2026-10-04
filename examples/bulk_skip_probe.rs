@@ -33,8 +33,14 @@ fn parse_args() -> (usize, usize) {
     let mut i = 1;
     while i < argv.len() {
         match argv[i].as_str() {
-            "--n" => { n = argv[i + 1].parse().unwrap(); i += 2; }
-            "--sessions" => { sessions = argv[i + 1].parse().unwrap(); i += 2; }
+            "--n" => {
+                n = argv[i + 1].parse().unwrap();
+                i += 2;
+            }
+            "--sessions" => {
+                sessions = argv[i + 1].parse().unwrap();
+                i += 2;
+            }
             other => panic!("unknown arg {other}"),
         }
     }
@@ -44,7 +50,9 @@ fn parse_args() -> (usize, usize) {
 fn edges(n: usize, concepts: usize) -> Vec<EdgeAssertion> {
     let mut s: u64 = 20250910;
     let mut rng = move || {
-        s ^= s << 13; s ^= s >> 7; s ^= s << 17;
+        s ^= s << 13;
+        s ^= s >> 7;
+        s ^= s << 17;
         (s >> 11) as usize % concepts
     };
     let mut seen = std::collections::HashSet::new();
@@ -64,7 +72,9 @@ fn edges(n: usize, concepts: usize) -> Vec<EdgeAssertion> {
 }
 
 async fn seed(db: &Database, n: usize) {
-    let concepts: Vec<_> = (0..n).map(|i| ConceptUpsert::new(format!("c{i:06}"), "T").valid_from(TS)).collect();
+    let concepts: Vec<_> = (0..n)
+        .map(|i| ConceptUpsert::new(format!("c{i:06}"), "T").valid_from(TS))
+        .collect();
     db.write_concepts(concepts).await.unwrap();
 }
 
@@ -107,7 +117,9 @@ async fn arm_skip(db: &Database, n: usize, skip: bool) -> (f64, f64) {
     // The correctness claim F1 rests on: the projection agrees with what the
     // shipped path maintains. `audit_current` is the crate's own symmetric-
     // difference audit, Err(CurrentDrift) when anything disagrees.
-    let audit = macrame::integrity::audit_current(db.read_conn()).await.unwrap();
+    let audit = macrame::integrity::audit_current(db.read_conn())
+        .await
+        .unwrap();
     assert_eq!(audit, 0, "the skipped mirror left the projection drifting");
 
     if skip {

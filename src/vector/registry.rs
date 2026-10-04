@@ -108,13 +108,10 @@ pub async fn declared_dimension(conn: &libsql::Connection, model: &ModelName) ->
 /// Rejected line for keeping the index during loads.
 #[doc(hidden)]
 pub async fn drop_embedding_index(conn: &libsql::Connection, model: &ModelName) -> Result<()> {
-    conn.execute(
-        &format!("DROP INDEX IF EXISTS {}", model.index()),
-        (),
-    )
-    .await
-    .map(|_| ())
-    .map_err(Into::into)
+    conn.execute(&format!("DROP INDEX IF EXISTS {}", model.index()), ())
+        .await
+        .map(|_| ())
+        .map_err(Into::into)
 }
 
 /// Rebuild a model's DiskANN index in one pass (bulk-embedding finish, D-276).

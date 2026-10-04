@@ -241,8 +241,7 @@ pub fn format(st: SystemTime) -> String {
     // discard it.
     let signed_micros = match st.duration_since(SystemTime::UNIX_EPOCH) {
         Ok(d) => i128::try_from(d.as_micros()).unwrap_or(i128::MAX),
-        Err(before) => i128::try_from(before.duration().as_micros())
-            .map_or(i128::MIN, |m| -m),
+        Err(before) => i128::try_from(before.duration().as_micros()).map_or(i128::MIN, |m| -m),
     }
     .clamp(MIN_MICROS, MAX_MICROS);
 
@@ -387,8 +386,7 @@ mod tests {
         );
         assert_eq!(
             MAX_MICROS,
-            (i128::from(days_from_civil(9999, 12, 31)) * 86_400 + 86_399) * 1_000_000
-                + 999_999
+            (i128::from(days_from_civil(9999, 12, 31)) * 86_400 + 86_399) * 1_000_000 + 999_999
         );
 
         // The upper end is post-epoch, so every platform can build it.

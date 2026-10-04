@@ -96,11 +96,19 @@ pub enum Op {
     /// Closes the interval at `T2`. On a branch, at a key the branch inherited,
     /// this is the only cross-lineage retirement Doctrine III permits and is
     /// D-229's second symptom.
-    Retire { key: usize, branch: usize },
-    Fork { parent: usize, child: usize },
+    Retire {
+        key: usize,
+        branch: usize,
+    },
+    Fork {
+        parent: usize,
+        child: usize,
+    },
     /// Whole-ledger, at [`LATE`].
     Archive,
-    ArchiveBranch { branch: usize },
+    ArchiveBranch {
+        branch: usize,
+    },
 }
 
 pub fn id(name: &str) -> BranchId {
@@ -124,13 +132,9 @@ pub async fn seed(db: &Database) {
     .unwrap();
     for k in [0usize, 1] {
         let (s, t, ty, vf) = key_parts(k);
-        db.assert_edge(
-            EdgeAssertion::new(s, t, ty)
-                .valid_from(vf)
-                .valid_to(OPEN),
-        )
-        .await
-        .unwrap();
+        db.assert_edge(EdgeAssertion::new(s, t, ty).valid_from(vf).valid_to(OPEN))
+            .await
+            .unwrap();
     }
 }
 
@@ -144,7 +148,11 @@ pub async fn seed(db: &Database) {
 /// not the claim under test.
 pub async fn step(db: &Database, op: Op, tree: &mut Lineages) {
     match op {
-        Op::Assert { key, branch, closed } => {
+        Op::Assert {
+            key,
+            branch,
+            closed,
+        } => {
             let (s, t, ty, vf) = key_parts(key);
             let mut e = EdgeAssertion::new(s, t, ty)
                 .valid_from(vf)
@@ -379,7 +387,11 @@ pub fn render(history: &[Op]) -> String {
     let mut s = String::new();
     for op in history {
         match *op {
-            Op::Assert { key, branch, closed } => {
+            Op::Assert {
+                key,
+                branch,
+                closed,
+            } => {
                 let _ = writeln!(
                     s,
                     "assert key={} branch={} closed={}",
@@ -408,7 +420,11 @@ pub fn render(history: &[Op]) -> String {
                 let _ = writeln!(s, "archive");
             }
             Op::ArchiveBranch { branch } => {
-                let _ = writeln!(s, "archive_branch branch={}", BRANCHES[branch % BRANCHES.len()]);
+                let _ = writeln!(
+                    s,
+                    "archive_branch branch={}",
+                    BRANCHES[branch % BRANCHES.len()]
+                );
             }
         }
     }
@@ -441,12 +457,18 @@ pub fn parse(text: &str) -> Result<Vec<Op>, String> {
         let at = |e: String| format!("line {}: {e}", n + 1);
         let op = match t[0] {
             "assert" if t.len() == 4 => Op::Assert {
-                key: field(t[1], "key").map_err(at)?.parse().map_err(|_| at("bad key".into()))?,
+                key: field(t[1], "key")
+                    .map_err(at)?
+                    .parse()
+                    .map_err(|_| at("bad key".into()))?,
                 branch: branch_index(field(t[2], "branch").map_err(at)?).map_err(at)?,
                 closed: field(t[3], "closed").map_err(at)? != "0",
             },
             "retire" if t.len() == 3 => Op::Retire {
-                key: field(t[1], "key").map_err(at)?.parse().map_err(|_| at("bad key".into()))?,
+                key: field(t[1], "key")
+                    .map_err(at)?
+                    .parse()
+                    .map_err(|_| at("bad key".into()))?,
                 branch: branch_index(field(t[2], "branch").map_err(at)?).map_err(at)?,
             },
             "fork" if t.len() == 3 => Op::Fork {

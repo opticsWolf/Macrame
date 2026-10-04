@@ -49,11 +49,11 @@ pub struct macrame::branch::BranchView
 impl macrame::branch::BranchView
 pub async fn macrame::branch::BranchView::assert_edge(&self, macrame::graph::EdgeAssertion) -> macrame::error::Result<()>
 pub async fn macrame::branch::BranchView::bulk_import(&self, alloc::vec::Vec<macrame::graph::EdgeAssertion>) -> macrame::error::BulkResult<usize>
-pub fn macrame::branch::BranchView::database(&self) -> &alloc::sync::Arc<macrame::connection::Database>
+pub fn macrame::branch::BranchView::database(&self) -> &alloc::rcs::arc::Arc<macrame::connection::Database>
 pub async fn macrame::branch::BranchView::diff(&self, &macrame::branch::BranchId) -> macrame::error::Result<alloc::vec::Vec<macrame::branch::Divergence>>
 pub fn macrame::branch::BranchView::id(&self) -> &macrame::branch::BranchId
 pub async fn macrame::branch::BranchView::load_subgraph(&self, &str, u32, &str, usize) -> macrame::error::Result<macrame::graph::Subgraph>
-pub fn macrame::branch::BranchView::new(alloc::sync::Arc<macrame::connection::Database>, macrame::branch::BranchId) -> Self
+pub fn macrame::branch::BranchView::new(alloc::rcs::arc::Arc<macrame::connection::Database>, macrame::branch::BranchId) -> Self
 pub async fn macrame::branch::BranchView::query_as_of_edges(&self, &str) -> macrame::error::Result<alloc::vec::Vec<(alloc::string::String, alloc::string::String, alloc::string::String, alloc::string::String, alloc::string::String)>>
 pub fn macrame::branch::BranchView::read_conn(&self) -> &libsql::connection::Connection
 pub async fn macrame::branch::BranchView::retire_edge(&self, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, &str, &str) -> macrame::error::Result<()>
@@ -155,7 +155,7 @@ pub async fn macrame::connection::Database::bulk_import_deferred(&self, alloc::v
 pub async fn macrame::connection::Database::bulk_import_deferred_with(&self, alloc::vec::Vec<macrame::graph::EdgeAssertion>, macrame::connection::BulkControl) -> macrame::error::BulkResult<usize>
 pub async fn macrame::connection::Database::bulk_import_with(&self, alloc::vec::Vec<macrame::graph::EdgeAssertion>, macrame::connection::BulkControl) -> macrame::error::BulkResult<usize>
 pub async fn macrame::connection::Database::checkpoint(&self) -> macrame::error::Result<macrame::connection::CheckpointReport>
-pub fn macrame::connection::Database::clock(&self) -> &alloc::sync::Arc<dyn macrame::util::Clock>
+pub fn macrame::connection::Database::clock(&self) -> &alloc::rcs::arc::Arc<dyn macrame::util::Clock>
 pub async fn macrame::connection::Database::close(self) -> macrame::error::Result<()>
 pub async fn macrame::connection::Database::diagnostic_conn(&self) -> macrame::error::Result<libsql::connection::Connection>
 pub async fn macrame::connection::Database::diff(&self, &macrame::branch::BranchId, &macrame::branch::BranchId) -> macrame::error::Result<alloc::vec::Vec<macrame::branch::Divergence>>
@@ -169,7 +169,7 @@ pub fn macrame::connection::Database::metrics(&self) -> macrame::metrics::Metric
 pub async fn macrame::connection::Database::open(impl core::convert::AsRef<std::path::Path>) -> macrame::error::Result<Self>
 pub async fn macrame::connection::Database::open_tuned(impl core::convert::AsRef<std::path::Path>, macrame::connection::Tuning) -> macrame::error::Result<Self>
 pub async fn macrame::connection::Database::open_with_cadence(impl core::convert::AsRef<std::path::Path>, core::option::Option<macrame::temporal::SnapshotCadence>) -> macrame::error::Result<Self>
-pub async fn macrame::connection::Database::open_with_clock(impl core::convert::AsRef<std::path::Path>, core::option::Option<macrame::temporal::SnapshotCadence>, alloc::sync::Arc<dyn macrame::util::Clock>) -> macrame::error::Result<Self>
+pub async fn macrame::connection::Database::open_with_clock(impl core::convert::AsRef<std::path::Path>, core::option::Option<macrame::temporal::SnapshotCadence>, alloc::rcs::arc::Arc<dyn macrame::util::Clock>) -> macrame::error::Result<Self>
 pub async fn macrame::connection::Database::optimize(&self) -> macrame::error::Result<()>
 pub fn macrame::connection::Database::path(&self) -> &std::path::Path
 pub fn macrame::connection::Database::read_conn(&self) -> &libsql::connection::Connection
@@ -192,7 +192,7 @@ pub async fn macrame::connection::Database::upsert_embeddings(&self, &macrame::v
 pub async fn macrame::connection::Database::upsert_embeddings_with(&self, &macrame::vector::ModelName, alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<f32>)>, macrame::connection::BulkControl) -> macrame::error::BulkResult<usize>
 pub async fn macrame::connection::Database::verify_last_link(&self) -> macrame::error::Result<core::option::Option<macrame::temporal::ChainCheck>>
 pub async fn macrame::connection::Database::verify_snapshot_chain(&self, &str) -> macrame::error::Result<macrame::temporal::ChainCheck>
-pub fn macrame::connection::Database::view(&alloc::sync::Arc<Self>, macrame::branch::BranchId) -> macrame::branch::BranchView
+pub fn macrame::connection::Database::view(&alloc::rcs::arc::Arc<Self>, macrame::branch::BranchId) -> macrame::branch::BranchView
 pub async fn macrame::connection::Database::write_analytics_annotations(&self, alloc::vec::Vec<macrame::connection::Annotation>) -> macrame::error::BulkResult<usize>
 pub async fn macrame::connection::Database::write_analytics_annotations_with(&self, alloc::vec::Vec<macrame::connection::Annotation>, macrame::connection::BulkControl) -> macrame::error::BulkResult<usize>
 pub async fn macrame::connection::Database::write_bulk_atomic(&self, alloc::vec::Vec<macrame::graph::EdgeAssertion>) -> macrame::error::Result<usize>
@@ -205,7 +205,7 @@ impl core::ops::drop::Drop for macrame::connection::Database
 pub fn macrame::connection::Database::drop(&mut self)
 #[non_exhaustive] pub struct macrame::connection::Tuning
 pub macrame::connection::Tuning::cadence: macrame::connection::CadencePolicy
-pub macrame::connection::Tuning::clock: core::option::Option<alloc::sync::Arc<dyn macrame::util::Clock>>
+pub macrame::connection::Tuning::clock: core::option::Option<alloc::rcs::arc::Arc<dyn macrame::util::Clock>>
 pub macrame::connection::Tuning::future_stamps: macrame::FutureStampPolicy
 pub macrame::connection::Tuning::max_blob_bytes: core::option::Option<usize>
 pub macrame::connection::Tuning::reader_cache_size: core::option::Option<i32>
@@ -213,7 +213,7 @@ pub macrame::connection::Tuning::wal_autocheckpoint: macrame::connection::WalChe
 pub macrame::connection::Tuning::writer_cache_size: core::option::Option<i32>
 impl macrame::connection::Tuning
 pub fn macrame::connection::Tuning::cadence(self, macrame::connection::CadencePolicy) -> Self
-pub fn macrame::connection::Tuning::clock(self, alloc::sync::Arc<dyn macrame::util::Clock>) -> Self
+pub fn macrame::connection::Tuning::clock(self, alloc::rcs::arc::Arc<dyn macrame::util::Clock>) -> Self
 pub fn macrame::connection::Tuning::future_stamps(self, macrame::FutureStampPolicy) -> Self
 pub fn macrame::connection::Tuning::max_blob_bytes(self, usize) -> Self
 pub fn macrame::connection::Tuning::reader_cache_size(self, i32) -> Self
@@ -1012,7 +1012,7 @@ pub async fn macrame::connection::Database::bulk_import_deferred(&self, alloc::v
 pub async fn macrame::connection::Database::bulk_import_deferred_with(&self, alloc::vec::Vec<macrame::graph::EdgeAssertion>, macrame::connection::BulkControl) -> macrame::error::BulkResult<usize>
 pub async fn macrame::connection::Database::bulk_import_with(&self, alloc::vec::Vec<macrame::graph::EdgeAssertion>, macrame::connection::BulkControl) -> macrame::error::BulkResult<usize>
 pub async fn macrame::connection::Database::checkpoint(&self) -> macrame::error::Result<macrame::connection::CheckpointReport>
-pub fn macrame::connection::Database::clock(&self) -> &alloc::sync::Arc<dyn macrame::util::Clock>
+pub fn macrame::connection::Database::clock(&self) -> &alloc::rcs::arc::Arc<dyn macrame::util::Clock>
 pub async fn macrame::connection::Database::close(self) -> macrame::error::Result<()>
 pub async fn macrame::connection::Database::diagnostic_conn(&self) -> macrame::error::Result<libsql::connection::Connection>
 pub async fn macrame::connection::Database::diff(&self, &macrame::branch::BranchId, &macrame::branch::BranchId) -> macrame::error::Result<alloc::vec::Vec<macrame::branch::Divergence>>
@@ -1026,7 +1026,7 @@ pub fn macrame::connection::Database::metrics(&self) -> macrame::metrics::Metric
 pub async fn macrame::connection::Database::open(impl core::convert::AsRef<std::path::Path>) -> macrame::error::Result<Self>
 pub async fn macrame::connection::Database::open_tuned(impl core::convert::AsRef<std::path::Path>, macrame::connection::Tuning) -> macrame::error::Result<Self>
 pub async fn macrame::connection::Database::open_with_cadence(impl core::convert::AsRef<std::path::Path>, core::option::Option<macrame::temporal::SnapshotCadence>) -> macrame::error::Result<Self>
-pub async fn macrame::connection::Database::open_with_clock(impl core::convert::AsRef<std::path::Path>, core::option::Option<macrame::temporal::SnapshotCadence>, alloc::sync::Arc<dyn macrame::util::Clock>) -> macrame::error::Result<Self>
+pub async fn macrame::connection::Database::open_with_clock(impl core::convert::AsRef<std::path::Path>, core::option::Option<macrame::temporal::SnapshotCadence>, alloc::rcs::arc::Arc<dyn macrame::util::Clock>) -> macrame::error::Result<Self>
 pub async fn macrame::connection::Database::optimize(&self) -> macrame::error::Result<()>
 pub fn macrame::connection::Database::path(&self) -> &std::path::Path
 pub fn macrame::connection::Database::read_conn(&self) -> &libsql::connection::Connection
@@ -1049,7 +1049,7 @@ pub async fn macrame::connection::Database::upsert_embeddings(&self, &macrame::v
 pub async fn macrame::connection::Database::upsert_embeddings_with(&self, &macrame::vector::ModelName, alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<f32>)>, macrame::connection::BulkControl) -> macrame::error::BulkResult<usize>
 pub async fn macrame::connection::Database::verify_last_link(&self) -> macrame::error::Result<core::option::Option<macrame::temporal::ChainCheck>>
 pub async fn macrame::connection::Database::verify_snapshot_chain(&self, &str) -> macrame::error::Result<macrame::temporal::ChainCheck>
-pub fn macrame::connection::Database::view(&alloc::sync::Arc<Self>, macrame::branch::BranchId) -> macrame::branch::BranchView
+pub fn macrame::connection::Database::view(&alloc::rcs::arc::Arc<Self>, macrame::branch::BranchId) -> macrame::branch::BranchView
 pub async fn macrame::connection::Database::write_analytics_annotations(&self, alloc::vec::Vec<macrame::connection::Annotation>) -> macrame::error::BulkResult<usize>
 pub async fn macrame::connection::Database::write_analytics_annotations_with(&self, alloc::vec::Vec<macrame::connection::Annotation>, macrame::connection::BulkControl) -> macrame::error::BulkResult<usize>
 pub async fn macrame::connection::Database::write_bulk_atomic(&self, alloc::vec::Vec<macrame::graph::EdgeAssertion>) -> macrame::error::Result<usize>
@@ -1243,7 +1243,7 @@ pub fn macrame::graph::TraversalBuilder::plan(self, macrame::plan::ReadPlan) -> 
 pub fn macrame::graph::TraversalBuilder::read_plan(&self) -> macrame::error::Result<macrame::plan::ReadPlan>
 #[non_exhaustive] pub struct macrame::prelude::Tuning
 pub macrame::prelude::Tuning::cadence: macrame::connection::CadencePolicy
-pub macrame::prelude::Tuning::clock: core::option::Option<alloc::sync::Arc<dyn macrame::util::Clock>>
+pub macrame::prelude::Tuning::clock: core::option::Option<alloc::rcs::arc::Arc<dyn macrame::util::Clock>>
 pub macrame::prelude::Tuning::future_stamps: macrame::FutureStampPolicy
 pub macrame::prelude::Tuning::max_blob_bytes: core::option::Option<usize>
 pub macrame::prelude::Tuning::reader_cache_size: core::option::Option<i32>
@@ -1251,7 +1251,7 @@ pub macrame::prelude::Tuning::wal_autocheckpoint: macrame::connection::WalCheckp
 pub macrame::prelude::Tuning::writer_cache_size: core::option::Option<i32>
 impl macrame::connection::Tuning
 pub fn macrame::connection::Tuning::cadence(self, macrame::connection::CadencePolicy) -> Self
-pub fn macrame::connection::Tuning::clock(self, alloc::sync::Arc<dyn macrame::util::Clock>) -> Self
+pub fn macrame::connection::Tuning::clock(self, alloc::rcs::arc::Arc<dyn macrame::util::Clock>) -> Self
 pub fn macrame::connection::Tuning::future_stamps(self, macrame::FutureStampPolicy) -> Self
 pub fn macrame::connection::Tuning::max_blob_bytes(self, usize) -> Self
 pub fn macrame::connection::Tuning::reader_cache_size(self, i32) -> Self
@@ -1725,11 +1725,11 @@ pub struct macrame::BranchView
 impl macrame::branch::BranchView
 pub async fn macrame::branch::BranchView::assert_edge(&self, macrame::graph::EdgeAssertion) -> macrame::error::Result<()>
 pub async fn macrame::branch::BranchView::bulk_import(&self, alloc::vec::Vec<macrame::graph::EdgeAssertion>) -> macrame::error::BulkResult<usize>
-pub fn macrame::branch::BranchView::database(&self) -> &alloc::sync::Arc<macrame::connection::Database>
+pub fn macrame::branch::BranchView::database(&self) -> &alloc::rcs::arc::Arc<macrame::connection::Database>
 pub async fn macrame::branch::BranchView::diff(&self, &macrame::branch::BranchId) -> macrame::error::Result<alloc::vec::Vec<macrame::branch::Divergence>>
 pub fn macrame::branch::BranchView::id(&self) -> &macrame::branch::BranchId
 pub async fn macrame::branch::BranchView::load_subgraph(&self, &str, u32, &str, usize) -> macrame::error::Result<macrame::graph::Subgraph>
-pub fn macrame::branch::BranchView::new(alloc::sync::Arc<macrame::connection::Database>, macrame::branch::BranchId) -> Self
+pub fn macrame::branch::BranchView::new(alloc::rcs::arc::Arc<macrame::connection::Database>, macrame::branch::BranchId) -> Self
 pub async fn macrame::branch::BranchView::query_as_of_edges(&self, &str) -> macrame::error::Result<alloc::vec::Vec<(alloc::string::String, alloc::string::String, alloc::string::String, alloc::string::String, alloc::string::String)>>
 pub fn macrame::branch::BranchView::read_conn(&self) -> &libsql::connection::Connection
 pub async fn macrame::branch::BranchView::retire_edge(&self, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, &str, &str) -> macrame::error::Result<()>
@@ -1813,7 +1813,7 @@ pub async fn macrame::connection::Database::bulk_import_deferred(&self, alloc::v
 pub async fn macrame::connection::Database::bulk_import_deferred_with(&self, alloc::vec::Vec<macrame::graph::EdgeAssertion>, macrame::connection::BulkControl) -> macrame::error::BulkResult<usize>
 pub async fn macrame::connection::Database::bulk_import_with(&self, alloc::vec::Vec<macrame::graph::EdgeAssertion>, macrame::connection::BulkControl) -> macrame::error::BulkResult<usize>
 pub async fn macrame::connection::Database::checkpoint(&self) -> macrame::error::Result<macrame::connection::CheckpointReport>
-pub fn macrame::connection::Database::clock(&self) -> &alloc::sync::Arc<dyn macrame::util::Clock>
+pub fn macrame::connection::Database::clock(&self) -> &alloc::rcs::arc::Arc<dyn macrame::util::Clock>
 pub async fn macrame::connection::Database::close(self) -> macrame::error::Result<()>
 pub async fn macrame::connection::Database::diagnostic_conn(&self) -> macrame::error::Result<libsql::connection::Connection>
 pub async fn macrame::connection::Database::diff(&self, &macrame::branch::BranchId, &macrame::branch::BranchId) -> macrame::error::Result<alloc::vec::Vec<macrame::branch::Divergence>>
@@ -1827,7 +1827,7 @@ pub fn macrame::connection::Database::metrics(&self) -> macrame::metrics::Metric
 pub async fn macrame::connection::Database::open(impl core::convert::AsRef<std::path::Path>) -> macrame::error::Result<Self>
 pub async fn macrame::connection::Database::open_tuned(impl core::convert::AsRef<std::path::Path>, macrame::connection::Tuning) -> macrame::error::Result<Self>
 pub async fn macrame::connection::Database::open_with_cadence(impl core::convert::AsRef<std::path::Path>, core::option::Option<macrame::temporal::SnapshotCadence>) -> macrame::error::Result<Self>
-pub async fn macrame::connection::Database::open_with_clock(impl core::convert::AsRef<std::path::Path>, core::option::Option<macrame::temporal::SnapshotCadence>, alloc::sync::Arc<dyn macrame::util::Clock>) -> macrame::error::Result<Self>
+pub async fn macrame::connection::Database::open_with_clock(impl core::convert::AsRef<std::path::Path>, core::option::Option<macrame::temporal::SnapshotCadence>, alloc::rcs::arc::Arc<dyn macrame::util::Clock>) -> macrame::error::Result<Self>
 pub async fn macrame::connection::Database::optimize(&self) -> macrame::error::Result<()>
 pub fn macrame::connection::Database::path(&self) -> &std::path::Path
 pub fn macrame::connection::Database::read_conn(&self) -> &libsql::connection::Connection
@@ -1850,7 +1850,7 @@ pub async fn macrame::connection::Database::upsert_embeddings(&self, &macrame::v
 pub async fn macrame::connection::Database::upsert_embeddings_with(&self, &macrame::vector::ModelName, alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<f32>)>, macrame::connection::BulkControl) -> macrame::error::BulkResult<usize>
 pub async fn macrame::connection::Database::verify_last_link(&self) -> macrame::error::Result<core::option::Option<macrame::temporal::ChainCheck>>
 pub async fn macrame::connection::Database::verify_snapshot_chain(&self, &str) -> macrame::error::Result<macrame::temporal::ChainCheck>
-pub fn macrame::connection::Database::view(&alloc::sync::Arc<Self>, macrame::branch::BranchId) -> macrame::branch::BranchView
+pub fn macrame::connection::Database::view(&alloc::rcs::arc::Arc<Self>, macrame::branch::BranchId) -> macrame::branch::BranchView
 pub async fn macrame::connection::Database::write_analytics_annotations(&self, alloc::vec::Vec<macrame::connection::Annotation>) -> macrame::error::BulkResult<usize>
 pub async fn macrame::connection::Database::write_analytics_annotations_with(&self, alloc::vec::Vec<macrame::connection::Annotation>, macrame::connection::BulkControl) -> macrame::error::BulkResult<usize>
 pub async fn macrame::connection::Database::write_bulk_atomic(&self, alloc::vec::Vec<macrame::graph::EdgeAssertion>) -> macrame::error::Result<usize>
@@ -1894,7 +1894,7 @@ pub fn macrame::plan::ReadPlan::recorded_at(self, impl core::convert::Into<alloc
 pub fn macrame::plan::ReadPlan::valid_at(self, impl core::convert::Into<alloc::string::String>) -> Self
 #[non_exhaustive] pub struct macrame::Tuning
 pub macrame::Tuning::cadence: macrame::connection::CadencePolicy
-pub macrame::Tuning::clock: core::option::Option<alloc::sync::Arc<dyn macrame::util::Clock>>
+pub macrame::Tuning::clock: core::option::Option<alloc::rcs::arc::Arc<dyn macrame::util::Clock>>
 pub macrame::Tuning::future_stamps: macrame::FutureStampPolicy
 pub macrame::Tuning::max_blob_bytes: core::option::Option<usize>
 pub macrame::Tuning::reader_cache_size: core::option::Option<i32>
@@ -1902,7 +1902,7 @@ pub macrame::Tuning::wal_autocheckpoint: macrame::connection::WalCheckpointPolic
 pub macrame::Tuning::writer_cache_size: core::option::Option<i32>
 impl macrame::connection::Tuning
 pub fn macrame::connection::Tuning::cadence(self, macrame::connection::CadencePolicy) -> Self
-pub fn macrame::connection::Tuning::clock(self, alloc::sync::Arc<dyn macrame::util::Clock>) -> Self
+pub fn macrame::connection::Tuning::clock(self, alloc::rcs::arc::Arc<dyn macrame::util::Clock>) -> Self
 pub fn macrame::connection::Tuning::future_stamps(self, macrame::FutureStampPolicy) -> Self
 pub fn macrame::connection::Tuning::max_blob_bytes(self, usize) -> Self
 pub fn macrame::connection::Tuning::reader_cache_size(self, i32) -> Self

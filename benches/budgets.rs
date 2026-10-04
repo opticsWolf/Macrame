@@ -1843,7 +1843,6 @@ fn fixture_matrix(c: &mut Criterion) {
     group.finish();
 }
 
-
 // ---------------------------------------------------------------------------
 // The budget-exempt kinds, priced (0.15.28, D-271, review A-5)
 // ---------------------------------------------------------------------------
@@ -2005,33 +2004,36 @@ fn exempt_kinds(c: &mut Criterion) {
     // not make the setup cheap, because seeding was never what cost: writing
     // the lineage was. Twenty rows measures the same operation on the same
     // shape and is the difference between a run of minutes and a run of hours.
-    group.bench_function(BenchmarkId::new("archive_branch_small_lineage", edges), |b| {
-        b.iter_batched(
-            || {
-                rt.block_on(async {
-                    let branch = next_bench_branch();
-                    fx.db.fork(branch.clone(), BranchId::main()).await.unwrap();
-                    let batch: Vec<_> = (1..=LINEAGE_ROWS)
-                        .map(|i| {
-                            EdgeAssertion::new("c0000000", format!("c{i:07}"), "ALT")
-                                .valid_from(TS)
-                                .on_branch(branch.clone())
-                        })
-                        .collect();
-                    fx.db.bulk_import(batch).await.unwrap();
-                    branch
-                })
-            },
-            |branch| {
-                let report = rt.block_on(fx.db.archive_branch(branch)).unwrap();
-                assert!(
-                    report.links_archived > 0,
-                    "the fixture abandoned an empty lineage"
-                );
-            },
-            BatchSize::PerIteration,
-        )
-    });
+    group.bench_function(
+        BenchmarkId::new("archive_branch_small_lineage", edges),
+        |b| {
+            b.iter_batched(
+                || {
+                    rt.block_on(async {
+                        let branch = next_bench_branch();
+                        fx.db.fork(branch.clone(), BranchId::main()).await.unwrap();
+                        let batch: Vec<_> = (1..=LINEAGE_ROWS)
+                            .map(|i| {
+                                EdgeAssertion::new("c0000000", format!("c{i:07}"), "ALT")
+                                    .valid_from(TS)
+                                    .on_branch(branch.clone())
+                            })
+                            .collect();
+                        fx.db.bulk_import(batch).await.unwrap();
+                        branch
+                    })
+                },
+                |branch| {
+                    let report = rt.block_on(fx.db.archive_branch(branch)).unwrap();
+                    assert!(
+                        report.links_archived > 0,
+                        "the fixture abandoned an empty lineage"
+                    );
+                },
+                BatchSize::PerIteration,
+            )
+        },
+    );
 
     // **Super-linear, which is steeper than this arm expected. Measured
     // 7.6 ms at 2,000 against 49.5 ms at 8,000** — 6.5x on a 4x fixture, where

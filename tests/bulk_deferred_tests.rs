@@ -21,9 +21,9 @@
 mod harness;
 
 use harness::TestHarness;
+use macrame::error::DbError;
 #[cfg(feature = "metrics")]
 use macrame::metrics::CommandKind;
-use macrame::error::DbError;
 use macrame::prelude::*;
 
 const TS: &str = "2026-01-01T00:00:00.000000Z";
@@ -37,7 +37,11 @@ fn turns_for(snap: &macrame::metrics::MetricsSnapshot, kind: CommandKind) -> u64
 
 #[cfg(feature = "metrics")]
 fn over_budget_for(snap: &macrame::metrics::MetricsSnapshot, kind: CommandKind) -> u64 {
-    snap.kinds.iter().find(|k| k.kind == kind).unwrap().over_budget
+    snap.kinds
+        .iter()
+        .find(|k| k.kind == kind)
+        .unwrap()
+        .over_budget
 }
 
 fn random_pairs(n: usize) -> Vec<EdgeAssertion> {
@@ -120,7 +124,9 @@ async fn a_deferred_bulk_maintains_the_same_projection_the_shipped_path_does() {
 
     // The audit, on the deferred file.
     assert_eq!(
-        macrame::integrity::audit_current(db2.read_conn()).await.unwrap(),
+        macrame::integrity::audit_current(db2.read_conn())
+            .await
+            .unwrap(),
         0,
         "the deferred load left the projection drifting from the ledger"
     );
@@ -143,12 +149,16 @@ async fn a_write_after_a_deferred_bulk_is_mirrored_again() {
     db.bulk_import_deferred(random_pairs(N - 1)).await.unwrap();
 
     db.assert_edge(
-        EdgeAssertion::new("c000", "c001", "NEWTYPE").valid_from(TS).valid_to(OPEN),
+        EdgeAssertion::new("c000", "c001", "NEWTYPE")
+            .valid_from(TS)
+            .valid_to(OPEN),
     )
     .await
     .unwrap();
     assert_eq!(
-        macrame::integrity::audit_current(db.read_conn()).await.unwrap(),
+        macrame::integrity::audit_current(db.read_conn())
+            .await
+            .unwrap(),
         0,
         "a post-window write must reach links_current through the mirror"
     );
@@ -164,7 +174,9 @@ async fn a_failed_deferred_bulk_still_rebuilds_and_restores() {
 
     // An open interval the bulk will overlap in a later chunk.
     db.assert_edge(
-        EdgeAssertion::new("c000", "c001", "EARLY").valid_from(TS).valid_to(OPEN),
+        EdgeAssertion::new("c000", "c001", "EARLY")
+            .valid_from(TS)
+            .valid_to(OPEN),
     )
     .await
     .unwrap();
@@ -173,7 +185,9 @@ async fn a_failed_deferred_bulk_still_rebuilds_and_restores() {
     // Re-asserting an open interval on the same key is the single-open rule's
     // own refusal — deterministic, and it lands in the last chunk.
     edges.push(
-        EdgeAssertion::new("c000", "c001", "EARLY").valid_from("2027-01-01T00:00:00.000000Z").valid_to(OPEN),
+        EdgeAssertion::new("c000", "c001", "EARLY")
+            .valid_from("2027-01-01T00:00:00.000000Z")
+            .valid_to(OPEN),
     );
 
     let err = db.bulk_import_deferred(edges).await.unwrap_err();
@@ -193,7 +207,9 @@ async fn a_failed_deferred_bulk_still_rebuilds_and_restores() {
 
     // The mirror is on and the projection is true.
     assert_eq!(
-        macrame::integrity::audit_current(db.read_conn()).await.unwrap(),
+        macrame::integrity::audit_current(db.read_conn())
+            .await
+            .unwrap(),
         0,
         "the failure path rebuilt before it reported"
     );

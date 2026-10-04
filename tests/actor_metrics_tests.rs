@@ -939,10 +939,7 @@ async fn the_two_reports_partition_the_kinds_and_neither_sees_the_other_half() {
             k.kind
         );
         assert!(
-            !snap
-                .budget_violations()
-                .iter()
-                .any(|v| v.kind == k.kind),
+            !snap.budget_violations().iter().any(|v| v.kind == k.kind),
             "{} is in both reports",
             k.kind
         );
@@ -1001,7 +998,11 @@ async fn exempt_costs_carries_real_numbers_longest_first_and_omits_untouched_kin
     assert!(!costs.is_empty(), "the rebuilds reached no report at all");
 
     for k in &costs {
-        assert!(k.turns > 0, "{} has no turns and should not be listed", k.kind);
+        assert!(
+            k.turns > 0,
+            "{} has no turns and should not be listed",
+            k.kind
+        );
         // `longest` is a maximum over the same holds `mean` averages, so it
         // cannot be the smaller of the two. This is what says the fields are
         // the kind's own rather than a default-constructed row.

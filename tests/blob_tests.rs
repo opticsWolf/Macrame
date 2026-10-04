@@ -159,7 +159,11 @@ async fn a_malformed_digest_is_refused_rather_than_absent() {
     let h = TestHarness::new();
     let db = open(&h).await;
     let good = NIST[0].1;
-    for bad in [good.to_uppercase(), good[..63].to_string(), format!("{good}0")] {
+    for bad in [
+        good.to_uppercase(),
+        good[..63].to_string(),
+        format!("{good}0"),
+    ] {
         assert!(matches!(
             db.blob_get(&bad).await,
             Err(DbError::InvalidDigest(_))

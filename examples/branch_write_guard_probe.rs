@@ -158,8 +158,7 @@ const VISIBLE: &str = r#"visible(source_id, target_id, edge_type, valid_from, va
 SELECT l.valid_from, l.valid_to FROM visible l WHERE l.valid_from <> ?4"#;
 
 /// The trunk's guard, which is not a resolution at all.
-const TRUNK_GUARD: &str =
-    "SELECT l.valid_from, l.valid_to FROM links_current l \
+const TRUNK_GUARD: &str = "SELECT l.valid_from, l.valid_to FROM links_current l \
      WHERE l.valid_from <> ?4 AND l.source_id = ?1 AND l.target_id = ?2 AND l.edge_type = ?3";
 
 fn resolved(churned: &str, arm: &str) -> String {

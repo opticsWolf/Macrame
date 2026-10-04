@@ -697,11 +697,7 @@ async fn an_empty_object_and_an_unrequested_load_are_not_the_same_answer() {
         .await
         .unwrap();
     let not_asked = db
-        .load_subgraph_with(
-            &macrame::graph::TraversalBuilder::new("solo"),
-            NOW,
-            1 << 20,
-        )
+        .load_subgraph_with(&macrame::graph::TraversalBuilder::new("solo"), NOW, 1 << 20)
         .await
         .unwrap();
 

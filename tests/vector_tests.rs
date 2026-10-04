@@ -37,10 +37,7 @@ fn model() -> ModelName {
 }
 
 #[cfg(feature = "metrics")]
-fn turns_for(
-    snap: &macrame::metrics::MetricsSnapshot,
-    kind: macrame::metrics::CommandKind,
-) -> u64 {
+fn turns_for(snap: &macrame::metrics::MetricsSnapshot, kind: macrame::metrics::CommandKind) -> u64 {
     snap.kinds.iter().find(|k| k.kind == kind).unwrap().turns
 }
 
@@ -49,7 +46,11 @@ fn over_budget_for(
     snap: &macrame::metrics::MetricsSnapshot,
     kind: macrame::metrics::CommandKind,
 ) -> u64 {
-    snap.kinds.iter().find(|k| k.kind == kind).unwrap().over_budget
+    snap.kinds
+        .iter()
+        .find(|k| k.kind == kind)
+        .unwrap()
+        .over_budget
 }
 
 /// Little-endian F32 bytes, the wire form of an F32_BLOB.
@@ -851,12 +852,18 @@ async fn a_bulk_load_rebuilds_the_index_and_search_finds_the_rows() {
             "the drop turn is attributed to its own kind"
         );
         assert_eq!(
-            turns_for(&metrics, macrame::metrics::CommandKind::RebuildEmbeddingIndex),
+            turns_for(
+                &metrics,
+                macrame::metrics::CommandKind::RebuildEmbeddingIndex
+            ),
             1,
             "the rebuild turn is attributed to its own kind"
         );
         assert_eq!(
-            over_budget_for(&metrics, macrame::metrics::CommandKind::RebuildEmbeddingIndex),
+            over_budget_for(
+                &metrics,
+                macrame::metrics::CommandKind::RebuildEmbeddingIndex
+            ),
             0,
             "a rebuild is exempt by contract: at this fixture size the build \
              is over the budget in a debug build, and it may not move the \
@@ -870,7 +877,10 @@ async fn a_bulk_load_rebuilds_the_index_and_search_finds_the_rows() {
     assert_eq!(again, 40);
     #[cfg(feature = "metrics")]
     assert_eq!(
-        turns_for(&db.metrics(), macrame::metrics::CommandKind::DropEmbeddingIndex),
+        turns_for(
+            &db.metrics(),
+            macrame::metrics::CommandKind::DropEmbeddingIndex
+        ),
         2,
         "the second load drops and rebuilds again"
     );
@@ -915,7 +925,8 @@ async fn a_failed_bulk_load_still_rebuilds_the_index() {
 
     let err = db.bulk_embeddings(&m, rows).await.unwrap_err();
     assert_eq!(
-        err.written, 30,
+        err.written,
+        30,
         "chunk one committed before the stop, and the exception says so \
          (cause: {}; cancelled: {})",
         err.cause,
@@ -937,7 +948,11 @@ async fn a_failed_bulk_load_still_rebuilds_the_index() {
     // And the row count is the prefix that committed: the failure path
     // rebuilt the index, it did not roll back what committed.
     assert_eq!(
-        count(db.read_conn(), &format!("SELECT COUNT(*) FROM {}", m.table())).await,
+        count(
+            db.read_conn(),
+            &format!("SELECT COUNT(*) FROM {}", m.table())
+        )
+        .await,
         30
     );
 
@@ -974,8 +989,17 @@ async fn a_wrong_width_first_row_refuses_before_the_drop() {
     #[cfg(feature = "metrics")]
     {
         let metrics = db.metrics();
-        assert_eq!(turns_for(&metrics, macrame::metrics::CommandKind::DropEmbeddingIndex), 0);
-        assert_eq!(turns_for(&metrics, macrame::metrics::CommandKind::RebuildEmbeddingIndex), 0);
+        assert_eq!(
+            turns_for(&metrics, macrame::metrics::CommandKind::DropEmbeddingIndex),
+            0
+        );
+        assert_eq!(
+            turns_for(
+                &metrics,
+                macrame::metrics::CommandKind::RebuildEmbeddingIndex
+            ),
+            0
+        );
     }
 
     db.close().await.unwrap();
@@ -1001,8 +1025,17 @@ async fn an_empty_bulk_load_touches_nothing() {
     #[cfg(feature = "metrics")]
     {
         let metrics = db.metrics();
-        assert_eq!(turns_for(&metrics, macrame::metrics::CommandKind::DropEmbeddingIndex), 0);
-        assert_eq!(turns_for(&metrics, macrame::metrics::CommandKind::RebuildEmbeddingIndex), 0);
+        assert_eq!(
+            turns_for(&metrics, macrame::metrics::CommandKind::DropEmbeddingIndex),
+            0
+        );
+        assert_eq!(
+            turns_for(
+                &metrics,
+                macrame::metrics::CommandKind::RebuildEmbeddingIndex
+            ),
+            0
+        );
     }
 
     db.close().await.unwrap();
@@ -1032,7 +1065,13 @@ async fn a_bulk_load_into_an_unregistered_model_refuses_at_the_dimension_read() 
         "the table is the gate, got {err:?}"
     );
     #[cfg(feature = "metrics")]
-    assert_eq!(turns_for(&db.metrics(), macrame::metrics::CommandKind::DropEmbeddingIndex), 0);
+    assert_eq!(
+        turns_for(
+            &db.metrics(),
+            macrame::metrics::CommandKind::DropEmbeddingIndex
+        ),
+        0
+    );
 
     db.close().await.unwrap();
 }

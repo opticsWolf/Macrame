@@ -115,7 +115,8 @@ fn the_readme_pins_the_series_the_crate_is_at() {
     let pin = readme_dep_pin().expect("the README's quick start pins a version");
 
     assert_eq!(
-        pin, series,
+        pin,
+        series,
         "the README's quick start says `macrame-db = \"{pin}\"` while the crate \
          is at {}. That line is not internal documentation: `README.md` is this \
          package's front page on crates.io and PyPI, so it is the first \

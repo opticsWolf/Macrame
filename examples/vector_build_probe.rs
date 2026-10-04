@@ -36,14 +36,27 @@ struct Args {
 }
 
 fn parse_args() -> Args {
-    let mut a = Args { dim: 256, n: 2000, sessions: 3 };
+    let mut a = Args {
+        dim: 256,
+        n: 2000,
+        sessions: 3,
+    };
     let argv = std::env::args().collect::<Vec<_>>();
     let mut i = 1;
     while i < argv.len() {
         match argv[i].as_str() {
-            "--dim" => { a.dim = argv[i + 1].parse().unwrap(); i += 2; }
-            "--n" => { a.n = argv[i + 1].parse().unwrap(); i += 2; }
-            "--sessions" => { a.sessions = argv[i + 1].parse().unwrap(); i += 2; }
+            "--dim" => {
+                a.dim = argv[i + 1].parse().unwrap();
+                i += 2;
+            }
+            "--n" => {
+                a.n = argv[i + 1].parse().unwrap();
+                i += 2;
+            }
+            "--sessions" => {
+                a.sessions = argv[i + 1].parse().unwrap();
+                i += 2;
+            }
             other => panic!("unknown arg {other}"),
         }
     }
@@ -54,7 +67,10 @@ fn corpus(n: usize, dim: usize, seed: u64) -> Vec<(String, Vec<f32>)> {
     // xorshift; a seeded RNG keeps every arm's data identical.
     let mut s = seed | 1;
     let mut rng = move || {
-        s ^= s << 13; s ^= s >> 7; s ^= s << 17; s as f64 / u64::MAX as f64
+        s ^= s << 13;
+        s ^= s >> 7;
+        s ^= s << 17;
+        s as f64 / u64::MAX as f64
     };
     (0..n)
         .map(|i| {
@@ -71,8 +87,7 @@ async fn open_default(path: &std::path::Path) -> Database {
 }
 
 async fn open_wal_recipe(path: &std::path::Path) -> Database {
-    let tuning = Tuning::default()
-        .wal_autocheckpoint(WalCheckpointPolicy::EveryPages(10_000));
+    let tuning = Tuning::default().wal_autocheckpoint(WalCheckpointPolicy::EveryPages(10_000));
     Database::open_tuned(path, tuning).await.unwrap()
 }
 
@@ -101,8 +116,15 @@ async fn upsert_all(db: &Database, rows: &[(String, Vec<f32>)]) -> ChunkTiming {
         .await
         .unwrap();
     assert_eq!(n, rows.len());
-    let holds = std::sync::Arc::try_unwrap(holds).ok().unwrap().into_inner().unwrap();
-    ChunkTiming { wall: t0.elapsed(), holds }
+    let holds = std::sync::Arc::try_unwrap(holds)
+        .ok()
+        .unwrap()
+        .into_inner()
+        .unwrap();
+    ChunkTiming {
+        wall: t0.elapsed(),
+        holds,
+    }
 }
 
 fn hold_profile(t: &ChunkTiming) -> (f64, Vec<f64>, Vec<f64>) {
@@ -118,16 +140,26 @@ fn hold_profile(t: &ChunkTiming) -> (f64, Vec<f64>, Vec<f64>) {
 
 async fn wal_mb(path: &std::path::Path) -> f64 {
     let wal = path.with_extension("db-wal");
-    if wal.exists() { wal.metadata().unwrap().len() as f64 / 1e6 } else { 0.0 }
+    if wal.exists() {
+        wal.metadata().unwrap().len() as f64 / 1e6
+    } else {
+        0.0
+    }
 }
 
 async fn arm_incremental(args: &Args, recipe: bool, dir: &std::path::Path) -> String {
     let name = if recipe { "inc_wal" } else { "incremental" };
     let path = dir.join(format!("vbp_{}_d{}_n{}.db", name, args.dim, args.n));
     let _ = std::fs::remove_file(&path);
-    let db = if recipe { open_wal_recipe(&path).await } else { open_default(&path).await };
+    let db = if recipe {
+        open_wal_recipe(&path).await
+    } else {
+        open_default(&path).await
+    };
     seed_concepts(&db, args.n).await;
-    db.register_model(&ModelName::new(MODEL).unwrap(), args.dim).await.unwrap();
+    db.register_model(&ModelName::new(MODEL).unwrap(), args.dim)
+        .await
+        .unwrap();
     let rows = corpus(args.n, args.dim, 1);
 
     let t = upsert_all(&db, &rows).await;
@@ -143,7 +175,11 @@ async fn seed_concepts(db: &Database, n: usize) {
         .map(|i| ConceptUpsert::new(format!("c{i:06}"), "text").valid_from(TS))
         .collect();
     db.write_concepts(concepts).await.unwrap();
-    println!("           concepts n={} in {:.3}s", n, t0.elapsed().as_secs_f64());
+    println!(
+        "           concepts n={} in {:.3}s",
+        n,
+        t0.elapsed().as_secs_f64()
+    );
 }
 
 async fn arm_full_build(args: &Args, dir: &std::path::Path) -> String {
@@ -157,10 +193,9 @@ async fn arm_full_build(args: &Args, dir: &std::path::Path) -> String {
 
     // Drop the index behind registration (actor idle), insert without it.
     let conn = rw(&db);
-    conn.execute(
-        &format!("DROP INDEX {}", model.index()),
-        (),
-    ).await.unwrap();
+    conn.execute(&format!("DROP INDEX {}", model.index()), ())
+        .await
+        .unwrap();
     drop(conn);
 
     let t = upsert_all(&db, &rows).await;
@@ -177,7 +212,9 @@ async fn arm_full_build(args: &Args, dir: &std::path::Path) -> String {
             model.table()
         ),
         (),
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
     let build = t1.elapsed();
     drop(conn);
 
@@ -207,7 +244,9 @@ async fn query_dissect(args: &Args, dir: &std::path::Path) -> String {
     // (1) the full search_vector path.
     let t0 = Instant::now();
     for _ in 0..50 {
-        let hits = search_vector(read, &query, &model, 10, None, None).await.unwrap();
+        let hits = search_vector(read, &query, &model, 10, None, None)
+            .await
+            .unwrap();
         assert_eq!(hits.len(), 10);
     }
     let full = t0.elapsed().as_secs_f64() / 50.0;
@@ -216,7 +255,10 @@ async fn query_dissect(args: &Args, dir: &std::path::Path) -> String {
     let sql = format!("SELECT id FROM vector_top_k('{}', ?1, 10)", model.index());
     let t0 = Instant::now();
     for _ in 0..50 {
-        let _ = read.query(&sql, libsql::params![blob.clone()]).await.unwrap();
+        let _ = read
+            .query(&sql, libsql::params![blob.clone()])
+            .await
+            .unwrap();
     }
     let topk = t0.elapsed().as_secs_f64() / 50.0;
 
@@ -231,7 +273,10 @@ async fn query_dissect(args: &Args, dir: &std::path::Path) -> String {
     );
     let t0 = Instant::now();
     for _ in 0..50 {
-        let _ = read.query(&sql3, libsql::params![blob.clone()]).await.unwrap();
+        let _ = read
+            .query(&sql3, libsql::params![blob.clone()])
+            .await
+            .unwrap();
     }
     let nojoin = t0.elapsed().as_secs_f64() / 50.0;
 

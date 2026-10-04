@@ -70,8 +70,7 @@ async fn every_promoted_case_still_holds() {
 
     for path in files {
         let text = std::fs::read_to_string(&path).expect("case file is readable");
-        let history: Vec<Op> = parse(&text)
-            .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        let history: Vec<Op> = parse(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
         assert!(
             !history.is_empty(),
             "{}: parsed to no operations",
@@ -181,8 +180,18 @@ fn the_strategy_still_reaches_the_shapes_it_was_written_for() {
     // stopped being reachable.
     let bounds: [(&str, usize, usize, usize); 5] = [
         ("a branch writing at a key the trunk seeds", shadow, 2, 98),
-        ("a branch retiring an inherited key", inherited_retire, 2, 90),
-        ("an archive with a live fork in the history", archive_with_fork, 2, 95),
+        (
+            "a branch retiring an inherited key",
+            inherited_retire,
+            2,
+            90,
+        ),
+        (
+            "an archive with a live fork in the history",
+            archive_with_fork,
+            2,
+            95,
+        ),
         (
             "archive_branch on a branch that has written",
             branch_archive_after_write,

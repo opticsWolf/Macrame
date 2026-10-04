@@ -193,7 +193,9 @@ pub enum DbError {
     ///
     /// [D-281]: ../docs/architecture/s13-decision-register.md#d-281
     /// [D-287]: ../docs/architecture/s13-decision-register.md#d-287
-    #[error("invalid blob digest {0:?} (must be 64 lowercase hex characters, as blob_put returns)")]
+    #[error(
+        "invalid blob digest {0:?} (must be 64 lowercase hex characters, as blob_put returns)"
+    )]
     InvalidDigest(String),
 
     /// A blob over [`crate::Tuning::max_blob_bytes`] (0.19.0, [D-281]).

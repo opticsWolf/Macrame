@@ -105,9 +105,7 @@ fn statements(extra: &str) -> Vec<(&'static str, String)> {
         ),
         (
             "collect archived keys",
-            format!(
-                "SELECT DISTINCT {PROJECTION_KEY} FROM links WHERE branch_id = ?1{extra}"
-            ),
+            format!("SELECT DISTINCT {PROJECTION_KEY} FROM links WHERE branch_id = ?1{extra}"),
         ),
         (
             "delete links",

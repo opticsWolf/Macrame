@@ -120,7 +120,7 @@ impl From<HybridHit> for PyVectorHit {
     frozen,
     from_py_object
 )]
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub(crate) enum PyFilterStrategy {
     /// Vector top-k′ from the index first, then discard what fails the filter.
     /// Cheap when the filter is loose.

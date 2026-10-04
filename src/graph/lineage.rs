@@ -1609,4 +1609,3 @@ mod tests {
         assert!(LineageShape::TrunkOnForked.binds_branch());
     }
 }
-

@@ -51,7 +51,7 @@ use crate::timestamps::{from_canonical, to_canonical};
     frozen,
     from_py_object
 )]
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub(crate) enum PyAttributeMode {
     /// Live attributes from `concepts`. Fast, and wrong for historical text.
     #[pyo3(name = "CURRENT")]
