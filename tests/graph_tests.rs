@@ -838,6 +838,16 @@ async fn the_loaders_running_total_agrees_with_the_derivation() {
 /// no bound loose enough to survive CI noise would catch. At 8x it is ~26x
 /// against ~8x, and the bound below sits between them with room on both sides.
 /// Verified by running the mutation, not by choosing a number that looked safe.
+///
+/// Each size is timed as the best of several loads, not one. A single sample
+/// put the whole verdict on one ~60 ms window, and on 2026-10-04 a macOS CI
+/// runner stalled inside it: 18.5x on an unchanged, linear loader, which
+/// passed on the next run of the same commit. Noise only adds time, so the
+/// minimum is the sample least contaminated by it, and taking it on both sides
+/// keeps the ratio a statement about the algorithm. A quadratic loader cannot
+/// get lucky into a low minimum — its cost is in every run. Re-measured with
+/// best-of-7: 8.8–9.0x linear over five runs, 30.5–30.9x with the mutation
+/// over three, so the bound stays at 16.
 #[tokio::test]
 async fn loading_scales_linearly_in_the_number_of_edges() {
     let small = TestHarness::new();
@@ -853,22 +863,31 @@ async fn loading_scales_linearly_in_the_number_of_edges() {
         .await
         .unwrap();
 
-    let t = std::time::Instant::now();
-    db_s.load_subgraph("N0000000", 2, T0, 1 << 30)
-        .await
-        .unwrap();
-    let small_ns = t.elapsed().as_nanos().max(1);
+    // Best of N per size. Noise only ever adds time, so the minimum is the
+    // estimate closest to what the algorithm costs; the sizes are interleaved
+    // so a slow stretch on the runner lands on both, not on one.
+    const RUNS: usize = 7;
+    let mut small_ns = u128::MAX;
+    let mut large_ns = u128::MAX;
+    for _ in 0..RUNS {
+        let t = std::time::Instant::now();
+        db_s.load_subgraph("N0000000", 2, T0, 1 << 30)
+            .await
+            .unwrap();
+        small_ns = small_ns.min(t.elapsed().as_nanos().max(1));
 
-    let t = std::time::Instant::now();
-    db_l.load_subgraph("N0000000", 2, T0, 1 << 30)
-        .await
-        .unwrap();
-    let large_ns = t.elapsed().as_nanos().max(1);
+        let t = std::time::Instant::now();
+        db_l.load_subgraph("N0000000", 2, T0, 1 << 30)
+            .await
+            .unwrap();
+        large_ns = large_ns.min(t.elapsed().as_nanos().max(1));
+    }
 
     let ratio = large_ns as f64 / small_ns as f64;
     assert!(
         ratio < 16.0,
-        "8x the edges took {ratio:.1}x the time ({small_ns} ns -> {large_ns} ns); \
+        "8x the edges took {ratio:.1}x the time ({small_ns} ns -> {large_ns} ns, \
+         best of {RUNS}); \
          linear is ~8x and quadratic ~26x — the per-row byte check is back"
     );
 }
