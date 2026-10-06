@@ -378,3 +378,263 @@ FAILS on 0.19.0 (empty adjacency — the reported gap); must PASS on 0.19.1.
 The full companion file additionally covers the bare-builder shape, the
 `reconstruct` control (passes on both versions), and an external-db probe
 harness.
+
+## Amendment 1 — Codebase review
+
+**Review scope:** current `dev/0.19.1` sources in `src/graph/subgraph.rs`,
+`src/graph/builder.rs`, `src/temporal/as_of.rs`, and `src/connection.rs`.
+This amendment records source-review findings; it does not change the code.
+
+### A1. Core mechanism confirmed, but only for a concept retired after `r`
+
+The loader path described in §3 is present: `load_subgraph_with` checks
+recorded-time reachability, projects the topology, calls `hydrate`, then calls
+`drop_dangling_adjacency`. `hydrate` reads `concepts WHERE retired = 0`. Both
+`build_sql_with` projections in `builder.rs` likewise join `concepts` and keep
+`c.retired = 0`. By contrast, `hydrate_at_time` folds concept payloads from
+`transaction_log`, rejects payloads retired at the requested instant, and
+filters their valid intervals. Thus the root cause and the secondary
+`execute_ids` mismatch are supported by the implementation **when an endpoint
+concept was live at `r` but is retired in current belief**. The loader already
+calls `check_recorded_reach`; T7 is coverage of an existing refusal, not a new
+guard requirement.
+
+### A2. The stated minimal reproducer does not produce the reported failure
+
+In §2 and Appendix B, both concepts are created with `ConceptUpsert::new` (whose
+default is `retired: false`), and the only later write is `retire_edge`. That
+operation closes/asserts a **link** row; it does not retire either endpoint
+concept. With `valid_to = 2027-01-01` and the query valid instant at
+`2026-01-01`, the replacement edge is still valid at the query instant. `B`
+therefore still matches the loader's live-concept hydration query, so
+`drop_dangling_adjacency` has no missing endpoint to prune. As written, this
+fixture should retain `A→B` on 0.19.0 and does not prove §3's root cause.
+
+To reproduce the reported defect, keep `A→B` available at the queried valid
+time and write a later concept version for `B` with `retired(true)` after
+capturing `t1` (preserving the concept's other fields/interval). Then load at
+both axes explicitly—e.g. `.as_of_valid(&t1).as_of_recorded(&t1)`—and verify
+that the recorded-time result keeps `B` and `A→B`. The present `concepts` row
+will now be retired, while the payload folded at `t1` will not be. The
+edge-only retirement in the current sketch may be removed; if retained, it
+must not be relied on to stand in for concept retirement.
+
+Also distinguish the two clocks in §2/T1: `load_subgraph_with`'s `now_ts` is
+the valid-time fallback (`TraversalBuilder::valid_instant`), not a recorded
+instant. A bare builder passed `t1` still reads **current belief**. Under the
+scope proposed in §4.1, a current-belief read at a past valid instant must
+continue to exclude a concept retired now. Therefore T1 must not expect the
+bare-builder shape to restore the endpoint; that is the current-belief control
+(and should remain absent). The historical expectation belongs on the builder
+with `as_of_recorded(t1)` set.
+
+### A3. The proposed helper is not a drop-in loader hydrator
+
+`hydrate_at_time` returns `NodeAttributes`, whereas the loader stores `NodeData`,
+which also carries `valid_from` and `valid_to`. The latter must come from the
+concept payload believed at `r` for a historical load—not from today's
+`concepts` row. In addition, loader `content` and `extra` are opt-in builder
+flags, and its existing `hydrate` accounts bytes as rows enter the graph,
+refusing as soon as `byte_budget` is crossed. `hydrate_at_time` chunks SQL but
+collects all returned attributes into a `HashMap` and has no loader byte-budget
+or content/extra controls. Calling it and checking the budget afterwards would
+not preserve the loader's incremental allocation/refusal behavior and could
+load content/extra that the caller did not request.
+
+Accordingly, §4.1 should treat `hydrate_at_time` as the fold/retirement
+semantics to reuse, not as a complete drop-in implementation. The loader path
+needs to preserve its opt-in fields and incremental budget accounting, and
+supply historical `valid_from`/`valid_to` as well as the historical attributes.
+A shared lower-level fold or a loader-specific incremental hydrator can do
+that; the amendment does not choose between them.
+
+### A4. Attribute-mode policy needs to cover explicit modes too
+
+The loader's rustdoc currently says `attribute_mode` is ignored and hydration
+always uses the live concept row; `load_subgraph_with` does not call
+`resolved_mode`. The §4.3 choice between refusing an unstated historical mode
+and defaulting to `AtTime` is therefore incomplete unless it also says what an
+explicit `Current` or `Omit` means on this API. Make that contract explicit
+before wiring the builder's mode into loading. In particular, the change must
+not silently override a caller's explicit mode, nor claim `Omit` while still
+requiring/hydrating node data to establish subgraph closure.
+
+### A5. Acceptance-test corrections
+
+- **T1:** use a post-`t1` concept retirement as in A2; assert the edge only for
+the recorded-time builder. Keep the bare/current-belief case as an unchanged
+control that excludes the now-retired endpoint. If checking content or `extra`,
+opt into `.content(true)` / `.extra(true)`; those fields are omitted by default.
+- **T2/T5:** assert ids/closure against the concept's recorded retirement
+state, not merely an edge retirement. Retired-at-`t1` should remain absent;
+retired-after-`t1` should be present only in the recorded-time result.
+- **T4:** with `ZZZ` having no concept row at all, the loader's hydration finds
+no `NodeData`, and the ids projection's inner join finds no id. The expected
+result is zero nodes/ids and no edges—not “start node only.” Alternatively,
+create the start concept if the intended assertion is a one-node graph.
+- **T7:** retain as regression coverage for the existing
+`check_recorded_reach` refusal before the loader query.
+
+These corrections narrow the issue to the bitemporal visibility leak the code
+actually exhibits, preserve the stated no-change rule for current-belief reads,
+and make the reproducer capable of distinguishing the two.
+
+## Amendment 2 — Empirical review (probes run against `dev/0.19.1`)
+
+**Review scope:** where Amendment 1 read source, this amendment *ran* five
+throwaway probes against this checkout (`dev/0.19.1`, which is 0.19.0's
+sources plus the document — no fix has landed). Session date 2026-10-06, so
+Appendix B's literal timestamps resolve against a live clock in the same era
+that produced Appendix A's stamps. The probe binary
+(`tests/amendment2_probes.rs`) was deleted after the run to keep the tree at
+doc-only changes; the load-bearing listing is inlined at §B2 and the setup is
+§6.1's helper otherwise. Checks printed actual values rather than asserting,
+so a wrong prediction still reports what the code does.
+
+### B1. Appendix B's sketch does not reproduce — now confirmed by execution
+
+P1 ran the sketch exactly as written (concepts live, `retire_edge` the only
+later write, `valid_to = 2027-01-01`, both loads at `now_ts = t1`):
+
+- bare builder at `t1`: **2 nodes, 1 edge** — `A→B` present;
+- `.as_of_recorded(t1)` at `t1`: **2 nodes, 1 edge** — `A→B` present.
+
+So §2.4 ("a subgraph **without** the `A→B` edge — with *and* without
+`.as_of_recorded(t1)`") and Appendix B's "FAILS on 0.19.0 (empty adjacency)"
+are not what this code does for edge-only retirement. Amendment 1 §A2's
+source-level prediction is confirmed by execution. The likely reconciliation
+of the original observation is an inference, stated as one: the actual
+narrowing-session fixture was a rename — and minting `new_name` plausibly
+retired `old_name` as a *concept* — which is precisely §B2's shape. The
+observed signature (missing **with and without** `as_of_recorded`) matches
+the concept-retirement shape on both counts; the condensed sketch dropped
+the load-bearing step when transcribing it.
+
+### B2. The corrected reproducer reproduces §3 exactly
+
+P2 kept the edge open and re-upserted the **endpoint concept** with
+`retired(true)` after `t1` (title changed v1→v2 so payloads are
+distinguishable). On unfixed code:
+
+```rust
+let hist = db.load_subgraph_with(
+    &TraversalBuilder::new("a::x").max_depth(2).as_of_recorded(&t1),
+    &t1, 10_000_000).await?;
+// → 1 node, 0 edges, a::y not hydrated        — §3's gap, as described
+
+let ids = TraversalBuilder::new("a::x").max_depth(2).as_of_recorded(&t1)
+    .execute_ids(db.read_conn(), &t1).await?;
+// → ["a::x"]                                  — §3.1, as described
+
+let attime = TraversalBuilder::new("a::x").max_depth(2).as_of_recorded(&t1)
+    .attribute_mode(AttributeMode::AtTime)
+    .execute(db.read_conn(), &t1).await?;
+// → only a::x                                 — see §B3: new finding
+
+let state = db.reconstruct(&t1).await?;
+// → state.concepts["a::y"] == ("b-v1", "doc-b") — fold control, correct
+```
+
+Controls all held: bare builder at `t2` **and** at `t1` — edge absent
+(current belief regardless of `now_ts`, as Amendment 1 §A2 says T1 must
+expect); `Current` mode — only `a::x`; instants without a mode —
+`AttributeModeUnstated`. Called directly, the fold the fix reuses answers
+the bitemporal question correctly:
+`hydrate_attributes(conn, &[both ids], &AsOf::bitemporal(t1, t1), AtTime)`
+returned `[a::x "a-v1", a::y "b-v1"]`. That is §4.1's premise confirmed by
+execution, and it also shows T1's attribute assertion
+("endpoint attributes are the at-`t1` payload") is checkable once the arm
+exists — subject to the `NodeData` `valid_from`/`valid_to` gap in §A3.
+
+The lower bound held too (P4): with the concept retired **before** `t1`, the
+`.as_of_recorded(t1)` load still drops the edge and the fold excludes the
+node — retired-as-of-`ts` must stay invisible after the fix, which is what
+§6.1 T5 wants, now pinned with a concept retirement rather than an edge one.
+
+### B3. New finding: `execute` + `AtTime` is a third affected surface
+
+P2's fourth block: `execute` with `.as_of_recorded(t1).attribute_mode(AtTime)`
+returns **only `a::x`** — the node believed live at `t1` never reaches AtTime
+hydration. The mechanism is visible in `execute`'s own body: it calls
+`execute_ids` first and hydrates whatever ids survive
+(`let ids = self.execute_ids(conn, now_ts).await?;` then
+`hydrate_attributes(conn, &ids, &as_of, mode)`), so §3.1's narrowed ids starve
+the fold before it runs.
+
+This means §1's sentence — "only the subgraph-loader path (and the
+`execute_ids` projection, secondarily) is affected" — is an undercount:
+**any `AtTime` consumer of `execute` loses the node**, through the same root
+cause. Three consequences for the plan:
+
+1. §4.2's ids fix repairs `execute`'s AtTime arm automatically, because
+   `execute` builds on `execute_ids`. No separate arm is needed, and the
+   blast-radius table should say so rather than imply `execute` is unaffected.
+2. T6 (§6.1) is gated on §4.2, not only on the loader arm — and on unfixed
+   code its AtTime expectation fails with a **missing node**, not a wrong
+   title. T6's description should say which failure mode proves which defect,
+   or the pre-fix run teaches the wrong lesson.
+3. §4.2's parity framing ("the two paths disagree") is really three surfaces
+   that must agree at instants: loader, `execute_ids`, and `execute` — the
+   first two directly, the third transitively.
+
+### B4. T4's expectation is wrong — confirmed by execution
+
+P3: start `zzz` with no concept row anywhere. The loader returns an **empty
+graph** (0 nodes, 0 edges, no error) and `execute_ids` returns `[]`. The
+loader does push the start id into its hydration list ("plus the start itself
+so a lone node still loads as a one-node graph"), but `hydrate` finds no live
+row for an id that never existed, so nothing lands. §6.1 T4's "start node
+only" should read "empty graph, no error" — as Amendment 1 §A5 said; this is
+the executing confirmation.
+
+### B5. The loader-contract premises §4.1 leans on hold
+
+P5, on a plain two-node graph: the default load carries `title` but
+`content() == None`; `.content(true)` loads it; a 10-byte budget refused with
+`SubgraphTooLarge { n: 322, budget: 10 }`. So the historical arm must
+preserve opt-in content/`extra` and the mid-hydration budget refusal, exactly
+as §A3 argued — `hydrate_at_time` wholesale would break both.
+
+### B6. §5's blast-radius claim needs one correction: the Python binding
+
+`BranchView::load_subgraph` indeed passes no instants, as §5 says. But the
+**Python binding is a second in-crate caller that does**:
+`bindings/python/src/database.rs`'s `load_subgraph` accepts `as_of_valid=`
+and `as_of_recorded=` keywords and forwards them into the builder passed to
+`load_subgraph_with`. So "in-crate behavior change is nil" is true of the
+**Rust** API only; a Python caller passing `as_of_recorded=t1` will see
+strictly more complete results after the fix. That is §5's own second bullet
+(the correction), but the nil-change sentence should be scoped, and the
+release-note item should cover the Python keyword.
+
+One doc-currency item rides along: the binding's
+`AttributeModeUnstatedError` text says "`as_of_valid(t)` or
+`as_of_recorded(t)` fixes the *topology*; node attributes are a second,
+independent question whose default answer is live text". Under §4.1 that
+stays true for current-belief loads but needs its historical-load caveat
+once belief-at-instant hydration lands — add it to §7.3's list of
+comment/doc sites to revisit.
+
+### B7. What checked out as written
+
+- The fold predicates are what §3's hand-SQL claim needs: `links_at_tx` takes
+  `recorded_at <= ?slot`, latest `seq_id` per `(entity_id, branch_id)`
+  (`src/graph/plan.rs` ≈368), and `hydrate_at_time` folds concepts per entity
+  under the same `<=`, skipping retired payloads and invalid valid intervals
+  (`src/temporal/as_of.rs` ≈407).
+- The refusal parity §4.1 asserts is literal, not merely equivalent:
+  `check_recorded_reach` **delegates to** `hot_log_answers_for`, the same
+  function `hydrate_at_time` guards with — one guard, one error, two
+  call sites. T7 therefore exercises the same refusal both arms would raise.
+- The walk, the `DISTINCT` projection, and the byte accounting match §3's
+  description line for line.
+- Nothing in Amendment 1 is retracted by execution; §A1, §A3, §A4, §A5 now
+  have run behind them as well as read.
+- The register hook D-289 can cite predates the two-axis split but reads
+  correctly today: Wave 1's retirement decision (defect AB/Z cycle,
+  *Macrame Implementation Plan v0.5.6*) — "retirement means *not returned as
+  of the instant asked about*, uniformly". Stated plainly, that principle is
+  already instant-parameterized; the loader's live-row filter is where the
+  "instant asked about" collapsed to *now* in 0.5.6-era code, before
+  `as_of_recorded` existed. §4.1 is that principle finally reaching the
+  surface it was written for, rather than a new policy.
