@@ -1316,6 +1316,10 @@ impl PyDatabase {
     /// What arrives is the **live** row's attributes: `attribute_mode` is
     /// ignored on this path for every field, and `extra` rides that boundary
     /// rather than widening it.
+    /// Historical loads are no exception (0.19.1, D-289): the binding states
+    /// `Current` on the caller's behalf — there is no keyword — so
+    /// `as_of_recorded` corrects the topology while the text stays live.
+    ///
     ///
     /// **The instants are honoured here as of 0.13.2 (W7.1, F-35).** They could
     /// not be reached from this binding at all before, and the Rust loader
@@ -1351,7 +1355,15 @@ impl PyDatabase {
             max_hops,
             edge_types,
             min_weight.unwrap_or(f64::NEG_INFINITY),
-            None,
+            // `Current`, not `None`: this binding offers no `attribute_mode`
+            // keyword and promises live attributes (below), so it states the
+            // mode the contract documents rather than leaving it unstated —
+            // with a recorded instant an unstated mode refuses (D-085,
+            // D-289), and there is no keyword for the caller to satisfy that
+            // refusal with. Historical loads through this binding therefore
+            // keep live text over historical topology: the topology fix
+            // reaches them, the text contract does not move.
+            Some(PyAttributeMode::Current),
             as_of_valid,
             as_of_recorded,
             branch,

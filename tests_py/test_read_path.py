@@ -489,3 +489,33 @@ def test_an_unregistered_lineage_is_refused_rather_than_defaulted(db):
         db.traverse_ids("a", branch="ghost")
     with pytest.raises(macrame.UnknownBranchError, match="ghost"):
         db.load_subgraph("a", 2, ROOMY, min_weight=0.0, branch="ghost")
+
+
+
+def test_historical_load_subgraph_keeps_live_text_over_corrected_topology(db_path):
+    # C7 / D-289: the binding offers no `attribute_mode` keyword and promises
+    # live attributes, so it states `Current` on the caller's behalf. A concept
+    # retired after the instant therefore stays invisible here — live text over
+    # historical topology, byte-identical to 0.19.0 — while the call itself
+    # keeps working: no `AttributeModeUnstatedError`, because there is no
+    # keyword the caller could satisfy it with.
+    with macrame.Database.open(db_path, snapshot_every_entries=None) as handle:
+        handle.write_concepts(
+            [
+                macrame.ConceptUpsert("a", "A", valid_from=T0),
+                macrame.ConceptUpsert("b", "B1", valid_from=T0),
+            ]
+        )
+        handle.bulk_import(
+            [macrame.EdgeAssertion("a", "b", "CALLS", valid_from=T0, weight=1.0)]
+        )
+        t1 = dt.datetime.now(UTC)
+        handle.write_concepts(
+            [macrame.ConceptUpsert("b", "B2", valid_from=T0, retired=True)]
+        )
+        g = handle.load_subgraph("a", 3, ROOMY, as_of_recorded=t1)
+        assert "a" in g
+        assert "b" not in g
+        assert g.is_closed()
+        bare = handle.load_subgraph("a", 3, ROOMY)
+        assert "b" not in bare

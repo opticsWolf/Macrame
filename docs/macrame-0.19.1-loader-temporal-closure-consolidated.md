@@ -2,8 +2,8 @@
 
 | | |
 |---|---|
-| **Status** | Proposed — root-caused, reproduced in the corrected shape, fix specified |
-| **Affects** | `macrame-db` 0.19.0 (verified against this checkout: `dev/0.19.1` = 0.19.0 sources; no fix has landed) |
+| **Status** | Landed in 0.19.1 — D-289 (loader arm + mode contract) + D-290 (ids parity); T1–T8 green |
+| **Affects** | `macrame-db` 0.19.0 (verified against this checkout: `dev/0.19.1` = 0.19.0 sources; no fix has landed at the time of writing; fixed on `dev/0.19.1` — see the Landing record below) |
 | **Target** | v0.19.1 |
 | **Scope** | Read path only. No schema, migration, table, or index changes |
 | **Supersedes** | `docs/macrame-0.19.1-loader-temporal-closure-issue.md` §§1–7, Appendices A–B, and Amendments 1–3 there — retained as history, not edited (house §7.4) |
@@ -483,6 +483,18 @@ link from day one (D-280) — which is why anchor validity is a
 done-criterion in §6.4, not an afterthought.
 
 ---
+
+## Landing record (0.19.1)
+
+What §4 specified is what landed, with two corrections found during implementation:
+
+- **§4.4 decided as option (a).** An unstated mode with a recorded instant refuses (`resolved_mode`, D-085); `AtTime` hydrates belief-at-the-instant, `Current` keeps live text over historical topology, `Omit` keeps topology only (`src/graph/subgraph.rs`: `hydrate_historical`, `hydrate_topology_only`). The shared fold/visibility predicates live once in `src/temporal/as_of.rs` (`fold_concepts_at`, `concept_visible_at`), with `hydrate_at_time` refactored onto them — behavior identical, one definition.
+- **C10 — §5's Python bullet corrected: Python `load_subgraph` is byte-identical, not more complete.** The binding offers no `attribute_mode` keyword and promises live attributes, so it states `Current` on the caller's behalf (`bindings/python/src/database.rs`) rather than leaving the mode unstated to refuse. A Python historical load therefore keeps live text over the corrected topology — the same shape as 0.19.0, with no new refusal and no silent text change. The "strictly more complete" claim holds for the Rust API only. A keyword that would let Python callers ask for `AtTime` is follow-up work, not this fix.
+- **Plan gates re-examined, not just updated (`tests/bitemporal_plan_tests.rs`).** The concepts fold is a new `transaction_log` consumer, so D-196/D-254 were re-measured: the transaction-time triple moved `(4, 3, 5)` → `(4, 4, 9)` (the fold's own seek plus its partial window sort), and the two-dimensional candidate is now reached on its leading column by the concepts fold only — a measured wash (`(4, 4, 9)` → `(4, 3, 10)`), still declined, with the gate re-pinned to those exact terms. All pin updates confined to historical-shape SQL per §6.3.
+
+Tests landed: `tests/loader_history_tests.rs` (T1–T8 plus historical-SQL pins — T6's `Current` arm pins absence, proving the mode never silently becomes `AtTime`; T7 archives through a raw connection with deterministic stamps because `read_conn` is read-only) and one `tests_py` pin through `as_of_recorded=` (C7; requires a maturin run — unwitnessed in this environment, CI confirms). Full gates: default suite green (lib 167, all integration binaries incl. 4 property suites under `property-tests`), `--no-default-features` green, doc tests green, clippy/rustfmt clean. Full-parallel `cargo test` segfaults intermittently on this Windows host **with and without the fix** (baseline reproduces) — a libsql-under-load environment flake, worked around by serial/partitioned runs; not a product signal.
+
+Remaining follow-ups (not this fix): CodeRadar un-ignores its two loader reproducer tests against 0.19.1 (§6.4 item 4); 0.19.1 release note covering the Python keyword; `docs/architecture/api-review-0.19.1.md` only if the house requires one per release — the public surface is unchanged (`api_growth_tests` green), so there is nothing to review.
 
 ## Appendix A. Ledger shapes
 

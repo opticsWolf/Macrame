@@ -8,9 +8,11 @@
 
 use std::collections::BTreeMap;
 
+use super::AttributeMode;
 use crate::connection::{Annotation, Database};
 use crate::error::{BulkResult, DbError, Result};
 use crate::graph::lineage::resolve_for;
+use crate::temporal::as_of::{concept_visible_at, fold_concepts_at};
 
 /// Edges returned to a caller asking for a node with no edges in that direction.
 const NO_EDGES: &[EdgeRef] = &[];
@@ -901,10 +903,16 @@ impl Database {
     /// producer of the parameter list and both call sites take it, so the two
     /// cannot bind different instants at `?3` again.
     ///
-    /// `attribute_mode` is still ignored: hydration here is always the live
-    /// concept row, which is what a `Subgraph` has always carried. That is a
-    /// narrower gap than the one above and a deliberate one — a `Subgraph` is
-    /// the input to the six algorithms, none of which reads a title.
+    /// `attribute_mode` decides historical hydration, and is ignored without a
+    /// recorded instant (0.19.1, D-289).
+    ///
+    /// Without `as_of_recorded` hydration is the live concept row, which is
+    /// what a `Subgraph` has always carried. With one, the mode must be stated
+    /// (`resolved_mode`, D-085): `AtTime` hydrates belief-at-the-instant,
+    /// `Current` keeps live text over historical topology, and `Omit` keeps
+    /// topology only. An unstated mode with a recorded instant refuses with
+    /// [`DbError::AttributeModeUnstated`] rather than guessing which text the
+    /// caller meant — the failure class D-085 exists to prevent.
     ///
     /// # A limited traversal bounds this walk too (0.15.10, W13.5)
     ///
@@ -1070,16 +1078,56 @@ ORDER BY l.source_id, l.target_id, l.edge_type
         ids.sort();
         ids.dedup();
 
-        hydrate(
-            conn,
-            &mut graph,
-            &ids,
-            bytes,
-            byte_budget,
-            traversal.content,
-            traversal.extra,
-        )
-        .await?;
+        // Which text the nodes carry is a question only a recorded instant
+        // asks (0.19.1, D-289). Without one the mode is ignored and this is
+        // the live read it has always been — same SQL, params, and results,
+        // which is what keeps every current-belief golden green. With one,
+        // the mode must be stated (`resolved_mode`, D-085): `AtTime` hydrates
+        // belief-at-the-instant, `Current` keeps live text over historical
+        // topology, and `Omit` keeps topology only.
+        match traversal.as_of_recorded.as_deref() {
+            None => {
+                hydrate(
+                    conn,
+                    &mut graph,
+                    &ids,
+                    bytes,
+                    byte_budget,
+                    traversal.content,
+                    traversal.extra,
+                )
+                .await?;
+            }
+            Some(_) => match traversal.resolved_mode()? {
+                AttributeMode::AtTime => {
+                    hydrate_historical(
+                        conn,
+                        &mut graph,
+                        &ids,
+                        traversal,
+                        now_ts,
+                        bytes,
+                        byte_budget,
+                    )
+                    .await?;
+                }
+                AttributeMode::Current => {
+                    hydrate(
+                        conn,
+                        &mut graph,
+                        &ids,
+                        bytes,
+                        byte_budget,
+                        traversal.content,
+                        traversal.extra,
+                    )
+                    .await?;
+                }
+                AttributeMode::Omit => {
+                    hydrate_topology_only(&mut graph, &ids, bytes, byte_budget)?;
+                }
+            },
+        }
         graph.drop_dangling_adjacency();
         Ok(graph)
     }
@@ -1156,6 +1204,141 @@ async fn hydrate(
     Ok(())
 }
 
+/// Fill in `nodes` from the recorded fold at `recorded`, for the ids the
+/// topology touched (0.19.1, D-289).
+///
+/// The historical arm of [`hydrate`]: same chunk discipline (via the shared
+/// fold), same incremental budget refusal, same opt-in `content`/`extra`
+/// semantics — only the source differs. Each landed node carries the title
+/// and interval the payload believed at the instant, never today's row
+/// (W7.1): reading the interval from live `concepts` would answer today's
+/// belief about validity wearing the past's title, which is the exact
+/// conflation that decision exists to end.
+///
+/// A v1 payload carries no `valid_from`/`valid_to`, and [`NodeData`] needs
+/// strings: the bound lands as `""`, which is honest about what the ledger
+/// recorded — the row predates validity in the log — rather than a sentinel
+/// that would read as a claim.
+///
+/// The model rides along unasked, as it does on the live arm: `hydrate` reads
+/// the column whether or not anyone asked, and the budget counts it either
+/// way, so this does the same from the payload.
+async fn hydrate_historical(
+    conn: &libsql::Connection,
+    graph: &mut Subgraph,
+    ids: &[String],
+    traversal: &super::TraversalBuilder,
+    now_ts: &str,
+    bytes_so_far: usize,
+    byte_budget: usize,
+) -> Result<()> {
+    // Matched by the caller: this arm runs only with `as_of_recorded` set,
+    // which is also what makes `resolved_mode` answer instead of refuse.
+    let recorded = traversal
+        .as_of_recorded
+        .as_deref()
+        .expect("historical hydration runs only with as_of_recorded set");
+    // The valid bound is the traversal's own: `execute` pairs `AtTime` with
+    // these same instants, so the two surfaces bound validity identically.
+    let valid = traversal.valid_instant(now_ts);
+    let (with_content, with_extra) = (traversal.content, traversal.extra);
+    let mut bytes = bytes_so_far;
+
+    // One fold for the whole id set, landed in the caller's sorted id order
+    // rather than in whatever order the engine returned rows.
+    let folded = fold_concepts_at(conn, ids, recorded).await?;
+    for id in ids {
+        let Some(payload) = folded.get(id) else {
+            // Never existed, or no row at or before the instant: absent, not
+            // an error — the same absence the fold reports everywhere else,
+            // and `drop_dangling_adjacency` prunes the edge that pointed here.
+            continue;
+        };
+        if !concept_visible_at(payload, Some(valid))? {
+            continue;
+        }
+        let mut data = NodeData::new(
+            payload.get("title").and_then(|s| s.as_str()).unwrap_or(""),
+            payload
+                .get("valid_from")
+                .and_then(|s| s.as_str())
+                .unwrap_or(""),
+            payload
+                .get("valid_to")
+                .and_then(|s| s.as_str())
+                .unwrap_or(""),
+        );
+        if with_content {
+            data = data.with_content(
+                payload
+                    .get("content")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or(""),
+            );
+        }
+        data = data.with_embedding_model(
+            payload
+                .get("embedding_model")
+                .and_then(|s| s.as_str())
+                .map(|s| s.to_string()),
+        );
+        if with_extra {
+            // Re-rendered, not read as a string: the payload carries a JSON
+            // *object*. Absent below v3 means `{}` — the entry was minted
+            // before the column existed, so there is nothing it could hide.
+            data = data.with_extra(
+                payload
+                    .get("extra")
+                    .map(|e| e.to_string())
+                    .unwrap_or_else(|| "{}".to_string()),
+            );
+        }
+        bytes += Subgraph::node_bytes(id, &data);
+        graph.nodes.insert(id.clone(), data);
+
+        if bytes > byte_budget {
+            return Err(DbError::SubgraphTooLarge {
+                n: bytes,
+                budget: byte_budget,
+            });
+        }
+    }
+
+    Ok(())
+}
+
+/// Fill in `nodes` with topology only: one entry per id, no text.
+///
+/// The `Omit` arm of historical hydration (0.19.1, D-289). `Omit` means the
+/// concepts source is not read at all — the mode's own docs say the join is
+/// omitted — so titles, intervals, and attribute payloads are all empty, and
+/// the entries exist solely so the closure invariant holds over historical
+/// topology. Byte accounting still runs: an omitted node costs its key plus
+/// the struct, and a neighbourhood large enough to overflow the budget
+/// refuses rather than returning a graph whose size nobody checked.
+fn hydrate_topology_only(
+    graph: &mut Subgraph,
+    ids: &[String],
+    bytes_so_far: usize,
+    byte_budget: usize,
+) -> Result<()> {
+    let mut bytes = bytes_so_far;
+
+    for id in ids {
+        let data = NodeData::new("", "", "");
+        bytes += Subgraph::node_bytes(id, &data);
+        graph.nodes.insert(id.clone(), data);
+
+        if bytes > byte_budget {
+            return Err(DbError::SubgraphTooLarge {
+                n: bytes,
+                budget: byte_budget,
+            });
+        }
+    }
+
+    Ok(())
+}
 #[cfg(test)]
 mod tests {
     use super::*;

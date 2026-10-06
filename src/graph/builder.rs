@@ -593,6 +593,14 @@ impl TraversalBuilder {
 
     /// [`Self::build_sql`] against a shape the caller has already established.
     pub(crate) fn build_sql_with(&self, shape: LineageShape, ancestry: &[Ancestor]) -> String {
+        // A recorded instant folds concepts at the instant rather than joining
+        // live rows (0.19.1, D-290): the walk reaches what the instant reached,
+        // and the projection keeps what the instant believed live. Without one
+        // the statement below is the one this has always emitted, byte for
+        // byte — the current-belief path is untouched so every golden holds.
+        if self.as_of_recorded.is_some() {
+            return self.build_sql_at_recorded(shape, ancestry);
+        }
         if self.limit.is_some() {
             return format!(
                 "{}{}",
@@ -609,6 +617,75 @@ FROM walk w JOIN concepts c ON c.id = w.node_id
 WHERE c.retired = 0
 ORDER BY w.node_id;
             "#
+        )
+    }
+
+    /// `build_sql_with` for a traversal with `as_of_recorded` set (0.19.1, D-290).
+    ///
+    /// Same walk, same placeholders, same row shape — only the node-visibility
+    /// half changes: where the current-belief projections join live `concepts`
+    /// rows and keep `retired = 0`, these join the folded log at the instant
+    /// and keep what the instant believed live. A separate function rather
+    /// than a branch inside the shared text so the current-belief statement
+    /// stays byte-identical: every golden pins it, and a conditional inside
+    /// the literal would put that guarantee on reading carefully instead of on
+    /// construction.
+    ///
+    /// The instant binds at `recorded_slot`, which `bind_params` already fills
+    /// whenever the traversal carries one — no layout change, which is why
+    /// this reuses the slot rather than appending a parameter. `execute` with
+    /// `AtTime` is repaired transitively: it hydrates whatever ids this
+    /// returns, so the narrowed set used to starve the fold before it ran.
+    fn build_sql_at_recorded(&self, shape: LineageShape, ancestry: &[Ancestor]) -> String {
+        // The fold hoists out so the final `format!` stays flat: one producer
+        // of the parameter list (`bind_params`), one interpolation of the text.
+        let concepts = self.concepts_at_instant_sql(shape);
+        let projection = if self.limit.is_some() {
+            format!(
+                r#"
+SELECT r.n, w.node_id
+FROM (SELECT COUNT(*) AS n FROM walk) r
+LEFT JOIN (
+    SELECT DISTINCT w.node_id AS node_id
+    FROM walk w JOIN ({concepts}) c ON c.node_id = w.node_id
+) w ON 1 = 1
+ORDER BY w.node_id;
+                    "#
+            )
+        } else {
+            format!(
+                r#"
+SELECT DISTINCT w.node_id
+FROM walk w JOIN ({concepts}) c ON c.node_id = w.node_id
+ORDER BY w.node_id;
+                "#
+            )
+        };
+        format!("{}{}", self.walk_cte(shape, ancestry), projection)
+    }
+
+    /// The `concepts` relation as believed at the traversal's recorded
+    /// instant: one id per concept the instant believed live (0.19.1, D-290).
+    ///
+    /// The SQL spelling of the fold `fold_concepts_at` runs in Rust: latest
+    /// row per `entity_id` under `recorded_at <=` the instant (partitioning on
+    /// `entity_id` alone for the reason that function's comment gives), with
+    /// the retired-as-of-the-instant rows dropped. `COALESCE(..., 0)` is the
+    /// SQL half of `unwrap_or(0)`: the trigger writes `'retired', NEW.retired`
+    /// as a JSON number, and payloads predating the key were minted live. No
+    /// valid-interval predicate here — the projection decides *which ids
+    /// survive*, and validity is hydration's question (W7.1), exactly the
+    /// division of labour the live join keeps.
+    fn concepts_at_instant_sql(&self, shape: LineageShape) -> String {
+        format!(
+            r#"SELECT entity_id AS node_id FROM (
+    SELECT entity_id, payload,
+           ROW_NUMBER() OVER (PARTITION BY entity_id ORDER BY seq_id DESC) AS rn
+    FROM transaction_log
+    WHERE table_name = 'concepts'
+      AND recorded_at <= ?{}
+) WHERE rn = 1 AND COALESCE(json_extract(payload, '$.retired'), 0) = 0"#,
+            Self::recorded_slot(shape)
         )
     }
 

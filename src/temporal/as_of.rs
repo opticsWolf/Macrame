@@ -382,6 +382,136 @@ async fn hydrate_current(
     Ok(found)
 }
 
+/// Latest `concepts` payload per id at or before `ts`, unfiltered.
+///
+/// The fold both historical attribute surfaces share (0.19.1, D-289):
+/// [`hydrate_at_time`] maps these to [`NodeAttributes`], and the subgraph
+/// loader's historical arm maps them to
+/// [`NodeData`](crate::graph::NodeData). Visibility — payload version,
+/// retirement, valid interval — lives in [`concept_visible_at`], not here:
+/// the fold answers *what the ledger held*, and visibility answers *what the
+/// instant shows*.
+///
+/// No hot-log guard here. Each read owns its own ([`hydrate_at_time`] keeps
+/// the refusal below; the loader checks `check_recorded_reach` before its
+/// walk), because a guard that lives at the fold is one the next caller does
+/// not inherit — the reason `hydrate_at_time` gives for checking twice on the
+/// `execute` path.
+///
+/// One query per [`HYDRATE_CHUNK`] ids, not one per node (defect AE).
+pub(crate) async fn fold_concepts_at(
+    conn: &libsql::Connection,
+    node_ids: &[String],
+    ts: &str,
+) -> Result<HashMap<String, serde_json::Value>> {
+    let mut folded = HashMap::new();
+
+    for chunk in node_ids.chunks(HYDRATE_CHUNK) {
+        // **`entity_id` alone, and unlike the link folds that is correct here.**
+        //
+        // The sweep that widened the four folds in `replay.rs` to carry
+        // `branch_id` (D-216) and the traversal's own fold at 0.14.4 (D-220)
+        // both left this one alone, so the reason is written down rather than
+        // left as an omission that happens to be safe.
+        //
+        // A link's `entity_id` is the edge key and is shared across lineages by
+        // design — that is how a branch corrects an edge it inherited — so a
+        // partition on it alone puts two lineages' beliefs in one group. A
+        // *concept's* `entity_id` is the concept id, and under Option A there is
+        // exactly one concept row per id across the whole ledger: the guards
+        // refuse a second lineage restating one at all, and `branch_id` on
+        // `concepts` is provenance rather than identity. One row per id means
+        // one `branch_id` per partition, so adding it would change nothing.
+        //
+        // `table_name = 'concepts'` is in the `WHERE` rather than the partition,
+        // which is the same discriminator applied one step earlier.
+        let sql = format!(
+            r#"
+            SELECT entity_id, seq_id, payload FROM (
+                SELECT entity_id, seq_id, payload,
+                       ROW_NUMBER() OVER (PARTITION BY entity_id ORDER BY seq_id DESC) as rn
+                FROM transaction_log
+                WHERE table_name = 'concepts'
+                  AND recorded_at <= ?1
+                  AND entity_id IN ({})
+            ) WHERE rn = 1
+            "#,
+            placeholders(2, chunk.len())
+        );
+
+        let mut params: Vec<libsql::Value> = Vec::with_capacity(chunk.len() + 1);
+        params.push(libsql::Value::Text(ts.to_string()));
+        params.extend(chunk.iter().map(|id| libsql::Value::Text(id.clone())));
+
+        let mut rows = conn.query(&sql, params).await?;
+        while let Some(row) = rows.next().await? {
+            let id: String = row.get(0)?;
+            let seq_id: i64 = row.get(1)?;
+            let payload_str: String = row.get(2)?;
+
+            // Raised rather than skipped. A payload that will not parse is the
+            // ledger disagreeing with itself, and the previous version's
+            // `if let Ok(..)` turned that into a node quietly missing from the
+            // answer — the same shape of silence defect W was.
+            let payload: serde_json::Value =
+                serde_json::from_str(&payload_str).map_err(|e| DbError::ReplayCorrupt {
+                    seq: seq_id,
+                    reason: format!("Failed to parse payload JSON: {e}"),
+                })?;
+
+            folded.insert(id, payload);
+        }
+    }
+
+    Ok(folded)
+}
+
+/// Whether a folded payload is visible at the instant asked about.
+///
+/// Payload-version gate, retirement *at* `ts`, and — when `valid` is given —
+/// the validity the payload itself recorded (W7.1). Shared by
+/// [`hydrate_at_time`] and the subgraph loader's historical arm (0.19.1,
+/// D-289) so the two surfaces cannot disagree about what an instant shows.
+///
+/// Retired-as-of-`ts` is not visible, and not an error either.
+///
+/// A v1 payload carries no `valid_from`/`valid_to` (they arrived with v2),
+/// and an absent bound is treated as unbounded on that side: the row is from
+/// before the crate recorded validity in the log, and excluding it would
+/// report a gap in the ledger that is really a gap in the payload schema.
+pub(crate) fn concept_visible_at(payload: &serde_json::Value, valid: Option<&str>) -> Result<bool> {
+    // The ceiling is the **concepts** ceiling, not a global one
+    // (0.18.0, D-285). No dispatch is needed here the way `replay`
+    // needs one: this query carries `WHERE table_name = 'concepts'`,
+    // so every row it sees is already of one shape.
+    let v = payload.get("v").and_then(|v| v.as_u64()).unwrap_or(1);
+    if v > PAYLOAD_VERSION_CONCEPTS as u64 {
+        return Err(DbError::PayloadVersion {
+            got: v as u8,
+            max: PAYLOAD_VERSION_CONCEPTS,
+        });
+    }
+
+    // Retired as of `ts`: not visible, and not an error either.
+    if payload.get("retired").and_then(|r| r.as_i64()).unwrap_or(0) != 0 {
+        return Ok(false);
+    }
+
+    // Outside its own valid interval at the instant asked about. Applied
+    // in Rust rather than in the `WHERE` because the interval lives
+    // inside the JSON payload and the fold has already narrowed to one
+    // row per entity — a `json_extract` in the outer filter would read
+    // the same bytes this arm already has in hand.
+    if let Some(v) = valid {
+        let from = payload.get("valid_from").and_then(|s| s.as_str());
+        let to = payload.get("valid_to").and_then(|s| s.as_str());
+        if from.is_some_and(|f| f > v) || to.is_some_and(|t| t <= v) {
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
+}
 /// Attributes as recorded at `ts`, filtered by retirement *at* `ts` and — when
 /// `valid` is given — by the validity the payload itself recorded (W7.1).
 ///
@@ -425,131 +555,49 @@ async fn hydrate_at_time(
         return Err(DbError::RecordedInstantUnreachable { ts: ts.to_string() });
     }
 
-    let mut found = HashMap::new();
+    // The fold and the visibility predicates are shared with the subgraph
+    // loader's historical arm (0.19.1, D-289); only the output type is this
+    // function's own.
+    let folded = fold_concepts_at(conn, node_ids, ts).await?;
 
-    for chunk in node_ids.chunks(HYDRATE_CHUNK) {
-        // **`entity_id` alone, and unlike the link folds that is correct here.**
-        //
-        // The sweep that widened the four folds in `replay.rs` to carry
-        // `branch_id` (D-216) and the traversal's own fold at 0.14.4 (D-220)
-        // both left this one alone, so the reason is written down rather than
-        // left as an omission that happens to be safe.
-        //
-        // A link's `entity_id` is the edge key and is shared across lineages by
-        // design — that is how a branch corrects an edge it inherited — so a
-        // partition on it alone puts two lineages' beliefs in one group. A
-        // *concept*'s `entity_id` is the concept id, and under Option A there is
-        // exactly one concept row per id across the whole ledger: the guards
-        // refuse a second lineage restating one at all, and `branch_id` on
-        // `concepts` is provenance rather than identity. One row per id means
-        // one `branch_id` per partition, so adding it would change nothing.
-        //
-        // `table_name = 'concepts'` is in the `WHERE` rather than the partition,
-        // which is the same discriminator applied one step earlier.
-        let sql = format!(
-            r#"
-            SELECT entity_id, seq_id, payload FROM (
-                SELECT entity_id, seq_id, payload,
-                       ROW_NUMBER() OVER (PARTITION BY entity_id ORDER BY seq_id DESC) as rn
-                FROM transaction_log
-                WHERE table_name = 'concepts'
-                  AND recorded_at <= ?1
-                  AND entity_id IN ({})
-            ) WHERE rn = 1
-            "#,
-            placeholders(2, chunk.len())
-        );
-
-        let mut params: Vec<libsql::Value> = Vec::with_capacity(chunk.len() + 1);
-        params.push(libsql::Value::Text(ts.to_string()));
-        params.extend(chunk.iter().map(|id| libsql::Value::Text(id.clone())));
-
-        let mut rows = conn.query(&sql, params).await?;
-        while let Some(row) = rows.next().await? {
-            let id: String = row.get(0)?;
-            let seq_id: i64 = row.get(1)?;
-            let payload_str: String = row.get(2)?;
-
-            // Raised rather than skipped. A payload that will not parse is the
-            // ledger disagreeing with itself, and the previous version's
-            // `if let Ok(..)` turned that into a node quietly missing from the
-            // answer — the same shape of silence defect W was.
-            let payload: serde_json::Value =
-                serde_json::from_str(&payload_str).map_err(|e| DbError::ReplayCorrupt {
-                    seq: seq_id,
-                    reason: format!("Failed to parse payload JSON: {e}"),
-                })?;
-
-            // The ceiling is the **concepts** ceiling, not a global one
-            // (0.18.0, D-285). No dispatch is needed here the way `replay`
-            // needs one: this query carries `WHERE table_name = 'concepts'`,
-            // so every row it sees is already of one shape.
-            let v = payload.get("v").and_then(|v| v.as_u64()).unwrap_or(1);
-            if v > PAYLOAD_VERSION_CONCEPTS as u64 {
-                return Err(DbError::PayloadVersion {
-                    got: v as u8,
-                    max: PAYLOAD_VERSION_CONCEPTS,
-                });
-            }
-
-            // Retired as of `ts`: not visible, and not an error either.
-            if payload.get("retired").and_then(|r| r.as_i64()).unwrap_or(0) != 0 {
-                continue;
-            }
-
-            // Outside its own valid interval at the instant asked about. Applied
-            // in Rust rather than in the `WHERE` because the interval lives
-            // inside the JSON payload and the fold has already narrowed to one
-            // row per entity — a `json_extract` in the outer filter would read
-            // the same bytes this arm already has in hand.
-            //
-            // A v1 payload carries no `valid_from`/`valid_to` (they arrived with
-            // v2), and an absent bound is treated as unbounded on that side: the
-            // row is from before the crate recorded validity in the log, and
-            // excluding it would report a gap in the ledger that is really a gap
-            // in the payload schema.
-            if let Some(v) = valid {
-                let from = payload.get("valid_from").and_then(|s| s.as_str());
-                let to = payload.get("valid_to").and_then(|s| s.as_str());
-                if from.is_some_and(|f| f > v) || to.is_some_and(|t| t <= v) {
-                    continue;
-                }
-            }
-
-            found.insert(
-                id.clone(),
-                NodeAttributes {
-                    id,
-                    title: payload
-                        .get("title")
-                        .and_then(|s| s.as_str())
-                        .unwrap_or("")
-                        .to_string(),
-                    content: payload
-                        .get("content")
-                        .and_then(|s| s.as_str())
-                        .unwrap_or("")
-                        .to_string(),
-                    // Absent in a v1 payload, which is indistinguishable here
-                    // from present-and-null and correctly so: both mean the
-                    // concept carries no model.
-                    embedding_model: payload
-                        .get("embedding_model")
-                        .and_then(|s| s.as_str())
-                        .map(|s| s.to_string()),
-                    // Absent below v3, and absent means `{}` rather than an
-                    // error: the entry was minted before the column existed,
-                    // so there is nothing it could be hiding. The payload
-                    // carries a JSON *object*, not a string, because the
-                    // trigger writes `json(NEW.extra)` — so it is re-rendered
-                    // here rather than read as `as_str`.
-                    extra: payload
-                        .get("extra")
-                        .map(|e| e.to_string())
-                        .unwrap_or_else(empty_extra),
-                },
-            );
+    let mut found = HashMap::with_capacity(folded.len());
+    for (id, payload) in folded {
+        if !concept_visible_at(&payload, valid)? {
+            continue;
         }
+        found.insert(
+            id.clone(),
+            NodeAttributes {
+                id,
+                title: payload
+                    .get("title")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                content: payload
+                    .get("content")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                // Absent in a v1 payload, which is indistinguishable here
+                // from present-and-null and correctly so: both mean the
+                // concept carries no model.
+                embedding_model: payload
+                    .get("embedding_model")
+                    .and_then(|s| s.as_str())
+                    .map(|s| s.to_string()),
+                // Absent below v3, and absent means `{}` rather than an
+                // error: the entry was minted before the column existed,
+                // so there is nothing it could be hiding. The payload
+                // carries a JSON *object*, not a string, because the
+                // trigger writes `json(NEW.extra)` — so it is re-rendered
+                // here rather than read as `as_str`.
+                extra: payload
+                    .get("extra")
+                    .map(|e| e.to_string())
+                    .unwrap_or_else(empty_extra),
+            },
+        );
     }
 
     Ok(found)

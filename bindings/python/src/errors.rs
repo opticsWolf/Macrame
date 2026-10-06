@@ -468,7 +468,10 @@ create_exception!(
      `as_of_valid(t)` or `as_of_recorded(t)` fixes the *topology*; node \
      attributes are a second, independent question whose default answer is live \
      text. Pass `AttributeMode.AT_TIME` for the past's text, or \
-     `AttributeMode.CURRENT` to confirm live text was meant. This used to be a \
+     `AttributeMode.CURRENT` to confirm live text was meant. \
+     On a subgraph load with `as_of_recorded`, `AttributeMode.AT_TIME` hydrates \
+     belief-at-the-instant and `AttributeMode.CURRENT` keeps live text over \
+     historical topology. This used to be a \
      log warning, which is invisible without a subscriber; it raises on purpose."
 );
 create_exception!(

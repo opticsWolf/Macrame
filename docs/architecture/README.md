@@ -130,7 +130,7 @@ This is the original single-file architecture document, split into one file per 
 | [Modules](s5-modules.md) | §5 | The Write Actor, traversal, replay and snapshots, archive, integrity, vectors |
 | [Flows to dependencies](s6-s10-flows-to-dependencies.md) | §6 Data flows · §7 Errors · §8 Testing · §9 Performance · §10 Dependencies | Five end-to-end paths, `DbError`, what each test layer can prove, the budgets, the tree |
 | [Milestones and risks](s11-s12-milestones-and-risks.md) | §11 · §12 | M1–M5 with exit gates; R1–R15 with mitigations |
-| [Decision register](s13-decision-register.md) | §13 | D-001…D-288: the authoritative record of intent |
+| [Decision register](s13-decision-register.md) | §13 | D-001…D-290: the authoritative record of intent |
 | [API review 0.13.0 → 0.14.0](api-review-0.14.0.md) | — | Generated. The item-by-item surface review §14's item 6 asked for, and the evidence for [D-212](s13-decision-register.md#d-212) |
 | [API review 0.15.0 → 0.16.0](api-review-0.16.0.md) | — | Generated, and open for the cycle. The item-by-item surface diff, and the paragraph on what an item-level review cannot see ([D-255](s13-decision-register.md#d-255)) |
 | [API review 0.16.0 → 0.17.0](api-review-0.17.0.md) | — | Generated. **+7 distinct items, 0 removed** — two bulk methods and their `_with` siblings, three `CommandKind` variants ([D-276](s13-decision-register.md#d-276), [D-277](s13-decision-register.md#d-277)); 1,763 → 1,781 lines counted the way Appendix D counts |

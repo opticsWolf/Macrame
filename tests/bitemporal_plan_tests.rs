@@ -18,6 +18,10 @@
 //!    that predicate is not applied to a table. It is applied to the walk's
 //!    join against a materialised fold whose columns come out of
 //!    `json_extract` — one derivation after any index could be consulted.
+//!
+//! (0.19.1: reached on its leading column by the concepts fold of historical
+//! queries only — the re-examination is recorded at the test. The conclusion stands.)
+//!
 //! 3. A two-dimensional candidate index over `(recorded_at, json_extract(…))`
 //!    **is picked and is used on its leading column only**. It is a wider
 //!    `idx_txlog_time` with a dead second column, which is the concrete cost of
@@ -245,6 +249,23 @@ async fn adding_the_valid_instant_does_not_reach_the_plan() {
 /// The R\*Tree option needs no test to reject: `rtree` coordinates are float32
 /// and `rtree_i32` is int32, so neither holds a microsecond epoch, and the
 /// recheck it would need is against columns that do not exist on the table.
+///
+/// **Re-examined at 0.19.1 (D-290), and the conclusion stands on new evidence.**
+///
+/// The candidate IS now reached — by the concepts fold historical queries
+/// gained, which carries its own `recorded_at <=` bound. Measured on this
+/// file's fixture (`counts_of`, before and after creating the probe): the
+/// fold moves from the `table_name` seek on `idx_txlog_fold_partition` with a
+/// partial window sort to the probe's `recorded_at` range with a full sort,
+/// and the VDBE counts move from `(4, 4, 9)` to `(4, 3, 10)` — one fewer
+/// seek, one more rewind, a wash that also spends the partial ordering. The
+/// probe's second column stays dead (the fold never touches `valid_from`),
+/// the write path would still pay an index entry per log row forever, and the
+/// fold runs once per query outside the recursive step, so D-244's 180× never
+/// applies to it. Still nothing to build — and the gate below now pins the
+/// exact terms: the links fold declines the candidate, and the concepts fold
+/// uses it on the leading column only. Either term breaking re-opens the
+/// arithmetic for real.
 #[tokio::test]
 async fn a_two_dimensional_candidate_is_used_as_a_one_dimensional_one() {
     let harness = TestHarness::new();
@@ -254,7 +275,6 @@ async fn a_two_dimensional_candidate_is_used_as_a_one_dimensional_one() {
         .as_of_valid(VALID_AT)
         .as_of_recorded(RECORDED_AT)
         .build_sql();
-    let before = plan_of(&conn, &sql).await;
 
     conn.execute(
         "CREATE INDEX probe_txlog_two_d ON transaction_log \
@@ -266,17 +286,24 @@ async fn a_two_dimensional_candidate_is_used_as_a_one_dimensional_one() {
     let _ = conn.query("ANALYZE", ()).await.unwrap();
 
     let after = plan_of(&conn, &sql).await;
+    // The links fold still declines the candidate for `idx_txlog_fold_partition`.
     assert!(
-        !after.contains("probe_txlog_two_d"),
-        "the candidate index is being reached for again. That is not a \
-         regression, but it re-opens D-196's arithmetic — measure what it \
-         costs on the write path before leaving it out: {after}"
+        after.contains("idx_txlog_fold_partition"),
+        "the established fold started reaching for the candidate too: {after}"
     );
+    // ... while the concepts fold uses it exactly once ...
     assert_eq!(
-        after, before,
-        "the two-dimensional candidate reached the plan without appearing in \
-         it, which means it displaced something else. D-196 concluded there \
-         was nothing to build; that conclusion is due for review"
+        after.matches("probe_txlog_two_d").count(),
+        1,
+        "the candidate serves more than the one new consumer, so a second \
+         access path wants it: {after}"
+    );
+    // ... and on the leading column only. The second column stays dead, which
+    // is the load-bearing half of D-196's decline.
+    assert!(
+        after.contains("probe_txlog_two_d (recorded_at<?)"),
+        "the candidate is used past its leading column, and the arithmetic \
+         underneath D-196 no longer holds: {after}"
     );
 }
 
@@ -312,6 +339,18 @@ async fn a_two_dimensional_candidate_is_used_as_a_one_dimensional_one() {
 /// equality between the transaction-time and cross-axis arms, so what this test
 /// exists to say is what it still says.
 ///
+/// **The transaction-time triple moved at 0.19.1** (D-290), from `(4, 3, 5)`
+/// to `(4, 4, 9)`: one more seek and four more rewinds. That is the concepts
+/// fold `build_sql_at_recorded` adds to historical queries — its own
+/// `table_name` seek on `idx_txlog_fold_partition`, plus the window's partial
+/// sort (`USE TEMP B-TREE FOR RIGHT PART OF ORDER BY`) and the join against
+/// it. The valid-time-only control did not move, and neither did the equality
+/// between the transaction-time and cross-axis arms, so what this test exists
+/// to say is what it still says: stating valid time as well costs nothing,
+/// because validity is applied in Rust against payloads, never on a table.
+/// Measured on this file's fixture with `counts_of`, before and after, the
+/// way the 0.15.12 move was measured with the example probe.
+///
 /// [D-195]: ../docs/architecture/s13-decision-register.md
 /// [D-196]: ../docs/architecture/s13-decision-register.md
 #[tokio::test]
@@ -339,7 +378,7 @@ async fn a_cross_axis_read_costs_what_the_transaction_time_read_costs() {
     );
     assert_eq!(
         recorded_only,
-        counts(4, 3, 5),
+        counts(4, 4, 9),
         "the transaction-time read's cost moved. Re-run \
          `cargo run --example bitemporal_index_probe` and read the sweep \
          before changing this number (D-195)"
