@@ -638,3 +638,293 @@ comment/doc sites to revisit.
   "instant asked about" collapsed to *now* in 0.5.6-era code, before
   `as_of_recorded` existed. §4.1 is that principle finally reaching the
   surface it was written for, rather than a new policy.
+
+## Amendment 3 — Consolidated findings (source + execution, `dev/0.19.1` @ `40ca378`)
+
+**Scope and method.** This amendment consolidates the issue document's
+original claims (§§1–7, Appendices A–B), Amendment 1's source-review
+findings (§A1–§A5), and Amendment 2's probe results (§B1–§B7) into a single
+record, re-verified against the current checkout. Method: full re-read of
+the document (640 lines); fresh `rg`/source pass over `src/graph/subgraph.rs`,
+`src/graph/builder.rs`, `src/temporal/as_of.rs`, `src/temporal/replay.rs`,
+`src/connection.rs`, `src/branch.rs`, and `bindings/python/src/database.rs`;
+`git log` confirming `src/` is unchanged since 0.19.0 for every path in
+scope (the branch is doc-only on top of `cdc6d74`: `eb368e7` the issue
+document, `40ca378` Amendments 1–2). No code or tests were changed; no test
+suite was run beyond the Amendment 2 probes, whose binary was deleted
+after the run with its load-bearing listing inlined at §B2. Anything below
+marked *inference* is stated as one; everything else was read in source,
+executed, or both.
+
+### 1. Verdict
+
+1. **The defect is real.** A historical read (`as_of_recorded` set) whose
+   endpoint concept retired after the instant silently loses the edge (and
+   the node) on the loader path — reproduced by execution (P2: 1 node,
+   0 edges, endpoint unhydrated) through exactly the §3 mechanism.
+2. **The defect is narrower than the document states.** Edge-only
+   retirement does not trigger it (P1: edge present on both builder shapes).
+   The necessary condition is *concept* retirement after the instant with
+   the edge still spanning it. §2/Appendix B's sketch must be rewritten;
+   §§3–4 otherwise stand.
+3. **Three surfaces are affected, not two.** Loader, `execute_ids`, and
+   `execute`+`AtTime` (transitively, via `execute_ids`). §4.2's ids fix
+   repairs all three; no third arm is needed.
+4. **The fix direction is sound with two refinements.** `hydrate_at_time`
+   supplies the fold/retirement semantics to reuse but is not a drop-in
+   (wrong return type, no budget/opt-in, and it is a *private* function);
+   §4.3 must additionally specify explicit `Current`/`Omit` semantics on the
+   loader.
+5. **The acceptance table needs three corrections** (T1's bare-builder
+   expectation, T4's "start node only", T6's gating and pre-fix failure
+   mode) **and the blast-radius claim needs one scoping fix** (the Python
+   binding forwards instants, so "in-crate behavior change is nil" is
+   Rust-only).
+
+### 2. Confirmed inventory — what the document gets right
+
+| # | Claim | Evidence |
+|---|---|----------|
+| F1 | §3 mechanism: walk collects the edge; `hydrate` reads `concepts WHERE retired = 0` (`src/graph/subgraph.rs:1122`); `drop_dangling_adjacency` (`:1083`, impl `:516`) prunes edges to unhydrated endpoints; `check_recorded_reach` runs first (`:951`) | Source re-verified this pass; execution-proven by P2 |
+| F2 | §3.1 secondary surface: both `build_sql_with` projections filter `WHERE c.retired = 0` (`src/graph/builder.rs:609,640`) | Source re-verified this pass; execution-proven by P2 (`execute_ids == ["a::x"]`) |
+| F3 | Walk, `links_at_tx` fold (`recorded_at <= ?slot`, latest `seq_id` per `(entity_id, branch_id)`, `src/graph/plan.rs` ≈368), `reconstruct`, and the `hydrate_attributes` fold answer correctly at `t1` | Source (Amendment 1) + execution (P2 controls: `reconstruct(t1)` yields `("b-v1", "doc-b")`; direct fold yields both nodes) |
+| F4 | Refusal parity is literal: `check_recorded_reach` (`src/graph/builder.rs:843`) delegates to `hot_log_answers_for`, the same guard `hydrate_at_time` uses — one guard, one `RecordedInstantUnreachable`, two call sites | Source re-verified this pass; T7 therefore covers the refusal both arms would raise |
+| F5 | Current-belief pin (§4.1): a bare builder at any `now_ts` excludes the now-retired endpoint, because `now_ts` is the valid-time fallback (`TraversalBuilder::valid_instant`), not a recorded instant | Execution-proven by P2 (absent at both `t2` and `t1`); `Current` mode returns only `a::x` |
+| F6 | Loader-contract premises: `title` carried by default, `content`/`extra` opt-in (`None` unless requested), mid-hydration `byte_budget` refusal | Execution-proven by P5 (`content() == None` default; `Some("doc-b")` with `.content(true)`; `SubgraphTooLarge { n: 322, budget: 10 }`) |
+| F7 | Lower bound: retirement *before* the instant must stay invisible after the fix (T5) | Execution-proven by P4 (loader and fold both exclude) |
+| F8 | `retire_edge` (public `src/connection.rs:2539`, internal `:5898`) closes a link row only; it never retires concepts | Source-confirmed (Amendment 1, unchallenged) |
+| F9 | `D-085` refusal intact: instants without a mode still yield `AttributeModeUnstated` (`resolved_mode`, `src/graph/builder.rs:1088–1097`; `execute` at `:1070–1079`) | Execution-proven by P2; §4.3 option (a) can reuse it |
+| F10 | `BranchView::load_subgraph` (`src/branch.rs:338`) passes no instants | Source re-verified this pass |
+
+### 3. Corrections — what the document gets wrong (C1–C8)
+
+**C1. The reproducer does not reproduce (amends §2, §6.1 setup, Appendix B).**
+Both concepts in the sketch default to `retired: false` and the only later
+write is `retire_edge`, which per F8 cannot starve `hydrate`. P1 executed
+the sketch verbatim: bare builder at `t1` → 2 nodes, 1 edge;
+`.as_of_recorded(t1)` at `t1` → 2 nodes, 1 edge. Hence §2 step 4 ("without
+the `A→B` edge — with *and* without `.as_of_recorded(t1)`") and Appendix B's
+"FAILS on 0.19.0 (empty adjacency)" do not describe this code. *Required
+doc change:* rewrite the setup helper so that after capturing `t1` it
+re-upserts `B` with `retired(true)` (changing the title v1→v2 keeps payloads
+distinguishable), keeps the edge spanning the query instant, and loads with
+`.as_of_valid(&t1).as_of_recorded(&t1)` for the historical expectation.
+*Inference (stated as one):* the live narrowing session's rename fixture
+most likely retired `old_name` as a concept when minting `new_name`; the
+observed "missing with and without `as_of_recorded`" signature matches the
+concept-retirement shape on both counts, and the condensed sketch dropped
+the load-bearing step in transcription.
+
+**C2. T1 must not expect the bare builder to restore the endpoint (amends
+§6.1 T1, §2 clocks).** Per F5, `load_subgraph_with(builder, t1)` with no
+instants on the builder is a current-belief read at a past valid instant,
+and under §4.1's own scoping it must continue to exclude the now-retired
+endpoint. *Required doc change:* T1 asserts `A→B` present **only** for the
+`.as_of_recorded(t1)` builder (with endpoint attributes equal to the at-`t1`
+payload, per the P2 fold result); the bare-builder shape becomes the
+unchanged-behavior control asserting absence — i.e. T1's second shape and
+T3's shape coincide, and the table should say so rather than list them as
+independent expectations.
+
+**C3. T4's expectation is "empty graph", not "start node only" (amends
+§6.1 T4).** P3 executed the `ZZZ` shape: loader → 0 nodes, 0 edges, no
+error; `execute_ids` → `[]`. Mechanism: the loader pushes the start id into
+its hydration list, but `hydrate` finds no `concepts` row for an id that
+never existed, so nothing lands, and the ids projection's inner join finds
+no id. *Required doc change:* expect "empty graph, no error" — or create
+the start concept in the fixture if the intent is a one-node-graph
+assertion.
+
+**C4. `execute`+`AtTime` is a third affected surface (amends §1, §4.2, §5).**
+P2's fourth block returned only `a::x` for
+`.as_of_recorded(t1).attribute_mode(AtTime)` `execute`, because `execute`
+hydrates whatever `execute_ids` returns (`builder.rs:1072–1079`) and the
+narrowed ids starve the fold before it runs. §1's "only the subgraph-loader
+path (and the `execute_ids` projection, secondarily)" is therefore an
+undercount. *Consequences:* (a) §4.2's parity goal covers three surfaces —
+loader and `execute_ids` directly, `execute` transitively — with no
+separate arm; (b) the blast-radius table must state `execute`+`AtTime` is
+repaired by the same fix rather than implying it is unaffected; (c) T6 (see
+C8) is gated on §4.2.
+
+**C5. `hydrate_at_time` is semantics to reuse, not a function to call
+(amends §4.1, §7.1 D-286 row).** Four gaps, three from Amendment 1 plus one
+new this pass: (i) it returns `NodeAttributes` (`as_of.rs:59`: id, title,
+content, embedding_model, extra) while the loader stores `NodeData`
+(`subgraph.rs:112`), which additionally carries `valid_from`/`valid_to` —
+the historical interval must come from the payload believed at `r`, not from
+today's `concepts` row; (ii) it has no byte-budget accounting, while the
+loader refuses incrementally inside the hydration loop (F6); (iii) it has no
+content/`extra` opt-in; (iv) *new:* it is a private `async fn`
+(`as_of.rs:407`, returning `HashMap<String, NodeAttributes>`), callable only
+via the public `hydrate_attributes` (`as_of.rs:290`, returning
+`Vec<NodeAttributes>`). *Required doc change:* §4.1 must specify a
+loader-specific incremental hydrator (or a shared lower-level fold plus a
+visibility decision) that preserves opt-in fields, incremental refusal, and
+historical intervals — reusing the fold/retirement predicates, not the
+function wholesale. The D-286 row's "shared helper … without coupling"
+hedge is the right shape; promote it from aside to requirement.
+
+**C6. The mode decision must cover explicit modes (amends §4.3 item 2).**
+The loader never calls `resolved_mode`, so neither §4.3 option (refuse
+unstated vs. default `AtTime`) says what an explicit `Current` or `Omit`
+means on this API — and either option must not silently override an
+explicit mode nor claim `Omit` while hydrating node data for closure (the
+closure invariant, `subgraph.rs:18–60` plus `is_closed` at algorithm
+entries per D-140, needs node data regardless of attribute policy).
+*Required doc change:* a mode-contract matrix (see §4.5 below) decided
+before wiring the builder's mode into loading.
+
+**C7. Blast-radius nil-change claim is Rust-only (amends §5, §7.3).**
+`bindings/python/src/database.rs`'s `load_subgraph` accepts `as_of_valid=`
+and `as_of_recorded=` keywords and forwards them into the builder passed to
+`load_subgraph_with` — a second in-crate caller that *does* pass instants.
+So historical Python callers will see strictly more complete results after
+the fix (which is the correction itself, §5's own second bullet — but the
+nil-change sentence must be scoped to the Rust API, and the 0.19.1 release
+note must cover the Python keyword). Doc-currency rider: the binding's
+`AttributeModeUnstatedError` text ("`as_of_valid(t)` or
+`as_of_recorded(t)` fixes the *topology*; node attributes are a second,
+independent question whose default answer is live text") stays true for
+current-belief loads but needs its historical-load caveat once
+belief-at-instant hydration lands — add it to §7.3's revisit list alongside
+the `load_subgraph_with` "attribute_mode is still ignored" note, the
+`Subgraph` closure docs, and the s5 §5.2/§5.4 paragraphs.
+
+**C8. T6's gating and failure mode are misstated (amends §6.1 T6).** T6
+(retitle `B` after `t1`; `AtTime` → old title, `Current` → live title) can
+pass only after §4.2, not after the loader arm alone — on unfixed code the
+AtTime expectation fails with a *missing node* (C4), never reaching any
+title comparison. *Required doc change:* state the pre-fix failure mode per
+expectation (absence proves the topology defect; a wrong title afterward
+would prove an attribute defect) so the pre-fix run teaches the right
+lesson. T2/T5 fixtures likewise move from edge retirement to concept
+retirement per C1, with retired-at-`t1` absent and retired-after-`t1`
+present-only-historically.
+
+### 4. Consolidated fix specification
+
+**4.1 Gating rule (unchanged from the document, reaffirmed).** All new
+behavior sits behind `as_of_recorded` being set. With no recorded instant —
+including bare past-`now_ts` valid-time reads — SQL text, parameters,
+results, and goldens are byte-identical to today. This is what keeps every
+existing golden green and what makes T3 a both-versions-green guard for the
+§4.1 current-belief design.
+
+**4.2 Loader arm.** When `traversal.as_of_recorded` is set, hydration
+answers belief-at-instant under these simultaneous constraints: (a) walk,
+CTEs, and `drop_dangling_adjacency` untouched — closure then holds *at the
+instant* automatically (live-at-`r` hydrates; never-existed and
+retired-as-of-`r` do not; edges to them prune as today); (b) `NodeData`
+shape preserved with `valid_from`/`valid_to` taken from the payload believed
+at `r` (C5-i); (c) `content`/`extra` remain opt-in builder flags (C5-iii,
+F6); (d) byte accounting stays incremental with mid-loop `SubgraphTooLarge`
+refusal (C5-ii, F6); (e) pre-hot-log instants refuse via the existing guard
+(F4) and corrupt payloads refuse rather than skip; (f) the fold/retirement
+predicates are reused from `hydrate_at_time`'s implementation, with the
+private-visibility question (C5-iv) settled as a `pub(crate)` exposure or a
+new shared lower-level fold — not by routing the loader through the
+collect-everything public wrapper.
+
+**4.3 Ids arm.** Both `build_sql_with` projections gain the
+instant-aware node filter when `as_of_recorded` is set — a folded-concepts
+join over the reached ids mirroring `links_at_tx_cte`, or an equivalent
+existence check against the recorded fold — honoring the D-073 both-halves
+contract (a walk-only or projection-only fix reintroduces the closed class).
+`execute`+`AtTime` is repaired transitively through `execute_ids` (C4); no
+third arm, and new goldens cover the historical shapes only (§6.2
+unchanged).
+
+**4.4 Valid-time-only reads.** Unchanged (present-tense closure = current
+belief about what was true at `v`), per §4.3 item 1's recommendation, which
+this consolidation endorses: minimal blast radius, coherent semantics,
+callers wanting history set `as_of_recorded`.
+
+**4.5 Mode contract (decides §4.3 item 2 + C6 together).** The decision must
+fill every cell before implementation:
+
+| Builder mode | No instants (current belief) | `as_of_recorded` set (historical) |
+|---|---|---|
+| Unstated | live hydration, as today | (a) `AttributeModeUnstated` refusal, or (b) default `AtTime` |
+| `AtTime` | N/A on the loader today (ignored) — define or refuse | belief-at-`r` hydration |
+| `Current` | live hydration, as today | live hydration with historical *topology* — define explicitly; must not silently become `AtTime` |
+| `Omit` | define: closure still needs node data — say what is stored vs. returned | same, at the instant |
+
+Option (a) matches the house T3.2 stance; option (b) breaks no existing
+caller since no in-crate Rust caller passes instants (F10). Either way the
+Python error text (C7) is updated to match.
+
+**4.6 Explicitly out of scope (reaffirmed).** `replay.rs` folds,
+`links_at_tx_cte`, `walk_cte`, `reconstruct`, branch/lineage resolution,
+archive/cold paths; no schema, migration, table, or index changes; no change
+to `drop_dangling_adjacency`, the closure invariant and its `is_closed`
+asserts, or any current-belief SQL text.
+
+**4.7 Decision records.** D-289 (loader arm + §4.5 mode wiring) and D-290
+(ids parity), with D-291 in reserve if the maintainer splits mode from
+parity — the document's numbering reservation stands. Each amends D-174 and
+D-085 by back-pointer per §7.4 mechanism 1 (bodies untouched; "Amended by
+D-…" lines with valid anchors from day one, D-280). The Wave 1 retirement
+principle (defect AB/Z cycle, *Macrame Implementation Plan v0.5.6*:
+"retirement means *not returned as of the instant asked about*,
+uniformly") is the cited precedent: read plainly it is already
+instant-parameterized, and the loader's live-row filter is where the
+"instant asked about" collapsed to *now* before `as_of_recorded` existed
+— so D-289 extends the principle to the surface it was written for rather
+than inventing policy.
+
+### 5. Consolidated acceptance criteria (deltas to §6 applied)
+
+| # | Corrected test | Fixture delta vs §6.1 | Historical call | Must hold (pre-fix → post-fix) |
+|---|---|---|---|---|
+| T1 | Historical loader keeps post-instant-retired edge | **Concept** retirement of `B` after `t1` (C1), edge spanning `t1` | `.as_of_recorded(t1)` loader; bare builder as control | Historical: absent → present with at-`t1` payload; bare: absent → absent (C2) |
+| T2 | Historical ids agree with loader | Same fixture as T1 | `execute_ids` with `.as_of_recorded(t1)` | `B` excluded → included |
+| T3 | Current belief unchanged | Same fixture as T1 | Bare builder at `now` | Absent → absent (green both versions; guards §4.1) |
+| T4 | Never-existed stays absent | Start `ZZZ`, no rows anywhere | Loader + ids at `t1` | **Empty graph / `[]`, no error** → same (C3; green both versions) |
+| T5 | Pre-instant retirement stays dropped | **Concept** retirement of `B` before `t1` (C1) | `.as_of_recorded(t1)` loader | Absent → absent (green both versions; pins the lower bound) |
+| T6 | Attribute modes | Retitle `B` after `t1` (**plus** T1's fixture shape so the node reaches hydration) | `execute` `AtTime` vs `Current` at `t1` | AtTime: node missing → old title; Current: live title → live title (C8; gated on §4.3+§4.2) |
+| T7 | Cold instant still refuses | `t0` predating hot-log coverage | Loader with `.as_of_recorded(t0)` | `RecordedInstantUnreachable` → same (F4; coverage of the existing guard) |
+
+Golden-string and done-criteria deltas: §6.2 stands (byte-identical
+current-belief SQL asserted against existing goldens; new goldens for
+historical shapes only; plus an `AttributeModeUnstated`-on-loader test iff
+§4.5 chooses refusal). §6.3 stands with two additions: the Python
+`as_of_recorded=` keyword covered by at least one historical assertion (C7),
+and the §7.3 doc-currency list extended with the binding error text (C7).
+§6.1's setup helper is rewritten per C1 (concept retirement, canonical
+stamps per D-029) and the companion CodeRadar reproducer's `#[ignore]`d
+loader tests are un-ignored against 0.19.1 per §6.3 item 4.
+
+### 6. Restated blast radius
+
+- **Rust current-belief reads**: zero change (same SQL, params, results,
+  goldens) — F10's caller passes no instants.
+- **Historical reads** (`as_of_recorded` set, Rust and Python): strictly
+  *more* complete — nodes/edges live-at-the-instant stop being silently
+  dropped. Dependence on the narrowed behavior sees more rows; that is the
+  correction.
+- **Refusals**: `RecordedInstantUnreachable` preserved on both arms (F4);
+  corrupt payloads refuse; `SubgraphTooLarge` mid-hydration semantics
+  preserved (F6).
+- **Python surface**: behavior change is confined to calls passing
+  `as_of_recorded=`/`as_of_valid=`; all other Python calls byte-identical
+  in effect (C7).
+
+### 7. Provenance ledger — what is proven, what is inferred
+
+- *Proven by source + execution:* F1–F3 (mechanism, ids surface, correct
+  controls), C1 (sketch refuted), C3 (empty graph), C4 (third surface),
+  F5–F7 (belief pin, contract premises, lower bound), F9 (refusal
+  constructible at this call shape).
+- *Proven by source alone:* F4 (shared guard function), F8 (`retire_edge`
+  scope), F10 (instant-free Rust caller), C5-iv (helper privacy), C6 (mode
+  never consulted on the loader path), C7 (binding forwards instants).
+- *Inference, stated as such:* the transcription-drop reconciliation of the
+  original narrowing-session observation (C1) — consistent with every
+  executed signature but not directly observed, since the companion
+  CodeRadar fixture was not in this checkout.
+- *Superseded text if this amendment is accepted:* §2 step 4, §1's
+  affected-surface sentence, §4.1's drop-in paragraph, §4.3 item 2's
+  two-option framing, §5's nil-change sentence, §6.1's setup helper and the
+  T1/T4/T6 rows, and §7.3's revisit list — each per the C-item deltas above,
+  with the original paragraphs retained as history per §7.4.
