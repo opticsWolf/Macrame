@@ -61,6 +61,11 @@ name: Python
 on:
   push:
     branches: [main, "dev/**"]
+    paths-ignore: ["site/**"]
+    # Site-only pushes deploy through pages.yml; the binding suite has nothing
+    # to verify in `site/` and must not burn it. Mixed pushes still run: ignore
+    # applies only when every changed file matches. pull_request is
+    # deliberately unfiltered — a PR's checks must exist whatever it touches.
   pull_request:
   workflow_call: # so wheels.yml can gate an upload on exactly this
 
