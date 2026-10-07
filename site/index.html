@@ -231,11 +231,11 @@ footer.site p{margin:.3rem 0;max-width:64ch}
     <a class="brand" href="#top">Macrame<span class="dot">.</span></a>
     <nav class="links" aria-label="Sections">
       <a href="#gap">The gap</a>
-      <a href="#reads">Three reads</a>
-      <a href="#stratum">Stratum</a>
-      <a href="#measures">Measures</a>
       <a href="#doctrines">Doctrines</a>
-      <a href="#limits">Limits</a>
+      <a href="#reads">Three reads</a>
+      <a href="#toolkit">Toolkit</a>
+      <a href="#measures">Measures</a>
+      <a href="#limits">Boundaries</a>
     </nav>
     <a class="btn small ghost" href="https://github.com/opticsWolf/Macrame">GitHub</a>
   </div>
@@ -253,7 +253,7 @@ footer.site p{margin:.3rem 0;max-width:64ch}
           <a class="btn solid" href="https://github.com/opticsWolf/Macrame">Get the code</a>
           <a class="btn ghost" href="https://github.com/opticsWolf/Macrame/blob/main/docs/Macrame%20Update%20Plan%20v0.19.0.md">Read the docs</a>
         </div>
-        <p class="fine">Two clocks and a lineage: <span class="clock-v">valid time</span> (when a fact held) and <span class="clock-r">recorded time</span> (when the database learned it), plus which line of inquiry recorded it. No third axis; the doctrine count stays at eight.</p>
+        <p class="fine">Two clocks and a lineage: <span class="clock-v">valid time</span> (when a fact held) and <span class="clock-r">recorded time</span> (when the database learned it), plus which line of inquiry recorded it. No third axis: eight binding doctrines hold the design below.</p>
       </div>
       <figure class="plate rv" aria-labelledby="treecap">
         <div class="linetabs" role="group" aria-label="Choose the reading lineage">
@@ -302,7 +302,7 @@ footer.site p{margin:.3rem 0;max-width:64ch}
           <p class="path" id="readpath">Read on L: root path L → b2 → b1 → main</p>
           <p id="readrule">Each ancestor contributes only rows recorded at or before its fork clamp. Among the holders of a key, the nearest to L wins, deterministically, from stored state alone.</p>
         </div>
-        <figcaption id="treecap">Redrawn from the paper's lineage figure (§3.2). Fork instants never decrease down a path; valid time carries no branch predicate anywhere in the tree. Pick a lineage to walk its root path.</figcaption>
+        <figcaption id="treecap">Redrawn from the paper's lineage figure. Fork instants never decrease down a path; valid time carries no branch predicate anywhere in the tree. Pick a lineage to walk its root path.</figcaption>
       </figure>
     </div>
   </div>
@@ -310,7 +310,7 @@ footer.site p{margin:.3rem 0;max-width:64ch}
   <!-- ================= GAP ================= -->
   <section class="block rv" id="gap" aria-labelledby="gap-h">
     <h2 id="gap-h">Everyone branched something else.</h2>
-    <p class="standfirst">Every line of work branches <strong>something</strong>: worlds, states, commits, the valid future. Only the last row branches the <strong>transaction-time order</strong> with valid time still separate and reads resolved by a rule in the model. A 2026 PRISMA review of 54 bitemporal studies records branching exactly once, on the valid axis. Nothing branches the record. (Paper §2.)</p>
+    <p class="standfirst">Every line of work branches <strong>something</strong>: worlds, states, commits, the valid future. Only the last row branches the <strong>transaction-time order</strong> with valid time still separate and reads resolved by a rule in the model. A 2026 PRISMA review of 54 bitemporal studies records branching exactly once, on the valid axis. Nothing branches the record.</p>
     <div class="table-scroll">
       <table class="ledger">
         <thead><tr><th>Line of work</th><th>Branches</th><th>Transaction-time order</th><th>Cross-branch resolution</th></tr></thead>
@@ -324,6 +324,22 @@ footer.site p{margin:.3rem 0;max-width:64ch}
         </tbody>
       </table>
     </div>
+  </section>
+
+  <!-- ================= DOCTRINES ================= -->
+  <section class="block rv" id="doctrines" aria-labelledby="doctrines-h">
+    <h2 id="doctrines-h">Eight doctrines, before and after.</h2>
+    <p class="standfirst">Binding constraints, not guidelines — checked by the stability suite, changed only through dated amendments. They drew the storage, the interface, and the refusals: append-only rows, a trigger-captured log, disposable caches, and signatures that declare their time.</p>
+    <ol class="doctrines">
+      <li><div><strong class="t">The boundary is sacred</strong><p>Everything above the libSQL connection is project code; the engine is never patched, never forked.</p></div></li>
+      <li><div><strong class="t">Two clocks, never mixed</strong><p>Every row carries valid and transaction time; no path may derive one from the other. Lineage is a clause on the second clock.</p></div></li>
+      <li><div><strong class="t">Assertions are immutable</strong><p>Rows are never updated in place; a new recorded state is a new insert with a fresh recorded_at.</p></div></li>
+      <li><div><strong class="t">The ledger is a table, not the log</strong><p>Reconstruction reads transaction_log, captured by engine triggers, never the WAL, replication frames, or CDC.</p></div></li>
+      <li><div><strong class="t">No physical deletion in primary tables</strong><p>Rows leave only through a declared, verified archive session; ad-hoc DELETE aborts at the trigger layer.</p></div></li>
+      <li><div><strong class="t">Derivative state is disposable</strong><p>links_current is a cache of current recorded state, rebuildable by one deterministic query; audit detects drift, rebuild recovers.</p></div></li>
+      <li><div><strong class="t">Embeddings are immutable per version, excluded from the ledger</strong><p>Vectors live in per-model tables, never in log payloads; vector search is present-state only.</p></div></li>
+      <li><div><strong class="t">Fidelity is a parameter, never a silent default</strong><p>Queries mixing time dimensions declare it in their signatures; the past's text is never attached silently.</p></div></li>
+    </ol>
   </section>
 
   <!-- ================= READS ================= -->
@@ -366,7 +382,7 @@ footer.site p{margin:.3rem 0;max-width:64ch}
           <text x="216" y="228" font-size="11" fill="#4A4F55">compose</text>
         </g>
       </svg>
-      <figcaption id="readscap">Redrawn from the paper's read-modifier figure (§3.3). Setting both instants asks what was believed then about what was true then. Cross-branch comparison (what L holds that M does not) is the read the model does not provide.</figcaption>
+      <figcaption id="readscap">Redrawn from the paper's read-modifier figure. Setting both instants asks what was believed then about what was true then. Cross-branch comparison (what L holds that M does not) is the read the model does not provide.</figcaption>
     </figure>
     <ol class="reads">
       <li class="v"><span class="sig">as_of_valid(v)</span><span class="what"><span class="clock-v">True at v</span> — valid time under current belief. No branch predicate: branches share the valid-time domain, so no valid-time query changes meaning.</span></li>
@@ -400,7 +416,7 @@ footer.site p{margin:.3rem 0;max-width:64ch}
           <text x="280" y="299" text-anchor="middle" font-size="11" fill="#4A4F55">SQLite storage engine, WAL</text>
         </g>
       </svg>
-      <figcaption id="stratumcap">Redrawn from the paper's placement figure (§4.1). Correctness rests on triggers the write path cannot bypass: assertions immutable (III), reconstruction from a trigger-captured log (IV), no physical deletion outside archive sessions (V).</figcaption>
+      <figcaption id="stratumcap">Redrawn from the paper's placement figure. Correctness rests on triggers the write path cannot bypass: assertions immutable (III), reconstruction from a trigger-captured log (IV), no physical deletion outside archive sessions (V).</figcaption>
     </figure>
   </section>
 
@@ -449,14 +465,27 @@ footer.site p{margin:.3rem 0;max-width:64ch}
           <path d="M330 188 C 370 200, 410 208, 440 220" stroke="#0A4F4B" stroke-width="1.6" stroke-dasharray="5 4" fill="none" marker-end="url(#arr2)"/>
         </g>
       </svg>
-      <figcaption id="ledgercap">Redrawn from the paper's ledger figure (§4.2). Overlap computation stays out of the trigger layer, decided in the single writer where no check-then-write race can exist. Concepts inherit across lineages and are never restated.</figcaption>
+      <figcaption id="ledgercap">Redrawn from the paper's ledger figure. Overlap computation stays out of the trigger layer, decided in the single writer where no check-then-write race can exist. Concepts inherit across lineages and are never restated.</figcaption>
     </figure>
+  </section>
+
+  <!-- ================= TOOLKIT ================= -->
+  <section class="block rv" id="toolkit" aria-labelledby="toolkit-h">
+    <h2 id="toolkit-h">One file, two clocks, and the tooling around them.</h2>
+    <p class="standfirst">The model is the headline; the system around it is the reason it survives contact with real work.</p>
+    <ol class="reads">
+      <li class="v"><span class="sig">Embedded, no server</span><span class="what">One libSQL file, one writer, WAL readers unblocked. Branch, fold, and archive against the file in place — there is nothing to operate.</span></li>
+      <li class="r"><span class="sig">Rust core, Python bindings</span><span class="what">Traversals, belief-at-instant reads, snapshots, and the archive from either side of the boundary — and the graph algorithms run on loaded subgraphs.</span></li>
+      <li><span class="sig">History you can audit</span><span class="what">Every superseded row stays in the ledger. Reconstruction replays the trigger-captured log, snapshots anchor the trunk, and archive sessions move cold rows with verifiable reports.</span></li>
+      <li class="v"><span class="sig">Branches for real work</span><span class="what">Competing extractions, corrections under review, planning scenarios — each lineage keeps its recorded positions, resolved by rule on read instead of merged by convention.</span></li>
+      <li class="r"><span class="sig">Integrity by construction</span><span class="what">Overlap guards, lineage provenance, and deletion refusal live in triggers and the single writer. Callers inherit the guarantees; they are never asked to keep them.</span></li>
+    </ol>
   </section>
 
   <!-- ================= MEASURES ================= -->
   <section class="block rv" id="measures" aria-labelledby="measures-h">
     <h2 id="measures-h">Settled by measurement.</h2>
-    <p class="standfirst">One harness, reference hardware, trigger amplification included. Session noise runs near 29%, so these figures claim <strong>shapes and orders of magnitude</strong> (flat across sizes, constant across depths), not decimals. (Paper §5.)</p>
+    <p class="standfirst">One harness, reference hardware, trigger amplification included. Read <strong>shapes and orders of magnitude</strong> here (flat across sizes, constant across depths), not decimals.</p>
     <div class="table-scroll">
       <table class="ledger">
         <thead><tr><th>Operation</th><th>Figure</th><th>Budget / baseline</th></tr></thead>
@@ -473,31 +502,15 @@ footer.site p{margin:.3rem 0;max-width:64ch}
     <p class="fine">Against BranchBench's tension: systems that branch fast but read orders of magnitude slower as branches deepen — Macrame does neither: the trunk's complete immunity bought for bounded branch-side prices. Different systems, hardware, and decades separate these figures; a comparison of shapes, not a ranking.</p>
   </section>
 
-  <!-- ================= DOCTRINES ================= -->
-  <section class="block rv" id="doctrines" aria-labelledby="doctrines-h">
-    <h2 id="doctrines-h">Eight doctrines, before and after.</h2>
-    <p class="standfirst">Binding constraints, not guidelines — checked by the stability suite, changed only through dated amendments. Lineage entered as a clause on transaction time, so branching did not become a ninth: <strong>eight invariants before, eight after</strong>. (Paper §1.)</p>
-    <ol class="doctrines">
-      <li><div><strong class="t">The boundary is sacred</strong><p>Everything above the libSQL connection is project code; the engine is never patched, never forked.</p></div></li>
-      <li><div><strong class="t">Two clocks, never mixed</strong><p>Every row carries valid and transaction time; no path may derive one from the other. Lineage is a clause on the second clock.</p></div></li>
-      <li><div><strong class="t">Assertions are immutable</strong><p>Rows are never updated in place; a new recorded state is a new insert with a fresh recorded_at.</p></div></li>
-      <li><div><strong class="t">The ledger is a table, not the log</strong><p>Reconstruction reads transaction_log, captured by engine triggers, never the WAL, replication frames, or CDC.</p></div></li>
-      <li><div><strong class="t">No physical deletion in primary tables</strong><p>Rows leave only through a declared, verified archive session; ad-hoc DELETE aborts at the trigger layer.</p></div></li>
-      <li><div><strong class="t">Derivative state is disposable</strong><p>links_current is a cache of current recorded state, rebuildable by one deterministic query; audit detects drift, rebuild recovers.</p></div></li>
-      <li><div><strong class="t">Embeddings are immutable per version, excluded from the ledger</strong><p>Vectors live in per-model tables, never in log payloads; vector search is present-state only.</p></div></li>
-      <li><div><strong class="t">Fidelity is a parameter, never a silent default</strong><p>Queries mixing time dimensions declare it in their signatures; the past's text is never attached silently.</p></div></li>
-    </ol>
-  </section>
-
   <!-- ================= LIMITS + CLOSE ================= -->
   <section class="block rv" id="limits" aria-labelledby="limits-h">
-    <h2 id="limits-h">What it cannot do yet.</h2>
-    <p class="standfirst">Each gap ships with the condition that would reopen it. (Paper §7.)</p>
+    <h2 id="limits-h">Deliberate boundaries.</h2>
+    <p class="standfirst">Every system is a set of refusals. Each boundary below is stated with the condition that would reopen it. None of them is a roadmap promise.</p>
     <ul class="limits">
-      <li><strong>No cross-branch merge.</strong> The model defines divergence and resolution but no convergence, by design, since a merge rule that silently picks winners would violate the integrity the refusals protect.</li>
-      <li><strong>No concept overlay.</strong> Branches inherit concepts but cannot restate them; retiring an inherited concept has no branch-local operation.</li>
-      <li><strong>No per-branch snapshots.</strong> A snapshot without recorded_at cannot serve a cutoff, so lineage replays fold from the initial state.</li>
-      <li><strong>No historical vector semantics.</strong> Similarity is scoped to the present trunk; staleness bounds between folds and rebuilds are unclaimed.</li>
+      <li><strong>Divergence is modeled; convergence is not.</strong> No rule composes two lineages' recorded positions into one — by design, since a merge rule that silently picks winners would violate the integrity the refusals protect. Ancestry-determined precedence is the outlined form of the missing rule.</li>
+      <li><strong>Inheritance without restatement.</strong> Branches inherit concepts but cannot restate them, so retiring an inherited concept has no branch-local operation — the deferred overlay design stands until its reopening symptoms appear.</li>
+      <li><strong>Replays fold from the initial state.</strong> A snapshot without recorded_at cannot serve a lineage-scoped cutoff, so closing this gap means snapshotting per lineage or not at all, with the storage costs computed first.</li>
+      <li><strong>Similarity lives in the present.</strong> The embedding index derives from current recorded state and crosses no lineage; temporal-vector consistency is stated as a limit: to our knowledge an unclaimed gap anywhere.</li>
     </ul>
     <div class="close">
       <p class="verdict">Forked recorded histories, carried by a trigger layer above an unmodified engine, at a small depth-independent overhead.</p>
