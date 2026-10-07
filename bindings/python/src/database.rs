@@ -1316,11 +1316,12 @@ impl PyDatabase {
     /// What arrives is the **live** row's attributes: `attribute_mode` is
     /// ignored on this path for every field, and `extra` rides that boundary
     /// rather than widening it.
-    /// Historical loads are no exception (0.19.1, D-289): the binding states
-    /// `Current` on the caller's behalf — there is no keyword — so
-    /// `as_of_recorded` corrects the topology while the text stays live.
     ///
-    ///
+    /// `attribute_mode` defaults to `Current`, unlike `traverse` where an
+    /// unstated mode refuses (0.19.1, D-289). A `Subgraph` carries `NodeData`
+    /// and this binding promises live attributes, so the default states the
+    /// documented contract; pass `AT_TIME` for belief-at-the-instant
+    /// hydration, `OMIT` for topology only.
     /// **The instants are honoured here as of 0.13.2 (W7.1, F-35).** They could
     /// not be reached from this binding at all before, and the Rust loader
     /// ignored them when they were set on a builder passed to it — a historical
@@ -1329,7 +1330,8 @@ impl PyDatabase {
     #[pyo3(signature = (
         start_node, max_hops, byte_budget, *, edge_types = None,
         min_weight = None, as_of_valid = None, as_of_recorded = None,
-        branch = None, now = None, content = false, extra = false
+        branch = None, now = None, content = false, extra = false,
+        attribute_mode = None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn load_subgraph(
@@ -1346,6 +1348,7 @@ impl PyDatabase {
         now: Option<&Bound<'_, PyAny>>,
         content: bool,
         extra: bool,
+        attribute_mode: Option<PyAttributeMode>,
     ) -> PyResult<graph::PySubgraph> {
         let as_of_valid = as_of_valid.map(|t| to_canonical(Some(t))).transpose()?;
         let as_of_recorded = as_of_recorded.map(|t| to_canonical(Some(t))).transpose()?;
@@ -1355,15 +1358,12 @@ impl PyDatabase {
             max_hops,
             edge_types,
             min_weight.unwrap_or(f64::NEG_INFINITY),
-            // `Current`, not `None`: this binding offers no `attribute_mode`
-            // keyword and promises live attributes (below), so it states the
-            // mode the contract documents rather than leaving it unstated —
-            // with a recorded instant an unstated mode refuses (D-085,
-            // D-289), and there is no keyword for the caller to satisfy that
-            // refusal with. Historical loads through this binding therefore
-            // keep live text over historical topology: the topology fix
-            // reaches them, the text contract does not move.
-            Some(PyAttributeMode::Current),
+            // `None` means `Current` here — unlike `traverse`, where it
+            // refuses. This binding promises live attributes (below) and a
+            // `Subgraph` carries `NodeData`, so the default states the mode
+            // the contract documents; `AT_TIME` opts into belief-at-instant
+            // hydration (D-289), `OMIT` into topology only.
+            Some(attribute_mode.unwrap_or(PyAttributeMode::Current)),
             as_of_valid,
             as_of_recorded,
             branch,

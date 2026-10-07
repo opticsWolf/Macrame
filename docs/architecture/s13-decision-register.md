@@ -6071,7 +6071,7 @@ The walk was correct at historical instants and the fold was correct with it; on
 
 **Mode contract, decided whole (§4.4 option (a)).** An unstated mode with a recorded instant refuses with the existing `AttributeModeUnstated` — the house T3.2 stance, reusing the proven refusal rather than guessing. `AtTime` hydrates belief-at-the-instant; `Current` keeps live text over historical topology (a concept retired now is absent, which pins that `Current` never silently becomes `AtTime`); `Omit` keeps topology only, with node entries present as closure keys carrying no text, because the mode omits the join.
 
-Surfaces that offer no mode keyword default instead of refusing: the Python `load_subgraph` binding states `Current` on the caller's behalf — it promises live attributes and offers no keyword — so Python historical loads keep live text over the corrected topology, byte-identical to 0.19.0. The refusal above guards surfaces where the caller can state the mode and did not.
+Python `load_subgraph` offers the keyword with a `Current` default: the binding promises live attributes, so an unstated mode states the documented contract rather than refusing — historical topology with live text, byte-identical to 0.19.0 unless the caller opts into `AT_TIME`. The refusal above guards surfaces where an unstated mode has no documented reading.
 
 Valid-time-only reads are unchanged: present-tense closure is current belief about what was true at `v`.
 

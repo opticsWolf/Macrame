@@ -493,12 +493,12 @@ def test_an_unregistered_lineage_is_refused_rather_than_defaulted(db):
 
 
 def test_historical_load_subgraph_keeps_live_text_over_corrected_topology(db_path):
-    # C7 / D-289: the binding offers no `attribute_mode` keyword and promises
-    # live attributes, so it states `Current` on the caller's behalf. A concept
-    # retired after the instant therefore stays invisible here — live text over
-    # historical topology, byte-identical to 0.19.0 — while the call itself
-    # keeps working: no `AttributeModeUnstatedError`, because there is no
-    # keyword the caller could satisfy it with.
+    # C7 / D-289: the `attribute_mode` keyword defaults to `Current`, and the
+    # binding promises live attributes. A concept retired after the instant
+    # therefore stays invisible by default — live text over historical
+    # topology, byte-identical to 0.19.0 — while the call itself keeps
+    # working: no `AttributeModeUnstatedError` for a default the binding
+    # documents.
     with macrame.Database.open(db_path, snapshot_every_entries=None) as handle:
         handle.write_concepts(
             [
@@ -519,3 +519,12 @@ def test_historical_load_subgraph_keeps_live_text_over_corrected_topology(db_pat
         assert g.is_closed()
         bare = handle.load_subgraph("a", 3, ROOMY)
         assert "b" not in bare
+        # ... while opting into `AT_TIME` hydrates belief-at-the-instant:
+        # the retired-after-t1 endpoint is present wearing its at-t1 title.
+        at_time = handle.load_subgraph(
+            "a", 3, ROOMY, as_of_recorded=t1,
+            attribute_mode=macrame.AttributeMode.AT_TIME,
+        )
+        assert "b" in at_time
+        assert at_time.node("b").title == "B1"
+        assert at_time.is_closed()
