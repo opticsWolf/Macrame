@@ -81,7 +81,25 @@ nav.links a:hover{color:var(--oxide-deep);border-bottom-color:var(--oxide)}
 .nav .btn{margin-left:.4rem;flex:none}
 
 /* ---------- hero ---------- */
-.hero{padding:clamp(2.6rem,6vw,4.6rem) 0 clamp(2.2rem,5vw,3.4rem)}
+.hero{position:relative;isolation:isolate;padding:clamp(2.6rem,6vw,4.6rem) 0 clamp(2.2rem,5vw,3.4rem)}
+.hero::before{
+  content:"";position:absolute;z-index:-1;top:0;
+  left:calc(0px - clamp(1.1rem,4vw,2.5rem));
+  width:calc(100% + clamp(1.1rem,4vw,2.5rem) + clamp(1.1rem,4vw,2.5rem));
+  height:clamp(24rem,52vw,38rem);pointer-events:none;
+  background-image:
+    linear-gradient(to right,rgba(34,38,43,.13) 2px,transparent 2px),
+    linear-gradient(to bottom,rgba(34,38,43,.13) 2px,transparent 2px);
+  background-size:48px 48px;
+  -webkit-mask-image:
+    linear-gradient(to left,#000 0%,rgba(0,0,0,.7) 62%,transparent 100%),
+    linear-gradient(to bottom,#000 0%,rgba(0,0,0,.62) 46%,transparent 100%);
+  -webkit-mask-composite:source-in;
+  mask-image:
+    linear-gradient(to left,#000 0%,rgba(0,0,0,.7) 62%,transparent 100%),
+    linear-gradient(to bottom,#000 0%,rgba(0,0,0,.62) 46%,transparent 100%);
+  mask-composite:intersect;
+}
 .hero-grid{display:grid;grid-template-columns:1.02fr .98fr;gap:clamp(1.6rem,4vw,3.4rem);align-items:start}
 .hero h1{
   font-family:var(--font-display);font-weight:800;letter-spacing:-.035em;
@@ -208,6 +226,27 @@ ul.limits strong{font-weight:600}
 .close .btn.solid{background:var(--oxide);border-color:var(--oxide)}
 .close .btn.solid:hover{background:var(--oxide-deep);border-color:var(--oxide-deep)}
 .versionline{font-family:var(--font-mono);font-size:.82rem;color:#B9AE94;margin-top:1.6rem}
+
+/* Footer approach: same square grid, rotated 180° from the hero. */
+#limits{position:relative;isolation:isolate}
+#limits::before{
+  content:"";position:absolute;z-index:-1;bottom:calc(0px - clamp(2.4rem,5vw,3.8rem));
+  left:calc(0px - clamp(1.1rem,4vw,2.5rem));
+  width:calc(100% + clamp(1.1rem,4vw,2.5rem) + clamp(1.1rem,4vw,2.5rem));
+  height:clamp(24rem,52vw,38rem);pointer-events:none;
+  background-image:
+    linear-gradient(to right,rgba(34,38,43,.13) 2px,transparent 2px),
+    linear-gradient(to bottom,rgba(34,38,43,.13) 2px,transparent 2px);
+  background-size:48px 48px;
+  -webkit-mask-image:
+    linear-gradient(to right,#000 0%,rgba(0,0,0,.7) 62%,transparent 100%),
+    linear-gradient(to top,#000 0%,rgba(0,0,0,.62) 46%,transparent 100%);
+  -webkit-mask-composite:source-in;
+  mask-image:
+    linear-gradient(to right,#000 0%,rgba(0,0,0,.7) 62%,transparent 100%),
+    linear-gradient(to top,#000 0%,rgba(0,0,0,.62) 46%,transparent 100%);
+  mask-composite:intersect;
+}
 
 /* footer */
 footer.site{border-top:2px solid var(--ink);margin-top:clamp(2.4rem,5vw,3.8rem);padding:1.8rem 0 2.6rem;font-size:.9rem;color:var(--ink-soft)}
