@@ -1,0 +1,39 @@
+name: Pages
+
+# The site deploys from `site/` on main through this workflow — not from a
+# publishing branch. Deploying is idempotent (the artifact is the current
+# tree's `site/`), so a superseded run cancels: there is no evidence to
+# preserve, only the newest page to serve. Verification evidence lives in
+# ci.yml, which this file deliberately does not duplicate or gate on — a
+# docs-only change must not wait on the full matrix, and a red matrix must
+# not take the site down with it.
+
+on:
+  push:
+    branches: [main]
+    paths: ["site/**", ".github/workflows/pages.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site/
+      - id: deployment
+        uses: actions/deploy-pages@v4
