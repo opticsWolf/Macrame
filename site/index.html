@@ -165,6 +165,15 @@ ol.reads li.v .sig{color:var(--oxide-deep)}
 ol.reads li.r .sig{color:var(--teal-deep)}
 .compose{margin:1.1rem 0 0;font-size:1.02rem}
 .sweep{margin:1.6rem 0 0;font-size:1.08rem;line-height:1.66;max-width:72ch}
+.start{background:var(--ink);color:var(--paper);border-radius:var(--radius);padding:1.1rem 1.4rem;display:flex;flex-wrap:wrap;gap:.7rem 1.6rem;align-items:center;margin-top:1.8rem;box-shadow:7px 7px 0 rgba(168,58,34,.35)}
+.start .cmd{font-family:var(--font-mono);font-size:.9rem;background:#101316;border:1px solid #4A4F55;border-radius:8px;padding:.55rem .95rem;color:var(--paper);white-space:nowrap}
+.start .cmd b{color:#F0B9A6;font-weight:600}
+.start p{margin:0;font-size:.95rem;color:#D8CFB8;max-width:none}
+.start a{color:#F0B9A6}
+.codeplate{background:#101316;border:1.5px solid var(--ink);border-radius:var(--radius);margin-top:1.4rem;overflow:hidden;box-shadow:7px 7px 0 rgba(34,38,43,.14)}
+.codeplate pre{margin:0;padding:1.15rem 1.3rem;overflow-x:auto}
+.codeplate code{font-family:var(--font-mono);font-size:.84rem;line-height:1.7;color:#EDE4CC}
+.codeplate .k{color:#F0B9A6}.codeplate .s{color:#9FD8D2}.codeplate .c{color:#8A918F}.codeplate .f{color:#F1E9D6;font-weight:600}
 .compose code{background:var(--panel);padding:.1rem .45rem;border-radius:6px;border:1px solid var(--rule)}
 
 /* doctrines */
@@ -253,6 +262,11 @@ footer.site p{margin:.3rem 0;max-width:64ch}
         <div class="actions">
           <a class="btn solid" href="https://github.com/opticsWolf/Macrame">Get the code</a>
           <a class="btn ghost" href="https://github.com/opticsWolf/Macrame/blob/main/docs/Macrame%20Update%20Plan%20v0.19.0.md">Read the docs</a>
+        </div>
+        <div class="start rv">
+          <span class="cmd"><b>cargo add</b> macrame-db</span>
+          <span class="cmd"><b>pip install</b> macrame-db</span>
+          <p>0.19.1 on crates.io and PyPI. One file, no server — <a href="https://github.com/opticsWolf/Macrame">the manual</a> opens the ledger in a page.</p>
         </div>
         <p class="fine">Two clocks and a lineage: <span class="clock-v">valid time</span> (when a fact held) and <span class="clock-r">recorded time</span> (when the database learned it), plus which line of inquiry recorded it. No third axis: eight binding doctrines hold the design below.</p>
       </div>
@@ -391,6 +405,16 @@ footer.site p{margin:.3rem 0;max-width:64ch}
       <li><span class="sig">reconstruct_on(r, L)</span><span class="what"><strong>Believed by L</strong> — the fold scoped by ancestry, nearest ancestor winning. Resolution is silent: one position per key, no flag where a sibling disagrees.</span></li>
     </ol>
     <p class="compose">Compose the instants: <code>as_of_valid(v) + as_of_recorded(r)</code> asks <em>believed at r about true at v</em>: current belief about the past routinely differs from past belief about the past.</p>
+    <div class="codeplate rv">
+      <pre><code><span class="k">import</span> datetime, macrame
+db = macrame.<span class="f">Database.open</span>(<span class="s">"ledger.db"</span>)
+tuesday = datetime.datetime(<span class="s">2026, 3, 3</span>, tzinfo=datetime.timezone.utc)
+past = db.<span class="f">load_subgraph</span>(
+    <span class="s">"invoice-7"</span>, <span class="s">3</span>, <span class="s">1 &lt;&lt; 20</span>,
+    as_of_recorded=tuesday,
+    attribute_mode=macrame.AttributeMode.<span class="f">AT_TIME</span>,
+)  <span class="c"># Tuesday’s topology wearing Tuesday’s titles</span></code></pre>
+    </div>
   </section>
 
   <!-- ================= STRATUM ================= -->
@@ -478,7 +502,7 @@ footer.site p{margin:.3rem 0;max-width:64ch}
       <li class="v"><span class="sig">Embedded, no server</span><span class="what">One libSQL file, one writer, WAL readers unblocked. Branch, fold, and archive against the file in place — there is nothing to operate.</span></li>
       <li class="r"><span class="sig">Rust core, Python bindings</span><span class="what">Traversals, belief-at-instant reads, snapshots, and the archive from either side of the boundary — and the graph algorithms run on loaded subgraphs.</span></li>
       <li><span class="sig">History you can audit</span><span class="what">Every superseded row stays in the ledger. Reconstruction replays the trigger-captured log, snapshots anchor the trunk, and archive sessions move cold rows with verifiable reports.</span></li>
-      <li class="v"><span class="sig">Branches for real work</span><span class="what">Competing extractions, corrections under review, planning scenarios — each lineage keeps its recorded positions, resolved by rule on read instead of merged by convention.</span></li>
+      <li class="v"><span class="sig">Branches for real work</span><span class="what">Competing extractions, corrections under review, planning scenarios — each lineage keeps its recorded positions, resolved by rule on read instead of merged by convention. The sharpest case: a correction authored Monday, reviewed Wednesday, adopted Friday — recorded as a candidate before it becomes the accepted position.</span></li>
       <li class="r"><span class="sig">Integrity by construction</span><span class="what">Overlap guards, lineage provenance, and deletion refusal live in triggers and the single writer. Callers inherit the guarantees; they are never asked to keep them.</span></li>
     </ol>
     <p class="sweep">Around the ledger sits the rest of the system: snapshots that anchor trunk reconstruction; archive sessions that move cold rows, blobs with them, under verifiable reports; a content-addressed blob store reclaimed through the archive instead of by reference counting; application attributes riding the concept row as versioned JSON with expression indexes over their paths; a branch-global key-value sidecar for the operational state the ledger should never see; full-text search beside present-state vector search; and communities, shortest paths, and dense cores running on loaded subgraphs. Per-shape version gates keep older binaries folding what newer ones wrote.</p>
