@@ -129,7 +129,7 @@ figcaption code{color:var(--ink)}
 #branchtree .node.reader-node .sub{fill:var(--paper-deep)}
 #branchtree .on .edge, #branchtree .edge.on{stroke:var(--teal-deep);stroke-width:3.2;opacity:1}
 #branchtree .node.on circle{stroke:var(--teal-deep);stroke-width:3.2}
-#branchtree .tick{font-family:var(--font-mono);font-size:12.5px;fill:var(--ink-soft)}
+#branchtree .tick{font-family:var(--font-mono);font-size:14px;fill:var(--ink-soft)}
 
 /* ---------- sections ---------- */
 section.block{padding:clamp(2.4rem,5vw,3.8rem) 0;border-top:2px solid var(--ink)}
@@ -287,31 +287,31 @@ footer.site p{margin:.3rem 0;max-width:64ch}
             <path id="e-L-b2" class="edge" d="M168 98 C 168 76, 168 66, 168 48"/>
           </g>
           <g class="node" id="n-main">
-            <circle cx="280" cy="282" r="29"/>
+            <circle cx="280" cy="282" r="31"/>
             <text x="280" y="277" text-anchor="middle">main</text>
             <text class="sub" x="280" y="293" text-anchor="middle">root</text>
           </g>
           <g class="node" id="n-b1">
-            <circle cx="168" cy="186" r="29"/>
+            <circle cx="168" cy="186" r="31"/>
             <text x="168" y="181" text-anchor="middle">b1</text>
             <text class="sub" x="168" y="197" text-anchor="middle">fork t1</text>
           </g>
           <g class="node" id="n-b2">
-            <circle cx="168" cy="108" r="29"/>
+            <circle cx="168" cy="108" r="31"/>
             <text x="168" y="103" text-anchor="middle">b2</text>
             <text class="sub" x="168" y="119" text-anchor="middle">fork t2</text>
           </g>
           <g class="node reader-node" id="n-L">
-            <circle cx="168" cy="38" r="29"/>
+            <circle cx="168" cy="38" r="31"/>
             <text x="168" y="33" text-anchor="middle">L</text>
             <text class="sub" x="168" y="49" text-anchor="middle">fork t3</text>
           </g>
           <g class="node" id="n-sib">
-            <circle cx="372" cy="142" r="29"/>
+            <circle cx="372" cy="142" r="31"/>
             <text x="372" y="137" text-anchor="middle">sib</text>
             <text class="sub" x="372" y="153" text-anchor="middle">fork t2′</text>
           </g>
-          <text class="tick" x="288" y="240">t1 ≤ t2 ≤ t3 down every path</text>
+          <text class="tick" x="270" y="240">t1 ≤ t2 ≤ t3 down every path</text>
         </svg>
         <div class="reader">
           <p class="path" id="readpath">Read on L: root path L → b2 → b1 → main</p>
