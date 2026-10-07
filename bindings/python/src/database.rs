@@ -1313,15 +1313,15 @@ impl PyDatabase {
     /// `SubgraphTooLargeError` on graphs that used to fit, for callers who
     /// never touched the column. Ask and pay, or do not and do not.
     ///
-    /// What arrives is the **live** row's attributes: `attribute_mode` is
-    /// ignored on this path for every field, and `extra` rides that boundary
-    /// rather than widening it.
+    /// What arrives, by default, is the **live** row's attributes, and `extra`
+    /// rides that boundary rather than widening it.
     ///
     /// `attribute_mode` defaults to `Current`, unlike `traverse` where an
     /// unstated mode refuses (0.19.1, D-289). A `Subgraph` carries `NodeData`
     /// and this binding promises live attributes, so the default states the
     /// documented contract; pass `AT_TIME` for belief-at-the-instant
     /// hydration, `OMIT` for topology only.
+    ///
     /// **The instants are honoured here as of 0.13.2 (W7.1, F-35).** They could
     /// not be reached from this binding at all before, and the Rust loader
     /// ignored them when they were set on a builder passed to it — a historical

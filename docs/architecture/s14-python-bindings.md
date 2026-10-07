@@ -622,7 +622,7 @@ Three methods, and the split between them is the whole design:
 |---|---|
 | `traverse_ids(start, …)` | node ids. Cannot raise `AttributeModeUnstated` — topology at an instant is unambiguous |
 | `traverse(start, …)` | ids **and** hydrated text, under a stated `attribute_mode` |
-| `load_subgraph(start, max_hops, byte_budget, …, content=False)` | the neighbourhood as a `Subgraph`, bounded. `content=True` fetches document text; without it `NodeData.content` is `None` ([D-116](s13-decision-register.md#d-116), [D-123](s13-decision-register.md#d-123)) |
+| `load_subgraph(start, max_hops, byte_budget, …, content=False)` | the neighbourhood as a `Subgraph`, bounded. `content=True` fetches document text; without it `NodeData.content` is `None` ([D-116](s13-decision-register.md#d-116), [D-123](s13-decision-register.md#d-123)). `attribute_mode=None` means `Current` — unlike `traverse`, an unstated mode never refuses here — with `AT_TIME` opting into belief-at-instant hydration (0.19.1, [D-289](s13-decision-register.md#d-289)) |
 
 **The four chunked writes take `progress=` and `cancel=` as of 0.13.8 ([D-181](s13-decision-register.md#d-181)).** `bulk_import`, `write_concepts`, `upsert_embeddings` and `write_analytics_annotations` are keyword-only on both, and every exception they raise now carries `written` — the rows the chunks before the stop committed, which are still committed. The exception *class* is unchanged and still chosen by the cause, so `except NotFoundError` catches the same thing it always did.
 
@@ -645,6 +645,7 @@ Two facts here are the binding's rather than the ledger's. First, `cancel` has t
 Two boundary decisions that are not merely translation:
 
 - **`traverse(attribute_mode=OMIT)` is refused** ([D-102](s13-decision-register.md#d-102)), naming `traverse_ids`. It is the single place the binding narrows the library, and the reason is that `execute` under `Omit` returns an empty list its own rustdoc calls indistinguishable from a traversal that reached nothing.
+- **An unstated `attribute_mode` on `load_subgraph` is `Current`** (0.19.1, [D-289](s13-decision-register.md#d-289)), not the refusal `traverse` gives. A `Subgraph` carries `NodeData` and the binding promises live attributes, so the default states the documented contract; stating nothing cannot ask a question the caller was never offered.
 - **An unstated `min_weight` is `-inf`** ([D-103](s13-decision-register.md#d-103)), not the builder's `0.0`, so a negative weight reaches `NegativeEdgeWeight` rather than being silently dropped. A *stated* floor filters, because stating one is asking to exclude.
 
 The pairing rule survives intact and is visible from Python in one test: at an instant before anything was recorded, `traverse_ids(as_of=t)` finds the topology, `AttributeMode.CURRENT` hydrates it, and `AttributeMode.AT_TIME` returns nothing — because on that date nobody had written it down. Two calls differing by one keyword, disagreeing completely, which is the concrete case [D-085](s13-decision-register.md#d-085) refuses to default.

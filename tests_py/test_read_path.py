@@ -6,7 +6,7 @@ the boundary — the ones that exist because a wrong answer would otherwise arri
 looking like a right one:
 
 - an instant without a stated ``attribute_mode`` raises rather than defaulting
-  (D-085).
+  (D-085) — on ``traverse``; ``load_subgraph`` defaults to ``Current`` (D-289).
 - ``AttributeMode.OMIT`` on ``traverse`` is refused rather than answering with an
   empty list nobody can interpret.
 - an unstated ``min_weight`` on ``load_subgraph`` lets a negative weight reach
