@@ -52,7 +52,7 @@ header.site{
   background:var(--paper);
   position:sticky;top:0;z-index:50;
 }
-.nav{display:flex;align-items:center;gap:1.4rem;padding:.85rem 0}
+.nav{display:flex;align-items:center;gap:1.4rem;padding:.85rem clamp(1.1rem,4vw,2.5rem)}
 .brand{
   font-family:var(--font-display);font-weight:800;letter-spacing:-.02em;
   font-size:1.3rem;color:var(--ink);text-decoration:none;white-space:nowrap;
@@ -211,8 +211,14 @@ ul.limits strong{font-weight:600}
 
 /* footer */
 footer.site{border-top:2px solid var(--ink);margin-top:clamp(2.4rem,5vw,3.8rem);padding:1.8rem 0 2.6rem;font-size:.9rem;color:var(--ink-soft)}
-footer.site .cols{display:flex;flex-wrap:wrap;gap:1rem 2.5rem;justify-content:space-between}
-footer.site p{margin:.3rem 0;max-width:64ch}
+footer.site .footer-grid{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(0,.8fr) minmax(0,.7fr);gap:2rem;align-items:start}
+footer.site .brand{display:inline-block;font-size:1.15rem}
+footer.site .footer-about p{margin:.4rem 0 0;max-width:34ch}
+footer.site .footer-label{display:block;margin:0 0 .5rem;font-family:var(--font-display);font-size:.72rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-soft)}
+footer.site .footer-release{margin:0;font-family:var(--font-mono);font-size:.8rem;line-height:1.7}
+footer.site .footer-link-list{display:flex;flex-wrap:wrap;gap:.55rem 1rem}
+footer.site .footer-link-list a{font-family:var(--font-display);font-size:.86rem;font-weight:600}
+@media(max-width:900px){footer.site .footer-grid{grid-template-columns:1fr 1fr;gap:1.5rem}footer.site .footer-about{grid-column:1/-1}}
 
 /* reveal */
 .js .rv{opacity:0;transform:translateY(22px);transition:opacity .7s cubic-bezier(.16,1,.3,1),transform .7s cubic-bezier(.16,1,.3,1)}
@@ -223,14 +229,49 @@ footer.site p{margin:.3rem 0;max-width:64ch}
   *{transition:none !important}
 }
 
+/* editorial section layout */
+@media (min-width:1200px){
+  section.block{
+    display:grid;
+    grid-template-columns:minmax(16rem,.72fr) minmax(0,2fr);
+    column-gap:clamp(2rem,2.8vw,2.5rem);
+    align-items:start;
+  }
+  section.block > .section-intro{grid-column:1;grid-row:1;align-self:start}
+  section.block > .section-content{grid-column:2;grid-row:1;min-width:0}
+  section.block .section-content > :first-child{margin-top:0}
+  section.block .section-intro .standfirst{margin:.75rem 0 0;max-width:34ch}
+}
+
 /* responsive */
 @media (max-width:900px){
   .hero-grid{grid-template-columns:1fr}
   .hero figure.plate{order:2}
   ol.reads li{grid-template-columns:1fr}
   ol.doctrines li{grid-template-columns:2.4rem 1fr}
-  nav.links{display:none}
+  .nav{
+    display:grid;grid-template-columns:minmax(0,1fr) auto;
+    gap:.25rem .75rem;padding:.45rem clamp(1.1rem,4vw,2.5rem) .5rem;
+  }
+  .nav .brand{grid-column:1;grid-row:1}
+  .nav .btn{grid-column:2;grid-row:1;margin:0}
+  nav.links{
+    display:flex;grid-column:1/-1;grid-row:2;min-width:0;width:100%;
+    margin:0;padding:.1rem .15rem;gap:.35rem;overflow-x:auto;overflow-y:hidden;
+    scrollbar-width:none;overscroll-behavior-x:contain;
+  }
+  nav.links::-webkit-scrollbar{display:none}
+  nav.links a{
+    display:inline-flex;align-items:center;flex:none;min-height:40px;
+    padding:0 .72rem;border:1px solid var(--rule);border-radius:999px;
+    font-size:.78rem;background:var(--card);
+  }
+  nav.links a:hover{background:var(--paper-deep);border-color:var(--ink-soft);border-bottom-color:var(--ink-soft)}
+  nav.links a:focus-visible{outline-offset:-2px}
 }
+:root{--anchor-offset:5rem}
+section[id]{scroll-margin-top:var(--anchor-offset)}
+@media (max-width:900px){:root{--anchor-offset:7rem}}
 </style>
 </head>
 <body>
@@ -279,7 +320,7 @@ footer.site p{margin:.3rem 0;max-width:64ch}
           <button data-lin="main" aria-pressed="false">main</button>
         </div>
         <svg id="branchtree" viewBox="0 0 560 340" role="img" aria-label="Branch tree: main forks b1, b1 forks b2 and sib, b2 forks L. A read walks the reader's root path.">
-          <title>Lineage tree with root-path resolution</title>
+          <title>Choose a lineage and follow its root path</title>
           <g class="edges">
             <path id="e-b1-main" class="edge" d="M280 268 C 280 232, 200 236, 168 196"/>
             <path id="e-b2-b1" class="edge" d="M168 176 C 168 150, 168 140, 168 118"/>
@@ -317,15 +358,18 @@ footer.site p{margin:.3rem 0;max-width:64ch}
           <p class="path" id="readpath">Read on L: root path L → b2 → b1 → main</p>
           <p id="readrule">Each ancestor contributes only rows recorded at or before its fork clamp. Among the holders of a key, the nearest to L wins, deterministically, from stored state alone.</p>
         </div>
-        <figcaption id="treecap">Redrawn from the paper's lineage figure. Fork instants never decrease down a path; valid time carries no branch predicate anywhere in the tree. Pick a lineage to walk its root path.</figcaption>
+        <figcaption id="treecap">Choose a lineage to trace its root path. Fork times never decrease from parent to child; valid time stays shared across every branch.</figcaption>
       </figure>
     </div>
   </div>
 
   <!-- ================= GAP ================= -->
   <section class="block rv" id="gap" aria-labelledby="gap-h">
-    <h2 id="gap-h">Everyone branched something else.</h2>
-    <p class="standfirst">Every line of work branches <strong>something</strong>: worlds, states, commits, the valid future. Only the last row branches the <strong>transaction-time order</strong> with valid time still separate and reads resolved by a rule in the model. A 2026 PRISMA review of 54 bitemporal studies records branching exactly once, on the valid axis. Nothing branches the record.</p>
+    <div class="section-intro">
+      <h2 id="gap-h">Everyone branched something else.</h2>
+          <p class="standfirst">Every line of work branches <strong>something</strong>: worlds, states, commits, or the valid future. Macrame is the exception: it branches the <strong>transaction-time order</strong>, keeps valid time separate, and resolves reads by a rule in the model. A 2026 PRISMA review of 54 bitemporal studies records branching exactly once, on the valid axis. Nothing branches the record.</p>
+    </div>
+    <div class="section-content">
     <div class="table-scroll">
       <table class="ledger">
         <thead><tr><th>Line of work</th><th>Branches</th><th>Transaction-time order</th><th>Cross-branch resolution</th></tr></thead>
@@ -339,12 +383,16 @@ footer.site p{margin:.3rem 0;max-width:64ch}
         </tbody>
       </table>
     </div>
+    </div>
   </section>
 
   <!-- ================= DOCTRINES ================= -->
   <section class="block rv" id="doctrines" aria-labelledby="doctrines-h">
-    <h2 id="doctrines-h">Eight doctrines, before and after.</h2>
-    <p class="standfirst">Binding constraints, not guidelines — checked by the stability suite, changed only through dated amendments. They drew the storage, the interface, and the refusals: append-only rows, a trigger-captured log, disposable caches, and signatures that declare their time.</p>
+    <div class="section-intro">
+      <h2 id="doctrines-h">Eight doctrines, before and after.</h2>
+          <p class="standfirst">Binding constraints, not guidelines — checked by the stability suite, changed only through dated amendments. They drew the storage, the interface, and the refusals: append-only rows, a trigger-captured log, disposable caches, and signatures that declare their time.</p>
+    </div>
+    <div class="section-content">
     <ol class="doctrines">
       <li><div><strong class="t">The boundary is sacred</strong><p>Everything above the libSQL connection is project code; the engine is never patched, never forked.</p></div></li>
       <li><div><strong class="t">Two clocks, never mixed</strong><p>Every row carries valid and transaction time; no path may derive one from the other. Lineage is a clause on the second clock.</p></div></li>
@@ -355,21 +403,28 @@ footer.site p{margin:.3rem 0;max-width:64ch}
       <li><div><strong class="t">Embeddings are immutable per version, excluded from the ledger</strong><p>Vectors live in per-model tables, never in log payloads; vector search is present-state only.</p></div></li>
       <li><div><strong class="t">Fidelity is a parameter, never a silent default</strong><p>Queries mixing time dimensions declare it in their signatures; the past's text is never attached silently.</p></div></li>
     </ol>
+    </div>
   </section>
 
   <!-- ================= READS ================= -->
   <section class="block rv" id="reads" aria-labelledby="reads-h">
-    <h2 id="reads-h">Three questions, three reads.</h2>
-    <p class="standfirst">A bitemporal database answers two questions. Macrame adds the third (<strong>what did this line of inquiry believe?</strong>) as sequenced modifiers in builder form, never as one parameter with two meanings.</p>
+    <div class="section-intro">
+      <h2 id="reads-h">Three questions, three reads.</h2>
+          <p class="standfirst">A bitemporal database answers two questions. Macrame adds the third (<strong>what did this line of inquiry believe?</strong>) as sequenced modifiers in builder form, never as one parameter with two meanings.</p>
+    </div>
+    <div class="section-content">
     <figure class="plate" aria-labelledby="readscap">
       <svg viewBox="0 0 560 300" role="img" aria-label="Decision diagram: which question leads to true at v, believed at r, or believed by L; the first two compose.">
-        <title>The three reads and their composition</title>
+        <title>Three read modes: true at v, believed at r, believed by L</title>
         <defs>
           <marker id="arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
             <path d="M0 0 L10 5 L0 10 z" fill="#22262B"/>
           </marker>
           <marker id="arrT" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
             <path d="M0 0 L10 5 L0 10 z" fill="#0A4F4B"/>
+          </marker>
+          <marker id="arrR" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0 0 L10 5 L0 10 z" fill="#A83A22"/>
           </marker>
         </defs>
         <g font-family="JetBrains Mono, monospace">
@@ -392,12 +447,13 @@ footer.site p{margin:.3rem 0;max-width:64ch}
           <path d="M240 62 C 205 80, 150 92, 118 110" stroke="#22262B" stroke-width="1.8" fill="none" marker-end="url(#arr)"/>
           <path d="M280 62 L280 106" stroke="#0A4F4B" stroke-width="1.8" fill="none" marker-end="url(#arrT)"/>
           <path d="M320 62 C 355 80, 410 92, 442 110" stroke="#22262B" stroke-width="1.8" fill="none" marker-end="url(#arr)"/>
-          <path d="M150 198 C 190 212, 215 222, 238 232" stroke="#A83A22" stroke-width="1.8" fill="none"/>
-          <path d="M280 198 L280 230" stroke="#0A4F4B" stroke-width="1.8" fill="none"/>
-          <text x="250" y="216" font-size="9.5" fill="#4A4F55">compose</text>
+          <path d="M99 198 C 140 210, 180 222, 200 234" stroke="#A83A22" stroke-width="1.8" fill="none" marker-end="url(#arrR)"/>
+          <text x="99" y="214" text-anchor="middle" font-size="9.5" fill="#8C2E1B">compose</text>
+          <path d="M280 198 L280 230" stroke="#0A4F4B" stroke-width="1.8" fill="none" marker-end="url(#arrT)"/>
+          <text x="288" y="214" font-size="9.5" fill="#0A4F4B">compose</text>
         </g>
       </svg>
-      <figcaption id="readscap">Redrawn from the paper's read-modifier figure. Setting both instants asks what was believed then about what was true then. Cross-branch comparison (what L holds that M does not) is the read the model does not provide.</figcaption>
+      <figcaption id="readscap">Set both cutoffs to ask what the ledger believed at recorded time r about what was true at valid time v. Each lineage read follows one ancestry; comparing what L holds that M does not is outside the model.</figcaption>
     </figure>
     <ol class="reads">
       <li class="v"><span class="sig">as_of_valid(v)</span><span class="what"><span class="clock-v">True at v</span> — valid time under current belief. No branch predicate: branches share the valid-time domain, so no valid-time query changes meaning.</span></li>
@@ -415,15 +471,19 @@ past = db.<span class="f">load_subgraph</span>(
     attribute_mode=macrame.AttributeMode.<span class="f">AT_TIME</span>,
 )  <span class="c"># Tuesday’s topology wearing Tuesday’s titles</span></code></pre>
     </div>
+    </div>
   </section>
 
   <!-- ================= STRATUM ================= -->
   <section class="block rv" id="stratum" aria-labelledby="stratum-h">
-    <h2 id="stratum-h">A stratum, not a fork.</h2>
-    <p class="standfirst">Schema generation, triggers, and temporal logic live <strong>above the engine interface</strong>, project code over unmodified libSQL. Every guarantee is SQL the engine executes, portable to any engine that runs it. Doctrine&nbsp;I restates a 1998 thesis as a project boundary, and §5 settles the layering dispute with measurements rather than adjectives.</p>
+    <div class="section-intro">
+      <h2 id="stratum-h">A stratum, not a fork.</h2>
+          <p class="standfirst">Schema generation, triggers, and temporal logic live <strong>above the engine interface</strong>, project code over unmodified libSQL. Every guarantee is SQL the engine executes, portable to any engine that runs it. Doctrine&nbsp;I restates a 1998 thesis as a project boundary, and §5 settles the layering dispute with measurements rather than adjectives.</p>
+    </div>
+    <div class="section-content">
     <figure class="plate" aria-labelledby="stratumcap">
       <svg viewBox="0 0 560 330" role="img" aria-label="Layer stack: API, temporal and lineage logic, schema and trigger DDL above the libSQL connection boundary, unmodified engine below.">
-        <title>The stratum boundary</title>
+        <title>Temporal and lineage logic above unmodified libSQL</title>
         <g font-family="JetBrains Mono, monospace">
           <rect x="60" y="14" width="440" height="52" rx="10" fill="#EADFC2" stroke="#22262B" stroke-width="2"/>
           <text x="280" y="36" text-anchor="middle" font-size="12" font-weight="600" fill="#22262B">API: as_of_valid, as_of_recorded, reconstruct_on</text>
@@ -441,17 +501,21 @@ past = db.<span class="f">load_subgraph</span>(
           <text x="280" y="300" text-anchor="middle" font-size="10" fill="#4A4F55">SQLite storage engine, WAL</text>
         </g>
       </svg>
-      <figcaption id="stratumcap">Redrawn from the paper's placement figure. Correctness rests on triggers the write path cannot bypass: assertions immutable (III), reconstruction from a trigger-captured log (IV), no physical deletion outside archive sessions (V).</figcaption>
+      <figcaption id="stratumcap">Project code owns schema, temporal rules, and lineage resolution above unmodified libSQL. Triggers enforce immutable assertions, capture the transaction log, and reject physical deletion outside archive sessions.</figcaption>
     </figure>
+    </div>
   </section>
 
   <!-- ================= LEDGER ================= -->
   <section class="block rv" id="ledger" aria-labelledby="ledger-h">
-    <h2 id="ledger-h">One write, three rows, zero rewrites.</h2>
-    <p class="standfirst">A single edge assertion produces three writes: the <strong>ledger row</strong>, its <strong>current-state upsert</strong>, and its <strong>log entry</strong>. Rows are never updated in place: a new recorded state is a new insert, so retroactive correction is an operation, not an accident.</p>
+    <div class="section-intro">
+      <h2 id="ledger-h">One write, three rows, zero rewrites.</h2>
+          <p class="standfirst">A single edge assertion produces three writes: the <strong>ledger row</strong>, its <strong>current-state upsert</strong>, and its <strong>log entry</strong>. Rows are never updated in place: a new recorded state is a new insert, so retroactive correction is an operation, not an accident.</p>
+    </div>
+    <div class="section-content">
     <figure class="plate" aria-labelledby="ledgercap">
       <svg viewBox="0 0 560 300" role="img" aria-label="Write Actor inserts into append-only links; triggers capture the transaction log and project links_current; reads split by clock; ad-hoc delete aborts.">
-        <title>Ledger flow with doctrine guards</title>
+        <title>One assertion flows through the ledger, log, and cache</title>
         <defs>
           <marker id="arr2" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
             <path d="M0 0 L10 5 L0 10 z" fill="#22262B"/>
@@ -490,14 +554,18 @@ past = db.<span class="f">load_subgraph</span>(
           <path d="M330 188 C 370 200, 410 208, 440 220" stroke="#0A4F4B" stroke-width="1.5" stroke-dasharray="5 4" fill="none" marker-end="url(#arr2)"/>
         </g>
       </svg>
-      <figcaption id="ledgercap">Redrawn from the paper's ledger figure. Overlap computation stays out of the trigger layer, decided in the single writer where no check-then-write race can exist. Concepts inherit across lineages and are never restated.</figcaption>
+      <figcaption id="ledgercap">Overlap is resolved by the single writer, avoiding a check-then-write race. Triggers capture the log and project current state; ad-hoc deletion is rejected. Concepts inherit across lineages, never restated.</figcaption>
     </figure>
+    </div>
   </section>
 
   <!-- ================= TOOLKIT ================= -->
   <section class="block rv" id="toolkit" aria-labelledby="toolkit-h">
-    <h2 id="toolkit-h">One file, two clocks, and the tooling around them.</h2>
-    <p class="standfirst">The model is the headline; the system around it is the reason it survives contact with real work.</p>
+    <div class="section-intro">
+      <h2 id="toolkit-h">One file, two clocks, and the tooling around them.</h2>
+          <p class="standfirst">The model is the headline; the system around it is the reason it survives contact with real work.</p>
+    </div>
+    <div class="section-content">
     <ol class="reads">
       <li class="v"><span class="sig">Embedded, no server</span><span class="what">One libSQL file, one writer, WAL readers unblocked. Branch, fold, and archive against the file in place — there is nothing to operate.</span></li>
       <li class="r"><span class="sig">Rust core, Python bindings</span><span class="what">Traversals, belief-at-instant reads, snapshots, and the archive from either side of the boundary — and the graph algorithms run on loaded subgraphs.</span></li>
@@ -506,12 +574,16 @@ past = db.<span class="f">load_subgraph</span>(
       <li class="r"><span class="sig">Integrity by construction</span><span class="what">Overlap guards, lineage provenance, and deletion refusal live in triggers and the single writer. Callers inherit the guarantees; they are never asked to keep them.</span></li>
     </ol>
     <p class="sweep">Around the ledger sits the rest of the system: snapshots that anchor trunk reconstruction; archive sessions that move cold rows, blobs with them, under verifiable reports; a content-addressed blob store reclaimed through the archive instead of by reference counting; application attributes riding the concept row as versioned JSON with expression indexes over their paths; a branch-global key-value sidecar for the operational state the ledger should never see; full-text search beside present-state vector search; and communities, shortest paths, and dense cores running on loaded subgraphs. Per-shape version gates keep older binaries folding what newer ones wrote.</p>
+    </div>
   </section>
 
   <!-- ================= MEASURES ================= -->
   <section class="block rv" id="measures" aria-labelledby="measures-h">
-    <h2 id="measures-h">Settled by measurement.</h2>
-    <p class="standfirst">One harness, reference hardware, trigger amplification included. Read <strong>shapes and orders of magnitude</strong> here (flat across sizes, constant across depths), not decimals.</p>
+    <div class="section-intro">
+      <h2 id="measures-h">Settled by measurement.</h2>
+          <p class="standfirst">One harness, reference hardware, trigger amplification included. Read <strong>shapes and orders of magnitude</strong> here (flat across sizes, constant across depths), not decimals.</p>
+    </div>
+    <div class="section-content">
     <div class="table-scroll">
       <table class="ledger">
         <thead><tr><th>Operation</th><th>Figure</th><th>Budget / baseline</th></tr></thead>
@@ -525,13 +597,17 @@ past = db.<span class="f">load_subgraph</span>(
         </tbody>
       </table>
     </div>
-    <p class="fine">Against BranchBench's tension: systems that branch fast but read orders of magnitude slower as branches deepen — Macrame does neither: the trunk's complete immunity bought for bounded branch-side prices. Different systems, hardware, and decades separate these figures; a comparison of shapes, not a ranking.</p>
+    <p class="fine">BranchBench illustrates a tradeoff: fast forks can bring increasingly expensive reads as histories deepen. Macrame’s measurements show a different scaling profile: trunk operations remain unchanged, forks add one register row, and branch reads stay depth-independent through 100 levels.</p>
+    </div>
   </section>
 
   <!-- ================= LIMITS + CLOSE ================= -->
   <section class="block rv" id="limits" aria-labelledby="limits-h">
-    <h2 id="limits-h">Deliberate boundaries.</h2>
-    <p class="standfirst">Every system is a set of refusals. Each boundary below is stated with the condition that would reopen it. None of them is a roadmap promise.</p>
+    <div class="section-intro">
+      <h2 id="limits-h">Deliberate boundaries.</h2>
+          <p class="standfirst">Every system is a set of refusals. Each boundary below is stated with the condition that would reopen it. None of them is a roadmap promise.</p>
+    </div>
+    <div class="section-content">
     <ul class="limits">
       <li><strong>Divergence is modeled; convergence is not.</strong> No rule composes two lineages' recorded positions into one — by design, since a merge rule that silently picks winners would violate the integrity the refusals protect. Ancestry-determined precedence is the outlined form of the missing rule.</li>
       <li><strong>Inheritance without restatement.</strong> Branches inherit concepts but cannot restate them, so retiring an inherited concept has no branch-local operation — the deferred overlay design stands until its reopening symptoms appear.</li>
@@ -545,16 +621,31 @@ past = db.<span class="f">load_subgraph</span>(
         <a class="btn solid" href="https://github.com/opticsWolf/Macrame">Get the code</a>
         <a class="btn ghost" href="https://github.com/opticsWolf/Macrame/blob/main/README.md">Read the manual</a>
       </div>
-      <p class="versionline">macrame-db 0.19.1 · schema v22 · MSRV 1.88 · paper rev. 2026-10-05</p>
+      <p class="versionline">macrame-db 0.19.1 · schema v22 · MSRV 1.88</p>
+    </div>
     </div>
   </section>
 
 </main>
 
 <footer class="site">
-  <div class="wrap cols">
-    <p>“Branching Transaction Time: Lineage-Resolved Belief in an Embedded Bitemporal Ledger” — complete draft, rev. 2026-10-05. Diagrams redrawn from the paper's mermaid sources for the web.</p>
-    <p>Set in Archivo, Source Serif 4 &amp; JetBrains Mono. Valid time in oxide, recorded time in teal: the two clocks keep their colors everywhere on this page.</p>
+  <div class="wrap footer-grid">
+    <div class="footer-about">
+      <a class="brand" href="#top">Macrame<span class="dot">.</span></a>
+      <p>An embedded bitemporal ledger for Rust and Python, built above unmodified libSQL.</p>
+    </div>
+    <div>
+      <p class="footer-label">Current release</p>
+      <p class="footer-release">macrame-db 0.19.1<br>schema v22<br>MSRV 1.88</p>
+    </div>
+    <nav class="footer-links" aria-label="Project links">
+      <p class="footer-label">Explore</p>
+      <div class="footer-link-list">
+        <a href="https://github.com/opticsWolf/Macrame">Source</a>
+        <a href="https://github.com/opticsWolf/Macrame/blob/main/README.md">Manual</a>
+        <a href="https://github.com/opticsWolf/Macrame/issues">Issues</a>
+      </div>
+    </nav>
   </div>
 </footer>
 
