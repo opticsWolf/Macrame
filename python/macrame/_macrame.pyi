@@ -118,6 +118,11 @@ class AttributeMode:
     to a historical topology is the wrong answer, delivered silently.
 
     `OMIT` is deliberately absent from the traversal surface — see D-102.
+
+    `load_subgraph` is the exception: its `attribute_mode` defaults to
+    `CURRENT` (D-289) rather than refusing, and it accepts `OMIT` for
+    topology only — so a historical load keeps live text unless `AT_TIME`
+    is passed.
     """
 
     CURRENT: Final[AttributeMode]
@@ -1194,6 +1199,7 @@ class Database:
         now: Timestamp | None = None,
         content: bool = False,
         extra: bool = False,
+        attribute_mode: AttributeMode | None = None,
     ) -> Subgraph:
         """Materialise a neighbourhood under a byte budget.
 
