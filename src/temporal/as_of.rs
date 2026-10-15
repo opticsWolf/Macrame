@@ -53,6 +53,38 @@ impl AsOf {
     }
 }
 
+/// One concept as one lineage sees it, with where and when that version was
+/// written (0.20.0, M4, [D-294]).
+///
+/// Returned by [`Database::concepts_by_id`](crate::Database::concepts_by_id).
+/// A separate type from [`NodeAttributes`] rather than two fields added to it,
+/// because `NodeAttributes` is a snapshot payload: a field there changes the
+/// `bincode` container and needs `SNAP_FORMAT_VERSION` moved ([D-282]), for a
+/// provenance question the snapshot never asks.
+///
+/// [D-282]: ../../docs/architecture/s13-decision-register.md#d-282
+/// [D-294]: ../../docs/architecture/s13-decision-register.md#d-294
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ConceptVersion {
+    pub id: String,
+    pub title: String,
+    pub content: String,
+    pub embedding_model: Option<String>,
+    /// App-defined attributes, `{}` when none.
+    pub extra: String,
+    /// The version's own valid interval; `None` only for a v1 log payload,
+    /// which predates validity in the log.
+    pub valid_from: Option<String>,
+    pub valid_to: Option<String>,
+    /// The lineage that minted the concept. Every version of a concept lives
+    /// there, because a branch cannot restate an inherited one (D-214).
+    pub branch_id: String,
+    /// When this version was recorded — the transaction time of the row the
+    /// lineage sees, not of the latest write anywhere.
+    pub recorded_at: String,
+}
+
 /// Node attribute payload hydrated from concepts table or transaction_log.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -322,6 +354,75 @@ pub async fn hydrate_attributes(
     for id in node_ids {
         if let Some(attrs) = found.get(id) {
             out.push(attrs.clone());
+        }
+    }
+    Ok(out)
+}
+
+/// [`hydrate_attributes`], as one lineage sees each concept (0.20.0, M4,
+/// [D-294]).
+///
+/// Same modes, same three cells, same caller-order output; the source is
+/// `concept_versions` instead of the live table and the log fold, so an
+/// ancestor's post-fork edit and a sibling's concept are both out of reach.
+///
+/// - `Current`: the lineage's version, live, no valid-time bound.
+/// - `AtTime` with only `valid`: the same version, bounded by its own
+///   interval at `valid`.
+/// - `AtTime` with `recorded`: the version the lineage held at `recorded`
+///   (effective cutoff `min(fork point, recorded)`), bounded at `valid` when
+///   set. Refuses past the hot log's reach, as [`hydrate_attributes`] does.
+///
+/// [D-294]: ../../docs/architecture/s13-decision-register.md#d-294
+pub(crate) async fn hydrate_attributes_on(
+    conn: &libsql::Connection,
+    node_ids: &[String],
+    as_of: &AsOf,
+    mode: AttributeMode,
+    ancestry: &[crate::graph::lineage::Ancestor],
+) -> Result<Vec<NodeAttributes>> {
+    if node_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let (recorded, valid) = match mode {
+        AttributeMode::Omit => return Ok(Vec::new()),
+        AttributeMode::Current => (None, None),
+        AttributeMode::AtTime => (as_of.recorded.as_deref(), as_of.valid.as_deref()),
+    };
+    if let Some(ts) = recorded {
+        if !crate::temporal::replay::hot_log_answers_for(conn, ts).await? {
+            return Err(DbError::RecordedInstantUnreachable { ts: ts.to_string() });
+        }
+    }
+    let rows = crate::graph::concept_lineage::rows_on(conn, node_ids, ancestry, recorded).await?;
+    // Ids the lineage does not hold are concepts its edges *named* — shared
+    // vocabulary (D-214) — and hydrate as the single-lineage path would.
+    // `execute_ids` has already decided they are shown; see
+    // `concept_lineage::filter_visible`.
+    let named: Vec<String> = node_ids
+        .iter()
+        .filter(|i| !rows.contains_key(*i))
+        .cloned()
+        .collect();
+    let named: HashMap<String, NodeAttributes> = hydrate_attributes(conn, &named, as_of, mode)
+        .await?
+        .into_iter()
+        .map(|n| (n.id.clone(), n))
+        .collect();
+    let mut out = Vec::with_capacity(node_ids.len());
+    for id in node_ids {
+        if let Some(r) = rows.get(id) {
+            if r.shows_at(valid) {
+                out.push(NodeAttributes {
+                    id: r.id.clone(),
+                    title: r.title.clone(),
+                    content: r.content.clone(),
+                    embedding_model: r.embedding_model.clone(),
+                    extra: r.extra.clone(),
+                });
+            }
+        } else if let Some(n) = named.get(id) {
+            out.push(n.clone());
         }
     }
     Ok(out)

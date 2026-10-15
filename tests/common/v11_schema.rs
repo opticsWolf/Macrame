@@ -358,7 +358,20 @@ pub async fn v11_schema(conn: &libsql::Connection) {
 /// names, so the order is only "triggers and index before the table" — and
 /// `DROP TABLE` would take them anyway. Spelled out so the wind-back says what
 /// v22 added. Idempotent, like the rest.
+/// Undo v23 on a database built from today's baseline (0.20.0, D-293): the
+/// edge-kind register is one table nothing references.
+#[allow(dead_code)]
+pub async fn wind_back_to_v22(conn: &libsql::Connection) {
+    conn.execute("DROP TABLE IF EXISTS edge_kinds", ())
+        .await
+        .unwrap();
+}
+
+/// Undo v22 (and v23 first) on a database built from today's baseline.
+#[allow(dead_code)]
 pub async fn wind_back_to_v21(conn: &libsql::Connection) {
+    // v23 first, so every caller below v22 is also below v23 (0.20.0, D-293).
+    wind_back_to_v22(conn).await;
     for stmt in [
         "DROP TRIGGER IF EXISTS trg_blobs_frozen_update",
         "DROP TRIGGER IF EXISTS trg_blobs_guard_delete",

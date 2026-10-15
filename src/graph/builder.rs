@@ -593,6 +593,22 @@ impl TraversalBuilder {
 
     /// [`Self::build_sql`] against a shape the caller has already established.
     pub(crate) fn build_sql_with(&self, shape: LineageShape, ancestry: &[Ancestor]) -> String {
+        // On a forked database the node half is not this statement's to decide
+        // (0.20.0, M4, D-294): which concepts a lineage sees, and whether they
+        // are retired *for it*, is `graph::concept_lineage`'s answer, applied
+        // by `execute_ids_explained` to the ids this returns. Joining the live
+        // `concepts` row here would drop a concept the trunk retired after the
+        // fork before the lineage's own version was ever consulted. The walk is
+        // unchanged; only the projection stops filtering. The single-lineage
+        // statements below are untouched, byte for byte.
+        if shape != LineageShape::Trunk {
+            let projection = if self.limit.is_some() {
+                Self::LIMITED_NODES_ONLY
+            } else {
+                Self::NODES_ONLY
+            };
+            return format!("{}{}", self.walk_cte(shape, ancestry), projection);
+        }
         // A recorded instant folds concepts at the instant rather than joining
         // live rows (0.19.1, D-290): the walk reaches what the instant reached,
         // and the projection keeps what the instant believed live. Without one
@@ -716,6 +732,23 @@ LEFT JOIN (
     FROM walk w JOIN concepts c ON c.id = w.node_id
     WHERE c.retired = 0
 ) w ON 1 = 1
+ORDER BY w.node_id;
+            "#;
+
+    /// The forked-database projection: reached ids, no concept join (0.20.0,
+    /// M4). See [`Self::build_sql_with`].
+    const NODES_ONLY: &'static str = r#"
+SELECT DISTINCT w.node_id
+FROM walk w
+ORDER BY w.node_id;
+            "#;
+
+    /// [`Self::NODES_ONLY`] anchored on the walk's row count, for
+    /// [`Self::LIMITED_PROJECTION`]'s reason.
+    const LIMITED_NODES_ONLY: &'static str = r#"
+SELECT r.n, w.node_id
+FROM (SELECT COUNT(*) AS n FROM walk) r
+LEFT JOIN (SELECT DISTINCT node_id FROM walk) w ON 1 = 1
 ORDER BY w.node_id;
             "#;
 
@@ -1102,6 +1135,24 @@ WITH RECURSIVE {prelude}walk(node_id, depth) AS (
             Some(n) if walk_rows >= n as i64 => WalkOutcome::LimitReached,
             _ => WalkOutcome::Complete,
         };
+        // The walk resolved the lineage's *edges*; the nodes it reached are
+        // narrowed to the concepts the lineage can see (0.20.0, M4, D-294).
+        // `None` on a single-lineage database, where the projection's live
+        // join is already exact and nothing is re-read.
+        let ids =
+            match crate::graph::concept_lineage::scope_for(conn, self.branch.as_deref()).await? {
+                None => ids,
+                Some(ancestry) => {
+                    crate::graph::concept_lineage::filter_visible(
+                        conn,
+                        &self.start_node,
+                        ids,
+                        &ancestry,
+                        self.as_of_recorded.as_deref(),
+                    )
+                    .await?
+                }
+            };
         Ok((ids, outcome))
     }
 
@@ -1147,6 +1198,18 @@ WITH RECURSIVE {prelude}walk(node_id, depth) AS (
         let mode = self.resolved_mode()?;
         let as_of = self.instants(now_ts);
         let ids = self.execute_ids(conn, now_ts).await?;
+
+        // On a forked database the text comes from the lineage's own versions
+        // (0.20.0, M4, D-294): the live row may be an ancestor's post-fork
+        // edit the reader must not see.
+        if let Some(ancestry) =
+            crate::graph::concept_lineage::scope_for(conn, self.branch.as_deref()).await?
+        {
+            return crate::temporal::as_of::hydrate_attributes_on(
+                conn, &ids, &as_of, mode, &ancestry,
+            )
+            .await;
+        }
 
         // `Current` hydrates from `concepts` live and ignores both instants, so
         // the pair it receives only matters for `AtTime`. Passing the traversal's

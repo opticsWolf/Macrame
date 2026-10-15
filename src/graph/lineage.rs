@@ -573,17 +573,28 @@ pub(crate) fn ancestry_params(ancestry: &[Ancestor]) -> Vec<libsql::Value> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct KeySlots {
     pub source: usize,
-    pub target: usize,
+    /// `None` for a **prefix** key: a reader that knows `(source, edge_type)`
+    /// and not the target — the pointer read (0.20.0, M3, D-293). The base
+    /// scans then seek `idx_lc_open_interval` on `source_id` and filter the
+    /// type, instead of resolving the lineage's whole projection.
+    pub target: Option<usize>,
     pub edge_type: usize,
 }
 
 impl KeySlots {
-    /// The three equalities, on `alias`, as one line of a `WHERE`.
+    /// The equalities, on `alias`, as one line of a `WHERE`: three for a full
+    /// key, two for a prefix.
     pub(crate) fn equalities(&self, alias: &str) -> String {
-        format!(
-            "{alias}.source_id = ?{} AND {alias}.target_id = ?{} AND {alias}.edge_type = ?{}",
-            self.source, self.target, self.edge_type
-        )
+        match self.target {
+            Some(t) => format!(
+                "{alias}.source_id = ?{} AND {alias}.target_id = ?{} AND {alias}.edge_type = ?{}",
+                self.source, t, self.edge_type
+            ),
+            None => format!(
+                "{alias}.source_id = ?{} AND {alias}.edge_type = ?{}",
+                self.source, self.edge_type
+            ),
+        }
     }
 }
 
@@ -820,7 +831,7 @@ pub(crate) fn links_cut_cte(tag: &str, key: Option<KeySlots>) -> String {
 /// at one site each.
 const WRITE_KEY: KeySlots = KeySlots {
     source: 1,
-    target: 2,
+    target: Some(2),
     edge_type: 3,
 };
 const WRITE_BRANCH_SLOT: usize = 5;

@@ -535,7 +535,8 @@ pub(crate) async fn fork(
     conn: &libsql::Connection,
     name: &BranchId,
     parent: &BranchId,
-    stamp: &str,
+    point: &ForkPoint,
+    now: &str,
 ) -> Result<Branch> {
     // `EXISTS` separately from `forked_at`, because the trunk's `forked_at` is
     // legitimately NULL and a single nullable column cannot tell "no such
@@ -556,6 +557,7 @@ pub(crate) async fn fork(
     let taken: i64 = row.get(0)?;
     let parent_exists: i64 = row.get(1)?;
     let parent_forked_at: Option<String> = row.get(2)?;
+    drop(rows);
 
     if taken > 0 {
         return Err(DbError::BranchExists(name.as_str().to_string()));
@@ -563,6 +565,11 @@ pub(crate) async fn fork(
     if parent_exists == 0 {
         return Err(DbError::UnknownBranch(parent.as_str().to_string()));
     }
+    // The fork point, resolved only once the parent is known to exist: a
+    // `fork_after` against an unregistered parent is refused by name before
+    // anything is read on its behalf (0.20.0, M1, D-291).
+    let forked_at = resolve_fork_point(conn, name, parent, point, now).await?;
+    let stamp = forked_at.as_str();
     if let Some(parent_forked_at) = parent_forked_at {
         if stamp < parent_forked_at.as_str() {
             return Err(DbError::ForkPrecedesParent {
@@ -574,10 +581,15 @@ pub(crate) async fn fork(
         }
     }
 
+    // `created_at` is the clock reading and `forked_at` the cutoff. They are
+    // equal for `ForkPoint::Now`, which keeps every fork written before 0.20.0
+    // byte-identical, and `forked_at` is behind `created_at` for a historical
+    // fork — the case the column split and `CHECK (forked_at <= created_at)`
+    // were left open for (§15.2).
     conn.execute(
         "INSERT INTO branches (branch_id, parent_id, forked_at, created_at) \
-         VALUES (?1, ?2, ?3, ?3)",
-        libsql::params![name.as_str(), parent.as_str(), stamp],
+         VALUES (?1, ?2, ?3, ?4)",
+        libsql::params![name.as_str(), parent.as_str(), stamp, now],
     )
     .await?;
 
@@ -585,8 +597,105 @@ pub(crate) async fn fork(
         id: name.clone(),
         parent: Some(parent.clone()),
         forked_at: Some(stamp.to_string()),
-        created_at: stamp.to_string(),
+        created_at: now.to_string(),
     })
+}
+
+/// Where a new lineage is cut from its parent (0.20.0, M1, [D-291]).
+///
+/// `Now` is what `fork` has always done. The other two name an instant in the
+/// parent's past, and both are resolved to a plain `forked_at` before the
+/// insert: the read path has treated `forked_at` as an inclusive visibility
+/// cutoff since 0.14.6 (D-223) and does not need to know how it was chosen.
+///
+/// [D-291]: ../../docs/architecture/s13-decision-register.md#d-291
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ForkPoint {
+    /// The actor's clock reading.
+    Now,
+    /// A caller-named transaction-time instant, already canonical.
+    At(String),
+    /// The instant a concept was minted, as the parent sees it.
+    After(String),
+}
+
+/// Turn a [`ForkPoint`] into the `forked_at` the row will carry.
+///
+/// # `After`: the mint instant, and why not the latest version's
+///
+/// A conversation turn is written once, so its mint and its latest version
+/// are the same instant and the choice is invisible. For a concept that was
+/// updated later the two differ, and the mint is the answer that means *the
+/// lineage branches off right after this concept appeared*: everything written
+/// in the same batch is inherited (one batch, one stamp — D-014, M2), and
+/// nothing written afterwards is.
+///
+/// The mint is the concept's earliest log entry on its own lineage. If that
+/// entry has been archived the instant is unknown, and guessing from the
+/// projection would pick the *latest* version's stamp — a cutoff that silently
+/// inherits every later write. So it refuses with
+/// [`DbError::RecordedInstantUnreachable`], the refusal every other read past
+/// the hot log's reach makes.
+///
+/// The concept has to be visible on the parent: minted on the parent or on an
+/// ancestor of it, and — for an ancestor — at or before that ancestor's cutoff.
+/// Anything else is [`DbError::ConceptNotVisible`].
+async fn resolve_fork_point(
+    conn: &libsql::Connection,
+    name: &BranchId,
+    parent: &BranchId,
+    point: &ForkPoint,
+    now: &str,
+) -> Result<String> {
+    match point {
+        ForkPoint::Now => Ok(now.to_string()),
+        ForkPoint::At(ts) => {
+            if ts.as_str() > now {
+                return Err(DbError::ForkInFuture {
+                    branch: name.as_str().to_string(),
+                    at: ts.clone(),
+                    now: now.to_string(),
+                });
+            }
+            Ok(ts.clone())
+        }
+        ForkPoint::After(id) => {
+            let mut rows = conn
+                .query(
+                    "SELECT c.branch_id, \
+                            (SELECT MIN(t.recorded_at) FROM transaction_log t \
+                              WHERE t.table_name = 'concepts' AND t.entity_id = c.id \
+                                AND t.branch_id = c.branch_id) \
+                       FROM concepts c WHERE c.id = ?1",
+                    libsql::params![id.as_str()],
+                )
+                .await?;
+            let not_visible = || DbError::ConceptNotVisible {
+                id: id.clone(),
+                branch: parent.as_str().to_string(),
+            };
+            let row = rows.next().await?.ok_or_else(not_visible)?;
+            let minted_on: String = row.get(0)?;
+            let minted_at: Option<String> = row.get(1)?;
+            drop(rows);
+
+            let lineages = crate::graph::lineage::Lineages::load(conn).await?;
+            let ancestry = lineages.ancestry(parent.as_str());
+            let holder = ancestry
+                .iter()
+                .find(|a| a.branch_id == minted_on)
+                .ok_or_else(not_visible)?;
+            let minted_at = minted_at.ok_or_else(|| DbError::RecordedInstantUnreachable {
+                ts: format!("mint of {id}"),
+            })?;
+            if let Some(cutoff) = holder.cutoff.as_deref() {
+                if minted_at.as_str() > cutoff {
+                    return Err(not_visible());
+                }
+            }
+            Ok(minted_at)
+        }
+    }
 }
 
 /// One belief `a` holds that `b` does not (§15.4, 0.14.11, [D-228]).

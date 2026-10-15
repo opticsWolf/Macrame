@@ -450,6 +450,7 @@ fn next_chunk_size(
 /// | the rebuild turn of [`Database::bulk_embeddings`], counted as `rebuild_embedding_index` (0.16.2, D-276) | measured **2.61 / 19.7 / 39.0 s** for 2,000 vectors at dim 64 / 256 / 512, ~10 ms/vector at dim 256, growing with the corpus | One `CREATE INDEX` over the whole table — the one-pass DiskANN build is indivisible, exactly the criterion `shadow_swap` and `rebuild_current` meet. The difference is schedule: this hold is caller-scheduled and opt-in, so the docstring states the number instead of arguing it. Counted would add a permanent `N(bulk loads)` to every database that ever bulk-embedded — `shadow_swap`'s own argument, unchanged |
 /// | the toggle turn of [`Database::bulk_import_deferred`], counted as `links_current_mirror` (0.16.3, D-277) | µs-scale; one DDL statement either direction | Same shape as `drop_embedding_index`: one statement, no smaller unit, and its kind exists for attribution beside the load it wraps. The window's *cost* is the chunked rebuild that follows, which keeps its own counted kinds rather than hiding behind the toggle's exemption — the toggle is not where the time goes |
 /// | [`Database::blob_put`], counted as `blob_put` (0.19.0, D-281) | a function of the blob's size, capped by [`Tuning::max_blob_bytes`]; warns above [`BLOB_WARN_HOLD`] | libSQL 0.9.30 has no incremental blob I/O, so the bytes enter the file in one statement or not at all — there is no smaller unit than the value. The cap is the bound, and it is the caller's to raise |
+/// | [`Database::write_batch`], counted as `write_batch` (0.20.0, D-292) | capped at [`crate::batch::MAX_BATCH_ROWS`] rows | D-014's rule extended from edges to every row an act writes: concepts, retirements, edges and pointer moves under one stamp, all or none. Splitting it would let a lineage cut at the stamp inherit half a turn |
 ///
 /// The `archive` figure is end-to-end through this method, so it **includes**
 /// the re-derivation `archive()` runs inside its transaction — but it does not
@@ -829,6 +830,9 @@ pub(crate) enum HighPriCommand {
     Fork {
         name: crate::branch::BranchId,
         parent: crate::branch::BranchId,
+        /// Where the lineage is cut (0.20.0, M1, D-291). `Now` for every fork
+        /// written before 0.20.0.
+        point: crate::branch::ForkPoint,
         responder: oneshot::Sender<Result<crate::branch::Branch>>,
     },
     /// A put or a delete against `kv_store` (0.18.0, P3, [D-280]).
@@ -880,6 +884,36 @@ pub(crate) enum HighPriCommand {
         sha256: String,
         bytes: Vec<u8>,
         responder: oneshot::Sender<Result<bool>>,
+    },
+    /// Register an edge kind, functional or not (0.20.0, M3, [D-293]).
+    ///
+    /// High priority for `RegisterModel`'s reason: every write of the kind
+    /// depends on it, and an app registers its kinds at startup.
+    ///
+    /// [D-293]: ../docs/architecture/s13-decision-register.md#d-293
+    RegisterEdgeKind {
+        kind: String,
+        functional: bool,
+        responder: oneshot::Sender<Result<()>>,
+    },
+    /// Move a pointer under one stamp (0.20.0, M3, [D-293]).
+    ///
+    /// [D-293]: ../docs/architecture/s13-decision-register.md#d-293
+    SetPointer {
+        ptr: crate::batch::PointerSet,
+        responder: oneshot::Sender<Result<crate::batch::PointerChange>>,
+    },
+    /// Concepts, edges, retirements and pointer moves as one act (0.20.0, M2,
+    /// [D-292]).
+    ///
+    /// High priority for `WriteBulkAtomic`'s reason, and exempt from the chunk
+    /// budget for the same one: it is atomic by contract and capped by
+    /// [`crate::batch::MAX_BATCH_ROWS`].
+    ///
+    /// [D-292]: ../docs/architecture/s13-decision-register.md#d-292
+    WriteBatch {
+        batch: crate::batch::WriteBatch,
+        responder: oneshot::Sender<Result<crate::batch::BatchReport>>,
     },
     Shutdown {
         responder: oneshot::Sender<Result<()>>,
@@ -1086,6 +1120,9 @@ struct ActorState {
     insert_link: Option<libsql::Statement>,
     /// The overlap guard, with the shape it was compiled for.
     guard: Option<OverlapGuard>,
+    /// Edge kinds registered functional (0.20.0, M3, D-293). Loaded on first
+    /// use and dropped by the one command that writes `edge_kinds`.
+    functional: Option<std::collections::HashSet<String>>,
 }
 
 // `Lineages` moved to `graph::lineage` in 0.15.17 ([D-259]). It held
@@ -1102,7 +1139,27 @@ impl ActorState {
             lineages: None,
             insert_link: None,
             guard: None,
+            functional: None,
         }
+    }
+
+    /// The functional edge kinds, loaded once and kept until
+    /// [`HighPriCommand::RegisterEdgeKind`] drops them.
+    async fn functional_kinds(
+        &mut self,
+        conn: &libsql::Connection,
+    ) -> Result<std::collections::HashSet<String>> {
+        if self.functional.is_none() {
+            let mut rows = conn
+                .query("SELECT kind FROM edge_kinds WHERE functional = 1", ())
+                .await?;
+            let mut set = std::collections::HashSet::new();
+            while let Some(row) = rows.next().await? {
+                set.insert(row.get::<String>(0)?);
+            }
+            self.functional = Some(set);
+        }
+        Ok(self.functional.clone().unwrap_or_default())
     }
 
     /// Forget `branches`. Called by the two commands that write it.
@@ -3029,6 +3086,71 @@ impl Database {
         self.high(|responder| HighPriCommand::Fork {
             name,
             parent: from,
+            point: crate::branch::ForkPoint::Now,
+            responder,
+        })
+        .await
+    }
+
+    /// Cut a lineage at a past transaction-time instant of `from` (0.20.0, M1,
+    /// [D-291]).
+    ///
+    /// The new lineage sees `from`'s history up to and including `at`, and
+    /// nothing `from` recorded after it — the cutoff [`Self::fork`] has always
+    /// applied, at an instant the caller names instead of now. `forked_at`
+    /// is `at` and `created_at` is the clock reading, which is the split the
+    /// `branches` table has carried since v12 for exactly this.
+    ///
+    /// # Errors
+    ///
+    /// Everything [`Self::fork`] raises, plus [`DbError::InvalidTimestamp`]
+    /// for an `at` that does not parse and [`DbError::ForkInFuture`] for one
+    /// after the clock. [`DbError::ForkPrecedesParent`] covers an `at` before
+    /// `from`'s own fork point, which would inherit nothing from it.
+    ///
+    /// [D-291]: ../docs/architecture/s13-decision-register.md#d-291
+    pub async fn fork_at(
+        &self,
+        name: crate::branch::BranchId,
+        from: crate::branch::BranchId,
+        at: &str,
+    ) -> Result<crate::branch::Branch> {
+        let at = crate::util::timestamp::normalize(at)?;
+        self.high(|responder| HighPriCommand::Fork {
+            name,
+            parent: from,
+            point: crate::branch::ForkPoint::At(at),
+            responder,
+        })
+        .await
+    }
+
+    /// Cut a lineage right after `concept_id` appeared on `from` (0.20.0, M1,
+    /// [D-291]).
+    ///
+    /// The fork point is the concept's mint instant: the new lineage inherits
+    /// the concept and everything written in the same batch, and nothing
+    /// written later. For a conversation this is *branch after turn k*.
+    ///
+    /// # Errors
+    ///
+    /// Everything [`Self::fork`] raises, plus [`DbError::ConceptNotVisible`]
+    /// when `from` cannot see the concept, and
+    /// [`DbError::RecordedInstantUnreachable`] when its mint has been archived
+    /// out of the hot log.
+    ///
+    /// [D-291]: ../docs/architecture/s13-decision-register.md#d-291
+    pub async fn fork_after(
+        &self,
+        name: crate::branch::BranchId,
+        from: crate::branch::BranchId,
+        concept_id: &str,
+    ) -> Result<crate::branch::Branch> {
+        let concept_id = concept_id.to_string();
+        self.high(|responder| HighPriCommand::Fork {
+            name,
+            parent: from,
+            point: crate::branch::ForkPoint::After(concept_id),
             responder,
         })
         .await
@@ -3664,6 +3786,305 @@ impl Database {
             plan.limit,
         )
         .await
+    }
+
+    /// Register an edge kind, and say whether it is functional (0.20.0, M3,
+    /// [D-293]).
+    ///
+    /// A **functional** kind holds at most one open target per `(source,
+    /// kind)` in each lineage's view. Every edge write path refuses a second
+    /// one with [`DbError::FunctionalEdgeConflict`]; [`Self::set_pointer`] is
+    /// how it moves. Registering is idempotent and may flip the flag; a kind
+    /// never registered behaves exactly as before 0.20.0. Call it at startup.
+    ///
+    /// Flipping a kind to functional does not check rows already written: a
+    /// lineage that already holds two open targets keeps them, and the next
+    /// write of that `(source, kind)` is refused until a pointer move closes
+    /// them.
+    ///
+    /// # Errors
+    ///
+    /// [`DbError::InvalidEdgeType`] for a name `assert_edge` would refuse.
+    ///
+    /// [D-293]: ../docs/architecture/s13-decision-register.md#d-293
+    pub async fn register_edge_kind(&self, kind: &str, functional: bool) -> Result<()> {
+        crate::graph::edge::validate_edge_type(kind)?;
+        let kind = kind.to_string();
+        self.high(|responder| HighPriCommand::RegisterEdgeKind {
+            kind,
+            functional,
+            responder,
+        })
+        .await
+    }
+
+    /// Every registered edge kind and whether it is functional, by name.
+    pub async fn edge_kinds(&self) -> Result<Vec<(String, bool)>> {
+        let mut rows = self
+            .read_conn
+            .query("SELECT kind, functional FROM edge_kinds ORDER BY kind", ())
+            .await?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await? {
+            out.push((row.get::<String>(0)?, row.get::<i64>(1)? != 0));
+        }
+        Ok(out)
+    }
+
+    /// Move a pointer: close `(source, kind)`'s open target on the lineage and
+    /// open `ptr.target`, under one stamp (0.20.0, M3, [D-293]).
+    ///
+    /// The old interval closes at `ptr.valid_from` — on a branch whose open
+    /// target is inherited, by shadow retirement, so the parent's pointer is
+    /// untouched. Moving to the current target writes nothing and returns
+    /// `changed: false`. Works on any kind; on a functional one it is the only
+    /// way to change the target.
+    ///
+    /// # Errors
+    ///
+    /// [`DbError::InvalidTimestamp`] for a missing or malformed `valid_from`,
+    /// or one not after the open target's own; [`DbError::UnknownBranch`];
+    /// the overlap guard's [`DbError::OverlappingInterval`] when the new
+    /// target held an interval that overlaps on this lineage.
+    ///
+    /// [D-293]: ../docs/architecture/s13-decision-register.md#d-293
+    pub async fn set_pointer(
+        &self,
+        ptr: crate::batch::PointerSet,
+    ) -> Result<crate::batch::PointerChange> {
+        let ptr = normalize_pointer(ptr)?;
+        self.high(|responder| HighPriCommand::SetPointer { ptr, responder })
+            .await
+    }
+
+    /// Where `(source, kind)` points on `plan`'s lineage, or `None` (0.20.0,
+    /// M3, [D-293]).
+    ///
+    /// The open target — the latest belief about the pointer, independent of
+    /// a valid-time instant, so `plan.valid` and `plan.limit` are ignored.
+    /// `plan.recorded` asks where it pointed at a past transaction time. On a
+    /// kind that is not functional and holds several open targets, the one
+    /// with the newest `valid_from` (then the smallest id) is returned.
+    ///
+    /// [D-293]: ../docs/architecture/s13-decision-register.md#d-293
+    pub async fn pointer(
+        &self,
+        source: &str,
+        kind: &str,
+        plan: ReadPlan,
+    ) -> Result<Option<String>> {
+        let recorded = self.pointer_instant(&plan).await?;
+        let lineages = Lineages::load(&self.read_conn).await?;
+        let branch = plan
+            .branch_name()
+            .unwrap_or(crate::schema::ddl::MAIN_BRANCH);
+        Ok(crate::graph::pointer::open_edges(
+            &self.read_conn,
+            &lineages,
+            branch,
+            Some(source),
+            kind,
+            recorded.as_deref(),
+        )
+        .await?
+        .into_iter()
+        .next()
+        .map(|o| o.target))
+    }
+
+    /// Every pointer of `kind` on `plan`'s lineage, as `(source, target)` in
+    /// source order (0.20.0, M3, [D-293]).
+    ///
+    /// The workspace view: `pointers("CURRENT", …)` is every file's current
+    /// version on a branch in one read. One row per source, chosen as
+    /// [`Self::pointer`] chooses.
+    ///
+    /// [D-293]: ../docs/architecture/s13-decision-register.md#d-293
+    pub async fn pointers(&self, kind: &str, plan: ReadPlan) -> Result<Vec<(String, String)>> {
+        let recorded = self.pointer_instant(&plan).await?;
+        let lineages = Lineages::load(&self.read_conn).await?;
+        let branch = plan
+            .branch_name()
+            .unwrap_or(crate::schema::ddl::MAIN_BRANCH);
+        let open = crate::graph::pointer::open_edges(
+            &self.read_conn,
+            &lineages,
+            branch,
+            None,
+            kind,
+            recorded.as_deref(),
+        )
+        .await?;
+        let mut out: Vec<(String, String)> = Vec::new();
+        for o in open {
+            if out.last().map(|(s, _)| s.as_str()) != Some(o.source.as_str()) {
+                out.push((o.source, o.target));
+            }
+        }
+        Ok(out)
+    }
+
+    /// The recorded instant a pointer read names, checked against the hot log.
+    async fn pointer_instant(&self, plan: &ReadPlan) -> Result<Option<String>> {
+        let recorded = plan
+            .recorded
+            .as_deref()
+            .map(timestamp::normalize)
+            .transpose()?;
+        if let Some(ts) = recorded.as_deref() {
+            if !crate::temporal::replay::hot_log_answers_for(&self.read_conn, ts).await? {
+                return Err(DbError::RecordedInstantUnreachable { ts: ts.to_string() });
+            }
+        }
+        Ok(recorded)
+    }
+
+    /// The highest log sequence number ever allocated — where a change-feed
+    /// consumer starts when it has just synchronised (0.20.0, M7, [D-295]).
+    ///
+    /// [D-295]: ../docs/architecture/s13-decision-register.md#d-295
+    pub async fn head_seq(&self) -> Result<i64> {
+        crate::temporal::feed::head_seq(&self.read_conn).await
+    }
+
+    /// Ledger writes after `after_seq`, oldest first (0.20.0, M7, [D-295]).
+    ///
+    /// `branch` keeps only rows written on that lineage (not its ancestry);
+    /// `tables` keeps only `"concepts"` and/or `"links"` rows (empty means
+    /// both); `limit` bounds the answer, and a consumer continues from the
+    /// last returned `seq_id`. Rows carry no payload — read the entity.
+    ///
+    /// # Errors
+    ///
+    /// [`DbError::ChangeFeedGap`] when rows past `after_seq` have been archived;
+    /// resynchronise from current state and continue from [`Self::head_seq`].
+    ///
+    /// [D-295]: ../docs/architecture/s13-decision-register.md#d-295
+    pub async fn changes(
+        &self,
+        after_seq: i64,
+        branch: Option<&str>,
+        tables: &[&str],
+        limit: usize,
+    ) -> Result<Vec<crate::temporal::Change>> {
+        if let Some(b) = branch {
+            crate::graph::lineage::Lineages::load(&self.read_conn)
+                .await?
+                .shape(b)?;
+        }
+        crate::temporal::feed::changes(&self.read_conn, after_seq, branch, tables, limit).await
+    }
+
+    /// Write concepts, edges, retirements and pointer moves as one act: one
+    /// transaction, one `recorded_at`, all or nothing (0.20.0, M2, [D-292]).
+    ///
+    /// See [`crate::batch::WriteBatch`] for lineage claiming and write order.
+    /// The stamp is in the report, and it is what makes a fork at the batch
+    /// (M1) inherit every row of it.
+    ///
+    /// # Errors
+    ///
+    /// [`DbError::BatchTooLarge`] over [`crate::batch::MAX_BATCH_ROWS`];
+    /// [`DbError::BranchMismatch`] for a row naming another lineage than the
+    /// batch; [`DbError::InvalidId`] for a concept id twice; and whatever the
+    /// single-row write paths raise for a bad row — the whole batch is then
+    /// rolled back.
+    ///
+    /// [D-292]: ../docs/architecture/s13-decision-register.md#d-292
+    pub async fn write_batch(
+        &self,
+        batch: crate::batch::WriteBatch,
+    ) -> Result<crate::batch::BatchReport> {
+        if batch.len() > crate::batch::MAX_BATCH_ROWS {
+            return Err(DbError::BatchTooLarge {
+                rows: batch.len(),
+                max: crate::batch::MAX_BATCH_ROWS,
+            });
+        }
+        let batch = claim_batch(batch)?;
+        self.high(|responder| HighPriCommand::WriteBatch { batch, responder })
+            .await
+    }
+
+    /// The concepts with these ids, as `plan`'s lineage sees them (0.20.0, M4,
+    /// [D-294]).
+    ///
+    /// The concept half of [`Self::edges`]: `plan.branch` picks the lineage
+    /// (the trunk when unset), `plan.recorded` asks what that lineage believed
+    /// at an instant, and `plan.valid`, **when set**, keeps only versions valid
+    /// then — unset applies no valid-time bound, which is
+    /// [`AttributeMode::Current`](crate::graph::AttributeMode::Current)'s
+    /// reading rather than `edges`' "now". `plan.limit` is ignored: the ids
+    /// already bound the answer.
+    ///
+    /// Retired versions and ids the lineage cannot see are absent; the rest
+    /// come back in the order asked. A concept minted on an ancestor after the
+    /// lineage's fork point, or on a sibling, is not visible — see
+    /// `graph::concept_lineage` for the rule.
+    ///
+    /// # Errors
+    ///
+    /// [`DbError::UnknownBranch`] for an unregistered lineage;
+    /// [`DbError::RecordedInstantUnreachable`] for `plan.recorded` past the
+    /// hot log's reach.
+    ///
+    /// [D-294]: ../docs/architecture/s13-decision-register.md#d-294
+    pub async fn concepts_by_id(
+        &self,
+        ids: &[String],
+        plan: ReadPlan,
+    ) -> Result<Vec<crate::temporal::ConceptVersion>> {
+        let valid = plan
+            .valid
+            .as_deref()
+            .map(timestamp::normalize)
+            .transpose()?;
+        let recorded = plan
+            .recorded
+            .as_deref()
+            .map(timestamp::normalize)
+            .transpose()?;
+        if let Some(ts) = recorded.as_deref() {
+            if !crate::temporal::replay::hot_log_answers_for(&self.read_conn, ts).await? {
+                return Err(DbError::RecordedInstantUnreachable { ts: ts.to_string() });
+            }
+        }
+        let named = plan
+            .branch_name()
+            .unwrap_or(crate::schema::ddl::MAIN_BRANCH);
+        let ancestry =
+            match crate::graph::concept_lineage::scope_for(&self.read_conn, Some(named)).await? {
+                Some(a) => a,
+                // One lineage: its ancestry is itself, uncut, and the versions
+                // relation reduces to the live table.
+                None => vec![crate::graph::lineage::Ancestor::new(named, 0)],
+            };
+        let rows = crate::graph::concept_lineage::rows_on(
+            &self.read_conn,
+            ids,
+            &ancestry,
+            recorded.as_deref(),
+        )
+        .await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for id in ids {
+            if let Some(r) = rows.get(id) {
+                if r.shows_at(valid.as_deref()) {
+                    out.push(crate::temporal::ConceptVersion {
+                        id: r.id.clone(),
+                        title: r.title.clone(),
+                        content: r.content.clone(),
+                        embedding_model: r.embedding_model.clone(),
+                        extra: r.extra.clone(),
+                        valid_from: r.valid_from.clone(),
+                        valid_to: r.valid_to.clone(),
+                        branch_id: r.branch_id.clone(),
+                        recorded_at: r.recorded_at.clone(),
+                    });
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// Create a model's embedding table and DiskANN index (§5.9, D-048).
@@ -4576,6 +4997,77 @@ fn before_any_chunk(cause: DbError) -> BulkInterrupted {
     BulkInterrupted { written: 0, cause }
 }
 
+/// Validate a pointer move before it reaches the actor (0.20.0, M3).
+fn normalize_pointer(mut ptr: crate::batch::PointerSet) -> Result<crate::batch::PointerSet> {
+    crate::graph::edge::validate_edge_type(&ptr.edge_type)?;
+    if let Some(kind) = &ptr.link_previous {
+        crate::graph::edge::validate_edge_type(kind)?;
+    }
+    ptr.valid_from = timestamp::normalize(&ptr.valid_from)?;
+    if ptr.weight < 0.0 || ptr.weight.is_nan() {
+        return Err(DbError::NegativeEdgeWeight {
+            source_id: ptr.source.clone(),
+            target_id: ptr.target.clone(),
+            weight: ptr.weight,
+        });
+    }
+    Ok(ptr)
+}
+
+/// Stamp the batch's lineage on rows that name none, refuse rows naming
+/// another, and normalise every row — [`crate::BranchView`]'s claim, applied to
+/// a batch (0.20.0, M2, D-292).
+fn claim_batch(batch: crate::batch::WriteBatch) -> Result<crate::batch::WriteBatch> {
+    let crate::batch::WriteBatch {
+        concepts,
+        edges,
+        retirements,
+        pointers,
+        branch,
+    } = batch;
+    let claim =
+        |named: &Option<crate::branch::BranchId>| -> Result<Option<crate::branch::BranchId>> {
+            match (named, &branch) {
+                (Some(n), Some(b)) if n != b => Err(DbError::BranchMismatch {
+                    view: b.as_str().to_string(),
+                    named: n.as_str().to_string(),
+                }),
+                (Some(n), _) => Ok(Some(n.clone())),
+                (None, b) => Ok(b.clone()),
+            }
+        };
+    let mut out = crate::batch::WriteBatch::new();
+    out.branch = branch.clone();
+    for c in concepts {
+        let b = claim(&c.branch)?;
+        let c = match b {
+            Some(b) => c.on_branch(b),
+            None => c,
+        };
+        out.concepts.push(c.normalized()?);
+    }
+    for e in edges {
+        let b = claim(&e.branch)?;
+        let e = match b {
+            Some(b) => e.on_branch(b),
+            None => e,
+        };
+        out.edges.push(e.normalized()?);
+    }
+    for mut r in retirements {
+        r.branch = claim(&r.branch)?;
+        crate::graph::edge::validate_edge_type(&r.edge_type)?;
+        r.valid_from = timestamp::normalize(&r.valid_from)?;
+        r.valid_to = timestamp::normalize(&r.valid_to)?;
+        out.retirements.push(r);
+    }
+    for mut p in pointers {
+        p.branch = claim(&p.branch)?;
+        out.pointers.push(normalize_pointer(p)?);
+    }
+    Ok(out)
+}
+
 fn normalize_all(edges: Vec<EdgeAssertion>) -> Result<Vec<EdgeAssertion>> {
     edges.into_iter().map(EdgeAssertion::normalized).collect()
 }
@@ -5421,6 +5913,9 @@ impl HighPriCommand {
             HighPriCommand::Fork { .. } => K::Fork,
             HighPriCommand::KvWrite { .. } => K::KvWrite,
             HighPriCommand::BlobPut { .. } => K::BlobPut,
+            HighPriCommand::RegisterEdgeKind { .. } => K::RegisterEdgeKind,
+            HighPriCommand::SetPointer { .. } => K::SetPointer,
+            HighPriCommand::WriteBatch { .. } => K::WriteBatch,
             HighPriCommand::Checkpoint { .. } => K::Checkpoint,
             HighPriCommand::Shutdown { .. } => K::Shutdown,
         }
@@ -5464,6 +5959,12 @@ impl HighPriCommand {
                     }
                 };
                 if let Err(e) = reject_overlapping_interval(state, conn, &edge, shape).await {
+                    turn.answer(responder, Err(e));
+                    return LoopCtl::Continue;
+                }
+                // A functional kind may hold one open target per lineage view
+                // (0.20.0, M3, D-293).
+                if let Err(e) = check_functional(state, conn, std::slice::from_ref(&edge)).await {
                     turn.answer(responder, Err(e));
                     return LoopCtl::Continue;
                 }
@@ -5567,15 +6068,16 @@ impl HighPriCommand {
             HighPriCommand::Fork {
                 name,
                 parent,
+                point,
                 responder,
             } => {
-                // The same clock as every other write, and the same instant in
-                // both columns: `forked_at` is a transaction-time point in the
-                // parent's history, and the point this release can fork from is
-                // now. See `branch::Branch::created_at` for why they are two
-                // columns anyway.
+                // The same clock as every other write. `created_at` is always
+                // this reading; `forked_at` is too unless the caller named a
+                // past instant (0.20.0, M1, D-291) — see
+                // `branch::Branch::created_at` for why they were two columns
+                // from the start.
                 let stamp = clock.now();
-                let res = crate::branch::fork(conn, &name, &parent, &stamp).await;
+                let res = crate::branch::fork(conn, &name, &parent, &point, &stamp).await;
                 // `branches` has a row it did not have. Unconditional rather
                 // than `if res.is_ok()`: a fork that failed leaves the table
                 // as it was, so forgetting costs one query and asserting that
@@ -5597,6 +6099,55 @@ impl HighPriCommand {
                     }
                     KvWrite::Delete { key } => crate::kv::delete(conn, &key).await,
                 };
+                turn.answer(responder, res);
+            }
+            HighPriCommand::RegisterEdgeKind {
+                kind,
+                functional,
+                responder,
+            } => {
+                let stamp = clock.now();
+                let res = conn
+                    .execute(
+                        "INSERT INTO edge_kinds (kind, functional, registered_at) \
+                         VALUES (?1, ?2, ?3) \
+                         ON CONFLICT(kind) DO UPDATE SET functional = excluded.functional",
+                        libsql::params![kind.as_str(), i64::from(functional), stamp.as_str()],
+                    )
+                    .await
+                    .map(|_| ())
+                    .map_err(Into::into);
+                state.functional = None;
+                turn.answer(responder, res);
+            }
+            HighPriCommand::SetPointer { ptr, responder } => {
+                let stamp = clock.now();
+                let res = async {
+                    let name = ptr.branch_name().to_string();
+                    let (shape, lineages) =
+                        check_lineages_with(state, conn, &[name.as_str()]).await?;
+                    let lineages = lineages.clone();
+                    let tx = conn
+                        .transaction_with_behavior(libsql::TransactionBehavior::Immediate)
+                        .await?;
+                    match move_pointer(&tx, &lineages, shape, &ptr, &stamp).await {
+                        Ok(change) => {
+                            tx.commit().await?;
+                            Ok(change)
+                        }
+                        Err(e) => {
+                            let _ = tx.rollback().await;
+                            Err(e)
+                        }
+                    }
+                }
+                .await;
+                turn.answer(responder, res);
+            }
+            HighPriCommand::WriteBatch { batch, responder } => {
+                // One stamp for every row (D-014, extended by D-292).
+                let stamp = clock.now();
+                let res = write_batch_atomic(state, conn, batch, &stamp).await;
                 turn.answer(responder, res);
             }
             HighPriCommand::BlobPut {
@@ -6349,6 +6900,11 @@ async fn write_edges_atomic(
     }
     drop(guards);
 
+    if let Err(e) = check_functional(state, &tx, edges).await {
+        let _ = tx.rollback().await;
+        return Err(e);
+    }
+
     let stmt = tx.prepare(INSERT_LINK).await?;
 
     for edge in edges {
@@ -6377,6 +6933,365 @@ async fn write_edges_atomic(
     drop(stmt);
     tx.commit().await?;
     Ok(edges.len())
+}
+
+/// Refuse a second open target for a functional kind (0.20.0, M3, [D-293]).
+///
+/// For every edge of a functional kind with an open interval: no other open
+/// target for `(source, kind)` in its lineage's view — neither already written
+/// (read through the lineage resolution, so an ancestor's open edge counts)
+/// nor earlier in the same batch. Re-asserting the open target itself is not a
+/// conflict; the primary key and `trg_links_single_open` already decide it.
+///
+/// Runs on the caller's connection, inside the caller's transaction when there
+/// is one, so the rows it reads cannot change before the insert.
+///
+/// [D-293]: ../docs/architecture/s13-decision-register.md#d-293
+async fn check_functional(
+    state: &mut ActorState,
+    conn: &libsql::Connection,
+    edges: &[EdgeAssertion],
+) -> Result<()> {
+    let functional = state.functional_kinds(conn).await?;
+    if functional.is_empty() {
+        return Ok(());
+    }
+    let candidates: Vec<&EdgeAssertion> = edges
+        .iter()
+        .filter(|e| e.valid_to == timestamp::OPEN_SENTINEL && functional.contains(&e.edge_type))
+        .collect();
+    if candidates.is_empty() {
+        return Ok(());
+    }
+    let lineages = state.lineages(conn).await?.clone();
+    let mut in_batch: std::collections::HashMap<(&str, &str, &str), &str> =
+        std::collections::HashMap::new();
+    for e in candidates {
+        let key = (e.branch_name(), e.source.as_str(), e.edge_type.as_str());
+        if let Some(prev) = in_batch.insert(key, e.target.as_str()) {
+            if prev != e.target {
+                return Err(DbError::FunctionalEdgeConflict {
+                    source_id: e.source.clone(),
+                    edge_type: e.edge_type.clone(),
+                    open_target: prev.to_string(),
+                    attempted: e.target.clone(),
+                });
+            }
+        }
+        let open = crate::graph::pointer::open_edges(
+            conn,
+            &lineages,
+            e.branch_name(),
+            Some(&e.source),
+            &e.edge_type,
+            None,
+        )
+        .await?;
+        if let Some(other) = open.iter().find(|o| o.target != e.target) {
+            return Err(DbError::FunctionalEdgeConflict {
+                source_id: e.source.clone(),
+                edge_type: e.edge_type.clone(),
+                open_target: other.target.clone(),
+                attempted: e.target.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Close `(source, kind)`'s open targets on a lineage and open `ptr.target`,
+/// on `conn` (a transaction) under `stamp` (0.20.0, M3, [D-293]).
+///
+/// Every open target other than the new one is closed at `ptr.valid_from` —
+/// by shadow retirement when the open row is an ancestor's, which is
+/// `retire_edge`'s ordinary behaviour on a branch. If the new target is
+/// already open, nothing is opened, and if it was the only open target the
+/// move is a no-op that writes nothing.
+///
+/// [D-293]: ../docs/architecture/s13-decision-register.md#d-293
+async fn move_pointer(
+    conn: &libsql::Connection,
+    lineages: &Lineages,
+    shape: LineageShape,
+    ptr: &crate::batch::PointerSet,
+    stamp: &str,
+) -> Result<crate::batch::PointerChange> {
+    let branch = ptr.branch_name();
+    let open = crate::graph::pointer::open_edges(
+        conn,
+        lineages,
+        branch,
+        Some(&ptr.source),
+        &ptr.edge_type,
+        None,
+    )
+    .await?;
+    let old = open.first().map(|o| o.target.clone());
+    let already = open.iter().any(|o| o.target == ptr.target);
+    // One overlap guard for both inserts this move may make: same lineage,
+    // same shape, and preparing the resolved statement is the expensive part.
+    let mut guard: Option<OverlapGuard> = None;
+    // The append primitive: link from what the head *is*, read inside this
+    // transaction, so no caller-side read can go stale between the two.
+    if let Some(kind) = &ptr.link_previous {
+        if !already {
+            let from = old.clone().unwrap_or_else(|| ptr.source.clone());
+            let mut link = EdgeAssertion::new(&from, &ptr.target, kind).valid_from(&ptr.valid_from);
+            if let Some(b) = &ptr.branch {
+                link = link.on_branch(b.clone());
+            }
+            let link = link.normalized()?;
+            if guard.is_none() {
+                guard = Some(OverlapGuard::prepare(conn, shape, lineages, branch).await?);
+            }
+            check_prepared(guard.as_ref().expect("prepared above"), &link).await?;
+            if let Err(e) = conn.execute(INSERT_LINK, edge_params(&link, stamp)).await {
+                return Err(classify(
+                    conn,
+                    e,
+                    WriteOp::Edge {
+                        source_id: &link.source,
+                        target_id: &link.target,
+                        edge_type: &link.edge_type,
+                    },
+                )
+                .await);
+            }
+        }
+    }
+    if already && open.len() == 1 {
+        drop(guard);
+        return Ok(crate::batch::PointerChange {
+            source: ptr.source.clone(),
+            edge_type: ptr.edge_type.clone(),
+            old,
+            new: ptr.target.clone(),
+            changed: false,
+        });
+    }
+    let ancestry = lineages.ancestry(branch);
+    for o in open.iter().filter(|o| o.target != ptr.target) {
+        if ptr.valid_from.as_str() <= o.valid_from.as_str() {
+            return Err(DbError::InvalidTimestamp {
+                value: ptr.valid_from.clone(),
+                reason: format!(
+                    "a pointer move must start after the target it closes: \
+                     {} -> {} ({}) opened at {}",
+                    ptr.source, o.target, ptr.edge_type, o.valid_from
+                ),
+            });
+        }
+        retire_edge(
+            conn,
+            &ptr.source,
+            &o.target,
+            &ptr.edge_type,
+            &o.valid_from,
+            &ptr.valid_from,
+            stamp,
+            branch,
+            shape,
+            &ancestry,
+        )
+        .await?;
+    }
+    if !already {
+        let mut edge = EdgeAssertion::new(&ptr.source, &ptr.target, &ptr.edge_type)
+            .valid_from(&ptr.valid_from)
+            .weight(ptr.weight);
+        if let Some(b) = &ptr.branch {
+            edge = edge.on_branch(b.clone());
+        }
+        let edge = edge.normalized()?;
+        if guard.is_none() {
+            guard = Some(OverlapGuard::prepare(conn, shape, lineages, branch).await?);
+        }
+        let checked = check_prepared(guard.as_ref().expect("prepared above"), &edge).await;
+        drop(guard.take());
+        checked?;
+        if let Err(e) = conn.execute(INSERT_LINK, edge_params(&edge, stamp)).await {
+            return Err(classify(
+                conn,
+                e,
+                WriteOp::Edge {
+                    source_id: &edge.source,
+                    target_id: &edge.target,
+                    edge_type: &edge.edge_type,
+                },
+            )
+            .await);
+        }
+    }
+    drop(guard);
+    Ok(crate::batch::PointerChange {
+        source: ptr.source.clone(),
+        edge_type: ptr.edge_type.clone(),
+        old,
+        new: ptr.target.clone(),
+        changed: true,
+    })
+}
+
+/// [`HighPriCommand::WriteBatch`]'s body: every row or none, one stamp
+/// (0.20.0, M2, [D-292]).
+///
+/// Order inside the transaction: concepts, retirements, edges (overlap guard,
+/// functional check, insert), pointer moves. Validation that needs no lock —
+/// lineage claims, the cap, duplicate concept ids, overlaps within the batch,
+/// every lineage registered — happens before the transaction opens, as
+/// `write_edges_atomic` does it.
+///
+/// [D-292]: ../docs/architecture/s13-decision-register.md#d-292
+async fn write_batch_atomic(
+    state: &mut ActorState,
+    conn: &libsql::Connection,
+    batch: crate::batch::WriteBatch,
+    stamp: &str,
+) -> Result<crate::batch::BatchReport> {
+    let crate::batch::WriteBatch {
+        concepts,
+        edges,
+        retirements,
+        pointers,
+        ..
+    } = batch;
+
+    reject_overlaps_within(&edges)?;
+    {
+        let mut seen = std::collections::HashSet::new();
+        for c in &concepts {
+            if !seen.insert(c.id.as_str()) {
+                return Err(DbError::InvalidId {
+                    id: c.id.clone(),
+                    reason: "appears twice in one write batch, and one batch is one \
+                             stamp: the second version would not be later than the first"
+                        .to_string(),
+                });
+            }
+        }
+    }
+
+    let mut names: Vec<&str> = Vec::new();
+    for n in concepts
+        .iter()
+        .map(|c| c.branch_name())
+        .chain(edges.iter().map(|e| e.branch_name()))
+        .chain(retirements.iter().map(|r| {
+            r.branch
+                .as_ref()
+                .map_or(crate::schema::ddl::MAIN_BRANCH, |b| b.as_str())
+        }))
+        .chain(pointers.iter().map(|p| p.branch_name()))
+    {
+        if !names.contains(&n) {
+            names.push(n);
+        }
+    }
+    if names.is_empty() {
+        names.push(crate::schema::ddl::MAIN_BRANCH);
+    }
+    let (shape, lineages) = check_lineages_with(state, conn, &names).await?;
+    let lineages = lineages.clone();
+
+    let tx = conn
+        .transaction_with_behavior(libsql::TransactionBehavior::Immediate)
+        .await?;
+
+    let res: Result<Vec<crate::batch::PointerChange>> = async {
+        for c in &concepts {
+            if let Err(e) = tx.execute(UPSERT_CONCEPT, concept_params(c, stamp)).await {
+                return Err(classify(
+                    &tx,
+                    e,
+                    WriteOp::Concept {
+                        id: &c.id,
+                        recorded_at: stamp,
+                        branch: c.branch_name(),
+                    },
+                )
+                .await);
+            }
+        }
+        for r in &retirements {
+            let name = r
+                .branch
+                .as_ref()
+                .map_or(crate::schema::ddl::MAIN_BRANCH, |b| b.as_str());
+            retire_edge(
+                &tx,
+                &r.source,
+                &r.target,
+                &r.edge_type,
+                &r.valid_from,
+                &r.valid_to,
+                stamp,
+                name,
+                shape,
+                &lineages.ancestry(name),
+            )
+            .await?;
+        }
+        if !edges.is_empty() {
+            let mut branches: Vec<&str> = Vec::new();
+            for e in &edges {
+                if !branches.contains(&e.branch_name()) {
+                    branches.push(e.branch_name());
+                }
+            }
+            for name in &branches {
+                let guard = OverlapGuard::prepare(&tx, shape, &lineages, name).await?;
+                for e in edges.iter().filter(|e| e.branch_name() == *name) {
+                    if let Err(err) = check_prepared(&guard, e).await {
+                        drop(guard);
+                        return Err(err);
+                    }
+                }
+                drop(guard);
+            }
+            check_functional(state, &tx, &edges).await?;
+            let stmt = tx.prepare(INSERT_LINK).await?;
+            for e in &edges {
+                stmt.reset();
+                if let Err(err) = stmt.execute(edge_params(e, stamp)).await {
+                    drop(stmt);
+                    return Err(classify(
+                        &tx,
+                        err,
+                        WriteOp::Edge {
+                            source_id: &e.source,
+                            target_id: &e.target,
+                            edge_type: &e.edge_type,
+                        },
+                    )
+                    .await);
+                }
+            }
+            drop(stmt);
+        }
+        let mut changes = Vec::with_capacity(pointers.len());
+        for p in &pointers {
+            changes.push(move_pointer(&tx, &lineages, shape, p, stamp).await?);
+        }
+        Ok(changes)
+    }
+    .await;
+
+    match res {
+        Ok(changes) => {
+            tx.commit().await?;
+            Ok(crate::batch::BatchReport {
+                recorded_at: stamp.to_string(),
+                concepts: concepts.len(),
+                edges: edges.len(),
+                retirements: retirements.len(),
+                pointers: changes,
+            })
+        }
+        Err(e) => {
+            let _ = tx.rollback().await;
+            Err(e)
+        }
+    }
 }
 
 /// Write every concept or none, under a single stamp.

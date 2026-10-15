@@ -218,6 +218,16 @@ create_exception!(
 );
 create_exception!(
     macrame,
+    FunctionalEdgeConflictError,
+    IntegrityError,
+    "A second open target for a functional edge kind on one lineage (0.20.0, \
+     D-293). Attributes: `source_id`, `edge_type`, `open_target`, \
+     `attempted`.\n\n\
+     Move a pointer with `set_pointer`, which closes the old target and opens \
+     the new one under one stamp."
+);
+create_exception!(
+    macrame,
     SingleOpenViolationError,
     IntegrityError,
     "The relationship already has an open interval; retire it first. \
@@ -436,6 +446,24 @@ create_exception!(
 );
 create_exception!(
     macrame,
+    ForkInFutureError,
+    BranchError,
+    "A historical fork named an instant after now (0.20.0, D-291). \
+     Attributes: `branch`, `at`, `now`.\n\n\
+     A cutoff in the future would admit rows nobody has written yet, so the \
+     parent's next write would change what the child inherited."
+);
+create_exception!(
+    macrame,
+    ConceptNotVisibleError,
+    BranchError,
+    "`fork_after` named a concept the parent lineage cannot see (0.20.0, \
+     D-291). Attributes: `id`, `branch`.\n\n\
+     The concept may exist — on a sibling, or on an ancestor after the parent's \
+     own cutoff — so this is a lineage question, not a missing id."
+);
+create_exception!(
+    macrame,
     CrossLineageError,
     BranchError,
     "A branch tried to restate a concept another lineage holds. Attributes: \
@@ -485,6 +513,14 @@ create_exception!(
      instant the search reads at is the one age is measured from — or drop \
      `half_life`. It is not defaulted to now: that would make every decayed \
      search quietly a search about the present."
+);
+create_exception!(
+    macrame,
+    ChangeFeedGapError,
+    TemporalError,
+    "The change feed cannot answer from `after_seq`: rows past it were \
+     archived (0.20.0, D-295). Attributes: `after_seq`, `removed`.\n\n\
+     Resynchronise from current state and continue from `head_seq()`."
 );
 create_exception!(
     macrame,
@@ -627,6 +663,15 @@ create_exception!(
     SubgraphTooLargeError,
     BudgetError,
     "A subgraph exceeded its byte budget. Attributes: `n`, `budget`."
+);
+create_exception!(
+    macrame,
+    BatchTooLargeError,
+    BudgetError,
+    "A `write_batch` over `MAX_BATCH_ROWS` (0.20.0, D-292). Attributes: \
+     `rows`, `max`.\n\n\
+     A batch is one transaction under the write lock; a bulk load belongs on \
+     `bulk_import`, which chunks."
 );
 create_exception!(
     macrame,
@@ -818,6 +863,43 @@ fn build(py: Python<'_>, err: DbError) -> PyErr {
             e.setattr("forked_at", forked_at)?;
             e.setattr("parent_forked_at", parent_forked_at)
         }),
+
+        DbError::ForkInFuture { branch, at, now } => raise::<ForkInFutureError, _>(py, m, |e| {
+            e.setattr("branch", branch)?;
+            e.setattr("at", at)?;
+            e.setattr("now", now)
+        }),
+
+        DbError::ConceptNotVisible { id, branch } => {
+            raise::<ConceptNotVisibleError, _>(py, m, |e| {
+                e.setattr("id", id)?;
+                e.setattr("branch", branch)
+            })
+        }
+
+        DbError::FunctionalEdgeConflict {
+            source_id,
+            edge_type,
+            open_target,
+            attempted,
+        } => raise::<FunctionalEdgeConflictError, _>(py, m, |e| {
+            e.setattr("source_id", source_id)?;
+            e.setattr("edge_type", edge_type)?;
+            e.setattr("open_target", open_target)?;
+            e.setattr("attempted", attempted)
+        }),
+
+        DbError::BatchTooLarge { rows, max } => raise::<BatchTooLargeError, _>(py, m, |e| {
+            e.setattr("rows", rows)?;
+            e.setattr("max", max)
+        }),
+
+        DbError::ChangeFeedGap { after_seq, removed } => {
+            raise::<ChangeFeedGapError, _>(py, m, |e| {
+                e.setattr("after_seq", after_seq)?;
+                e.setattr("removed", removed)
+            })
+        }
 
         DbError::CrossLineage {
             id,
@@ -1086,6 +1168,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
         // integrity
         OverlappingIntervalError,
         SingleOpenViolationError,
+        FunctionalEdgeConflictError,
         NegativeEdgeWeightError,
         CurrentDriftError,
         RebuildFailedError,
@@ -1117,6 +1200,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
         ArchiveViolationError,
         ArchiveWindowError,
         RecordedInstantUnreachableError,
+        ChangeFeedGapError,
         // branch
         BranchError,
         UnknownBranchError,
@@ -1124,6 +1208,8 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
         BranchNotArchivableError,
         BranchArchivedError,
         ForkPrecedesParentError,
+        ForkInFutureError,
+        ConceptNotVisibleError,
         CrossLineageError,
         BranchMismatchError,
         // writer
@@ -1133,6 +1219,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
         // budget
         SubgraphTooLargeError,
         BlobTooLargeError,
+        BatchTooLargeError,
     );
     Ok(())
 }

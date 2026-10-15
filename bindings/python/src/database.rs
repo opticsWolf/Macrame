@@ -1766,14 +1766,277 @@ impl PyDatabase {
     ///   characters, control characters, and leading or trailing whitespace.
     /// - `ForkPrecedesParentError` when the clock would place the fork point
     ///   before the parent's own.
-    #[pyo3(signature = (name, frm = "main"))]
-    fn fork(&self, py: Python<'_>, name: &str, frm: &str) -> PyResult<branch::PyBranch> {
+    ///
+    /// # Forking from the past (0.20.0, D-291)
+    ///
+    /// `at=` cuts at a past transaction-time instant of `frm` (a `datetime`
+    /// or canonical string); `after=` cuts right after a concept appeared on
+    /// `frm` — *branch after turn k*. At most one of the two. `at` after now
+    /// raises `ForkInFutureError`; an `after` concept `frm` cannot see raises
+    /// `ConceptNotVisibleError`.
+    #[pyo3(signature = (name, frm = "main", *, at = None, after = None))]
+    fn fork(
+        &self,
+        py: Python<'_>,
+        name: &str,
+        frm: &str,
+        at: Option<&Bound<'_, PyAny>>,
+        after: Option<&str>,
+    ) -> PyResult<branch::PyBranch> {
         let name = branch::branch_id(name)?;
         let parent = branch::branch_id(frm)?;
+        let at = crate::timestamps::to_canonical_opt(at)?;
+        if at.is_some() && after.is_some() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "fork() takes at most one of `at` and `after`",
+            ));
+        }
+        let after = after.map(str::to_string);
         let inner = self.with_db(py, move |db| {
-            runtime().block_on(db.fork(name, parent)).map_err(to_py)
+            runtime()
+                .block_on(async {
+                    match (at, after) {
+                        (Some(ts), _) => db.fork_at(name, parent, &ts).await,
+                        (None, Some(id)) => db.fork_after(name, parent, &id).await,
+                        (None, None) => db.fork(name, parent).await,
+                    }
+                })
+                .map_err(to_py)
         })?;
         Ok(branch::PyBranch { inner })
+    }
+
+    /// Register an edge kind and whether it is functional (0.20.0, D-293).
+    ///
+    /// A functional kind holds at most one open target per `(source, kind)` in
+    /// each lineage's view; every edge write refuses a second one with
+    /// `FunctionalEdgeConflictError`, and `set_pointer` moves it. Idempotent;
+    /// may flip the flag. Call at startup.
+    #[pyo3(signature = (kind, functional = false))]
+    fn register_edge_kind(&self, py: Python<'_>, kind: &str, functional: bool) -> PyResult<()> {
+        let kind = kind.to_string();
+        self.with_db(py, move |db| {
+            runtime()
+                .block_on(db.register_edge_kind(&kind, functional))
+                .map_err(to_py)
+        })
+    }
+
+    /// Every registered edge kind as `(kind, functional)`, by name.
+    fn edge_kinds(&self, py: Python<'_>) -> PyResult<Vec<(String, bool)>> {
+        self.with_db(py, move |db| {
+            runtime().block_on(db.edge_kinds()).map_err(to_py)
+        })
+    }
+
+    /// Move a pointer: close `(source, edge_type)`'s open target on the
+    /// lineage and open `target`, under one stamp (0.20.0, D-293).
+    ///
+    /// `valid_from` is required: the old target's interval closes there and
+    /// the new one's opens. Moving to the current target writes nothing and
+    /// returns `changed=False`.
+    #[pyo3(signature = (source, edge_type, target, *, valid_from, weight = 1.0, branch = None, link_previous = None))]
+    #[allow(clippy::too_many_arguments)]
+    fn set_pointer(
+        &self,
+        py: Python<'_>,
+        source: &str,
+        edge_type: &str,
+        target: &str,
+        valid_from: &Bound<'_, PyAny>,
+        weight: f64,
+        branch: Option<&str>,
+        link_previous: Option<&str>,
+    ) -> PyResult<crate::conversation::PyPointerChange> {
+        let mut ptr = macrame::PointerSet::new(source, edge_type, target)
+            .valid_from(to_canonical(Some(valid_from))?)
+            .weight(weight);
+        if let Some(kind) = link_previous {
+            ptr = ptr.link_previous(kind);
+        }
+        if let Some(b) = branch {
+            ptr = ptr.on_branch(branch::branch_id(b)?);
+        }
+        let inner = self.with_db(py, move |db| {
+            runtime().block_on(db.set_pointer(ptr)).map_err(to_py)
+        })?;
+        Ok(crate::conversation::PyPointerChange { inner })
+    }
+
+    /// Where `(source, edge_type)` points on a lineage, or `None` (0.20.0,
+    /// D-293). `as_of_recorded` asks where it pointed at a past transaction
+    /// time.
+    #[pyo3(signature = (source, edge_type, *, branch = None, as_of_recorded = None))]
+    fn pointer(
+        &self,
+        py: Python<'_>,
+        source: &str,
+        edge_type: &str,
+        branch: Option<&str>,
+        as_of_recorded: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Option<String>> {
+        let plan = conversation_plan(branch, None, as_of_recorded)?;
+        let (source, edge_type) = (source.to_string(), edge_type.to_string());
+        self.with_db(py, move |db| {
+            runtime()
+                .block_on(db.pointer(&source, &edge_type, plan))
+                .map_err(to_py)
+        })
+    }
+
+    /// Every pointer of `edge_type` on a lineage as `(source, target)` pairs,
+    /// in source order (0.20.0, D-293) — e.g. every file's current version.
+    #[pyo3(signature = (edge_type, *, branch = None, as_of_recorded = None))]
+    fn pointers(
+        &self,
+        py: Python<'_>,
+        edge_type: &str,
+        branch: Option<&str>,
+        as_of_recorded: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Vec<(String, String)>> {
+        let plan = conversation_plan(branch, None, as_of_recorded)?;
+        let edge_type = edge_type.to_string();
+        self.with_db(py, move |db| {
+            runtime()
+                .block_on(db.pointers(&edge_type, plan))
+                .map_err(to_py)
+        })
+    }
+
+    /// Concepts, edges, retirements and pointer moves as one act: one
+    /// transaction, one `recorded_at`, all or nothing (0.20.0, D-292).
+    ///
+    /// `retire` takes `(source, target, edge_type, valid_from, valid_to)`
+    /// tuples; `pointers` takes `(source, edge_type, target, valid_from)`
+    /// tuples, optionally with a fifth element, the weight, and a sixth, a
+    /// `link_previous` edge kind: the move then also links the target it
+    /// closes (or `source`) to the new one, decided inside the transaction —
+    /// the one-call append. Rows naming no
+    /// lineage take `branch`; a row naming another raises
+    /// `BranchMismatchError`. Over `MAX_BATCH_ROWS` raises
+    /// `BatchTooLargeError`.
+    #[pyo3(signature = (concepts = Vec::new(), edges = Vec::new(), retire = Vec::new(), pointers = Vec::new(), *, branch = None))]
+    fn write_batch(
+        &self,
+        py: Python<'_>,
+        concepts: Vec<PyConceptUpsert>,
+        edges: Vec<PyEdgeAssertion>,
+        retire: Vec<Bound<'_, PyTuple>>,
+        pointers: Vec<Bound<'_, PyTuple>>,
+        branch: Option<&str>,
+    ) -> PyResult<crate::conversation::PyBatchReport> {
+        let mut batch = macrame::WriteBatch::new();
+        if let Some(b) = branch {
+            batch = batch.on_branch(branch::branch_id(b)?);
+        }
+        for c in concepts {
+            batch = batch.concept(c.inner);
+        }
+        for e in edges {
+            batch = batch.edge(e.inner);
+        }
+        for r in retire {
+            if r.len() != 5 {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "retire rows are (source, target, edge_type, valid_from, valid_to)",
+                ));
+            }
+            batch = batch.retire(macrame::Retirement::new(
+                r.get_item(0)?.extract::<String>()?,
+                r.get_item(1)?.extract::<String>()?,
+                r.get_item(2)?.extract::<String>()?,
+                to_canonical(Some(&r.get_item(3)?))?,
+                to_canonical(Some(&r.get_item(4)?))?,
+            ));
+        }
+        for p in pointers {
+            if !(4..=6).contains(&p.len()) {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "pointer rows are (source, edge_type, target, valid_from[, weight[, link_previous]])",
+                ));
+            }
+            let mut ptr = macrame::PointerSet::new(
+                p.get_item(0)?.extract::<String>()?,
+                p.get_item(1)?.extract::<String>()?,
+                p.get_item(2)?.extract::<String>()?,
+            )
+            .valid_from(to_canonical(Some(&p.get_item(3)?))?);
+            if p.len() >= 5 {
+                ptr = ptr.weight(p.get_item(4)?.extract::<f64>()?);
+            }
+            if p.len() == 6 {
+                if let Some(kind) = p.get_item(5)?.extract::<Option<String>>()? {
+                    ptr = ptr.link_previous(kind);
+                }
+            }
+            batch = batch.pointer(ptr);
+        }
+        let inner = self.with_db(py, move |db| {
+            runtime().block_on(db.write_batch(batch)).map_err(to_py)
+        })?;
+        Ok(crate::conversation::PyBatchReport { inner })
+    }
+
+    /// The concepts with these ids as one lineage sees them, with where and
+    /// when each version was written (0.20.0, D-294).
+    ///
+    /// Retired versions and ids the lineage cannot see are absent; the rest
+    /// come back in the order asked. `as_of_valid`, when given, keeps only
+    /// versions valid then; `as_of_recorded` asks what the lineage believed
+    /// at a past transaction time.
+    #[pyo3(signature = (ids, *, branch = None, as_of_valid = None, as_of_recorded = None))]
+    fn concepts_by_id(
+        &self,
+        py: Python<'_>,
+        ids: Vec<String>,
+        branch: Option<&str>,
+        as_of_valid: Option<&Bound<'_, PyAny>>,
+        as_of_recorded: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Vec<crate::conversation::PyConceptVersion>> {
+        let plan = conversation_plan(branch, as_of_valid, as_of_recorded)?;
+        let out = self.with_db(py, move |db| {
+            runtime()
+                .block_on(db.concepts_by_id(&ids, plan))
+                .map_err(to_py)
+        })?;
+        Ok(out
+            .into_iter()
+            .map(|inner| crate::conversation::PyConceptVersion { inner })
+            .collect())
+    }
+
+    /// The highest log sequence number ever allocated — where a change-feed
+    /// consumer starts after synchronising (0.20.0, D-295).
+    fn head_seq(&self, py: Python<'_>) -> PyResult<i64> {
+        self.with_db(py, move |db| {
+            runtime().block_on(db.head_seq()).map_err(to_py)
+        })
+    }
+
+    /// Ledger writes after `after_seq`, oldest first (0.20.0, D-295).
+    ///
+    /// `branch` keeps rows written on that lineage; `tables` keeps
+    /// `"concepts"` and/or `"links"` rows. Continue from the last `seq_id`.
+    /// Raises `ChangeFeedGapError` when rows past `after_seq` were archived.
+    #[pyo3(signature = (after_seq, *, branch = None, tables = Vec::new(), limit = 1000))]
+    fn changes(
+        &self,
+        py: Python<'_>,
+        after_seq: i64,
+        branch: Option<String>,
+        tables: Vec<String>,
+        limit: usize,
+    ) -> PyResult<Vec<crate::conversation::PyChange>> {
+        let out = self.with_db(py, move |db| {
+            let t: Vec<&str> = tables.iter().map(String::as_str).collect();
+            runtime()
+                .block_on(db.changes(after_seq, branch.as_deref(), &t, limit))
+                .map_err(to_py)
+        })?;
+        Ok(out
+            .into_iter()
+            .map(|inner| crate::conversation::PyChange { inner })
+            .collect())
     }
 
     /// Write a key into `kv_store`, replacing whatever was there (D-280).
@@ -2157,7 +2420,11 @@ impl PyDatabase {
     /// Goes through the DiskANN index rather than scanning: an
     /// `ORDER BY vector_distance_cos(…)` over the table is linear in the corpus
     /// however small `top_k` is. Results ascend — **smaller score is closer**.
-    #[pyo3(signature = (model, query, *, top_k = 10, as_of_valid = None, half_life = None))]
+    ///
+    /// `branch` (0.20.0, D-294) keeps only concepts that lineage holds — minted
+    /// on it or inherited before its cutoff. Unset searches the whole file.
+    #[pyo3(signature = (model, query, *, top_k = 10, as_of_valid = None, half_life = None, branch = None))]
+    #[allow(clippy::too_many_arguments)]
     fn search_vector(
         &self,
         py: Python<'_>,
@@ -2166,6 +2433,7 @@ impl PyDatabase {
         top_k: usize,
         as_of_valid: Option<&Bound<'_, PyAny>>,
         half_life: Option<&Bound<'_, PyAny>>,
+        branch: Option<String>,
     ) -> PyResult<Vec<vector::PyVectorHit>> {
         let model = vector::model_name(model)?;
         let query = crate::types::coerce_embedding(query)?;
@@ -2173,13 +2441,14 @@ impl PyDatabase {
         let half_life = crate::timestamps::to_duration(half_life)?;
         let hits = self.with_db(py, move |db| {
             runtime()
-                .block_on(macrame::vector::search_vector(
+                .block_on(macrame::vector::search_vector_on(
                     db.read_conn(),
                     &query,
                     &model,
                     top_k,
                     as_of_valid.as_deref(),
                     half_life,
+                    branch.as_deref(),
                 ))
                 .map_err(to_py)
         })?;
@@ -2196,7 +2465,10 @@ impl PyDatabase {
     /// string is an FTS5 syntax error rather than a literal, so it is escaped
     /// here unless `raw` is set — which is the same choice `hybrid_search`
     /// makes, for the same reason.
-    #[pyo3(signature = (query, *, top_k = 10, raw = false, as_of_valid = None, half_life = None))]
+    ///
+    /// `branch` (0.20.0, D-294) keeps only concepts that lineage holds. Unset
+    /// searches the whole file, as before.
+    #[pyo3(signature = (query, *, top_k = 10, raw = false, as_of_valid = None, half_life = None, branch = None))]
     #[allow(clippy::too_many_arguments)]
     fn keyword_search(
         &self,
@@ -2206,6 +2478,7 @@ impl PyDatabase {
         raw: bool,
         as_of_valid: Option<&Bound<'_, PyAny>>,
         half_life: Option<&Bound<'_, PyAny>>,
+        branch: Option<String>,
     ) -> PyResult<Vec<(String, f64)>> {
         let expr = if raw {
             query.to_string()
@@ -2216,12 +2489,13 @@ impl PyDatabase {
         let half_life = crate::timestamps::to_duration(half_life)?;
         self.with_db(py, move |db| {
             runtime()
-                .block_on(macrame::vector::keyword_search(
+                .block_on(macrame::vector::keyword_search_on(
                     db.read_conn(),
                     &expr,
                     top_k,
                     as_of_valid.as_deref(),
                     half_life,
+                    branch.as_deref(),
                 ))
                 .map_err(to_py)
         })
@@ -2239,7 +2513,10 @@ impl PyDatabase {
     /// `max(5 * top_k, 50)`. An unregistered model raises rather than degrading
     /// to keyword-only: a caller who named a model that does not exist asked a
     /// question this cannot answer.
-    #[pyo3(signature = (model, query_text, query_vector, *, top_k = 10, depth = None, rrf_k = None, raw = false, as_of_valid = None, half_life = None))]
+    ///
+    /// `branch` (0.20.0, D-294) scopes both arms to the concepts that lineage
+    /// holds. Unset searches the whole file.
+    #[pyo3(signature = (model, query_text, query_vector, *, top_k = 10, depth = None, rrf_k = None, raw = false, as_of_valid = None, half_life = None, branch = None))]
     #[allow(clippy::too_many_arguments)]
     fn hybrid_search(
         &self,
@@ -2253,6 +2530,7 @@ impl PyDatabase {
         raw: bool,
         as_of_valid: Option<&Bound<'_, PyAny>>,
         half_life: Option<&Bound<'_, PyAny>>,
+        branch: Option<String>,
     ) -> PyResult<Vec<vector::PyVectorHit>> {
         let model = vector::model_name(model)?;
         let query_vector = crate::types::coerce_embedding(query_vector)?;
@@ -2270,6 +2548,9 @@ impl PyDatabase {
         }
         if let Some(h) = crate::timestamps::to_duration(half_life)? {
             search = search.half_life(h);
+        }
+        if let Some(b) = branch {
+            search = search.on_branch(b);
         }
         let hits = self.with_db(py, move |db| {
             runtime()
@@ -2794,4 +3075,23 @@ fn to_future_stamp_policy(obj: Option<&Bound<'_, PyAny>>) -> PyResult<macrame::F
     Ok(macrame::FutureStampPolicy::Tolerance(
         std::time::Duration::from_secs_f64(seconds),
     ))
+}
+
+/// A `ReadPlan` from the keyword arguments the 0.20.0 reads share.
+fn conversation_plan(
+    branch: Option<&str>,
+    as_of_valid: Option<&Bound<'_, PyAny>>,
+    as_of_recorded: Option<&Bound<'_, PyAny>>,
+) -> PyResult<macrame::ReadPlan> {
+    let mut plan = macrame::ReadPlan::new();
+    if let Some(b) = branch {
+        plan = plan.on(branch::branch_id(b)?);
+    }
+    if let Some(v) = crate::timestamps::to_canonical_opt(as_of_valid)? {
+        plan = plan.valid_at(v);
+    }
+    if let Some(r) = crate::timestamps::to_canonical_opt(as_of_recorded)? {
+        plan = plan.recorded_at(r);
+    }
+    Ok(plan)
 }

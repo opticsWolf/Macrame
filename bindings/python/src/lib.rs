@@ -16,6 +16,7 @@
 
 mod blob;
 mod branch;
+mod conversation;
 mod database;
 mod errors;
 mod graph;
@@ -122,6 +123,7 @@ fn _macrame(m: &Bound<'_, PyModule>) -> PyResult<()> {
     temporal::register(m)?;
     observe::register(m)?;
     vector::register(m)?;
+    conversation::register(m)?;
 
     m.add_class::<blob::PyBlobStat>()?;
     m.add("DEFAULT_MAX_BLOB_BYTES", macrame::DEFAULT_MAX_BLOB_BYTES)?;

@@ -13,7 +13,7 @@ use crate::schema::ddl::*;
 /// guarantee D-029 buys would be void on it while `user_version` insisted all
 /// was well. Reserving 1 as a value this build refuses by name is what makes
 /// "no legacy support" an enforced property instead of a README sentence.
-pub const SCHEMA_VERSION: u32 = 22;
+pub const SCHEMA_VERSION: u32 = 23;
 
 type StepFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
 
@@ -244,6 +244,17 @@ const STEPS: &[Step] = &[
         // and no row for a constraint to disagree with.
         suspends_foreign_keys: false,
         apply: |conn| Box::pin(add_blob_store(conn)),
+    },
+    Step {
+        from: 22,
+        to: 23,
+        name: "edge-kinds",
+        // One `CREATE TABLE` on a table nothing references and which
+        // references nothing -- the v19 -> v20 rung's ground. Empty is the
+        // only truth available: no kind was functional before 0.20.0, and an
+        // unregistered kind keeps its old behaviour.
+        suspends_foreign_keys: false,
+        apply: |conn| Box::pin(add_edge_kinds(conn)),
     },
     Step {
         from: 16,
@@ -534,6 +545,8 @@ async fn baseline(conn: &libsql::Connection) -> Result<()> {
     // v22 (0.19.0, D-288). Before the index and trigger loops, which both name
     // it; references nothing and is referenced by nothing.
     conn.execute(CREATE_BLOBS_TABLE, ()).await?;
+    // v23 (0.20.0, D-293). Outside the ledger, beside the other sidecars.
+    conn.execute(CREATE_EDGE_KINDS_TABLE, ()).await?;
     // Before the triggers, not after: `trg_concepts_fts_*` name this table, and
     // SQLite resolves a trigger body's tables at CREATE TRIGGER time.
     conn.execute(CREATE_CONCEPTS_FTS, ()).await?;
@@ -589,6 +602,18 @@ async fn add_blob_store(conn: &libsql::Connection) -> Result<()> {
     conn.execute(BLOBS_PUT_AT_INDEX, ()).await?;
     conn.execute(CREATE_BLOBS_GUARD_UPDATE, ()).await?;
     conn.execute(CREATE_BLOBS_GUARD_DELETE, ()).await?;
+    Ok(())
+}
+
+/// v22 → v23: the edge-kind register (0.20.0, M3, [D-293]).
+///
+/// One `CREATE TABLE`, no seed: before this release no kind was functional,
+/// and an unregistered kind keeps exactly the behaviour it had. `IF NOT EXISTS`
+/// is safe because no earlier version created the name.
+///
+/// [D-293]: ../../docs/architecture/s13-decision-register.md#d-293
+async fn add_edge_kinds(conn: &libsql::Connection) -> Result<()> {
+    conn.execute(CREATE_EDGE_KINDS_TABLE, ()).await?;
     Ok(())
 }
 

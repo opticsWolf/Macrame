@@ -103,6 +103,10 @@ macrame/
 │   ├── graph/
 │   │   ├── mod.rs
 │   │   ├── builder.rs          # Traversal builder → CTE; AttributeMode hydration
+│   │   ├── concept_lineage.rs  # one lineage's view of concepts: held vs named,
+│   │   │                       #   the versions hybrid (0.20.0, D-294)
+│   │   ├── pointer.rs          # open targets of (source, kind) per lineage, for
+│   │   │                       #   pointer moves and functional kinds (0.20.0, D-293)
 │   │   ├── edge.rs             # assert / retire / re-assert lifecycle
 │   │   ├── lineage.rs          # §15.3 — three read shapes, ancestry resolution (D-220, D-244),
 │   │   │                       #         fork-point cutoffs and the hybrid (D-223)
@@ -115,6 +119,8 @@ macrame/
 │   │   ├── mod.rs
 │   │   ├── interval.rs         # Interval, overlap arithmetic
 │   │   ├── as_of.rs            # valid-time filters under current belief
+│   │   ├── feed.rs             # the change feed: log rows after a seq_id, gap-checked
+│   │   │                       #   (0.20.0, D-295)
 │   │   ├── replay.rs           # window-function reconstruction; cold-DB ATTACH (§5.5)
 │   │   ├── snapshot.rs         # bincode + zstd snapshots, seq-anchored, sidecar files
 │   │   │                       #   (renamed from checkpoint.rs in 0.5.0)
@@ -126,6 +132,8 @@ macrame/
 │   │   ├── registry.rs         # §5.9 — register_model, declared_dimension
 │   │   ├── search.rs           # §5.9 — top-k, RRF fusion
 │   │   └── hybrid.rs           # §5.9 — hybrid vector + FTS, RRF (D-051)
+│   ├── batch.rs                # WriteBatch, PointerSet, Retirement: one act, one
+│   │                           #   stamp (0.20.0, D-292, D-293)
 │   ├── blob.rs                 # §4.10 — blobs: content-addressed bytes by
 │   │                           #   SHA-256, reclaimed by the archive's
 │   │                           #   reference scan (0.19.0, D-281, D-287,

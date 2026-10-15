@@ -229,6 +229,33 @@ EXPECTED: dict[str, tuple[str, str, dict]] = {
     # -- budget --
     "SubgraphTooLarge": ("SubgraphTooLargeError", "BudgetError", {"n": 4242, "budget": 1000}),
     "BlobTooLarge": ("BlobTooLargeError", "BudgetError", {"size": 4242, "max": 1000}),
+    # 0.20.0 (D-291..D-295)
+    "ForkInFuture": (
+        "ForkInFutureError",
+        "BranchError",
+        {
+            "branch": "ahead",
+            "at": "2999-01-01T00:00:00.000000Z",
+            "now": "2026-02-03T04:05:06.000007Z",
+        },
+    ),
+    "ConceptNotVisible": (
+        "ConceptNotVisibleError",
+        "BranchError",
+        {"id": "turn-7", "branch": "alt"},
+    ),
+    "FunctionalEdgeConflict": (
+        "FunctionalEdgeConflictError",
+        "IntegrityError",
+        {
+            "source_id": "session-1",
+            "edge_type": "HEAD",
+            "open_target": "turn-9",
+            "attempted": "turn-3",
+        },
+    ),
+    "BatchTooLarge": ("BatchTooLargeError", "BudgetError", {"rows": 4242, "max": 2000}),
+    "ChangeFeedGap": ("ChangeFeedGapError", "TemporalError", {"after_seq": 4242, "removed": 7}),
 }
 
 

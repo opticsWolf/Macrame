@@ -1,3 +1,4 @@
+pub mod batch;
 pub mod blob;
 pub mod branch;
 pub mod connection;
@@ -16,6 +17,7 @@ pub mod vector;
 // `[`crate::CHUNK_BUDGET`]` in their rustdoc — an intra-doc link that resolved
 // to nothing, since the const lives in `connection`. The bound is the crate's
 // one cross-cutting number; the root is where a reader looks for it.
+pub use batch::{BatchReport, PointerChange, PointerSet, Retirement, WriteBatch, MAX_BATCH_ROWS};
 pub use blob::{BlobLocation, BlobStat, DEFAULT_MAX_BLOB_BYTES};
 pub use branch::{Branch, BranchId, BranchView, Divergence, MAX_BRANCH_ID};
 pub use connection::{

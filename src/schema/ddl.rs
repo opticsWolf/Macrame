@@ -991,6 +991,39 @@ CREATE TABLE IF NOT EXISTS kv_store (
 "#
 );
 
+/// Registered edge kinds, and which of them are functional (v23, 0.20.0, M3,
+/// [D-293]).
+///
+/// A functional kind holds **at most one open target per `(source, kind)` in
+/// each lineage's view** — a pointer: a session's head turn, a file's current
+/// version, a run's status. The write actor enforces it on every edge write
+/// path, resolved per lineage, because a trigger sees one row and the open
+/// target may be an ancestor's (the same reason the overlap guard lives in the
+/// actor, D-060). [`crate::Database::set_pointer`] is the one write that moves
+/// a functional edge.
+///
+/// **Outside the ledger, like `kv_store`.** No log trigger, no lineage, no
+/// archive membership: whether a kind is functional is a property of the
+/// file's vocabulary, not a belief with a history. Registering is idempotent
+/// and may flip the flag; kinds never registered behave as before 0.20.0.
+///
+/// `WITHOUT ROWID` for `kv_store`'s reason: tiny rows, and the key is the
+/// table.
+///
+/// [D-293]: ../../docs/architecture/s13-decision-register.md#d-293
+pub const CREATE_EDGE_KINDS_TABLE: &str = concat!(
+    r#"
+CREATE TABLE IF NOT EXISTS edge_kinds (
+    kind          TEXT PRIMARY KEY,
+    functional    INTEGER NOT NULL CHECK (functional IN (0, 1)),
+    registered_at TEXT NOT NULL,
+    "#,
+    canonical_ts_check!("registered_at"),
+    r#"
+) WITHOUT ROWID;
+"#
+);
+
 /// Content-addressed bytes, reclaimed by the archive and by nothing else
 /// (§4.10, v22, [D-281]).
 ///

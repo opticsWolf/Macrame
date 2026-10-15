@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use crate::error::{DbError, Result};
 use crate::vector::search::{decay_factor, rerank_depth};
-use crate::vector::{reciprocal_rank_fusion, search_vector, ModelName, VectorSearchResult};
+use crate::vector::{reciprocal_rank_fusion, ModelName, VectorSearchResult};
 
 /// The `k` in `1/(k + rank)`, from the paper and from §5.9.
 ///
@@ -114,6 +114,35 @@ pub async fn keyword_search(
     as_of_valid: Option<&str>,
     half_life: Option<Duration>,
 ) -> Result<Vec<(String, f64)>> {
+    keyword_search_on(conn, query, top_k, as_of_valid, half_life, None).await
+}
+
+/// [`keyword_search`], restricted to the concepts one lineage holds (0.20.0,
+/// M5, [D-294]).
+///
+/// `branch: None` is [`keyword_search`] exactly — the whole file's index, every
+/// lineage's concepts, byte-identical SQL. That asymmetry with traversal (where
+/// unbranched means the trunk) is deliberate and recorded in D-294: the index
+/// is a property of the file, callers already rely on it answering across
+/// lineages, and "search everything" is a question with a real use.
+///
+/// `Some(b)` keeps the concepts `b` **holds** — minted on it, or inherited at
+/// or before the cutoff — at the version `b` sees, and drops the rest before
+/// the `LIMIT`, so the answer is `top_k` hits from `b` rather than `top_k`
+/// hits filtered down. Concepts `b`'s edges merely name (`filter_visible`'s
+/// second tier) are not held and are not found here. The match itself runs
+/// on the index's single row per concept — the latest text — as the module
+/// docs of `graph::concept_lineage` say.
+///
+/// [D-294]: ../../docs/architecture/s13-decision-register.md#d-294
+pub async fn keyword_search_on(
+    conn: &libsql::Connection,
+    query: &str,
+    top_k: usize,
+    as_of_valid: Option<&str>,
+    half_life: Option<Duration>,
+    branch: Option<&str>,
+) -> Result<Vec<(String, f64)>> {
     if top_k == 0 || query.trim().is_empty() {
         return Ok(Vec::new());
     }
@@ -135,10 +164,32 @@ pub async fn keyword_search(
         ""
     };
 
+    // The lineage, when one is named and the database has more than one.
+    // `scope_for` refuses an unregistered name; a single-lineage database has
+    // nothing to narrow and keeps the original statement.
+    let scope = match branch {
+        Some(b) => crate::graph::concept_lineage::scope_for(conn, Some(b)).await?,
+        None => None,
+    };
+    let (with, source) = match &scope {
+        None => (String::new(), "concepts"),
+        Some(ancestry) => (
+            format!(
+                "WITH {} ",
+                crate::graph::concept_lineage::versions_cte(
+                    ancestry.len(),
+                    3 + usize::from(as_of_valid.is_some()),
+                    None,
+                    "",
+                )
+            ),
+            "concept_versions",
+        ),
+    };
     let sql = format!(
-        "SELECT c.id, bm25(concepts_fts) AS rank{age_column}
+        "{with}SELECT c.id, bm25(concepts_fts) AS rank{age_column}
            FROM concepts_fts
-           JOIN concepts c ON c.rowid_pk = concepts_fts.rowid
+           JOIN {source} c ON c.rowid_pk = concepts_fts.rowid
           WHERE concepts_fts MATCH ?1
             AND {visible}
           ORDER BY rank ASC, c.id ASC
@@ -149,6 +200,9 @@ pub async fn keyword_search(
     let mut params: Vec<libsql::Value> = vec![query.into(), (want as i64).into()];
     if let Some(t) = as_of_valid {
         params.push(t.into());
+    }
+    if let Some(ancestry) = &scope {
+        params.extend(crate::graph::lineage::ancestry_params(ancestry));
     }
     let mut rows = conn.query(&sql, params).await?;
     let mut out: Vec<(String, f64)> = Vec::new();
@@ -219,6 +273,7 @@ pub struct HybridSearch {
     raw_match: bool,
     as_of_valid: Option<String>,
     half_life: Option<Duration>,
+    branch: Option<String>,
 }
 
 impl HybridSearch {
@@ -237,7 +292,18 @@ impl HybridSearch {
             raw_match: false,
             as_of_valid: None,
             half_life: None,
+            branch: None,
         }
+    }
+
+    /// Search only the concepts `branch` holds, in both arms (0.20.0, M5,
+    /// [D-294]). See [`keyword_search_on`] for what *holds* means and why an
+    /// unset branch searches the whole file.
+    ///
+    /// [D-294]: ../../docs/architecture/s13-decision-register.md#d-294
+    pub fn on_branch(mut self, branch: impl Into<String>) -> Self {
+        self.branch = Some(branch.into());
+        self
     }
 
     pub fn top_k(mut self, k: usize) -> Self {
@@ -324,13 +390,15 @@ impl HybridSearch {
         // is deliberately not softened into "no vector results": a caller who
         // named a model that does not exist asked a question this cannot answer.
         let at = self.as_of_valid.as_deref();
-        let vector: Vec<VectorSearchResult> = search_vector(
+        let branch = self.branch.as_deref();
+        let vector: Vec<VectorSearchResult> = crate::vector::search::search_vector_on(
             conn,
             &self.query_vector,
             &self.model,
             depth,
             at,
             self.half_life,
+            branch,
         )
         .await?;
 
@@ -339,7 +407,8 @@ impl HybridSearch {
         } else {
             escape_fts5_query(&self.query_text)
         };
-        let keyword = keyword_search(conn, &match_expr, depth, at, self.half_life).await?;
+        let keyword =
+            keyword_search_on(conn, &match_expr, depth, at, self.half_life, branch).await?;
 
         let vector_ids: Vec<String> = vector.iter().map(|v| v.concept_id.clone()).collect();
         let keyword_ids: Vec<String> = keyword.iter().map(|(id, _)| id.clone()).collect();

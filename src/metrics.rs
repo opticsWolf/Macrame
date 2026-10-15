@@ -293,6 +293,31 @@ pub enum CommandKind {
     /// construction, which is `Analyze`'s problem and not a signal.
     /// **At the end of the declaration order**, per [`CommandKind::index`].
     BlobPut,
+    /// Registering an edge kind, functional or not (0.20.0, M3, [D-293]).
+    ///
+    /// **Not exempt**: one upsert into a `WITHOUT ROWID` sidecar. **At the end
+    /// of the declaration order**, per [`CommandKind::index`].
+    ///
+    /// [D-293]: ../docs/architecture/s13-decision-register.md#d-293
+    RegisterEdgeKind,
+    /// One [`crate::Database::set_pointer`] turn (0.20.0, M3, [D-293]): a read
+    /// of the open target through the lineage resolution, at most one
+    /// retirement per open target, and one insert.
+    ///
+    /// **Not exempt.** A pointer move is a handful of indexed statements, so a
+    /// long one is information. At the end of the declaration order.
+    ///
+    /// [D-293]: ../docs/architecture/s13-decision-register.md#d-293
+    SetPointer,
+    /// One [`crate::Database::write_batch`] turn (0.20.0, M2, [D-292]).
+    ///
+    /// **Exempt**, for [`CommandKind::WriteBulkAtomic`]'s reason: the batch is
+    /// one act under one stamp and splitting it is the thing it exists not to
+    /// do. Unlike that kind it has a bound —
+    /// [`crate::batch::MAX_BATCH_ROWS`]. At the end of the declaration order.
+    ///
+    /// [D-292]: ../docs/architecture/s13-decision-register.md#d-292
+    WriteBatch,
 }
 
 impl CommandKind {
@@ -327,6 +352,9 @@ impl CommandKind {
         CommandKind::KvWrite,
         CommandKind::RegisterExtraIndex,
         CommandKind::BlobPut,
+        CommandKind::RegisterEdgeKind,
+        CommandKind::SetPointer,
+        CommandKind::WriteBatch,
     ];
 
     pub const COUNT: usize = CommandKind::ALL.len();
@@ -385,6 +413,9 @@ impl CommandKind {
             CommandKind::KvWrite => "kv_write",
             CommandKind::RegisterExtraIndex => "register_extra_index",
             CommandKind::BlobPut => "blob_put",
+            CommandKind::RegisterEdgeKind => "register_edge_kind",
+            CommandKind::SetPointer => "set_pointer",
+            CommandKind::WriteBatch => "write_batch",
         }
     }
 
@@ -598,6 +629,7 @@ impl CommandKind {
                 | CommandKind::RebuildEmbeddingIndex
                 | CommandKind::LinksCurrentMirror
                 | CommandKind::BlobPut
+                | CommandKind::WriteBatch
         )
     }
 }

@@ -497,6 +497,46 @@ rows[0].branch_id;                      // WHO WROTE THE ROW -- reported, never
 // write checks its lineage before the lock, so an unregistered name is
 // UnknownBranch rather than a foreign-key failure.
 
+// -- Conversation branching (0.20.0, D-291 … D-295) --
+// Fork at a past instant, or right after a concept appeared (M1, D-291).
+// `forked_at` is the cutoff, `created_at` the clock reading -- the split the
+// `branches` table carried since v12 for exactly this.
+let past = db.fork_at(BranchId::new("past")?, BranchId::main(), ts).await?;
+let alt  = db.fork_after(BranchId::new("alt")?, BranchId::main(), "turn:7").await?;
+// Refusals add ForkInFuture (at > now) and ConceptNotVisible (the parent cannot
+// see the concept); a mint archived out of the hot log is
+// RecordedInstantUnreachable.
+
+// One act, one stamp, all or none (M2, D-292): concepts, retirements, edges,
+// pointer moves, in that order inside one transaction.
+let report: BatchReport = db.write_batch(WriteBatch::new()
+    .on_branch(alt.id.clone())                  // rows naming none take this;
+    .concept(ConceptUpsert::new("turn:8", t))   //   another lineage is
+    .edge(EdgeAssertion::new("turn:7", "turn:8", "NEXT").valid_from(vf))
+    .pointer(PointerSet::new("session", "HEAD", "turn:8").valid_from(vf))
+).await?;                                       //   BranchMismatch
+report.recorded_at;   // the one stamp; BatchTooLarge over MAX_BATCH_ROWS
+
+// Pointers: functional edge kinds (M3, D-293). At most one open target per
+// (source, kind) per lineage view, enforced on every edge write path.
+db.register_edge_kind("HEAD", true).await?;          // v23 `edge_kinds`, outside
+let kinds: Vec<(String, bool)> = db.edge_kinds().await?;   //   the ledger
+let ch: PointerChange = db.set_pointer(PointerSet::new("session", "HEAD", "turn:9")
+    .valid_from(vf).on_branch(alt.id.clone())).await?;     // closes the old target
+let head: Option<String> = db.pointer("session", "HEAD", ReadPlan::new().on(alt.id.clone())).await?;
+let all: Vec<(String, String)> = db.pointers("CURRENT", plan).await?;
+// A second open target is FunctionalEdgeConflict; set_pointer is the move.
+
+// Concepts as one lineage sees them (M4, D-294): the version at or before each
+// ancestor's cutoff, nothing minted on a sibling, provenance included.
+let v: Vec<ConceptVersion> = db.concepts_by_id(&ids, ReadPlan::new().on(alt.id.clone())).await?;
+v[0].branch_id;   // the minting lineage      v[0].recorded_at;  // this version's
+
+// The change feed (M7, D-295).
+let cursor = db.head_seq().await?;
+let feed: Vec<Change> = db.changes(cursor, Some("alt"), &["concepts"], 1000).await?;
+// ChangeFeedGap when rows past the cursor were archived: resynchronise.
+
 // -- Vectors: writes through the handle (D-048), reads direct --
 let model = ModelName::new("nomic_v1")?;
 db.register_model(&model, 768).await?;                 // high-pri: table + index
@@ -789,7 +829,7 @@ Minor-version changes, and several of them are expected rather than merely permi
 
 **3. The derivative tables** — `links_current`, the per-model `embeddings_*` tables, and `concepts_fts`. **No schema-stability guarantee at all.** A minor version needing a different materialization drops the table, recreates it from the DDL and re-derives it inside the same migration step ([D-036](s13-decision-register.md#d-036), [Doctrine VI](s0-s3-foundations.md#doctrine-vi), [Doctrine VII](s0-s3-foundations.md#doctrine-vii)).
 
-**4. The schema version and its migration rungs.** **v22** today. Rungs are forward-only and run at `open()`; adding one is a minor version, and refusing to open a database from a *newer* build is the behaviour, not a bug.
+**4. The schema version and its migration rungs.** **v23** today. Rungs are forward-only and run at `open()`; adding one is a minor version, and refusing to open a database from a *newer* build is the behaviour, not a bug.
 
 **5. The snapshot container format.** **v5** today. A snapshot is a cache of a fold the ledger can always reproduce, so the format is versioned and an unrecognised version is **refused rather than parsed** ([D-043](s13-decision-register.md#d-043)); a build that cannot read an old snapshot folds from the log instead. Losing every snapshot costs time and no information.
 

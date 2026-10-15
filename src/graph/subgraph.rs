@@ -1085,6 +1085,101 @@ ORDER BY l.source_id, l.target_id, l.edge_type
         // the mode must be stated (`resolved_mode`, D-085): `AtTime` hydrates
         // belief-at-the-instant, `Current` keeps live text over historical
         // topology, and `Omit` keeps topology only.
+        // On a forked database the nodes are the lineage's own concept
+        // versions (0.20.0, M4, D-294); the three-cell dispatch below is the
+        // single-lineage path, untouched.
+        if let Some(ancestry) =
+            crate::graph::concept_lineage::scope_for(conn, traversal.branch.as_deref()).await?
+        {
+            let recorded = traversal.as_of_recorded.as_deref();
+            let (at, valid) = match recorded {
+                None => (None, None),
+                Some(ts) => match traversal.resolved_mode()? {
+                    AttributeMode::AtTime => (Some(ts), Some(traversal.valid_instant(now_ts))),
+                    AttributeMode::Current => (None, None),
+                    AttributeMode::Omit => {
+                        hydrate_topology_only(&mut graph, &ids, bytes, byte_budget)?;
+                        graph.drop_dangling_adjacency();
+                        return Ok(graph);
+                    }
+                },
+            };
+            let rows = crate::graph::concept_lineage::rows_on(conn, &ids, &ancestry, at).await?;
+            if !rows.contains_key(start_node) {
+                // A start the lineage cannot see has no subgraph on it, the
+                // rule `TraversalBuilder::execute_ids` applies.
+                return Ok(Subgraph::default());
+            }
+            let mut bytes = bytes;
+            // Concepts the lineage does not hold were *named* by its edges and
+            // hydrate as on a single lineage (D-214; `filter_visible`).
+            let named: Vec<String> = ids
+                .iter()
+                .filter(|i| !rows.contains_key(*i))
+                .cloned()
+                .collect();
+            for id in &ids {
+                let Some(r) = rows.get(id) else { continue };
+                if !r.shows_at(valid) {
+                    continue;
+                }
+                let data = NodeData {
+                    title: r.title.clone(),
+                    content: if traversal.content {
+                        Some(r.content.clone())
+                    } else {
+                        None
+                    },
+                    embedding_model: r.embedding_model.clone(),
+                    extra: if traversal.extra {
+                        Some(r.extra.clone())
+                    } else {
+                        None
+                    },
+                    valid_from: r.valid_from.clone().unwrap_or_default(),
+                    valid_to: r.valid_to.clone().unwrap_or_default(),
+                };
+                bytes += Subgraph::node_bytes(id, &data);
+                graph.nodes.insert(id.clone(), data);
+                if bytes > byte_budget {
+                    return Err(DbError::SubgraphTooLarge {
+                        n: bytes,
+                        budget: byte_budget,
+                    });
+                }
+            }
+            if !named.is_empty() {
+                match at {
+                    Some(_) => {
+                        hydrate_historical(
+                            conn,
+                            &mut graph,
+                            &named,
+                            traversal,
+                            now_ts,
+                            bytes,
+                            byte_budget,
+                        )
+                        .await?
+                    }
+                    None => {
+                        hydrate(
+                            conn,
+                            &mut graph,
+                            &named,
+                            bytes,
+                            byte_budget,
+                            traversal.content,
+                            traversal.extra,
+                        )
+                        .await?
+                    }
+                }
+            }
+            graph.drop_dangling_adjacency();
+            return Ok(graph);
+        }
+
         match traversal.as_of_recorded.as_deref() {
             None => {
                 hydrate(

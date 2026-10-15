@@ -177,6 +177,27 @@ pub enum DbError {
         named: String,
     },
 
+    // 0.20.0 (D-291 … D-295)
+    #[error("branch {branch} cannot fork at {at}: that is after now ({now})")]
+    ForkInFuture { branch: String, at: String, now: String },
+
+    #[error("concept {id} is not visible on lineage {branch}")]
+    ConceptNotVisible { id: String, branch: String },
+
+    #[error("{edge_type} is functional: {source_id} already points at {open_target} in this lineage's view, so it cannot also point at {attempted}; use set_pointer")]
+    FunctionalEdgeConflict {
+        source_id: String,
+        edge_type: String,
+        open_target: String,
+        attempted: String,
+    },
+
+    #[error("write batch of {rows} row(s) exceeds the cap of {max}")]
+    BatchTooLarge { rows: usize, max: usize },
+
+    #[error("change feed gap: {removed} log row(s) after seq {after_seq} have been archived; resynchronise from current state")]
+    ChangeFeedGap { after_seq: i64, removed: i64 },
+
     #[error("subgraph exceeds budget ({n} > {budget})")]
     SubgraphTooLarge { n: usize, budget: usize },
 

@@ -69,6 +69,8 @@ CHAIN_CHECK_SAMPLE_LIMIT: Final[int]
 #: rather than clamping (`ArchiveWindowError`) — a window that implies more than
 #: this many sessions is a caller who meant a wider window.
 MAX_ARCHIVE_SESSIONS: Final[int]
+MAX_BATCH_ROWS: Final[int]
+"""The most rows one `write_batch` may carry (0.20.0, D-292)."""
 #: The largest chunk each bulk path will ever ask for.
 #:
 #: **Ceilings, not sizes.** Since 0.12.0 the bulk loops time each chunk and size
@@ -672,6 +674,77 @@ class Branch:
     @property
     def is_main(self) -> bool:
         """Whether this names the trunk."""
+
+class PointerChange:
+    """What a pointer move did (0.20.0, D-293)."""
+
+    @property
+    def source(self) -> str: ...
+    @property
+    def edge_type(self) -> str: ...
+    @property
+    def old(self) -> str | None:
+        """The target open on the lineage before the move, if any."""
+    @property
+    def new(self) -> str: ...
+    @property
+    def changed(self) -> bool:
+        """`False` when `new` was already the open target and nothing was written."""
+
+class BatchReport:
+    """What a `write_batch` wrote (0.20.0, D-292)."""
+
+    @property
+    def recorded_at(self) -> datetime:
+        """The one transaction-time stamp every row of the batch carries."""
+    @property
+    def concepts(self) -> int: ...
+    @property
+    def edges(self) -> int: ...
+    @property
+    def retirements(self) -> int: ...
+    @property
+    def pointers(self) -> list[PointerChange]: ...
+
+class ConceptVersion:
+    """One concept as one lineage sees it (0.20.0, D-294)."""
+
+    @property
+    def id(self) -> str: ...
+    @property
+    def title(self) -> str: ...
+    @property
+    def content(self) -> str: ...
+    @property
+    def embedding_model(self) -> str | None: ...
+    @property
+    def extra(self) -> str: ...
+    @property
+    def valid_from(self) -> datetime | None: ...
+    @property
+    def valid_to(self) -> datetime | None: ...
+    @property
+    def branch_id(self) -> str:
+        """The lineage that minted the concept."""
+    @property
+    def recorded_at(self) -> datetime:
+        """When this version was recorded."""
+
+class Change:
+    """One ledger write, as the change feed reports it (0.20.0, D-295)."""
+
+    @property
+    def seq_id(self) -> int: ...
+    @property
+    def branch_id(self) -> str: ...
+    @property
+    def table(self) -> str: ...
+    @property
+    def entity_id(self) -> str: ...
+    @property
+    def operation(self) -> str: ...
+    @property
+    def recorded_at(self) -> datetime: ...
 
 class ChainCheck:
     """Whether snapshot composition agrees with a fold from genesis (D-092).
@@ -1357,7 +1430,14 @@ class Database:
 
 
     # -- vector ----------------------------------------------------------------
-    def fork(self, name: str, frm: str = "main") -> Branch:
+    def fork(
+        self,
+        name: str,
+        frm: str = "main",
+        *,
+        at: Timestamp | None = None,
+        after: str | None = None,
+    ) -> Branch:
         """Cut a new lineage from an existing one, and return it.
 
         O(1) in rows written: one row in `branches`, and nothing else. A branch
@@ -1484,6 +1564,74 @@ class Database:
         """Size, ``put_at`` and location without the bytes, or ``None``.
         Raises `InvalidDigestError` as `blob_get` does."""
 
+    def register_edge_kind(self, kind: str, functional: bool = False) -> None:
+        """Register an edge kind and whether it is functional (0.20.0, D-293).
+
+        A functional kind holds at most one open target per `(source, kind)` in
+        each lineage's view; every edge write refuses a second one with
+        `FunctionalEdgeConflictError`, and `set_pointer` moves it.
+        """
+    def edge_kinds(self) -> list[tuple[str, bool]]: ...
+    def set_pointer(
+        self,
+        source: str,
+        edge_type: str,
+        target: str,
+        *,
+        valid_from: Timestamp,
+        weight: float = 1.0,
+        branch: str | None = None,
+        link_previous: str | None = None,
+    ) -> PointerChange:
+        """Close the open target on the lineage and open `target`, one stamp.
+
+        `link_previous` also asserts an edge of that kind from the closed
+        target (or `source`) to the new one, inside the same transaction.
+        """
+    def pointer(
+        self,
+        source: str,
+        edge_type: str,
+        *,
+        branch: str | None = None,
+        as_of_recorded: Timestamp | None = None,
+    ) -> str | None: ...
+    def pointers(
+        self,
+        edge_type: str,
+        *,
+        branch: str | None = None,
+        as_of_recorded: Timestamp | None = None,
+    ) -> list[tuple[str, str]]: ...
+    def write_batch(
+        self,
+        concepts: Sequence[ConceptUpsert] = ...,
+        edges: Sequence[EdgeAssertion] = ...,
+        retire: Sequence[tuple[Any, ...]] = ...,
+        pointers: Sequence[tuple[Any, ...]] = ...,
+        *,
+        branch: str | None = None,
+    ) -> BatchReport:
+        """Concepts, edges, retirements and pointer moves as one act (D-292)."""
+    def concepts_by_id(
+        self,
+        ids: Sequence[str],
+        *,
+        branch: str | None = None,
+        as_of_valid: Timestamp | None = None,
+        as_of_recorded: Timestamp | None = None,
+    ) -> list[ConceptVersion]:
+        """The concepts with these ids as one lineage sees them (D-294)."""
+    def head_seq(self) -> int: ...
+    def changes(
+        self,
+        after_seq: int,
+        *,
+        branch: str | None = None,
+        tables: Sequence[str] = ...,
+        limit: int = 1000,
+    ) -> list[Change]:
+        """Ledger writes after `after_seq`, oldest first (D-295)."""
     def branches(self) -> list[Branch]:
         """Every lineage, trunk first then creation order.
 
@@ -1574,6 +1722,7 @@ class Database:
         top_k: int = 10,
         as_of_valid: Timestamp | None = None,
         half_life: timedelta | float | None = None,
+        branch: str | None = None,
     ) -> list[VectorHit]:
         """Nearest `top_k` concepts by cosine distance. Smaller score is closer.
 
@@ -1602,6 +1751,7 @@ class Database:
         raw: bool = False,
         as_of_valid: Timestamp | None = None,
         half_life: timedelta | float | None = None,
+        branch: str | None = None,
     ) -> list[tuple[str, float]]: ...
     def hybrid_search(
         self,
@@ -1615,6 +1765,7 @@ class Database:
         raw: bool = False,
         as_of_valid: Timestamp | None = None,
         half_life: timedelta | float | None = None,
+        branch: str | None = None,
     ) -> list[VectorHit]:
         """Vector and keyword arms, fused by reciprocal rank. Larger is better.
 
@@ -1793,6 +1944,19 @@ class ForkPrecedesParentError(BranchError):
     forked_at: str
     parent_forked_at: str
 
+class ForkInFutureError(BranchError):
+    """A historical fork named an instant after now (0.20.0, D-291)."""
+
+    branch: str
+    at: str
+    now: str
+
+class ConceptNotVisibleError(BranchError):
+    """`fork(after=...)` named a concept the parent cannot see (0.20.0, D-291)."""
+
+    id: str
+    branch: str
+
 class CrossLineageError(BranchError):
     """A branch tried to restate a concept another lineage holds.
 
@@ -1936,6 +2100,14 @@ class HalfLifeWithoutInstantError(ValidationError):
 class RecordedInstantUnreachableError(TemporalError):
     ts: str
 
+class FunctionalEdgeConflictError(IntegrityError):
+    """A second open target for a functional edge kind (0.20.0, D-293)."""
+
+    source_id: str
+    edge_type: str
+    open_target: str
+    attempted: str
+
 class SingleOpenViolationError(IntegrityError):
     source_id: str
     target_id: str
@@ -1995,6 +2167,12 @@ class DimMismatchError(VectorError):
 class ModelNotRegisteredError(VectorError):
     model: str
     table: str
+
+class ChangeFeedGapError(TemporalError):
+    """Log rows past `after_seq` were archived (0.20.0, D-295)."""
+
+    after_seq: int
+    removed: int
 
 class ReplayCorruptError(TemporalError):
     seq: int
@@ -2062,6 +2240,12 @@ class WriterStoppedError(WriterError):
 class SubgraphTooLargeError(BudgetError):
     n: int
     budget: int
+
+class BatchTooLargeError(BudgetError):
+    """A `write_batch` over `MAX_BATCH_ROWS` (0.20.0, D-292)."""
+
+    rows: int
+    max: int
 
 class BlobTooLargeError(BudgetError):
     """A blob over `Tuning.max_blob_bytes` (8 MiB by default), refused before

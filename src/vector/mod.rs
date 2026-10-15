@@ -5,7 +5,11 @@ pub(crate) mod registry;
 pub(crate) mod search;
 
 pub use embedding::EmbeddingCodec;
-pub use hybrid::{escape_fts5_query, keyword_search, HybridHit, HybridSearch, RRF_K};
+pub use hybrid::{
+    escape_fts5_query, keyword_search, keyword_search_on, HybridHit, HybridSearch, RRF_K,
+};
 pub use model::ModelName;
 pub use registry::{declared_dimension, register_model, registered_models};
-pub use search::{reciprocal_rank_fusion, search_vector, upsert_embedding, VectorSearchResult};
+pub use search::{
+    reciprocal_rank_fusion, search_vector, search_vector_on, upsert_embedding, VectorSearchResult,
+};

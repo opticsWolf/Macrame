@@ -1,9 +1,11 @@
 pub(crate) mod algorithms;
 pub(crate) mod builder;
+pub(crate) mod concept_lineage;
 pub(crate) mod dense;
 pub(crate) mod edge;
 pub(crate) mod lineage;
 pub(crate) mod plan;
+pub(crate) mod pointer;
 pub(crate) mod subgraph;
 pub(crate) mod vector_filter;
 

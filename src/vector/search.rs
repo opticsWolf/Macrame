@@ -283,6 +283,28 @@ pub async fn search_vector(
     as_of_valid: Option<&str>,
     half_life: Option<Duration>,
 ) -> Result<Vec<VectorSearchResult>> {
+    search_vector_on(conn, query_vec, model, top_k, as_of_valid, half_life, None).await
+}
+
+/// [`search_vector`], restricted to the concepts one lineage holds (0.20.0,
+/// M5, [D-294]).
+///
+/// `None` is [`search_vector`] exactly. `Some(b)` joins `concept_versions` for
+/// `b` instead of the live table, so the escalation above re-asks the index
+/// whenever the lineage's share of the nearest neighbours comes up short — the
+/// same mechanism that already absorbs retirement and valid-time thinning. See
+/// [`crate::vector::keyword_search_on`] for the shared semantics.
+///
+/// [D-294]: ../../docs/architecture/s13-decision-register.md#d-294
+pub async fn search_vector_on(
+    conn: &libsql::Connection,
+    query_vec: &[f32],
+    model: &ModelName,
+    top_k: usize,
+    as_of_valid: Option<&str>,
+    half_life: Option<Duration>,
+    branch: Option<&str>,
+) -> Result<Vec<VectorSearchResult>> {
     if top_k == 0 {
         return Ok(Vec::new());
     }
@@ -310,11 +332,30 @@ pub async fn search_vector(
 
     // `?2` is what the index is asked for and `?3` is what the ranking pool
     // needs; they are the same on the first pass and diverge on escalation.
+    let scope = match branch {
+        Some(b) => crate::graph::concept_lineage::scope_for(conn, Some(b)).await?,
+        None => None,
+    };
+    let (with, source) = match &scope {
+        None => (String::new(), "concepts"),
+        Some(ancestry) => (
+            format!(
+                "WITH {} ",
+                crate::graph::concept_lineage::versions_cte(
+                    ancestry.len(),
+                    4 + usize::from(as_of_valid.is_some()),
+                    None,
+                    "",
+                )
+            ),
+            "concept_versions",
+        ),
+    };
     let sql = format!(
-        "SELECT e.concept_id, vector_distance_cos(e.embedding, ?1){age_column}
+        "{with}SELECT e.concept_id, vector_distance_cos(e.embedding, ?1){age_column}
            FROM vector_top_k('{index}', ?1, ?2) AS t
            JOIN {table} AS e ON e.rowid = t.id
-           JOIN concepts AS c ON c.id = e.concept_id
+           JOIN {source} AS c ON c.id = e.concept_id
           WHERE {visible}
           ORDER BY 2 ASC
           LIMIT ?3",
@@ -334,6 +375,9 @@ pub async fn search_vector(
         ];
         if let Some(t) = as_of_valid {
             params.push(t.into());
+        }
+        if let Some(ancestry) = &scope {
+            params.extend(crate::graph::lineage::ancestry_params(ancestry));
         }
         let mut rows = conn.query(&sql, params).await?;
 

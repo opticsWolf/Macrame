@@ -84,6 +84,11 @@ pub(crate) const DB_ERROR_VARIANTS: &[&str] = &[
     "RecordedAtRegression",
     "ArchiveSessionLeaked",
     "BulkCancelled",
+    "ForkInFuture",
+    "ConceptNotVisible",
+    "FunctionalEdgeConflict",
+    "BatchTooLarge",
+    "ChangeFeedGap",
 ];
 
 #[pyfunction]
@@ -122,6 +127,29 @@ fn sample(name: &str) -> Option<DbError> {
         "BlobTooLarge" => DbError::BlobTooLarge {
             size: 4242,
             max: 1000,
+        },
+        "ForkInFuture" => DbError::ForkInFuture {
+            branch: "ahead".into(),
+            at: "2999-01-01T00:00:00.000000Z".into(),
+            now: "2026-02-03T04:05:06.000007Z".into(),
+        },
+        "ConceptNotVisible" => DbError::ConceptNotVisible {
+            id: "turn-7".into(),
+            branch: "alt".into(),
+        },
+        "FunctionalEdgeConflict" => DbError::FunctionalEdgeConflict {
+            source_id: "session-1".into(),
+            edge_type: "HEAD".into(),
+            open_target: "turn-9".into(),
+            attempted: "turn-3".into(),
+        },
+        "BatchTooLarge" => DbError::BatchTooLarge {
+            rows: 4242,
+            max: 2000,
+        },
+        "ChangeFeedGap" => DbError::ChangeFeedGap {
+            after_seq: 4242,
+            removed: 7,
         },
         "InvalidExtra" => DbError::InvalidExtra {
             id: "c1".into(),

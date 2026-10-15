@@ -416,6 +416,83 @@ pub enum DbError {
         named: String,
     },
 
+    /// A fork point after the instant the fork was asked for (0.20.0, M1,
+    /// [D-291]).
+    ///
+    /// A historical fork names an instant in the parent's *past*; one in its
+    /// future would be a lineage whose cutoff admits rows nobody has written
+    /// yet, so the parent's next write would change what the child inherited
+    /// after the fact — the opposite of a cutoff.
+    ///
+    /// [D-291]: ../../docs/architecture/s13-decision-register.md#d-291
+    #[error("branch {branch} cannot fork at {at}: that is after now ({now})")]
+    ForkInFuture {
+        branch: String,
+        at: String,
+        now: String,
+    },
+
+    /// `fork_after` named a concept the parent lineage cannot see (0.20.0, M1,
+    /// [D-291]).
+    ///
+    /// Distinct from [`NotFound`](Self::NotFound) because the concept may well
+    /// exist — on a sibling, or on an ancestor after the parent's own cutoff —
+    /// and "not found" would send the caller to check the id rather than the
+    /// lineage.
+    ///
+    /// [D-291]: ../../docs/architecture/s13-decision-register.md#d-291
+    #[error("concept {id} is not visible on lineage {branch}")]
+    ConceptNotVisible { id: String, branch: String },
+
+    /// A write would open a second target for a functional edge kind on one
+    /// lineage (0.20.0, M3, [D-293]).
+    ///
+    /// A functional kind holds at most one open target per `(source, kind)` in
+    /// each lineage's view. Moving it is [`Database::set_pointer`]'s job, which
+    /// closes the old target and opens the new one under one stamp.
+    ///
+    /// Four fields, not five: the lineage is the one the refused write named,
+    /// and a fifth `String` puts `DbError` at 128 bytes — over
+    /// `clippy::result_large_err`, the threshold D-075 boxed `Overlap` for.
+    ///
+    /// [`Database::set_pointer`]: crate::Database::set_pointer
+    /// [D-293]: ../../docs/architecture/s13-decision-register.md#d-293
+    #[error(
+        "{edge_type} is functional: {source_id} already points at {open_target} \
+         in this lineage's view, so it cannot also point at {attempted}; use set_pointer"
+    )]
+    FunctionalEdgeConflict {
+        source_id: String,
+        edge_type: String,
+        open_target: String,
+        attempted: String,
+    },
+
+    /// A [`WriteBatch`](crate::WriteBatch) over the row cap (0.20.0, M2,
+    /// [D-292]).
+    ///
+    /// The batch is one transaction under one write lock, so its size is a
+    /// hold the caller is asking every other writer to wait out.
+    ///
+    /// [D-292]: ../../docs/architecture/s13-decision-register.md#d-292
+    #[error("write batch of {rows} row(s) exceeds the cap of {max}")]
+    BatchTooLarge { rows: usize, max: usize },
+
+    /// The change feed cannot answer from `after_seq`: log rows past it have
+    /// been archived (0.20.0, M7, [D-295]).
+    ///
+    /// A consumer reading on would silently miss changes, so it is told to
+    /// resynchronise instead. `seq_id` is `AUTOINCREMENT` and a rolled-back
+    /// transaction rolls the counter back (D-049), so a gap in the range is
+    /// exactly a removal.
+    ///
+    /// [D-295]: ../../docs/architecture/s13-decision-register.md#d-295
+    #[error(
+        "change feed gap: {removed} log row(s) after seq {after_seq} have been \
+         archived; resynchronise from current state"
+    )]
+    ChangeFeedGap { after_seq: i64, removed: i64 },
+
     #[error("subgraph exceeds budget ({n} > {budget})")]
     SubgraphTooLarge { n: usize, budget: usize },
 
@@ -950,7 +1027,8 @@ impl DbError {
             | Self::RebuildFailed { .. }
             | Self::RebuildInterrupted { .. }
             | Self::RecordedAtRegression { .. }
-            | Self::SingleOpenViolation { .. } => ErrorKind::Integrity,
+            | Self::SingleOpenViolation { .. }
+            | Self::FunctionalEdgeConflict { .. } => ErrorKind::Integrity,
 
             Self::AttributeModeUnstated { .. }
             | Self::HalfLifeWithoutInstant
@@ -970,6 +1048,7 @@ impl DbError {
             | Self::ArchiveWindow { .. }
             | Self::PayloadVersion { .. }
             | Self::RecordedInstantUnreachable { .. }
+            | Self::ChangeFeedGap { .. }
             | Self::ReplayCorrupt { .. }
             | Self::SnapshotCorrupt { .. }
             | Self::SnapshotIncompatible { .. }
@@ -979,9 +1058,13 @@ impl DbError {
             | Self::WriterStopped { .. }
             | Self::WriterUnavailable { .. } => ErrorKind::Writer,
 
-            Self::BlobTooLarge { .. } | Self::SubgraphTooLarge { .. } => ErrorKind::Budget,
+            Self::BlobTooLarge { .. }
+            | Self::BatchTooLarge { .. }
+            | Self::SubgraphTooLarge { .. } => ErrorKind::Budget,
 
             Self::BranchArchived { .. }
+            | Self::ConceptNotVisible { .. }
+            | Self::ForkInFuture { .. }
             | Self::BranchExists { .. }
             | Self::BranchMismatch { .. }
             | Self::BranchNotArchivable { .. }
