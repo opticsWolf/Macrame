@@ -11,6 +11,8 @@ than as a tuple whose two anchors invite being compared.
 from __future__ import annotations
 
 import datetime as dt
+import json
+import sqlite3
 
 import pytest
 
@@ -563,3 +565,99 @@ def test_archiving_does_not_resurrect_what_a_branch_retired(db):
         ("a", "b")
     ], "the archive un-retired an edge the branch had stopped believing"
     assert pairs(db.query_as_of_edges(T2)) == [("a", "b"), ("b", "c")]
+
+
+# --------------------------------------------------------------------------
+# reconstruct_as_of and verify_concept_intervals (0.20.0, P4, D-294)
+# --------------------------------------------------------------------------
+
+T_BETWEEN = "2026-02-01T00:00:00.000000Z"  # before the second start
+T_OVERLAP = "2026-04-01T00:00:00.000000Z"  # inside both intervals of the overlap test
+T_LATER = "2026-07-01T00:00:00.000000Z"  # after both starts
+
+
+def _append_concept_belief(db_path, *, valid_from, valid_to):
+    """Append a belief for concept ``x`` straight to the log, past the write guard.
+
+    The payload is the newest row's with its interval replaced. The recorded time
+    is later than every row, so the monotonic trigger admits it. This is the only
+    way to make an overlap: the guard refuses one through the API.
+    """
+    con = sqlite3.connect(db_path)
+    try:
+        (payload,) = con.execute(
+            "SELECT payload FROM transaction_log WHERE entity_id = 'x' "
+            "ORDER BY seq_id DESC LIMIT 1"
+        ).fetchone()
+        body = json.loads(payload)
+        body["valid_from"] = valid_from
+        body["valid_to"] = valid_to
+        con.execute(
+            "INSERT INTO transaction_log (table_name, entity_id, operation, payload, recorded_at) "
+            "VALUES ('concepts', 'x', 'upsert', ?, ?)",
+            (json.dumps(body), "2099-01-01T00:00:00.000000Z"),
+        )
+        con.commit()
+    finally:
+        con.close()
+
+
+@pytest.fixture
+def one_concept(db_path):
+    """One concept, open from T0. Closed before the test runs, so it can be appended to."""
+    with macrame.Database.open(db_path, snapshot_every_entries=None) as handle:
+        handle.write_concepts([macrame.ConceptUpsert("x", "X", valid_from=T0)])
+    return db_path
+
+
+@pytest.fixture
+def two_starts(db_path):
+    """One concept believed as ``First`` from T0 to T1, then ``Second`` from T1 on."""
+    with macrame.Database.open(db_path, snapshot_every_entries=None) as handle:
+        handle.write_concepts(
+            [macrame.ConceptUpsert("x", "First", valid_from=T0, valid_to=T1)]
+        )
+        handle.write_concepts([macrame.ConceptUpsert("x", "Second", valid_from=T1)])
+        yield handle
+
+
+def test_reconstruct_as_of_with_no_instant_is_the_present(two_starts):
+    assert two_starts.reconstruct_as_of().concepts["x"].title == "Second"
+
+
+def test_reconstruct_as_of_valid_answers_what_was_true_at_the_instant(two_starts):
+    assert two_starts.reconstruct_as_of(as_of_valid=T_BETWEEN).concepts["x"].title == "First"
+    assert two_starts.reconstruct_as_of(as_of_valid=T_LATER).concepts["x"].title == "Second"
+    # The recorded axis has one answer for the concept: the row written last.
+    assert two_starts.reconstruct(now()).concepts["x"].title == "Second"
+
+
+def test_reconstruct_as_of_refuses_two_beliefs_that_both_claim_the_instant(one_concept):
+    _append_concept_belief(one_concept, valid_from=T1, valid_to=T2)
+    with macrame.Database.open(one_concept, snapshot_every_entries=None) as handle:
+        # Before the overlap only the open belief holds, so the instant is answered.
+        assert handle.reconstruct_as_of(as_of_valid=T_BETWEEN).concepts["x"].title == "X"
+        with pytest.raises(macrame.OverlappingConceptError):
+            handle.reconstruct_as_of(as_of_valid=T_OVERLAP)
+
+
+def test_verify_concept_intervals_reports_the_overlap_by_both_intervals(one_concept):
+    _append_concept_belief(one_concept, valid_from=T1, valid_to=T2)
+    with macrame.Database.open(one_concept, snapshot_every_entries=None) as handle:
+        (overlap,) = handle.verify_concept_intervals()
+    assert overlap.id == "x"
+    assert overlap.within_batch is False
+    intervals = {
+        (overlap.valid_from, overlap.valid_to),
+        (overlap.existing_from, overlap.existing_to),
+    }
+    assert intervals == {
+        (dt.datetime(2026, 3, 1, tzinfo=UTC), dt.datetime(2026, 6, 1, tzinfo=UTC)),
+        (dt.datetime(2026, 1, 1, tzinfo=UTC), None),
+    }
+    assert repr(overlap).startswith("<macrame.ConceptOverlap id=")
+    assert repr(overlap).endswith("within_batch=False>")
+
+
+def test_verify_concept_intervals_is_empty_on_a_guarded_ledger(db):
+    assert db.verify_concept_intervals() == []

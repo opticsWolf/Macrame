@@ -109,6 +109,7 @@ from ._macrame import (
     CancelToken,
     ChainCheck,
     CheckpointReport,
+    ConceptOverlap,
     ConceptUpsert,
     CurrentDriftError,
     Database,
@@ -216,6 +217,7 @@ __all__ = [
     "RehydrateReport",
     "ChainCheck",
     "CHAIN_CHECK_SAMPLE_LIMIT",
+    "ConceptOverlap",
     # vector (P4.4)
     "VectorHit",
     "FilterStrategy",

@@ -111,6 +111,68 @@ pub(crate) fn belief_to_py<'py>(py: Python<'py>, e: &EdgeBelief) -> PyResult<Bou
     )
 }
 
+/// One pair of concept beliefs whose valid intervals overlap (0.20.0, P4, D-294).
+///
+/// Both intervals are reported, because neither alone identifies the conflict.
+/// `within_batch` says whether the collision is with another row in the same
+/// call (D-180), as it is for an edge overlap.
+#[pyclass(name = "ConceptOverlap", module = "macrame", frozen)]
+pub(crate) struct PyConceptOverlap {
+    pub(crate) inner: macrame::ConceptOverlap,
+}
+
+#[pymethods]
+impl PyConceptOverlap {
+    /// The concept whose beliefs overlap.
+    #[getter]
+    fn id(&self) -> String {
+        self.inner.id.clone()
+    }
+
+    /// One of the two intervals. `None` for an open end.
+    #[getter]
+    fn valid_from<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        from_canonical(py, &self.inner.valid_from)
+    }
+
+    /// See [`PyConceptOverlap::valid_from`]. `None` when open.
+    #[getter]
+    fn valid_to<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        from_canonical(py, &self.inner.valid_to)
+    }
+
+    /// The other interval, the one it collides with.
+    #[getter]
+    fn existing_from<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        from_canonical(py, &self.inner.existing_from)
+    }
+
+    /// See [`PyConceptOverlap::existing_from`]. `None` when open.
+    #[getter]
+    fn existing_to<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        from_canonical(py, &self.inner.existing_to)
+    }
+
+    /// True when the collision is with another row written in the same call.
+    #[getter]
+    fn within_batch(&self) -> bool {
+        self.inner.within_batch
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "<macrame.ConceptOverlap id={:?} within_batch={}>",
+            self.inner.id,
+            // Rust prints `false`; Python spells it `False`.
+            if self.inner.within_batch {
+                "True"
+            } else {
+                "False"
+            }
+        )
+    }
+}
+
 /// The world as believed at an instant (§5.5).
 #[pyclass(name = "MaterializedState", module = "macrame", frozen)]
 pub(crate) struct PyMaterializedState {
@@ -404,6 +466,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyArchiveReport>()?;
     m.add_class::<PyRehydrateReport>()?;
     m.add_class::<PyChainCheck>()?;
+    m.add_class::<PyConceptOverlap>()?;
     // The cap on each disagreement list, so a caller can tell a full list from a
     // truncated one without hard-coding 32.
     m.add("CHAIN_CHECK_SAMPLE_LIMIT", ChainCheck::SAMPLE_LIMIT)?;

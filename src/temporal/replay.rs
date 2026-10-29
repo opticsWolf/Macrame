@@ -565,7 +565,9 @@ const HOT_FOLD: &str = r#"
 /// selection is then made in Rust by [`fold_valid_delta`], which has to see every
 /// surviving start to tell one belief from two.
 ///
-/// `?1` is the recorded bound, or NULL for belief at the present.
+/// Belief at the present on the valid axis: no recorded bound, so no placeholder.
+/// Its plan scans the fold partition and never seeks `recorded_at`. The bounded
+/// shape is [`VALID_FOLD_BOUNDED`] (0.20.0, P3, D-293).
 const VALID_FOLD: &str = r#"
     SELECT seq_id, table_name, entity_id, operation, payload, branch_id
     FROM (
@@ -575,17 +577,40 @@ const VALID_FOLD: &str = r#"
                    ORDER BY seq_id DESC
                ) as rn
         FROM transaction_log
-        WHERE (?1 IS NULL OR recorded_at <= ?1)
+    ) WHERE rn = 1
+"#;
+
+/// [`VALID_FOLD`] bounded at a recorded instant, `?1` (0.20.0, P3, D-293).
+///
+/// The bound is in the text, where the planner can see it. The form it replaces,
+/// `WHERE (?1 IS NULL OR recorded_at <= ?1)`, has the same answer and a plan that
+/// scans the partition whatever `?1` holds, because the planner cannot seek through
+/// an `OR` with a NULL test. Here a seek on `idx_txlog_time` pays for a sort of the
+/// selection, so a bound that keeps nearly every row costs up to about 7% more,
+/// and a bound that keeps few costs far less: 0.08 ms against 11.3 ms when none of
+/// 20,000 hot rows qualify (release, best of five; see D-293).
+const VALID_FOLD_BOUNDED: &str = r#"
+    SELECT seq_id, table_name, entity_id, operation, payload, branch_id
+    FROM (
+        SELECT seq_id, table_name, entity_id, operation, payload, branch_id,
+               ROW_NUMBER() OVER (
+                   PARTITION BY table_name, entity_id, branch_id, json_extract(payload, '$.valid_from')
+                   ORDER BY seq_id DESC
+               ) as rn
+        FROM transaction_log
+        WHERE recorded_at <= ?1
     ) WHERE rn = 1
 "#;
 
 /// [`VALID_FOLD`] over hot and cold together. Requires `cold` to be ATTACHed.
 ///
-/// The archive's `recorded_at` bound composes with the valid selection because it
-/// is a row filter applied before the per-start `ROW_NUMBER`, as it is on the
-/// recorded axis. The valid predicate runs afterwards, in Rust, on the rows that
-/// survive, so the two never interact.
-fn valid_cold_fold(cold_lineage: ColdLineage) -> String {
+/// `bounded` puts the archive's `recorded_at` bound on the union, as a row filter
+/// applied before the per-start `ROW_NUMBER`, as it is on the recorded axis. The
+/// valid predicate runs afterwards, in Rust, on the rows that survive, so the two
+/// never interact. Both logs are then bounded by their own `recorded_at` index
+/// (0.20.0, P3, D-293).
+fn valid_cold_fold(cold_lineage: ColdLineage, bounded: bool) -> String {
+    let filter = if bounded { "WHERE recorded_at <= ?1" } else { "" };
     format!(
         r#"
     SELECT seq_id, table_name, entity_id, operation, payload, branch_id
@@ -599,10 +624,11 @@ fn valid_cold_fold(cold_lineage: ColdLineage) -> String {
             SELECT seq_id, table_name, entity_id, operation, payload, recorded_at, branch_id FROM main.transaction_log
             UNION ALL
             SELECT seq_id, table_name, entity_id, operation, payload, recorded_at, {cold} FROM cold.transaction_log
-        ) WHERE (?1 IS NULL OR recorded_at <= ?1)
+        ) {filter}
     ) WHERE rn = 1
 "#,
-        cold = cold_lineage.projection()
+        cold = cold_lineage.projection(),
+        filter = filter,
     )
 }
 
@@ -1011,7 +1037,8 @@ pub(crate) async fn reconstruct_valid(
 ) -> Result<MaterializedState> {
     if let Some(archive) = archive_path.filter(|p| crate::temporal::archive::archive_present(p)) {
         let cold_shape = attach_cold(conn, archive).await?;
-        let result = fold_valid(conn, valid, recorded, &valid_cold_fold(cold_shape)).await;
+        let query = valid_cold_fold(cold_shape, recorded.is_some());
+        let result = fold_valid(conn, valid, recorded, &query).await;
         detach_cold(conn).await;
         return result;
     }
@@ -1025,7 +1052,12 @@ pub(crate) async fn reconstruct_valid(
             ),
         });
     }
-    fold_valid(conn, valid, recorded, VALID_FOLD).await
+    let query = if recorded.is_some() {
+        VALID_FOLD_BOUNDED
+    } else {
+        VALID_FOLD
+    };
+    fold_valid(conn, valid, recorded, query).await
 }
 
 /// ATTACH the archive as `cold` and read its lineage shape. Every caller must
@@ -2138,7 +2170,8 @@ async fn current_valid_rows(
 ) -> Result<Vec<ValidStart>> {
     if let Some(archive) = archive_path.filter(|p| crate::temporal::archive::archive_present(p)) {
         let cold_shape = attach_cold(conn, archive).await?;
-        let result = collect_valid_rows(conn, &valid_cold_fold(cold_shape)).await;
+        let query = valid_cold_fold(cold_shape, false);
+        let result = collect_valid_rows(conn, &query, None).await;
         detach_cold(conn).await;
         return result;
     }
@@ -2152,12 +2185,16 @@ async fn current_valid_rows(
             ),
         });
     }
-    collect_valid_rows(conn, VALID_FOLD).await
+    collect_valid_rows(conn, VALID_FOLD, None).await
 }
 
-/// Run a valid-axis fold with no instant and collect its rows as [`ValidStart`]s.
-async fn collect_valid_rows(conn: &libsql::Connection, query: &str) -> Result<Vec<ValidStart>> {
-    let mut rows = conn.query(query, libsql::params![None::<String>]).await?;
+/// Run a valid-axis fold and collect its rows as [`ValidStart`]s.
+async fn collect_valid_rows(
+    conn: &libsql::Connection,
+    query: &str,
+    recorded: Option<&str>,
+) -> Result<Vec<ValidStart>> {
+    let mut rows = conn.query(query, valid_bind(recorded)).await?;
     let mut out = Vec::new();
     while let Some(row) = rows.next().await? {
         let seq_id: i64 = row.get(0)?;
@@ -2220,6 +2257,14 @@ pub(crate) async fn concept_interval_overlaps(
     Ok(out)
 }
 
+/// The one bind a valid fold takes: the recorded bound, when there is one. The open
+/// shape has no placeholder, so it takes none.
+fn valid_bind(recorded: Option<&str>) -> Vec<libsql::Value> {
+    recorded
+        .map(|r| vec![libsql::Value::Text(r.to_string())])
+        .unwrap_or_default()
+}
+
 /// [`fold`] on the valid axis. The state is at the valid instant, so that is its
 /// timestamp. It is not a recorded instant, and must not be saved as a snapshot.
 async fn fold_valid(
@@ -2228,8 +2273,7 @@ async fn fold_valid(
     recorded: Option<&str>,
     query: &str,
 ) -> Result<MaterializedState> {
-    let recorded = recorded.map(str::to_string);
-    let delta = fold_valid_delta(conn, query, libsql::params![recorded], valid).await?;
+    let delta = fold_valid_delta(conn, query, valid_bind(recorded), valid).await?;
     Ok(delta.apply_to(MaterializedState::empty(valid), valid))
 }
 
@@ -2539,6 +2583,224 @@ mod reach_table {
             hot_log_reach_within(&conn, BETWEEN).await.unwrap(),
             HotLogReach::NeedsArchive,
             "a damaged database was answered from rather than refused"
+        );
+    }
+}
+
+#[cfg(test)]
+mod valid_fold_plan {
+    //! The plan of every fold on the valid axis, pinned by its text (0.20.0, P3,
+    //! D-293).
+    //!
+    //! The plan gate asks which fold reaches which index on which column. The VDBE
+    //! counts cannot answer it: a full scan and a seek followed by a sort both open
+    //! a cursor and rewind or seek the same way, so every shape here reads
+    //! `(2, 0, 4)` on the probe that measured them. The plan text is what differs,
+    //! so the plan text is what is pinned.
+
+    use super::*;
+    use crate::schema::ddl::ARCHIVE_SESSION_MARKER;
+    use crate::temporal::archive::{COLD_LINEAGE_INDICES, COLD_SCHEMA};
+
+    /// A migrated log of 20,000 rows over 400 entities, each with one of twenty valid
+    /// starts, generated in SQL and analysed so the planner chooses from statistics.
+    /// Whether a bounded fold seeks depends on how many rows the bound keeps, so each
+    /// pin names its bound: `EARLY` keeps about one row in twenty, `RECORDED` about
+    /// one in two. `recorded_at` climbs one second a row, which the monotonic trigger
+    /// requires.
+    async fn hot_log() -> libsql::Connection {
+        let db = libsql::Builder::new_local(":memory:").build().await.unwrap();
+        let conn = db.connect().unwrap();
+        crate::schema::run_migrations(&conn).await.unwrap();
+        conn.execute(
+            "WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < 19999) \
+             INSERT INTO transaction_log (table_name, entity_id, operation, payload, recorded_at) \
+             SELECT 'concepts', 'c' || printf('%03d', i % 400), 'upsert', \
+                    json_object('valid_from', strftime('%Y-%m-%dT00:00:00.000000Z', 86400 * (1 + i % 20), 'unixepoch')), \
+                    strftime('%Y-%m-%dT%H:%M:%S', i, 'unixepoch') || '.000000Z' \
+             FROM n",
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute("ANALYZE", ()).await.unwrap();
+        conn
+    }
+
+    /// Mid-log: the first half of the rows, ten thousand of them, is inside it.
+    const RECORDED: &str = "1970-01-01T02:46:40.000000Z";
+
+    /// Selective: about one row in twenty is inside it. On this fixture a bounded
+    /// fold seeks `recorded_at` here and scans at `RECORDED`, so the seek pins use
+    /// this one.
+    const EARLY: &str = "1970-01-01T00:16:40.000000Z";
+
+    fn at(recorded: &str) -> Vec<libsql::Value> {
+        vec![libsql::Value::Text(recorded.to_string())]
+    }
+
+    /// The plan the planner prints for `sql` with `params` bound.
+    async fn plan(conn: &libsql::Connection, sql: &str, params: Vec<libsql::Value>) -> String {
+        let mut rows = conn
+            .query(&format!("EXPLAIN QUERY PLAN {sql}"), params)
+            .await
+            .unwrap();
+        let mut lines = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            lines.push(row.get::<String>(3).unwrap());
+        }
+        lines.join(" | ")
+    }
+
+    /// At `RECORDED` the recorded fold is the reference shape: one row per entity, a
+    /// scan of the fold partition, no seek on `recorded_at`, and no sort. The valid
+    /// folds are measured against it.
+    #[tokio::test]
+    async fn the_recorded_fold_scans_its_partition_and_seeks_no_time_index() {
+        let conn = hot_log().await;
+        let p = plan(&conn, HOT_FOLD, at(RECORDED)).await;
+        assert!(
+            p.contains("SCAN transaction_log USING INDEX idx_txlog_fold_partition"),
+            "{p}"
+        );
+        assert!(!p.contains("idx_txlog_time"), "{p}");
+        assert!(!p.contains("TEMP B-TREE"), "{p}");
+    }
+
+    /// The open valid fold reads every row, so it scans the partition and sorts the
+    /// right-hand part of its window. With no recorded bound there is no seek.
+    #[tokio::test]
+    async fn the_open_valid_fold_scans_the_fold_partition() {
+        let conn = hot_log().await;
+        let p = plan(&conn, VALID_FOLD, Vec::new()).await;
+        assert!(
+            p.contains("SCAN transaction_log USING INDEX idx_txlog_fold_partition"),
+            "{p}"
+        );
+        assert!(p.contains("USE TEMP B-TREE FOR RIGHT PART OF ORDER BY"), "{p}");
+        assert!(!p.contains("idx_txlog_time"), "{p}");
+    }
+
+    /// The bounded valid fold seeks `recorded_at` and sorts the whole selection. The
+    /// seek is what the open shape cannot do, and it is why the bound is in the text
+    /// rather than behind `?1 IS NULL OR`.
+    #[tokio::test]
+    async fn the_bounded_valid_fold_seeks_recorded_at_and_sorts_the_selection() {
+        let conn = hot_log().await;
+        let p = plan(&conn, VALID_FOLD_BOUNDED, at(EARLY)).await;
+        assert!(
+            p.contains("SEARCH transaction_log USING INDEX idx_txlog_time (recorded_at<?)"),
+            "{p}"
+        );
+        assert!(p.contains("USE TEMP B-TREE FOR ORDER BY"), "{p}");
+        assert!(!p.contains("fold_partition"), "{p}");
+    }
+
+    /// The two-dimensional candidate (D-196, D-290) is reached on its leading column
+    /// and only there, by the two folds that bound `recorded_at`: the recorded fold
+    /// and the bounded valid fold. The open valid fold never reaches it. The second
+    /// column, `valid_from`, is never constrained by any fold, so it stays dead.
+    /// Creating the candidate therefore moves two plans. That is the term the D-196
+    /// arithmetic rests on, and this is where it is noticed.
+    #[tokio::test]
+    async fn the_two_dimensional_candidate_is_reached_on_its_leading_column_only() {
+        let conn = hot_log().await;
+        conn.execute(
+            "CREATE INDEX valid_axis_candidate ON transaction_log \
+             (recorded_at, json_extract(payload, '$.valid_from'))",
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute("ANALYZE", ()).await.unwrap();
+
+        let bounded = plan(&conn, VALID_FOLD_BOUNDED, at(EARLY)).await;
+        assert!(
+            bounded.contains("SEARCH transaction_log USING INDEX valid_axis_candidate (recorded_at<?)"),
+            "{bounded}"
+        );
+        let open = plan(&conn, VALID_FOLD, Vec::new()).await;
+        assert!(!open.contains("valid_axis_candidate"), "{open}");
+        assert!(open.contains("idx_txlog_fold_partition"), "{open}");
+        let recorded = plan(&conn, HOT_FOLD, at(EARLY)).await;
+        assert!(
+            recorded.contains("valid_axis_candidate (recorded_at<?)"),
+            "{recorded}"
+        );
+    }
+
+    /// The archive arm, with the archive's own shape (its schema and its fold index).
+    /// At `EARLY` the recorded cold fold seeks the archive's `recorded_at` index. The
+    /// open valid fold scans the archive's fold partition. At `EARLY` the bounded valid
+    /// fold seeks `recorded_at` on both logs.
+    #[tokio::test]
+    async fn the_archive_arm_seeks_when_bounded_and_scans_its_partition_when_open() {
+        let conn = hot_log().await;
+        conn.execute("ATTACH DATABASE ':memory:' AS cold", ())
+            .await
+            .unwrap();
+        for ddl in COLD_SCHEMA.iter().chain(COLD_LINEAGE_INDICES.iter()) {
+            conn.execute(*ddl, ()).await.unwrap();
+        }
+        // Move the rows at or before `RECORDED` the way the archive does: copy them,
+        // then delete them under the session marker the archive itself holds.
+        conn.execute(
+            "INSERT INTO cold.transaction_log \
+             SELECT seq_id, table_name, entity_id, operation, payload, recorded_at, branch_id \
+             FROM main.transaction_log WHERE recorded_at <= ?1",
+            libsql::params![RECORDED],
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            &format!("CREATE TABLE {ARCHIVE_SESSION_MARKER} (x)"),
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "DELETE FROM main.transaction_log WHERE recorded_at <= ?1",
+            libsql::params![RECORDED],
+        )
+        .await
+        .unwrap();
+        conn.execute(&format!("DROP TABLE {ARCHIVE_SESSION_MARKER}"), ())
+            .await
+            .unwrap();
+        conn.execute("ANALYZE", ()).await.unwrap();
+        conn.execute("ANALYZE cold", ()).await.unwrap();
+
+        let recorded = plan(&conn, &cold_fold(ColdLineage::Stamped), at(EARLY)).await;
+        assert!(
+            recorded.contains("SEARCH cold.transaction_log USING INDEX idx_cold_txlog_time (recorded_at<?)"),
+            "{recorded}"
+        );
+
+        let open = plan(
+            &conn,
+            &valid_cold_fold(ColdLineage::Stamped, false),
+            Vec::new(),
+        )
+        .await;
+        assert!(
+            open.contains("SCAN cold.transaction_log USING INDEX idx_cold_txlog_fold_partition"),
+            "{open}"
+        );
+        assert!(!open.contains("idx_cold_txlog_time"), "{open}");
+
+        let bounded = plan(
+            &conn,
+            &valid_cold_fold(ColdLineage::Stamped, true),
+            at(EARLY),
+        )
+        .await;
+        assert!(
+            bounded.contains("SEARCH cold.transaction_log USING INDEX idx_cold_txlog_time (recorded_at<?)"),
+            "{bounded}"
+        );
+        assert!(
+            bounded.contains("SEARCH main.transaction_log USING INDEX idx_txlog_time (recorded_at<?)"),
+            "{bounded}"
         );
     }
 }

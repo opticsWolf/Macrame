@@ -49,7 +49,7 @@ pub struct ArchiveReport {
 /// the cold file holds only the concepts that have gone cold and `cold.links`
 /// may name any of them; and the delete guards must not exist on a file whose
 /// whole purpose is to receive rows and, on rehydration, to give them back.
-const COLD_SCHEMA: &[&str] = &[
+pub(crate) const COLD_SCHEMA: &[&str] = &[
     // `weight` carries the same CHECK as the hot table (T2.1, D-083). Not
     // symmetry for its own sake: the cold file is read back by `reconstruct`
     // through the same `f64` decode, so a text weight is the same panic there
@@ -619,7 +619,7 @@ pub async fn archive(
 ///
 /// [D-089]: ../../docs/architecture/s13-decision-register.md#d-089
 /// [D-254]: ../../docs/architecture/s13-decision-register.md#d-254
-const COLD_LINEAGE_INDICES: &[&str] = &[
+pub(crate) const COLD_LINEAGE_INDICES: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS cold.idx_cold_txlog_fold_partition ON transaction_log \
      (table_name, entity_id, branch_id, seq_id DESC)",
 ];

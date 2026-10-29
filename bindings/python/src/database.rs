@@ -1404,6 +1404,57 @@ impl PyDatabase {
         Ok(temporal::PyMaterializedState { inner })
     }
 
+    /// The world at an instant on either axis, or both (0.20.0, P4, D-294).
+    ///
+    /// `as_of_valid` is *what was true*: each concept answers with the belief whose
+    /// valid interval holds that instant. `as_of_recorded` is *what we believed*.
+    /// Neither set is the present, and `reconstruct(ts)` is `as_of_recorded=ts`,
+    /// unchanged. Both set is the bitemporal cell.
+    ///
+    /// A ledger holding two beliefs that both claim the instant raises
+    /// `ConceptSingleOpenError`, `OverlappingConceptError` or
+    /// `OverlappingIntervalError` naming them, rather than choosing one.
+    #[pyo3(signature = (*, as_of_valid = None, as_of_recorded = None))]
+    fn reconstruct_as_of(
+        &self,
+        py: Python<'_>,
+        as_of_valid: Option<&Bound<'_, PyAny>>,
+        as_of_recorded: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<temporal::PyMaterializedState> {
+        let valid = as_of_valid.map(|t| to_canonical(Some(t))).transpose()?;
+        let recorded = as_of_recorded.map(|t| to_canonical(Some(t))).transpose()?;
+        let at = match (valid, recorded) {
+            (None, None) => macrame::temporal::AsOf::now(),
+            (Some(v), None) => macrame::temporal::AsOf::valid_at(v),
+            (None, Some(r)) => macrame::temporal::AsOf::recorded_at(r),
+            (Some(v), Some(r)) => macrame::temporal::AsOf::bitemporal(v, r),
+        };
+        let inner = self.with_db(py, move |db| {
+            runtime().block_on(db.reconstruct_as_of(at)).map_err(to_py)
+        })?;
+        Ok(temporal::PyMaterializedState { inner })
+    }
+
+    /// Every pair of concept beliefs in this ledger whose valid intervals overlap
+    /// (0.20.0, P4, D-294). Empty for a ledger written through the write guard.
+    ///
+    /// Reports only. Calling it refuses no read; `reconstruct_as_of` refuses an
+    /// instant only when two beliefs both claim it.
+    fn verify_concept_intervals(
+        &self,
+        py: Python<'_>,
+    ) -> PyResult<Vec<temporal::PyConceptOverlap>> {
+        let overlaps = self.with_db(py, move |db| {
+            runtime()
+                .block_on(db.verify_concept_intervals())
+                .map_err(to_py)
+        })?;
+        Ok(overlaps
+            .into_iter()
+            .map(|inner| temporal::PyConceptOverlap { inner })
+            .collect())
+    }
+
     /// The world at `ts` **as one lineage saw it** (0.15.17, D-259).
     ///
     /// `reconstruct` answers about the ledger and returns every lineage's

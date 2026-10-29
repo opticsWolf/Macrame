@@ -1,6 +1,6 @@
 # Macrame Update Plan v0.20.0 — a valid-axis state fold
 
-**Status:** planned · **Branch:** `dev/0.20.0` (not yet cut) · **Date:** 2026-10-29
+**Status:** P1–P4 built on `dev/0.20.0`; not released, version label open · **Branch:** `dev/0.20.0` (cut, not merged) · **Date:** 2026-10-29
 **From:** 0.19.1 (schema v22, concepts payload v3, snapshot v5, surface 1,909 items + 1 Python keyword)
 **To:** 0.20.0 (**schema v22 — unchanged**; payload and snapshot unchanged)
 **Supersedes:** this file's own earlier form, a *request* drafted the same day against
@@ -19,8 +19,8 @@ Two items, and the first is the reason the second is decidable at all.
 |---|---|---|---|
 | P1 — concept valid-interval guard (D-291) | 3 d | v22 unchanged | **yes** — closes a live defect in current-belief reads (§3.3) |
 | P2 — `reconstruct_as_of` (D-292) | 3 d | v22 unchanged | needs P1 |
-| P3 — plan-gate re-measurement | ~4 h | none | — |
-| P4 — Python surface | ~4 h, optional | none | needs P2 |
+| P3 — plan-gate re-measurement (D-293) | ~4 h | none | — |
+| P4 — Python surface (D-294) | ~4 h, optional | none | needs P2 |
 
 **P1 ships first and ships even if P2 is cut.** That is not sequencing for its own
 sake: §3.3 shows the writer gap already corrupts `reconstruct(now)` for any caller
@@ -473,6 +473,19 @@ materialised fold. **If that expectation is wrong**, the index candidate at `:28
 found dead — becomes live for the first time, and the arithmetic that rejected it is
 re-run rather than inherited.
 
+**Outcome (D-293), and where it contradicted this section.** The expectation above
+was that the valid bound reaches the plan. In the form P2 shipped it did not:
+`(?1 IS NULL OR recorded_at <= ?1)` cannot seek. P3 replaced that form with two
+shapes, the open `VALID_FOLD` and `VALID_FOLD_BOUNDED`, whose bound is in the text.
+The bounded form seeks `recorded_at` on the hot log up to about half the log, and
+scans only when the bound keeps every row. The candidate index
+`(recorded_at, json_extract(payload, '$.valid_from'))` is reached by the bounded
+valid fold and by the recorded fold, on its leading column, and never by the open
+fold; its second column stays dead, as D-290 found. The archive's cold side seeks
+only at the smallest bounds and scans its fold-partition index from a few thousand
+rows. The choice depends on the statistics and on how many rows the bound keeps, so
+the pins name their bound. D-293 has the measurements.
+
 ### P4 — Python surface (~4 h, optional)
 
 `reconstruct_as_of` through the binding, with the mode contract spelled the way
@@ -513,7 +526,7 @@ the change and passes after, not a description of the change.
     intervals, and `verify` reports the same condition.
 11. **Plan gates re-measured** (P3), with the terms pinned exactly — which fold
     reaches which index on which column — so either term breaking re-opens the
-    arithmetic for real rather than silently.
+    arithmetic for real rather than silently. **Met by [D-293](architecture/s13-decision-register.md#d-293):** `mod valid_fold_plan` in `src/temporal/replay.rs` pins each shape at a named bound, and the candidate's reach on its leading column.
 12. **Mutation probes.** Each of gates 1–4 and 7 is verified by mutation, not merely
     by passing: remove the guard's call site and gates 1–3 fail; invert the valid
     selection and gate 7 fails. **A gate with no contrast between its healthy and
@@ -538,7 +551,7 @@ lags.
 What that means concretely for each landing commit:
 
 1. **The decision register** (`docs/architecture/s13-decision-register.md`) gains the
-   entry — D-291 with P1, D-292 with P2 — with the **Evidence** line filled in with
+   entry — D-291 with P1, D-292 with P2, D-293 with P3, D-294 with P4 — with the **Evidence** line filled in with
    real paths and test names, not left as the draft's placeholder. An entry whose
    evidence line is a promise is the half that drifts first.
    `the_file_table_offers_the_decisions_the_register_actually_holds` checks the file

@@ -673,6 +673,31 @@ class Branch:
     def is_main(self) -> bool:
         """Whether this names the trunk."""
 
+class ConceptOverlap:
+    """One pair of concept beliefs whose valid intervals overlap (0.20.0, D-294).
+
+    Both intervals are reported, because neither alone identifies the conflict.
+    """
+
+    @property
+    def id(self) -> str: ...
+    @property
+    def valid_from(self) -> datetime: ...
+    @property
+    def valid_to(self) -> datetime | None:
+        """`None` when open."""
+
+    @property
+    def existing_from(self) -> datetime: ...
+    @property
+    def existing_to(self) -> datetime | None:
+        """`None` when open."""
+
+    @property
+    def within_batch(self) -> bool:
+        """True when the collision is with another row written in the same call."""
+
+
 class ChainCheck:
     """Whether snapshot composition agrees with a fold from genesis (D-092).
 
@@ -1215,6 +1240,27 @@ class Database:
 
     # -- temporal --------------------------------------------------------------
     def reconstruct(self, ts: Timestamp) -> MaterializedState: ...
+    def reconstruct_as_of(
+        self,
+        *,
+        as_of_valid: Timestamp | None = None,
+        as_of_recorded: Timestamp | None = None,
+    ) -> MaterializedState:
+        """The world at an instant on either axis, or both (0.20.0, D-294).
+
+        `as_of_valid` is what was true; `as_of_recorded` is what we believed.
+        Neither set is the present, and `reconstruct(ts)` is
+        `as_of_recorded=ts`, unchanged. Both set is the bitemporal cell.
+
+        Two beliefs that both claim the instant raise `ConceptSingleOpenError`,
+        `OverlappingConceptError` or `OverlappingIntervalError`, naming them.
+        """
+
+    def verify_concept_intervals(self) -> list[ConceptOverlap]:
+        """Every pair of concept beliefs whose valid intervals overlap.
+
+        Reports only. Empty for a ledger written through the write guard.
+        """
     def reconstruct_on(self, ts: Timestamp, branch: str) -> MaterializedState:
         """The world at `ts` as one lineage saw it (0.15.17).
 
