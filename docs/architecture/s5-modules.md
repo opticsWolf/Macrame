@@ -714,6 +714,10 @@ row on a branched bulk write; the cost of the second spelling is a fold written
 twice, and what keeps it honest is that a divergence cannot be quiet — the write
 would disagree with the read about what a branch can see, which is one named test.
 
+**The concept guard is the same rule on the other ledger, and it takes the lineage predicate from the start (0.19.2, [D-291](s13-decision-register.md#d-291)).** `reject_overlapping_concept` runs in `upsert_concept` before the insert, and `reject_concept_overlaps_within` runs in `write_concepts_atomic` before the named-lineage check. Both read through `CURRENT_CONCEPT_INTERVALS`, which takes the belief per valid start (the latest row written for it) and binds `branch_id = ?3` as the lineage predicate, so the trunk's probe never reads a branch's rows. A trunk restatement of a branch-minted concept is therefore the trigger's `CrossLineage` refusal and not an overlap. A re-assertion of a start supersedes that start's row, so the probe excludes the row with the same `valid_from`.
+
+A batch is checked twice. `reject_concept_overlaps_within` sorts and sweeps the batch's final intervals per `(branch, id, valid_from)` before the transaction opens; that is the only place rows the database does not hold yet can be seen. `check_batch_against_ledger` runs inside the transaction before the first prepared insert, and rolls back on refusal, so a batch that contradicts itself writes nothing. The in-transaction probe is one indexed read per concept per batch. Its cost on a bulk concept write is unmeasured, and P3 measures it; this paragraph claims no number for it.
+
 **Retirement across a lineage boundary is a write, not an update.** Closing the
 ancestor's row is the parent corruption [Doctrine
 III](s0-s3-foundations.md#doctrine-iii) forbids, and `links` is append-only, so a
