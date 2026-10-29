@@ -3554,6 +3554,15 @@ impl Database {
         .await
     }
 
+    /// The concept intervals this ledger holds that overlap (0.20.0, P2, D-292, gate
+    /// 10): every pair of current beliefs for one concept whose valid intervals
+    /// overlap, in write order. A read refuses such a pair only when both claim the
+    /// instant it asks about, so this reports the overlaps no read has reached yet.
+    /// A ledger written through the write guard returns none.
+    pub async fn verify_concept_intervals(&self) -> Result<Vec<crate::ConceptOverlap>> {
+        crate::temporal::concept_interval_overlaps(&self.read_conn, Some(&self.archive_path)).await
+    }
+
     /// State at `at`, on either axis or both (0.20.0, P2, D-292).
     ///
     /// `AsOf::recorded_at(ts)` is [`Self::reconstruct`] at `ts`, and is the same

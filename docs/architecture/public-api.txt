@@ -191,6 +191,7 @@ pub fn macrame::connection::Database::snapshots_dir(&self) -> &std::path::Path
 pub async fn macrame::connection::Database::upsert_concept(&self, macrame::connection::ConceptUpsert) -> macrame::error::Result<()>
 pub async fn macrame::connection::Database::upsert_embeddings(&self, &macrame::vector::ModelName, alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<f32>)>) -> macrame::error::BulkResult<usize>
 pub async fn macrame::connection::Database::upsert_embeddings_with(&self, &macrame::vector::ModelName, alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<f32>)>, macrame::connection::BulkControl) -> macrame::error::BulkResult<usize>
+pub async fn macrame::connection::Database::verify_concept_intervals(&self) -> macrame::error::Result<alloc::vec::Vec<macrame::error::ConceptOverlap>>
 pub async fn macrame::connection::Database::verify_last_link(&self) -> macrame::error::Result<core::option::Option<macrame::temporal::ChainCheck>>
 pub async fn macrame::connection::Database::verify_snapshot_chain(&self, &str) -> macrame::error::Result<macrame::temporal::ChainCheck>
 pub fn macrame::connection::Database::view(&alloc::rcs::arc::Arc<Self>, macrame::branch::BranchId) -> macrame::branch::BranchView
@@ -1077,6 +1078,7 @@ pub fn macrame::connection::Database::snapshots_dir(&self) -> &std::path::Path
 pub async fn macrame::connection::Database::upsert_concept(&self, macrame::connection::ConceptUpsert) -> macrame::error::Result<()>
 pub async fn macrame::connection::Database::upsert_embeddings(&self, &macrame::vector::ModelName, alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<f32>)>) -> macrame::error::BulkResult<usize>
 pub async fn macrame::connection::Database::upsert_embeddings_with(&self, &macrame::vector::ModelName, alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<f32>)>, macrame::connection::BulkControl) -> macrame::error::BulkResult<usize>
+pub async fn macrame::connection::Database::verify_concept_intervals(&self) -> macrame::error::Result<alloc::vec::Vec<macrame::error::ConceptOverlap>>
 pub async fn macrame::connection::Database::verify_last_link(&self) -> macrame::error::Result<core::option::Option<macrame::temporal::ChainCheck>>
 pub async fn macrame::connection::Database::verify_snapshot_chain(&self, &str) -> macrame::error::Result<macrame::temporal::ChainCheck>
 pub fn macrame::connection::Database::view(&alloc::rcs::arc::Arc<Self>, macrame::branch::BranchId) -> macrame::branch::BranchView
@@ -1893,6 +1895,7 @@ pub fn macrame::connection::Database::snapshots_dir(&self) -> &std::path::Path
 pub async fn macrame::connection::Database::upsert_concept(&self, macrame::connection::ConceptUpsert) -> macrame::error::Result<()>
 pub async fn macrame::connection::Database::upsert_embeddings(&self, &macrame::vector::ModelName, alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<f32>)>) -> macrame::error::BulkResult<usize>
 pub async fn macrame::connection::Database::upsert_embeddings_with(&self, &macrame::vector::ModelName, alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<f32>)>, macrame::connection::BulkControl) -> macrame::error::BulkResult<usize>
+pub async fn macrame::connection::Database::verify_concept_intervals(&self) -> macrame::error::Result<alloc::vec::Vec<macrame::error::ConceptOverlap>>
 pub async fn macrame::connection::Database::verify_last_link(&self) -> macrame::error::Result<core::option::Option<macrame::temporal::ChainCheck>>
 pub async fn macrame::connection::Database::verify_snapshot_chain(&self, &str) -> macrame::error::Result<macrame::temporal::ChainCheck>
 pub fn macrame::connection::Database::view(&alloc::rcs::arc::Arc<Self>, macrame::branch::BranchId) -> macrame::branch::BranchView

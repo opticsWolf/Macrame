@@ -2078,18 +2078,8 @@ fn overlap_key(table_name: &str, entity_id: &str, payload: &serde_json::Value) -
 /// link is `OverlappingInterval`. `existing` is the earlier write, `asserted` the
 /// later one.
 fn valid_overlap(existing: &ValidStart, asserted: &ValidStart) -> DbError {
-    let bounds = |s: &ValidStart| {
-        let field = |name: &str| {
-            s.payload
-                .get(name)
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string()
-        };
-        (field("valid_from"), field("valid_to"))
-    };
-    let (asserted_from, asserted_to) = bounds(asserted);
-    let (existing_from, existing_to) = bounds(existing);
+    let (asserted_from, asserted_to) = valid_bounds(asserted);
+    let (existing_from, existing_to) = valid_bounds(existing);
 
     if existing.table_name == "links" {
         let field = |name: &str| {
@@ -2124,6 +2114,110 @@ fn valid_overlap(existing: &ValidStart, asserted: &ValidStart) -> DbError {
     } else {
         DbError::OverlappingConcept { overlap }
     }
+}
+
+/// A belief's `(valid_from, valid_to)` as its payload records them. An absent
+/// `valid_from` is the earliest instant and an absent `valid_to` is open, the
+/// same reading [`valid_interval_contains`] gives them.
+fn valid_bounds(s: &ValidStart) -> (String, String) {
+    let field = |name: &str, absent: &str| {
+        s.payload
+            .get(name)
+            .and_then(|v| v.as_str())
+            .unwrap_or(absent)
+            .to_string()
+    };
+    (field("valid_from", ""), field("valid_to", OPEN_SENTINEL))
+}
+
+/// Every valid start's current belief with no valid instant: the rows
+/// [`reconstruct_valid`] selects from, before its selection (0.20.0, P2, D-292).
+async fn current_valid_rows(
+    conn: &libsql::Connection,
+    archive_path: Option<&Path>,
+) -> Result<Vec<ValidStart>> {
+    if let Some(archive) = archive_path.filter(|p| crate::temporal::archive::archive_present(p)) {
+        let cold_shape = attach_cold(conn, archive).await?;
+        let result = collect_valid_rows(conn, &valid_cold_fold(cold_shape)).await;
+        detach_cold(conn).await;
+        return result;
+    }
+    if !hot_log_is_intact(conn).await? {
+        return Err(DbError::ReplayCorrupt {
+            seq: 0,
+            reason: format!(
+                "the concept interval check needs rows the archive holds, \
+                 and no archive database was found; {}",
+                archive_hint(conn).await
+            ),
+        });
+    }
+    collect_valid_rows(conn, VALID_FOLD).await
+}
+
+/// Run a valid-axis fold with no instant and collect its rows as [`ValidStart`]s.
+async fn collect_valid_rows(conn: &libsql::Connection, query: &str) -> Result<Vec<ValidStart>> {
+    let mut rows = conn.query(query, libsql::params![None::<String>]).await?;
+    let mut out = Vec::new();
+    while let Some(row) = rows.next().await? {
+        let seq_id: i64 = row.get(0)?;
+        let table_name: String = row.get(1)?;
+        let entity_id: String = row.get(2)?;
+        let op: String = row.get(3)?;
+        let payload_str: String = row.get(4)?;
+        let branch_id: String = row.get(5)?;
+        let payload = parse_log_row(seq_id, &table_name, &entity_id, &op, &payload_str)?;
+        out.push(ValidStart {
+            seq_id,
+            table_name,
+            entity_id,
+            branch_id,
+            payload,
+        });
+    }
+    Ok(out)
+}
+
+/// Every pair of current concept beliefs whose valid intervals overlap (0.20.0, P2,
+/// D-292, gate 10).
+///
+/// A read refuses an overlap only when both claims contain the instant it asks
+/// about, so an overlap that no read has reached is clean by every read. This is the
+/// whole-ledger question. Each pair is named the way the read-time refusal names it:
+/// the earlier write is `existing` and the later one `asserted`.
+pub(crate) async fn concept_interval_overlaps(
+    conn: &libsql::Connection,
+    archive_path: Option<&Path>,
+) -> Result<Vec<ConceptOverlap>> {
+    let mut groups: BTreeMap<(String, String), Vec<ValidStart>> = BTreeMap::new();
+    for start in current_valid_rows(conn, archive_path).await? {
+        if start.table_name == "concepts" {
+            groups
+                .entry((start.entity_id.clone(), start.branch_id.clone()))
+                .or_default()
+                .push(start);
+        }
+    }
+
+    let mut out = Vec::new();
+    for mut starts in groups.into_values() {
+        starts.sort_by_key(|s| s.seq_id);
+        for (i, existing) in starts.iter().enumerate() {
+            let (existing_from, existing_to) = valid_bounds(existing);
+            for asserted in &starts[i + 1..] {
+                let (asserted_from, asserted_to) = valid_bounds(asserted);
+                if asserted_from < existing_to && existing_from < asserted_to {
+                    out.push(ConceptOverlap::new(
+                        &existing.entity_id,
+                        (asserted_from, asserted_to),
+                        (existing_from.clone(), existing_to.clone()),
+                        false,
+                    ));
+                }
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// [`fold`] on the valid axis. The state is at the valid instant, so that is its

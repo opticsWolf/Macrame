@@ -13,7 +13,7 @@ pub use replay::{
     reconstruct, reconstruct_on, resolve_beliefs, verify_last_link, verify_snapshot_chain,
     ChainCheck, EdgeBelief, MaterializedState,
 };
-pub(crate) use replay::reconstruct_valid;
+pub(crate) use replay::{concept_interval_overlaps, reconstruct_valid};
 pub use snapshot::{
     cleanup_expired_snapshots, load_snapshot, save_snapshot, write_final, SnapshotCadence,
 };

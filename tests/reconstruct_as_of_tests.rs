@@ -23,6 +23,7 @@ const JUN: &str = "2026-06-01T00:00:00.000000Z";
 const JUL: &str = "2026-07-01T00:00:00.000000Z";
 const SEP: &str = "2026-09-01T00:00:00.000000Z";
 const OPEN: &str = "9999-12-31T23:59:59.999999Z";
+const AUG: &str = "2026-08-01T00:00:00.000000Z";
 const FAR: &str = "2030-01-01T00:00:00.000000Z";
 
 fn concept(id: &str, title: &str, from: &str, to: Option<&str>) -> ConceptUpsert {
@@ -345,6 +346,117 @@ async fn a_superseded_start_archived_away_still_answers_its_valid_read() {
         Some("jun"),
         "the June belief lives only in the archive"
     );
+
+    db.close().await.unwrap();
+}
+
+/// Gate 7: §3.3's worked example, in the order P5 produces it. C2 is ingested first,
+/// valid from June, and C1 is backfilled after it, valid from January to June. A
+/// valid read at August answers with C2, and the recorded read answers with C1, the
+/// row written last. Both answers are right, and their difference is the gate.
+#[tokio::test]
+async fn the_backfilled_ledger_answers_each_axis_its_own_way() {
+    let harness = TestHarness::new();
+    let db = open_db(&harness).await;
+
+    upsert(&db, concept("src/a.rs", "C2", JUN, None)).await;
+    upsert(&db, concept("src/a.rs", "C1", JAN, Some(JUN))).await;
+
+    let in_august = db.reconstruct_as_of(AsOf::valid_at(AUG)).await.unwrap();
+    assert_eq!(titles(&in_august)["src/a.rs"], "C2");
+
+    let in_march = db.reconstruct_as_of(AsOf::valid_at(MAR)).await.unwrap();
+    assert_eq!(titles(&in_march)["src/a.rs"], "C1");
+
+    let recorded = db.reconstruct_as_of(AsOf::recorded_at(FAR)).await.unwrap();
+    assert_eq!(titles(&recorded)["src/a.rs"], "C1", "the row written last");
+    assert_eq!(
+        titles(&recorded),
+        titles(&db.reconstruct(FAR).await.unwrap()),
+        "the recorded read is reconstruct"
+    );
+
+    db.close().await.unwrap();
+}
+
+/// Gate 7's control: the backfill is admitted and is not an overlap, so the check
+/// that reports overlaps reports nothing for it.
+#[tokio::test]
+async fn a_backfilled_ledger_with_no_overlap_verifies_clean() {
+    let harness = TestHarness::new();
+    let db = open_db(&harness).await;
+
+    upsert(&db, concept("src/a.rs", "C2", JUN, None)).await;
+    upsert(&db, concept("src/a.rs", "C1", JAN, Some(JUN))).await;
+
+    assert!(db.verify_concept_intervals().await.unwrap().is_empty());
+
+    db.close().await.unwrap();
+}
+
+/// Gate 10: a pre-existing overlap is refused at read time, naming the concept and
+/// both intervals, and `verify_concept_intervals` reports the same pair. The
+/// comparison is with the error the read returns, not with a rebuilt expectation.
+#[tokio::test]
+async fn verify_reports_the_overlap_the_read_refuses() {
+    let harness = TestHarness::new();
+    let db = open_db(&harness).await;
+
+    raw_concept(&db, "a", "one", JAN, JUN, "2026-02-01T00:00:00.000001Z").await;
+    raw_concept(&db, "a", "two", MAR, SEP, "2026-02-01T00:00:00.000002Z").await;
+
+    let read = db
+        .reconstruct_as_of(AsOf::valid_at(APR))
+        .await
+        .expect_err("[Jan, Jun) and [Mar, Sep) both contain April");
+    let DbError::OverlappingConcept { overlap: refused } = read else {
+        panic!("expected OverlappingConcept, got {read:?}");
+    };
+
+    let found = db.verify_concept_intervals().await.unwrap();
+    assert_eq!(found.len(), 1, "one pair overlaps: {found:?}");
+    assert_eq!(found[0], *refused);
+
+    db.close().await.unwrap();
+}
+
+/// The single-open case is reported too, and as the same pair the read refuses.
+#[tokio::test]
+async fn verify_reports_two_open_starts_that_meet() {
+    let harness = TestHarness::new();
+    let db = open_db(&harness).await;
+
+    raw_concept(&db, "a", "one", JAN, OPEN, "2026-02-01T00:00:00.000001Z").await;
+    raw_concept(&db, "a", "two", MAR, OPEN, "2026-02-01T00:00:00.000002Z").await;
+
+    let read = db
+        .reconstruct_as_of(AsOf::valid_at(APR))
+        .await
+        .expect_err("both open starts contain April");
+    let DbError::ConceptSingleOpen { overlap: refused } = read else {
+        panic!("expected ConceptSingleOpen, got {read:?}");
+    };
+
+    let found = db.verify_concept_intervals().await.unwrap();
+    assert_eq!(found, vec![*refused]);
+
+    db.close().await.unwrap();
+}
+
+/// The check walks the archive as the read does. After superseded rows are archived
+/// the ledger still verifies clean, and the check does not refuse the archived ledger
+/// for want of rows it could not see.
+#[tokio::test]
+async fn verify_still_runs_once_superseded_rows_are_archived() {
+    let harness = TestHarness::new();
+    let db = open_db(&harness).await;
+
+    upsert(&db, concept("a", "jan", JAN, Some(JUN))).await;
+    upsert(&db, concept("a", "jun", JUN, None)).await;
+    upsert(&db, concept("a", "jan-corrected", JAN, Some(JUN))).await;
+    db.archive(FAR).await.unwrap();
+
+    assert!(db.verify_concept_intervals().await.unwrap().is_empty());
 
     db.close().await.unwrap();
 }
