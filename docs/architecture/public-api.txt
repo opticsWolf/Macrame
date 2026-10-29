@@ -177,6 +177,7 @@ pub async fn macrame::connection::Database::rebuild_current(&self) -> macrame::e
 pub async fn macrame::connection::Database::rebuild_current_chunked(&self) -> macrame::error::Result<macrame::integrity::RebuildReport>
 pub async fn macrame::connection::Database::rebuild_fts(&self) -> macrame::error::Result<()>
 pub async fn macrame::connection::Database::reconstruct(&self, &str) -> macrame::error::Result<macrame::temporal::MaterializedState>
+pub async fn macrame::connection::Database::reconstruct_as_of(&self, macrame::temporal::AsOf) -> macrame::error::Result<macrame::temporal::MaterializedState>
 pub async fn macrame::connection::Database::reconstruct_on(&self, &str, &str) -> macrame::error::Result<macrame::temporal::MaterializedState>
 pub async fn macrame::connection::Database::register_extra_index(&self, &str) -> macrame::error::Result<()>
 pub async fn macrame::connection::Database::register_model(&self, &macrame::vector::ModelName, usize) -> macrame::error::Result<()>
@@ -1062,6 +1063,7 @@ pub async fn macrame::connection::Database::rebuild_current(&self) -> macrame::e
 pub async fn macrame::connection::Database::rebuild_current_chunked(&self) -> macrame::error::Result<macrame::integrity::RebuildReport>
 pub async fn macrame::connection::Database::rebuild_fts(&self) -> macrame::error::Result<()>
 pub async fn macrame::connection::Database::reconstruct(&self, &str) -> macrame::error::Result<macrame::temporal::MaterializedState>
+pub async fn macrame::connection::Database::reconstruct_as_of(&self, macrame::temporal::AsOf) -> macrame::error::Result<macrame::temporal::MaterializedState>
 pub async fn macrame::connection::Database::reconstruct_on(&self, &str, &str) -> macrame::error::Result<macrame::temporal::MaterializedState>
 pub async fn macrame::connection::Database::register_extra_index(&self, &str) -> macrame::error::Result<()>
 pub async fn macrame::connection::Database::register_model(&self, &macrame::vector::ModelName, usize) -> macrame::error::Result<()>
@@ -1877,6 +1879,7 @@ pub async fn macrame::connection::Database::rebuild_current(&self) -> macrame::e
 pub async fn macrame::connection::Database::rebuild_current_chunked(&self) -> macrame::error::Result<macrame::integrity::RebuildReport>
 pub async fn macrame::connection::Database::rebuild_fts(&self) -> macrame::error::Result<()>
 pub async fn macrame::connection::Database::reconstruct(&self, &str) -> macrame::error::Result<macrame::temporal::MaterializedState>
+pub async fn macrame::connection::Database::reconstruct_as_of(&self, macrame::temporal::AsOf) -> macrame::error::Result<macrame::temporal::MaterializedState>
 pub async fn macrame::connection::Database::reconstruct_on(&self, &str, &str) -> macrame::error::Result<macrame::temporal::MaterializedState>
 pub async fn macrame::connection::Database::register_extra_index(&self, &str) -> macrame::error::Result<()>
 pub async fn macrame::connection::Database::register_model(&self, &macrame::vector::ModelName, usize) -> macrame::error::Result<()>

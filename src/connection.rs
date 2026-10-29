@@ -3554,6 +3554,53 @@ impl Database {
         .await
     }
 
+    /// State at `at`, on either axis or both (0.20.0, P2, D-292).
+    ///
+    /// `AsOf::recorded_at(ts)` is [`Self::reconstruct`] at `ts`, and is the same
+    /// fold. A valid instant, with or without a recorded bound, selects the row
+    /// whose validity contains that instant, one current belief per valid start.
+    /// Two starts of one concept are each answered by their own interval, where
+    /// [`Self::reconstruct`] answers with whichever row was written last.
+    ///
+    /// The state's `timestamp` is the valid instant when one is given. Such a
+    /// state is not a belief at a recorded instant, so it must not be saved as a
+    /// snapshot. A valid read folds from genesis and ignores snapshots (D-292). An
+    /// instant that predates the ledger is an ordinary empty state, not one with
+    /// `predates_recorded_history` set, because that flag answers a question about
+    /// the recorded axis only.
+    ///
+    /// Two beliefs that both claim the instant are refused by name, as
+    /// [`DbError::ConceptSingleOpen`], [`DbError::OverlappingConcept`] or
+    /// [`DbError::OverlappingInterval`]. Only a ledger written before the write
+    /// guard, or by raw SQL, can hold one.
+    pub async fn reconstruct_as_of(
+        &self,
+        at: crate::temporal::AsOf,
+    ) -> Result<crate::temporal::MaterializedState> {
+        let recorded = match at.recorded {
+            Some(r) => Some(timestamp::normalize(&r)?),
+            None => None,
+        };
+        let Some(valid) = at.valid else {
+            let ts = recorded.unwrap_or_else(|| self.clock.now());
+            return crate::temporal::reconstruct(
+                &self.read_conn,
+                &ts,
+                Some(&self.archive_path),
+                Some(&self.snapshots_dir),
+            )
+            .await;
+        };
+        let valid = timestamp::normalize(&valid)?;
+        crate::temporal::reconstruct_valid(
+            &self.read_conn,
+            &valid,
+            recorded.as_deref(),
+            Some(&self.archive_path),
+        )
+        .await
+    }
+
     /// State at `ts` as `branch` saw it (0.15.17, [D-259], review C-10).
     ///
     /// [`Self::reconstruct`] with the ancestry resolved: each ancestor bounded

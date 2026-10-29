@@ -1,10 +1,11 @@
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::branch::Ancestor;
-use crate::error::{DbError, Result};
-use crate::temporal::as_of::NodeAttributes;
+use crate::error::{ConceptOverlap, DbError, Overlap, Result};
+use crate::temporal::as_of::{valid_interval_contains, NodeAttributes};
+use crate::util::timestamp::OPEN_SENTINEL;
 
 /// One lineage's belief about one edge, at the instant a fold asked (§15.2).
 ///
@@ -553,6 +554,58 @@ const HOT_FOLD: &str = r#"
     ) WHERE rn = 1
 "#;
 
+/// The fold on the valid axis (0.20.0, P2, D-292): the winning row for each
+/// **valid start**, not for each entity.
+///
+/// [`HOT_FOLD`] keeps one row per `(table_name, entity_id, branch_id)`. That is
+/// the right partition for what the ledger believed and the wrong one for what
+/// was true: a concept with two valid starts has two current beliefs, and the
+/// entity partition hands the whole entity to whichever was written last. Adding
+/// the start to the partition gives each its own current belief. The valid
+/// selection is then made in Rust by [`fold_valid_delta`], which has to see every
+/// surviving start to tell one belief from two.
+///
+/// `?1` is the recorded bound, or NULL for belief at the present.
+const VALID_FOLD: &str = r#"
+    SELECT seq_id, table_name, entity_id, operation, payload, branch_id
+    FROM (
+        SELECT seq_id, table_name, entity_id, operation, payload, branch_id,
+               ROW_NUMBER() OVER (
+                   PARTITION BY table_name, entity_id, branch_id, json_extract(payload, '$.valid_from')
+                   ORDER BY seq_id DESC
+               ) as rn
+        FROM transaction_log
+        WHERE (?1 IS NULL OR recorded_at <= ?1)
+    ) WHERE rn = 1
+"#;
+
+/// [`VALID_FOLD`] over hot and cold together. Requires `cold` to be ATTACHed.
+///
+/// The archive's `recorded_at` bound composes with the valid selection because it
+/// is a row filter applied before the per-start `ROW_NUMBER`, as it is on the
+/// recorded axis. The valid predicate runs afterwards, in Rust, on the rows that
+/// survive, so the two never interact.
+fn valid_cold_fold(cold_lineage: ColdLineage) -> String {
+    format!(
+        r#"
+    SELECT seq_id, table_name, entity_id, operation, payload, branch_id
+    FROM (
+        SELECT seq_id, table_name, entity_id, operation, payload, branch_id,
+               ROW_NUMBER() OVER (
+                   PARTITION BY table_name, entity_id, branch_id, json_extract(payload, '$.valid_from')
+                   ORDER BY seq_id DESC
+               ) as rn
+        FROM (
+            SELECT seq_id, table_name, entity_id, operation, payload, recorded_at, branch_id FROM main.transaction_log
+            UNION ALL
+            SELECT seq_id, table_name, entity_id, operation, payload, recorded_at, {cold} FROM cold.transaction_log
+        ) WHERE (?1 IS NULL OR recorded_at <= ?1)
+    ) WHERE rn = 1
+"#,
+        cold = cold_lineage.projection()
+    )
+}
+
 /// Fold over hot and cold together (§5.5, D-026). Requires `cold` to be ATTACHed.
 ///
 /// The hot entry wins for entities present in both files because its `seq_id` is
@@ -909,19 +962,7 @@ async fn reconstruct_from(
         });
     }
 
-    detach_stale_cold(conn).await;
-
-    // Bound, not interpolated: a path is caller data, and hand-rolled quote
-    // doubling is a worse version of what the driver already does correctly.
-    conn.execute(
-        "ATTACH DATABASE ?1 AS cold",
-        libsql::params![archive.to_string_lossy().as_ref()],
-    )
-    .await?;
-
-    // Asked once, after the ATTACH and before either fold, because both arms
-    // need it and the answer cannot change while we hold the handle.
-    let cold_shape = cold_lineage(conn).await;
+    let cold_shape = attach_cold(conn, archive).await?;
 
     // Composition works across the archive boundary because the anchored fold
     // unions both files; before 0.5.5 it was refused here rather than made to
@@ -941,11 +982,76 @@ async fn reconstruct_from(
     };
 
     // Unconditional: see the ATTACH note above.
+    detach_cold(conn).await;
+
+    result
+}
+
+/// State at the valid instant `valid`, with belief bounded at `recorded`, or at
+/// the present when that is `None` (0.20.0, P2, D-292).
+///
+/// This is the valid axis's own reach question, and it is not
+/// [`reconstruct_from`]'s. The fold starts from genesis: a snapshot's instant is
+/// recorded, so a snapshot cannot stand in for a valid one (plan §5.3).
+///
+/// **The archive is consulted whenever one is present, whatever the recorded
+/// bound.** `LOG_ARCHIVABLE` keys on `entity_id`, so a concept's superseded starts
+/// leave the hot log once a later start exists, though each may still be the
+/// belief for its own interval. The newest-row argument behind [`hot_log_reach`]
+/// covers the newest row per entity, which is enough for the recorded fold and not
+/// for this one, so the shortcut that answers `reconstruct(now)` from the hot log
+/// does not apply here. With no archive file the hot log is the whole ledger,
+/// unless its integrity counter says rows left it; then the fold refuses rather
+/// than answering short.
+pub(crate) async fn reconstruct_valid(
+    conn: &libsql::Connection,
+    valid: &str,
+    recorded: Option<&str>,
+    archive_path: Option<&Path>,
+) -> Result<MaterializedState> {
+    if let Some(archive) = archive_path.filter(|p| crate::temporal::archive::archive_present(p)) {
+        let cold_shape = attach_cold(conn, archive).await?;
+        let result = fold_valid(conn, valid, recorded, &valid_cold_fold(cold_shape)).await;
+        detach_cold(conn).await;
+        return result;
+    }
+    if !hot_log_is_intact(conn).await? {
+        return Err(DbError::ReplayCorrupt {
+            seq: 0,
+            reason: format!(
+                "state at {valid} on the valid axis needs rows the archive holds, \
+                 and no archive database was found; {}",
+                archive_hint(conn).await
+            ),
+        });
+    }
+    fold_valid(conn, valid, recorded, VALID_FOLD).await
+}
+
+/// ATTACH the archive as `cold` and read its lineage shape. Every caller must
+/// [`detach_cold`] on the way out, error paths included (see [`reconstruct_from`]).
+async fn attach_cold(conn: &libsql::Connection, archive: &Path) -> Result<ColdLineage> {
+    detach_stale_cold(conn).await;
+
+    // Bound, not interpolated: a path is caller data, and hand-rolled quote
+    // doubling is a worse version of what the driver already does correctly.
+    conn.execute(
+        "ATTACH DATABASE ?1 AS cold",
+        libsql::params![archive.to_string_lossy().as_ref()],
+    )
+    .await?;
+
+    // Asked once, after the ATTACH and before either fold, because both arms
+    // need it and the answer cannot change while we hold the handle.
+    Ok(cold_lineage(conn).await)
+}
+
+/// DETACH the archive. Unconditional, so a failed fold cannot leave the handle
+/// attached for the next read; see the ATTACH note in [`reconstruct_from`].
+async fn detach_cold(conn: &libsql::Connection) {
     if let Err(e) = conn.execute("DETACH DATABASE cold", ()).await {
         tracing::warn!("reconstruct: failed to DETACH cold database: {e}");
     }
-
-    result
 }
 
 /// Fold from genesis and compare against the composed answer (§5.5, T5.3,
@@ -1732,12 +1838,10 @@ async fn fold_delta(
 ) -> Result<Delta> {
     let mut rows = conn.query(query, params).await?;
     let mut d = Delta::default();
-    let (concepts, edges, max_seq) = (&mut d.concepts, &mut d.edges, &mut d.max_seq);
-
     while let Some(row) = rows.next().await? {
         let seq_id: i64 = row.get(0)?;
         let table_name: String = row.get(1)?;
-        let _entity_id: String = row.get(2)?;
+        let entity_id: String = row.get(2)?;
         let op: String = row.get(3)?;
         let payload_str: String = row.get(4)?;
         // Projected by all four folds since 0.14.5. They have partitioned on it
@@ -1745,150 +1849,294 @@ async fn fold_delta(
         // is why the correct partition produced a collapsed result anyway.
         let branch_id: String = row.get(5)?;
 
-        if seq_id > *max_seq {
-            *max_seq = seq_id;
+        if seq_id > d.max_seq {
+            d.max_seq = seq_id;
         }
 
-        // A `'D'` row is corruption, not a tombstone (D-072).
-        //
-        // Doctrine V permits no physical delete outside an archive session, and
-        // the archive *moves* rows rather than logging their removal — so no
-        // trigger in the schema writes a `'D'`, and no code path in the crate
-        // can produce one. This arm used to treat it as a tombstone, which read
-        // as a claim that deletions are recorded and reconstructible. They are
-        // not. Refusing here makes the doctrine enforced at the fold rather than
-        // assumed by it, and is the same call D-060 made for overlap: the layer
-        // that can notice should.
-        //
-        // Retirement is unaffected and is the mechanism that actually removes a
-        // concept from a composed state — see the `retired != 0` branch below,
-        // which is where `concepts_gone` is populated in practice.
-        if op == "D" {
-            return Err(DbError::ReplayCorrupt {
-                seq: seq_id,
-                reason: format!(
-                    "transaction_log carries a 'D' operation for {table_name} \
-                     entity {_entity_id:?}; Doctrine V permits no physical delete \
-                     outside an archive session, and the archive logs none. This \
-                     row was not written by this crate."
-                ),
-            });
-        }
-
-        let payload: serde_json::Value =
-            serde_json::from_str(&payload_str).map_err(|e| DbError::ReplayCorrupt {
-                seq: seq_id,
-                reason: format!("Failed to parse payload JSON: {e}"),
-            })?;
-
-        // v1, v2 and v3 differ by added fields only, so an older payload folds
-        // by reading each as absent — which is what `Option` and the `{}`
-        // default already mean below. A future shape that *removes* or
-        // *retypes* a field would not be able to share this path, and would
-        // want a match on `v` rather than a ceiling.
-        //
-        // **The check is per shape and therefore comes after the dispatch**
-        // (0.18.0, D-285). Reading one ceiling against every row gated two
-        // shapes that version independently: a links row stamped 2 passed a
-        // global ceiling of 2 and then decoded under v1 field names, silently,
-        // because `get("source_id")` on a payload that has none yields the
-        // empty string rather than an error. No such row exists, since nothing
-        // but this crate writes links versions and it has never written one
-        // above 1 — so the tightening refuses only rows that were already
-        // being mis-folded, and refuses no row any version of this crate
-        // minted.
-        let v = payload.get("v").and_then(|v| v.as_u64()).unwrap_or(1);
-        let ceiling = |max: u8| -> Result<()> {
-            if v > max as u64 {
-                return Err(DbError::PayloadVersion { got: v as u8, max });
-            }
-            Ok(())
-        };
-
-        if table_name == "concepts" {
-            ceiling(PAYLOAD_VERSION_CONCEPTS)?;
-            let id = _entity_id;
-            let retired = payload.get("retired").and_then(|r| r.as_i64()).unwrap_or(0);
-            if retired == 0 {
-                let title = payload
-                    .get("title")
-                    .and_then(|s| s.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let content = payload
-                    .get("content")
-                    .and_then(|s| s.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let embedding_model = payload
-                    .get("embedding_model")
-                    .and_then(|s| s.as_str())
-                    .map(|s| s.to_string());
-                // Absent below v3, and absent means `{}`: the entry was minted
-                // before the column existed, so there is nothing it could be
-                // hiding. The trigger writes `json(NEW.extra)`, so the payload
-                // carries an object rather than a string — re-rendered here,
-                // not read as `as_str`.
-                let extra = payload
-                    .get("extra")
-                    .map(|e| e.to_string())
-                    .unwrap_or_else(|| "{}".to_string());
-                concepts.insert(
-                    id.clone(),
-                    NodeAttributes {
-                        id,
-                        title,
-                        content,
-                        embedding_model,
-                        extra,
-                    },
-                );
-            } else {
-                // Retirement is the application axis (§4.1), and a reconstruction
-                // shows what was visible. Onto a snapshot that means removing
-                // the concept, not declining to add it.
-                d.concepts_gone.insert(id);
-            }
-        } else if table_name == "links" {
-            ceiling(PAYLOAD_VERSION_LINKS)?;
-            let src = payload
-                .get("source_id")
-                .and_then(|s| s.as_str())
-                .unwrap_or("")
-                .to_string();
-            let tgt = payload
-                .get("target_id")
-                .and_then(|s| s.as_str())
-                .unwrap_or("")
-                .to_string();
-            let edge_type = payload
-                .get("edge_type")
-                .and_then(|s| s.as_str())
-                .unwrap_or("")
-                .to_string();
-            let vf = payload
-                .get("valid_from")
-                .and_then(|s| s.as_str())
-                .unwrap_or("")
-                .to_string();
-            let vt = payload
-                .get("valid_to")
-                .and_then(|s| s.as_str())
-                .unwrap_or("")
-                .to_string();
-            let belief = EdgeBelief {
-                source_id: src,
-                target_id: tgt,
-                edge_type,
-                valid_from: vf,
-                valid_to: vt,
-                branch_id,
-            };
-            edges.insert(belief.belief_key(), belief);
-        }
+        let payload = parse_log_row(seq_id, &table_name, &entity_id, &op, &payload_str)?;
+        absorb_row(&mut d, &table_name, entity_id, branch_id, &payload)?;
     }
 
     Ok(d)
+}
+
+/// The checks every fold makes on a log row before it reads the row's contents.
+///
+/// A `'D'` row is corruption, not a tombstone (D-072). Doctrine V permits no
+/// physical delete outside an archive session, and the archive *moves* rows
+/// rather than logging their removal, so no trigger writes a `'D'` and no code
+/// path in the crate can produce one. Refusing here makes the doctrine enforced
+/// at the fold rather than assumed by it. Retirement is what removes a concept
+/// from a composed state; see [`absorb_row`].
+fn parse_log_row(
+    seq_id: i64,
+    table_name: &str,
+    entity_id: &str,
+    op: &str,
+    payload_str: &str,
+) -> Result<serde_json::Value> {
+    if op == "D" {
+        return Err(DbError::ReplayCorrupt {
+            seq: seq_id,
+            reason: format!(
+                "transaction_log carries a 'D' operation for {table_name} \
+                 entity {entity_id:?}; Doctrine V permits no physical delete \
+                 outside an archive session, and the archive logs none. This \
+                 row was not written by this crate."
+            ),
+        });
+    }
+    serde_json::from_str(payload_str).map_err(|e| DbError::ReplayCorrupt {
+        seq: seq_id,
+        reason: format!("Failed to parse payload JSON: {e}"),
+    })
+}
+
+/// Apply one winning row to the delta, dispatching on its table.
+///
+/// Shared by the recorded fold and the valid-axis fold, so both read a row the
+/// same way. The per-shape version check comes after the dispatch (0.18.0,
+/// D-285), so a row is judged only against the ceiling of its own shape.
+fn absorb_row(
+    d: &mut Delta,
+    table_name: &str,
+    entity_id: String,
+    branch_id: String,
+    payload: &serde_json::Value,
+) -> Result<()> {
+    // v1, v2 and v3 differ by added fields only, so an older payload folds by
+    // reading each as absent, which is what `Option` and the `{}` default already
+    // mean below. A future shape that *removes* or *retypes* a field would want a
+    // match on `v` rather than a ceiling.
+    let v = payload.get("v").and_then(|v| v.as_u64()).unwrap_or(1);
+    let ceiling = |max: u8| -> Result<()> {
+        if v > max as u64 {
+            return Err(DbError::PayloadVersion { got: v as u8, max });
+        }
+        Ok(())
+    };
+
+    if table_name == "concepts" {
+        ceiling(PAYLOAD_VERSION_CONCEPTS)?;
+        let retired = payload.get("retired").and_then(|r| r.as_i64()).unwrap_or(0);
+        if retired == 0 {
+            let title = payload
+                .get("title")
+                .and_then(|s| s.as_str())
+                .unwrap_or("")
+                .to_string();
+            let content = payload
+                .get("content")
+                .and_then(|s| s.as_str())
+                .unwrap_or("")
+                .to_string();
+            let embedding_model = payload
+                .get("embedding_model")
+                .and_then(|s| s.as_str())
+                .map(|s| s.to_string());
+            // Absent below v3, and absent means `{}`: the entry was minted before
+            // the column existed, so there is nothing it could be hiding. The
+            // trigger writes `json(NEW.extra)`, so the payload carries an object
+            // rather than a string — re-rendered here, not read as `as_str`.
+            let extra = payload
+                .get("extra")
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| "{}".to_string());
+            d.concepts.insert(
+                entity_id.clone(),
+                NodeAttributes {
+                    id: entity_id,
+                    title,
+                    content,
+                    embedding_model,
+                    extra,
+                },
+            );
+        } else {
+            // Retirement is the application axis (§4.1), and a reconstruction
+            // shows what was visible. Onto a snapshot that means removing the
+            // concept, not declining to add it.
+            d.concepts_gone.insert(entity_id);
+        }
+    } else if table_name == "links" {
+        ceiling(PAYLOAD_VERSION_LINKS)?;
+        let field = |name: &str| {
+            payload
+                .get(name)
+                .and_then(|s| s.as_str())
+                .unwrap_or("")
+                .to_string()
+        };
+        let belief = EdgeBelief {
+            source_id: field("source_id"),
+            target_id: field("target_id"),
+            edge_type: field("edge_type"),
+            valid_from: field("valid_from"),
+            valid_to: field("valid_to"),
+            branch_id,
+        };
+        d.edges.insert(belief.belief_key(), belief);
+    }
+    Ok(())
+}
+
+/// One valid start's current belief, held until the fold knows whether any other
+/// start also claims the instant.
+struct ValidStart {
+    seq_id: i64,
+    table_name: String,
+    entity_id: String,
+    branch_id: String,
+    payload: serde_json::Value,
+}
+
+/// [`fold_delta`] on the valid axis: the beliefs whose validity contains `valid`
+/// (0.20.0, P2, D-292).
+///
+/// The query has already reduced the log to one row per valid start, so a row
+/// here is never a superseded row of its own start. What is left to decide is
+/// whether two starts both claim the instant. The write guard refuses that
+/// (D-291), so only a ledger written before it, or by raw SQL, can hold it. The
+/// fold refuses it too, naming both intervals, rather than picking one: which of
+/// two contradictory assertions to keep is the judgement the crate does not make
+/// on the caller's behalf (Doctrine III, plan §5.4).
+async fn fold_valid_delta(
+    conn: &libsql::Connection,
+    query: &str,
+    params: impl libsql::params::IntoParams,
+    valid: &str,
+) -> Result<Delta> {
+    let mut rows = conn.query(query, params).await?;
+    let mut claims: BTreeMap<(String, String, String), Vec<ValidStart>> = BTreeMap::new();
+    while let Some(row) = rows.next().await? {
+        let seq_id: i64 = row.get(0)?;
+        let table_name: String = row.get(1)?;
+        let entity_id: String = row.get(2)?;
+        let op: String = row.get(3)?;
+        let payload_str: String = row.get(4)?;
+        let branch_id: String = row.get(5)?;
+
+        let payload = parse_log_row(seq_id, &table_name, &entity_id, &op, &payload_str)?;
+        if !valid_interval_contains(&payload, valid) {
+            continue;
+        }
+        let key = overlap_key(&table_name, &entity_id, &payload);
+        claims
+            .entry((table_name.clone(), key, branch_id.clone()))
+            .or_default()
+            .push(ValidStart {
+                seq_id,
+                table_name,
+                entity_id,
+                branch_id,
+                payload,
+            });
+    }
+
+    let mut d = Delta::default();
+    for mut starts in claims.into_values() {
+        starts.sort_by_key(|s| s.seq_id);
+        match starts.as_slice() {
+            [] => {}
+            [only] => {
+                if only.seq_id > d.max_seq {
+                    d.max_seq = only.seq_id;
+                }
+                absorb_row(
+                    &mut d,
+                    &only.table_name,
+                    only.entity_id.clone(),
+                    only.branch_id.clone(),
+                    &only.payload,
+                )?;
+            }
+            [earlier, later, ..] => return Err(valid_overlap(earlier, later)),
+        }
+    }
+    Ok(d)
+}
+
+/// The identity two beliefs must share to overlap: the concept id, or a link's
+/// edge key `(source, target, type)`. A link's `entity_id` also carries its
+/// start, so it cannot be the key here.
+fn overlap_key(table_name: &str, entity_id: &str, payload: &serde_json::Value) -> String {
+    if table_name != "links" {
+        return entity_id.to_string();
+    }
+    let field = |name: &str| payload.get(name).and_then(|s| s.as_str()).unwrap_or("");
+    format!(
+        "{}|{}|{}",
+        field("source_id"),
+        field("target_id"),
+        field("edge_type")
+    )
+}
+
+/// The refusal for two beliefs that both claim the instant, worded as the write
+/// guard words it (D-291): a concept whose two open intervals meet is
+/// `ConceptSingleOpen`, any other concept overlap is `OverlappingConcept`, and a
+/// link is `OverlappingInterval`. `existing` is the earlier write, `asserted` the
+/// later one.
+fn valid_overlap(existing: &ValidStart, asserted: &ValidStart) -> DbError {
+    let bounds = |s: &ValidStart| {
+        let field = |name: &str| {
+            s.payload
+                .get(name)
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string()
+        };
+        (field("valid_from"), field("valid_to"))
+    };
+    let (asserted_from, asserted_to) = bounds(asserted);
+    let (existing_from, existing_to) = bounds(existing);
+
+    if existing.table_name == "links" {
+        let field = |name: &str| {
+            existing
+                .payload
+                .get(name)
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string()
+        };
+        return DbError::OverlappingInterval {
+            overlap: Box::new(Overlap::new(
+                field("source_id"),
+                field("target_id"),
+                field("edge_type"),
+                (asserted_from, asserted_to),
+                (existing_from, existing_to),
+                false,
+            )),
+        };
+    }
+
+    let both_open = asserted_to == OPEN_SENTINEL && existing_to == OPEN_SENTINEL;
+    let overlap = Box::new(ConceptOverlap::new(
+        &existing.entity_id,
+        (asserted_from, asserted_to),
+        (existing_from, existing_to),
+        false,
+    ));
+    if both_open {
+        DbError::ConceptSingleOpen { overlap }
+    } else {
+        DbError::OverlappingConcept { overlap }
+    }
+}
+
+/// [`fold`] on the valid axis. The state is at the valid instant, so that is its
+/// timestamp. It is not a recorded instant, and must not be saved as a snapshot.
+async fn fold_valid(
+    conn: &libsql::Connection,
+    valid: &str,
+    recorded: Option<&str>,
+    query: &str,
+) -> Result<MaterializedState> {
+    let recorded = recorded.map(str::to_string);
+    let delta = fold_valid_delta(conn, query, libsql::params![recorded], valid).await?;
+    Ok(delta.apply_to(MaterializedState::empty(valid), valid))
 }
 
 impl Delta {

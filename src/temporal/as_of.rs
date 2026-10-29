@@ -503,14 +503,24 @@ pub(crate) fn concept_visible_at(payload: &serde_json::Value, valid: Option<&str
     // row per entity — a `json_extract` in the outer filter would read
     // the same bytes this arm already has in hand.
     if let Some(v) = valid {
-        let from = payload.get("valid_from").and_then(|s| s.as_str());
-        let to = payload.get("valid_to").and_then(|s| s.as_str());
-        if from.is_some_and(|f| f > v) || to.is_some_and(|t| t <= v) {
+        if !valid_interval_contains(payload, v) {
             return Ok(false);
         }
     }
 
     Ok(true)
+}
+
+/// Whether the validity `payload` records covers `v`, as `[valid_from, valid_to)`.
+/// An absent bound is unbounded on that side (0.20.0, P2, D-292).
+///
+/// Shared by [`concept_visible_at`] and the valid-axis fold in
+/// [`crate::temporal::reconstruct_valid`], so the two readers cannot disagree
+/// about what an interval contains.
+pub(crate) fn valid_interval_contains(payload: &serde_json::Value, v: &str) -> bool {
+    let from = payload.get("valid_from").and_then(|s| s.as_str());
+    let to = payload.get("valid_to").and_then(|s| s.as_str());
+    !(from.is_some_and(|f| f > v) || to.is_some_and(|t| t <= v))
 }
 /// Attributes as recorded at `ts`, filtered by retirement *at* `ts` and — when
 /// `valid` is given — by the validity the payload itself recorded (W7.1).

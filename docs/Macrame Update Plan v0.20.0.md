@@ -171,7 +171,7 @@ last. The `concepts` projection agrees, since an upsert replaces the row and
 `concepts.id` is `TEXT NOT NULL UNIQUE` (`ddl.rs:648`). Nothing warns.
 
 That is why P1 is not merely a precondition. **A caller that writes `valid_from` out
-of order gets a wrong answer from `reconstruct(now)` on 0.19.1**, The guard refuses the overlapping cases, not this one: a backfill that does not overlap what the ledger holds is a legitimate history and is admitted. What `reconstruct(now)` returns for such a ledger is a read question, and P2 answers it with `reconstruct_as_of`. P1 does not claim to fix it.
+of order gets a wrong answer from `reconstruct(now)` on 0.19.1**. The guard refuses the overlapping cases, not this one: a backfill that does not overlap what the ledger holds is a legitimate history and is admitted. What `reconstruct(now)` returns for such a ledger is a read question, and P2 answers it with `reconstruct_as_of`. P1 does not claim to fix it.
 
 **Decision: Design B**, with Design A's predicate reused unchanged for the
 `recorded` bound. Rejected: *Design A alone* (cannot answer the question asked, §3.3);
@@ -317,6 +317,8 @@ ordinary answer, not a statement about the ledger's horizon. The flag's doc comm
 gains the distinction, because a field whose meaning is "one of two things" is the
 defect [D-121](architecture/s13-decision-register.md#d-121) added it to prevent.
 
+**Correction (0.20.0, P2, D-292).** The reach argument above holds for the recorded fold and not for the valid one. `LOG_ARCHIVABLE` keys on `entity_id`, so a concept's superseded start can leave the hot log while it is still the belief for its own interval, and the newest-row argument does not cover that. As built, a valid read consults the archive whenever one is present, takes the hot log alone only when `log_integrity` says no rows left it, and never takes the reach shortcut. `predates_recorded_history` is not set from a valid miss, as decided here.
+
 ### 5.4 Databases that already hold overlaps
 
 P1 refuses new overlaps. It cannot un-write old ones, and the plan says so rather
@@ -333,6 +335,8 @@ than a silent pick. The alternative — pick one and carry on — would make the
 answer depend on which contradiction it met first, which is the double-counting
 failure D-060 closed, moved from edges to concepts and from "two rows" to "two
 truths".
+
+**Superseded in the build (0.20.0, P2, D-292).** No new variant. P1 had already added `OverlappingConcept` and `ConceptSingleOpen`, the valid fold reuses them, and a link uses `OverlappingInterval`. `DbError` stays at 49 variants. The refusal is the one this section chose; only the variant names differ from the sketch above.
 
 A `verify`-time probe reports the same condition ahead of a read, so an operator can
 find it without waiting for a query to fail. Rejected: *refusing to open such a
@@ -390,8 +394,7 @@ commits, not after — see §9.
 > [D-227](architecture/s13-decision-register.md#d-227) (one lowering, not two),
 > [D-049](architecture/s13-decision-register.md#d-049) (snapshot composition, which
 > this axis cannot reuse), [D-121](architecture/s13-decision-register.md#d-121) (the
-> empty-state flag, whose meaning this does not widen). Evidence: *(to be filled by
-> the implementation)*.
+> empty-state flag, whose meaning this does not widen). Evidence: the register entry, [D-292](architecture/s13-decision-register.md#d-292).
 >
 > The state fold was the one read surface that knew a single clock. `AsOf` already
 > carried both instants and the traversal already took them, so this is the fold
