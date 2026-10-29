@@ -6209,7 +6209,7 @@ fn reject_concept_overlaps_within(concepts: &[ConceptUpsert]) -> Result<()> {
             if asserted.is_open() && first_open.is_none() {
                 first_open = Some(asserted);
             }
-            if widest.map_or(true, |w| asserted.valid_to > w.valid_to) {
+            if widest.is_none_or(|w| asserted.valid_to > w.valid_to) {
                 widest = Some(asserted);
             }
         }

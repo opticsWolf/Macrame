@@ -2740,7 +2740,7 @@ mod valid_fold_plan {
             .await
             .unwrap();
         for ddl in COLD_SCHEMA.iter().chain(COLD_LINEAGE_INDICES.iter()) {
-            conn.execute(*ddl, ()).await.unwrap();
+            conn.execute(ddl, ()).await.unwrap();
         }
         // Move the rows at or before `RECORDED` the way the archive does: copy them,
         // then delete them under the session marker the archive itself holds.
