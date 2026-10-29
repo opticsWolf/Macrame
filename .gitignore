@@ -37,3 +37,13 @@ dist/
 
 # Local working list, not published
 docs/documentation_fix.md
+
+# Local tooling scratch, not published
+.impeccable/
+
+# Local okfgraph pin and its index, not published
+okfgraph.toml
+docs-graph.db
+docs-graph.db-*
+docs-graph.db.lock
+docs-graph.db.wal
