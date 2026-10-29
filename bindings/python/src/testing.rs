@@ -28,7 +28,7 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use macrame::error::Overlap;
+use macrame::error::{ConceptOverlap, Overlap};
 use macrame::DbError;
 
 /// Every `DbError` variant, by name.
@@ -75,6 +75,8 @@ pub(crate) const DB_ERROR_VARIANTS: &[&str] = &[
     "InvalidTimestamp",
     "InvalidId",
     "OverlappingInterval",
+    "OverlappingConcept",
+    "ConceptSingleOpen",
     "CurrentDrift",
     "RebuildFailed",
     "RebuildInterrupted",
@@ -247,6 +249,22 @@ fn sample(name: &str) -> Option<DbError> {
                 "LINKS",
                 ("2026-03-01T00:00:00.000000Z", "2026-09-01T00:00:00.000000Z"),
                 ("2026-01-01T00:00:00.000000Z", "2026-06-01T00:00:00.000000Z"),
+                false,
+            )),
+        },
+        "OverlappingConcept" => DbError::OverlappingConcept {
+            overlap: Box::new(ConceptOverlap::new(
+                "concept-1",
+                ("2026-03-01T00:00:00.000000Z", "2026-09-01T00:00:00.000000Z"),
+                ("2026-01-01T00:00:00.000000Z", "2026-06-01T00:00:00.000000Z"),
+                false,
+            )),
+        },
+        "ConceptSingleOpen" => DbError::ConceptSingleOpen {
+            overlap: Box::new(ConceptOverlap::new(
+                "concept-1",
+                ("2026-03-01T00:00:00.000000Z", "9999-12-31T23:59:59.999999Z"),
+                ("2026-01-01T00:00:00.000000Z", "9999-12-31T23:59:59.999999Z"),
                 false,
             )),
         },

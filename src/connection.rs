@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
@@ -5950,6 +5951,7 @@ async fn upsert_concept(
     concept: &ConceptUpsert,
     stamp: &str,
 ) -> Result<()> {
+    reject_overlapping_concept(conn, concept).await?;
     let res = conn
         .execute(UPSERT_CONCEPT, concept_params(concept, stamp))
         .await;
@@ -5967,6 +5969,222 @@ async fn upsert_concept(
         )
         .await),
     }
+}
+
+// ---------------------------------------------------------------------------
+// The concept interval guard (0.19.2, D-291)
+// ---------------------------------------------------------------------------
+
+/// The latest row written for each valid start of one concept, read from the
+/// log (0.19.2, D-291).
+///
+/// The `concepts` projection holds one row per id, so it cannot see the other
+/// intervals a concept has held; the log can. For each `valid_from` the row
+/// written last is the belief in force for that start. That is the definition
+/// `links_current` keeps for edges (D-060), and the one this guard applies to
+/// concepts. The bound on `valid_from` sits before the window, which is sound
+/// because every row of one start falls on the same side of it.
+///
+/// Only the writing lineage's rows are read. A concept id has one owning lineage:
+/// the projection's `branch_id` is immutable and `trg_concepts_cross_lineage`
+/// refuses any other lineage's write to it. So the rows a lineage can see of an id
+/// it may write are its own, and reading the rest would let the trigger's
+/// `CrossLineage` refusal arrive as an overlap instead.
+///
+/// Seeks on the `(table_name, entity_id)` prefix of `idx_txlog_fold_partition`,
+/// the index the fold reads, so the cost is the concept's own history and not
+/// the ledger's.
+const CURRENT_CONCEPT_INTERVALS: &str = "
+    SELECT valid_from, valid_to FROM (
+        SELECT json_extract(payload, '$.valid_from') AS valid_from,
+               json_extract(payload, '$.valid_to') AS valid_to,
+               ROW_NUMBER() OVER (
+                   PARTITION BY json_extract(payload, '$.valid_from')
+                   ORDER BY seq_id DESC
+               ) AS rn
+        FROM transaction_log
+        WHERE table_name = 'concepts'
+          AND entity_id = ?1
+          AND json_extract(payload, '$.valid_from') < ?2
+          AND branch_id = ?3
+    )
+    WHERE rn = 1";
+
+/// The intervals the lineage `branch` currently believes for one concept, one per
+/// valid start, bounded above by `before` (0.19.2, D-291).
+async fn current_concept_intervals(
+    conn: &libsql::Connection,
+    id: &str,
+    before: &str,
+    branch: &str,
+) -> Result<Vec<Interval>> {
+    let mut rows = conn
+        .query(CURRENT_CONCEPT_INTERVALS, libsql::params![id, before, branch])
+        .await?;
+    let mut intervals = Vec::new();
+    while let Some(row) = rows.next().await? {
+        intervals.push(Interval::new(row.get::<String>(0)?, row.get::<String>(1)?));
+    }
+    Ok(intervals)
+}
+
+fn concept_interval(concept: &ConceptUpsert) -> Interval {
+    Interval::new(concept.valid_from.as_str(), concept.valid_to.as_str())
+}
+
+/// Whether two intervals for one concept cannot both be believed (0.19.2,
+/// D-291), and if so, which refusal names the collision.
+///
+/// Two open intervals share every instant from the later start, so they are the
+/// single-open violation and not an overlap. That is the partition the edge
+/// guard keeps (`defer_to_single_open`), applied to the concept's own history.
+/// Everything else that overlaps is an overlap.
+fn concept_clash(
+    id: &str,
+    asserted: &Interval,
+    existing: &Interval,
+    within_batch: bool,
+) -> Option<DbError> {
+    let pair = || {
+        crate::error::ConceptOverlap::new(
+            id,
+            (asserted.valid_from.as_str(), asserted.valid_to.as_str()),
+            (existing.valid_from.as_str(), existing.valid_to.as_str()),
+            within_batch,
+        )
+    };
+    if asserted.is_open() && existing.is_open() {
+        return Some(DbError::ConceptSingleOpen {
+            overlap: Box::new(pair()),
+        });
+    }
+    asserted.overlaps(existing).then(|| DbError::OverlappingConcept {
+        overlap: Box::new(pair()),
+    })
+}
+
+/// Refuse proposed intervals that clash with `current`, the intervals the ledger
+/// holds once the proposal's own starts are superseded (0.19.2, D-291).
+fn check_concept_against(id: &str, proposed: &[Interval], current: &[Interval]) -> Result<()> {
+    for asserted in proposed {
+        for existing in current {
+            if let Some(err) = concept_clash(id, asserted, existing, false) {
+                return Err(err);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The single-row guard, run before the actor's insert (0.19.2, D-291).
+///
+/// Inside the actor there is one writer (D-014), so the rows read here are the
+/// rows the insert will see, as the edge guard's are.
+async fn reject_overlapping_concept(
+    conn: &libsql::Connection,
+    concept: &ConceptUpsert,
+) -> Result<()> {
+    let asserted = concept_interval(concept);
+    // A start at or after the asserted end cannot overlap it, so only earlier
+    // starts are read. An open end admits all of them.
+    let current = current_concept_intervals(
+        conn,
+        &concept.id,
+        &asserted.valid_to,
+        concept.branch_name(),
+    )
+    .await?;
+    // Re-asserting an existing start supersedes that start's belief (Doctrine
+    // III), so it cannot clash with what it replaces.
+    let current: Vec<Interval> = current
+        .into_iter()
+        .filter(|e| e.valid_from != asserted.valid_from)
+        .collect();
+    check_concept_against(&concept.id, std::slice::from_ref(&asserted), &current)
+}
+
+/// What a batch leaves each (lineage, concept) holding: one interval per valid
+/// start, the last row written for that start winning (0.19.2, D-291).
+///
+/// Ordered by lineage, id and then start, so each group's intervals are contiguous
+/// and sorted by start, which is what the sweep below needs.
+fn final_concept_intervals(concepts: &[ConceptUpsert]) -> Vec<(&str, &str, Vec<Interval>)> {
+    let mut last: BTreeMap<(&str, &str, &str), Interval> = BTreeMap::new();
+    for concept in concepts {
+        last.insert(
+            (
+                concept.branch_name(),
+                concept.id.as_str(),
+                concept.valid_from.as_str(),
+            ),
+            concept_interval(concept),
+        );
+    }
+    let mut groups: Vec<(&str, &str, Vec<Interval>)> = Vec::new();
+    for ((branch, id, _), interval) in last {
+        match groups.last_mut() {
+            Some((b, i, intervals)) if *b == branch && *i == id => intervals.push(interval),
+            _ => groups.push((branch, id, vec![interval])),
+        }
+    }
+    groups
+}
+
+/// A batch checked against itself, before the transaction opens (0.19.2,
+/// D-291).
+///
+/// The database check cannot see rows that are not in it yet, so a batch that
+/// contradicts itself would otherwise commit its own overlap. This is sorted and
+/// swept per concept, as [`reject_overlaps_within`] is for edges (D-179). After
+/// the last-write-wins reduction the starts are distinct, so each interval needs
+/// checking only against the first open one and the widest end seen so far.
+fn reject_concept_overlaps_within(concepts: &[ConceptUpsert]) -> Result<()> {
+    for (_, id, intervals) in final_concept_intervals(concepts) {
+        let mut first_open: Option<&Interval> = None;
+        let mut widest: Option<&Interval> = None;
+        for asserted in &intervals {
+            let clash = first_open
+                .filter(|_| asserted.is_open())
+                .and_then(|open| concept_clash(id, asserted, open, true))
+                .or_else(|| widest.and_then(|w| concept_clash(id, asserted, w, true)));
+            if let Some(err) = clash {
+                return Err(err);
+            }
+            if asserted.is_open() && first_open.is_none() {
+                first_open = Some(asserted);
+            }
+            if widest.map_or(true, |w| asserted.valid_to > w.valid_to) {
+                widest = Some(asserted);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The batch checked against the committed ledger, inside the transaction and
+/// before its first insert (0.19.2, D-291).
+///
+/// Each concept is read once, bounded by the largest end the batch proposes for
+/// it, and compared with what the batch will leave. A start the batch rewrites
+/// is superseded and cannot clash with its own rewrite.
+async fn check_batch_against_ledger(
+    conn: &libsql::Connection,
+    concepts: &[ConceptUpsert],
+) -> Result<()> {
+    for (branch, id, proposed) in final_concept_intervals(concepts) {
+        let bound = proposed
+            .iter()
+            .map(|i| i.valid_to.as_str())
+            .max()
+            .unwrap_or(timestamp::OPEN_SENTINEL);
+        let current = current_concept_intervals(conn, id, bound, branch).await?;
+        let kept: Vec<Interval> = current
+            .into_iter()
+            .filter(|e| !proposed.iter().any(|p| p.valid_from == e.valid_from))
+            .collect();
+        check_concept_against(id, &proposed, &kept)?;
+    }
+    Ok(())
 }
 
 /// Whether this pair is the storage layer's case rather than this guard's.
@@ -6467,6 +6685,8 @@ async fn write_concepts_atomic(
         return Ok(0);
     }
 
+    reject_concept_overlaps_within(concepts)?;
+
     // Named lineages, before the write lock — `check_lineages`' reason, and the
     // shape it also returns is unused here because `concepts` is keyed by
     // identity and has no resolution to do (see `ConceptUpsert::branch`).
@@ -6482,6 +6702,13 @@ async fn write_concepts_atomic(
     let tx = conn
         .transaction_with_behavior(libsql::TransactionBehavior::Immediate)
         .await?;
+
+    // Against the committed ledger, before the first insert, so the rows read
+    // here cannot include this batch's own writes (D-291, as the edge batch does).
+    if let Err(e) = check_batch_against_ledger(&tx, concepts).await {
+        let _ = tx.rollback().await;
+        return Err(e);
+    }
 
     // Prepared once, like the edge chunk (D-056). This no longer routes through
     // [`upsert_concept`] — that function prepares per call by construction — but

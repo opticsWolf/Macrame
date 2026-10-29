@@ -71,11 +71,64 @@ impl Overlap {
     /// one format string, and rather than a `String` because this is on a
     /// `Display` path.
     pub fn provenance(&self) -> &'static str {
-        if self.within_batch {
-            "this same batch also asserts"
-        } else {
-            "is already recorded"
+        provenance_of(self.within_batch)
+    }
+}
+
+/// The two intervals of a concept collision, boxed out of the error enum
+/// (D-075, D-291). Both [`DbError::OverlappingConcept`] and
+/// [`DbError::ConceptSingleOpen`] carry one.
+///
+/// The concept half of [`Overlap`]: keyed on one id rather than an edge's three.
+/// As there, both intervals are reported, because neither alone identifies the
+/// conflict.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ConceptOverlap {
+    pub id: String,
+    pub valid_from: String,
+    pub valid_to: String,
+    pub existing_from: String,
+    pub existing_to: String,
+    /// Whether the collision is with another row in the same call (D-180), as
+    /// [`Overlap::within_batch`] is for edges.
+    pub within_batch: bool,
+}
+
+impl ConceptOverlap {
+    /// The collision, as the concept it is about and the two intervals.
+    ///
+    /// Grouped for the same reason [`Overlap::new`] is: eight positional strings
+    /// let `existing_from` and `valid_from` swap without the compiler noticing.
+    pub fn new(
+        id: impl Into<String>,
+        asserted: (impl Into<String>, impl Into<String>),
+        existing: (impl Into<String>, impl Into<String>),
+        within_batch: bool,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            valid_from: asserted.0.into(),
+            valid_to: asserted.1.into(),
+            existing_from: existing.0.into(),
+            existing_to: existing.1.into(),
+            within_batch,
         }
+    }
+
+    /// The message's closing clause: where the second interval came from.
+    pub fn provenance(&self) -> &'static str {
+        provenance_of(self.within_batch)
+    }
+}
+
+/// The closing clause shared by the overlap variants: an interval already
+/// recorded, or one this same call asserts (D-180).
+fn provenance_of(within_batch: bool) -> &'static str {
+    if within_batch {
+        "this same batch also asserts"
+    } else {
+        "is already recorded"
     }
 }
 
@@ -733,6 +786,35 @@ pub enum DbError {
     )]
     OverlappingInterval { overlap: Box<Overlap> },
 
+    /// Two valid-time intervals for one concept id claim the same instant
+    /// (0.19.2, D-291).
+    ///
+    /// The concept half of [`Self::OverlappingInterval`]. That variant is keyed
+    /// on an edge's `(source, target, edge_type)` and cannot name a concept, so
+    /// it is not widened to carry an id it never had. Boxed for the same reason
+    /// (D-075).
+    #[error(
+        "concept {}: the asserted [{}, {}) overlaps [{}, {}), which {}",
+        .overlap.id, .overlap.valid_from, .overlap.valid_to,
+        .overlap.existing_from, .overlap.existing_to,
+        .overlap.provenance()
+    )]
+    OverlappingConcept { overlap: Box<ConceptOverlap> },
+
+    /// A second open valid interval for one concept id (0.19.2, D-291).
+    ///
+    /// The concept half of [`Self::SingleOpenViolation`], which is keyed on an
+    /// edge and cannot name a concept. Two open intervals share every instant
+    /// from the later start, so they are refused as this and not as an overlap,
+    /// the same partition [`Self::OverlappingConcept`] keeps against edges'
+    /// [`Self::OverlappingInterval`].
+    #[error(
+        "concept {}: a second open interval from {} is refused; one from {} {}",
+        .overlap.id, .overlap.valid_from, .overlap.existing_from,
+        .overlap.provenance()
+    )]
+    ConceptSingleOpen { overlap: Box<ConceptOverlap> },
+
     #[error("links_current drift detected: {n} intervals diverge")]
     CurrentDrift { n: usize },
 
@@ -947,6 +1029,8 @@ impl DbError {
             | Self::FutureRecordedAt { .. }
             | Self::NegativeEdgeWeight { .. }
             | Self::OverlappingInterval { .. }
+            | Self::OverlappingConcept { .. }
+            | Self::ConceptSingleOpen { .. }
             | Self::RebuildFailed { .. }
             | Self::RebuildInterrupted { .. }
             | Self::RecordedAtRegression { .. }

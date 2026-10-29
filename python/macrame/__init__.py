@@ -153,6 +153,8 @@ from ._macrame import (
     NodeData,
     NotFoundError,
     OverlappingIntervalError,
+    OverlappingConceptError,
+    ConceptSingleOpenError,
     PayloadVersionError,
     RebuildFailedError,
     RebuildInterruptedError,
@@ -250,6 +252,8 @@ __all__ = [
     "DiagnosticConnError",
     # integrity
     "OverlappingIntervalError",
+    "OverlappingConceptError",
+    "ConceptSingleOpenError",
     "BulkCancelledError",
     "SingleOpenViolationError",
     "NegativeEdgeWeightError",

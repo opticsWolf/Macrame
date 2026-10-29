@@ -275,6 +275,16 @@ const REGISTRY: &[Growable] = &[
               nothing outside the crate can test against.",
     },
     Growable {
+        name: "ConceptOverlap",
+        entry: Entry::Built {
+            ctor: Ctor::Named("new"),
+        },
+        why: "the payload of `OverlappingConcept` and `ConceptSingleOpen`, built \
+              the way `Overlap` is: the binding builds a sample of each `DbError` \
+              to check its mapping, and nothing outside the crate can build one \
+              otherwise (D-291).",
+    },
+    Growable {
         name: "MaterializedState",
         entry: Entry::Built {
             ctor: Ctor::Named("empty"),
@@ -982,4 +992,32 @@ fn the_overlap_constructor_does_not_swap_the_two_intervals() {
     assert_eq!(o.target_id, "b");
     assert_eq!(o.edge_type, "relates");
     assert!(!o.within_batch);
+}
+
+/// **`ConceptOverlap::new` puts each interval where the message says it is.**
+///
+/// The concept half of the test above, for the same reason: `asserted` and
+/// `existing` are both pairs of `String`, so swapping them compiles and blames
+/// the caller's interval for the stored one's overlap (D-291).
+#[test]
+fn the_concept_overlap_constructor_does_not_swap_the_two_intervals() {
+    use macrame::error::ConceptOverlap;
+
+    let o = ConceptOverlap::new(
+        "a",
+        ("2026-02-01T00:00:00.000000Z", "2026-02-02T00:00:00.000000Z"),
+        ("2026-03-01T00:00:00.000000Z", "2026-03-02T00:00:00.000000Z"),
+        false,
+    );
+
+    assert_eq!(
+        (o.valid_from.as_str(), o.valid_to.as_str()),
+        ("2026-02-01T00:00:00.000000Z", "2026-02-02T00:00:00.000000Z"),
+        "the asserted interval landed somewhere other than `valid_from`/`valid_to`"
+    );
+    assert_eq!(
+        (o.existing_from.as_str(), o.existing_to.as_str()),
+        ("2026-03-01T00:00:00.000000Z", "2026-03-02T00:00:00.000000Z"),
+        "the stored interval landed somewhere other than `existing_from`/`existing_to`"
+    );
 }

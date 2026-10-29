@@ -261,6 +261,8 @@ pub macrame::error::DbError::BranchNotArchivable
 pub macrame::error::DbError::BranchNotArchivable::branch: alloc::string::String
 pub macrame::error::DbError::BranchNotArchivable::reason: alloc::string::String
 pub macrame::error::DbError::BulkCancelled
+pub macrame::error::DbError::ConceptSingleOpen
+pub macrame::error::DbError::ConceptSingleOpen::overlap: alloc::boxed::Box<macrame::error::ConceptOverlap>
 pub macrame::error::DbError::CrossLineage
 pub macrame::error::DbError::CrossLineage::attempted: alloc::string::String
 pub macrame::error::DbError::CrossLineage::held_by: alloc::string::String
@@ -310,6 +312,8 @@ pub macrame::error::DbError::NegativeEdgeWeight::source_id: alloc::string::Strin
 pub macrame::error::DbError::NegativeEdgeWeight::target_id: alloc::string::String
 pub macrame::error::DbError::NegativeEdgeWeight::weight: f64
 pub macrame::error::DbError::NotFound(alloc::string::String)
+pub macrame::error::DbError::OverlappingConcept
+pub macrame::error::DbError::OverlappingConcept::overlap: alloc::boxed::Box<macrame::error::ConceptOverlap>
 pub macrame::error::DbError::OverlappingInterval
 pub macrame::error::DbError::OverlappingInterval::overlap: alloc::boxed::Box<macrame::error::Overlap>
 pub macrame::error::DbError::PayloadVersion
@@ -404,6 +408,16 @@ impl core::error::Error for macrame::error::BulkInterrupted
 pub fn macrame::error::BulkInterrupted::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
 impl core::fmt::Display for macrame::error::BulkInterrupted
 pub fn macrame::error::BulkInterrupted::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+#[non_exhaustive] pub struct macrame::error::ConceptOverlap
+pub macrame::error::ConceptOverlap::existing_from: alloc::string::String
+pub macrame::error::ConceptOverlap::existing_to: alloc::string::String
+pub macrame::error::ConceptOverlap::id: alloc::string::String
+pub macrame::error::ConceptOverlap::valid_from: alloc::string::String
+pub macrame::error::ConceptOverlap::valid_to: alloc::string::String
+pub macrame::error::ConceptOverlap::within_batch: bool
+impl macrame::error::ConceptOverlap
+pub fn macrame::error::ConceptOverlap::new(impl core::convert::Into<alloc::string::String>, (impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>), (impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>), bool) -> Self
+pub fn macrame::error::ConceptOverlap::provenance(&self) -> &'static str
 #[non_exhaustive] pub struct macrame::error::Overlap
 pub macrame::error::Overlap::edge_type: alloc::string::String
 pub macrame::error::Overlap::existing_from: alloc::string::String
@@ -746,6 +760,8 @@ pub macrame::prelude::DbError::BranchNotArchivable
 pub macrame::prelude::DbError::BranchNotArchivable::branch: alloc::string::String
 pub macrame::prelude::DbError::BranchNotArchivable::reason: alloc::string::String
 pub macrame::prelude::DbError::BulkCancelled
+pub macrame::prelude::DbError::ConceptSingleOpen
+pub macrame::prelude::DbError::ConceptSingleOpen::overlap: alloc::boxed::Box<macrame::error::ConceptOverlap>
 pub macrame::prelude::DbError::CrossLineage
 pub macrame::prelude::DbError::CrossLineage::attempted: alloc::string::String
 pub macrame::prelude::DbError::CrossLineage::held_by: alloc::string::String
@@ -795,6 +811,8 @@ pub macrame::prelude::DbError::NegativeEdgeWeight::source_id: alloc::string::Str
 pub macrame::prelude::DbError::NegativeEdgeWeight::target_id: alloc::string::String
 pub macrame::prelude::DbError::NegativeEdgeWeight::weight: f64
 pub macrame::prelude::DbError::NotFound(alloc::string::String)
+pub macrame::prelude::DbError::OverlappingConcept
+pub macrame::prelude::DbError::OverlappingConcept::overlap: alloc::boxed::Box<macrame::error::ConceptOverlap>
 pub macrame::prelude::DbError::OverlappingInterval
 pub macrame::prelude::DbError::OverlappingInterval::overlap: alloc::boxed::Box<macrame::error::Overlap>
 pub macrame::prelude::DbError::PayloadVersion
@@ -958,6 +976,16 @@ pub macrame::prelude::CheckpointReport::checkpointed_frames: u64
 pub macrame::prelude::CheckpointReport::log_frames: u64
 impl macrame::connection::CheckpointReport
 pub fn macrame::connection::CheckpointReport::is_complete(&self) -> bool
+#[non_exhaustive] pub struct macrame::prelude::ConceptOverlap
+pub macrame::prelude::ConceptOverlap::existing_from: alloc::string::String
+pub macrame::prelude::ConceptOverlap::existing_to: alloc::string::String
+pub macrame::prelude::ConceptOverlap::id: alloc::string::String
+pub macrame::prelude::ConceptOverlap::valid_from: alloc::string::String
+pub macrame::prelude::ConceptOverlap::valid_to: alloc::string::String
+pub macrame::prelude::ConceptOverlap::within_batch: bool
+impl macrame::error::ConceptOverlap
+pub fn macrame::error::ConceptOverlap::new(impl core::convert::Into<alloc::string::String>, (impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>), (impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>), bool) -> Self
+pub fn macrame::error::ConceptOverlap::provenance(&self) -> &'static str
 #[non_exhaustive] pub struct macrame::prelude::ConceptUpsert
 pub macrame::prelude::ConceptUpsert::branch: core::option::Option<macrame::branch::BranchId>
 pub macrame::prelude::ConceptUpsert::content: alloc::string::String
@@ -1566,6 +1594,8 @@ pub macrame::DbError::BranchNotArchivable
 pub macrame::DbError::BranchNotArchivable::branch: alloc::string::String
 pub macrame::DbError::BranchNotArchivable::reason: alloc::string::String
 pub macrame::DbError::BulkCancelled
+pub macrame::DbError::ConceptSingleOpen
+pub macrame::DbError::ConceptSingleOpen::overlap: alloc::boxed::Box<macrame::error::ConceptOverlap>
 pub macrame::DbError::CrossLineage
 pub macrame::DbError::CrossLineage::attempted: alloc::string::String
 pub macrame::DbError::CrossLineage::held_by: alloc::string::String
@@ -1615,6 +1645,8 @@ pub macrame::DbError::NegativeEdgeWeight::source_id: alloc::string::String
 pub macrame::DbError::NegativeEdgeWeight::target_id: alloc::string::String
 pub macrame::DbError::NegativeEdgeWeight::weight: f64
 pub macrame::DbError::NotFound(alloc::string::String)
+pub macrame::DbError::OverlappingConcept
+pub macrame::DbError::OverlappingConcept::overlap: alloc::boxed::Box<macrame::error::ConceptOverlap>
 pub macrame::DbError::OverlappingInterval
 pub macrame::DbError::OverlappingInterval::overlap: alloc::boxed::Box<macrame::error::Overlap>
 pub macrame::DbError::PayloadVersion
@@ -1773,6 +1805,16 @@ pub macrame::CheckpointReport::checkpointed_frames: u64
 pub macrame::CheckpointReport::log_frames: u64
 impl macrame::connection::CheckpointReport
 pub fn macrame::connection::CheckpointReport::is_complete(&self) -> bool
+#[non_exhaustive] pub struct macrame::ConceptOverlap
+pub macrame::ConceptOverlap::existing_from: alloc::string::String
+pub macrame::ConceptOverlap::existing_to: alloc::string::String
+pub macrame::ConceptOverlap::id: alloc::string::String
+pub macrame::ConceptOverlap::valid_from: alloc::string::String
+pub macrame::ConceptOverlap::valid_to: alloc::string::String
+pub macrame::ConceptOverlap::within_batch: bool
+impl macrame::error::ConceptOverlap
+pub fn macrame::error::ConceptOverlap::new(impl core::convert::Into<alloc::string::String>, (impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>), (impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>), bool) -> Self
+pub fn macrame::error::ConceptOverlap::provenance(&self) -> &'static str
 #[non_exhaustive] pub struct macrame::ConceptUpsert
 pub macrame::ConceptUpsert::branch: core::option::Option<macrame::branch::BranchId>
 pub macrame::ConceptUpsert::content: alloc::string::String

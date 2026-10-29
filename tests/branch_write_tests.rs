@@ -620,8 +620,9 @@ async fn re_upserting_a_trunk_concept_from_the_trunk_is_still_a_plain_update() {
 
     // `branch_id` is deliberately absent from the `DO UPDATE` list: listing it
     // would make every re-upsert an abort from `trg_concepts_branch_immutable`
-    // rather than the no-op it is.
-    db.upsert_concept(ConceptUpsert::new("a", "Renamed").valid_from(TS2))
+    // rather than the no-op it is. The start is the seeded one (TS), so this
+    // supersedes the trunk's belief rather than opening a second start (D-291).
+    db.upsert_concept(ConceptUpsert::new("a", "Renamed").valid_from(TS))
         .await
         .unwrap();
 

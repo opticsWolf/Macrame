@@ -1941,6 +1941,30 @@ class SingleOpenViolationError(IntegrityError):
     target_id: str
     edge_type: str
 
+class OverlappingConceptError(IntegrityError):
+    """Two valid-time intervals for one concept claim the same instant. The
+    concept half of `OverlappingIntervalError`: keyed on `concept_id`, since an
+    edge's three-part key does not apply (0.19.2, D-291)."""
+
+    concept_id: str
+    valid_from: str
+    valid_to: str
+    existing_from: str
+    existing_to: str
+    within_batch: bool
+
+class ConceptSingleOpenError(IntegrityError):
+    """A second open valid interval for one concept, from a different start. Two
+    open intervals share every instant from the later start, so this is refused
+    as the single-open violation and not as an overlap (0.19.2, D-291)."""
+
+    concept_id: str
+    valid_from: str
+    valid_to: str
+    existing_from: str
+    existing_to: str
+    within_batch: bool
+
 class OverlappingIntervalError(IntegrityError):
     """The fields are flattened onto the exception rather than nested behind an
     `.overlap` object: `valid_*` is what the caller asserted, `existing_*` is

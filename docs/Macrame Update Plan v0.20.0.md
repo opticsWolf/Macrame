@@ -171,8 +171,7 @@ last. The `concepts` projection agrees, since an upsert replaces the row and
 `concepts.id` is `TEXT NOT NULL UNIQUE` (`ddl.rs:648`). Nothing warns.
 
 That is why P1 is not merely a precondition. **A caller that writes `valid_from` out
-of order gets a wrong answer from `reconstruct(now)` on 0.19.1**, and the guard is
-what refuses to let that state exist.
+of order gets a wrong answer from `reconstruct(now)` on 0.19.1**, The guard refuses the overlapping cases, not this one: a backfill that does not overlap what the ledger holds is a legitimate history and is admitted. What `reconstruct(now)` returns for such a ledger is a read question, and P2 answers it with `reconstruct_as_of`. P1 does not claim to fix it.
 
 **Decision: Design B**, with Design A's predicate reused unchanged for the
 `recorded` bound. Rejected: *Design A alone* (cannot answer the question asked, §3.3);
@@ -272,8 +271,7 @@ Concepts have no rule to defer to, which cuts two ways:
   regardless of any tiebreak.
 
 So P1 has to settle the single-open question before the overlap question, and the
-plan takes the position that **a concept has at most one open valid interval**, by
-the same argument `trg_links_single_open` rests on for links. The two guards then
+plan takes the position that **a concept has one belief in force per valid start, and at most one of those beliefs is open**, by the same argument `trg_links_single_open` rests on for links. The belief for a start is the latest row written for it, which is the definition `links_current` keeps for edges (D-060). The first draft of this section read *every* row ever written as the history to check, and that refuses every later version of a concept: a superseded open row would still block the next open interval. The decision on 2026-10-29 was current belief, and the guard is built to it (D-291). The two guards then
 partition the concept space the way D-060's two partition the edge space.
 
 D-060's cost argument does not transfer and does not need to: its probe rides
@@ -351,14 +349,13 @@ commits, not after — see §9.
 
 ### D-291 (draft)
 
-> `<a id="d-291"></a>`**D-291 — A concept has one open valid interval and no
-> overlapping closed ones, refused in the write actor (0.20.0, P1).**
+> `<a id="d-291"></a>`**D-291 — A concept has one belief in force per valid start, at most one of them open, and no
+> overlapping intervals, refused in the write actor (0.20.0, P1).**
 > [D-060](architecture/s13-decision-register.md#d-060) (the edge half, and the
 > reasoning this reuses), [D-014](architecture/s13-decision-register.md#d-014) (one
 > writer, so the window does not exist rather than being narrow),
 > [Doctrine II](architecture/s0-s3-foundations.md#doctrine-ii),
-> [Doctrine III](architecture/s0-s3-foundations.md#doctrine-iii). Evidence: *(to be
-> filled by the implementation)*.
+> [Doctrine III](architecture/s0-s3-foundations.md#doctrine-iii). Evidence: `src/connection.rs` (`CURRENT_CONCEPT_INTERVALS`, `reject_overlapping_concept`, `reject_concept_overlaps_within`, `check_batch_against_ledger`), `src/error.rs` (`OverlappingConcept`, `ConceptSingleOpen`), `tests/concept_interval_guard_tests.rs`, `tests/branch_write_tests.rs` (the trunk re-upsert pinned at its seeded start), `tests_py/test_vector.py` (the ranking fixture closes its earlier start).
 >
 > `reject_overlapping_interval` guarded edges only, and `ConceptUpsert.valid_from` is
 > caller-supplied, so a caller writing its own valid time could record two
@@ -369,7 +366,7 @@ commits, not after — see §9.
 > on 0.19.1.
 >
 > Unlike the edge case there was no single-open rule to partition against, so this
-> decides that question too: a concept has **at most one open valid interval**, by
+> decides that question too: a concept has **one belief in force per valid start, at most one of them open**, by
 > `trg_links_single_open`'s argument. The probe rides `idx_txlog_fold_partition` on
 > its two leading columns, so no index and no schema rung.
 >

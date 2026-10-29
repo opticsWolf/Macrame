@@ -288,7 +288,14 @@ def test_a_half_life_prices_age_into_the_ranking(db):
     # the second place decided by an id tie-break rather than by distance.
     q = [0.0, 0.6, 0.8, 0.0]
     # `b` becomes true a day before the instant; `a` and `c` stay at T0, half a
-    # year older. Nothing else about any of them changes.
+    # year older. A concept holds one open start at a time (D-291), so b's T0
+    # start is closed at T_LATER and the new start opened there. Nothing else
+    # about any of them changes.
+    db.upsert_concept(
+        macrame.ConceptUpsert(
+            "b", "Bravo", valid_from=T0, valid_to=T_LATER, content="bravo charlie"
+        )
+    )
     db.upsert_concept(
         macrame.ConceptUpsert("b", "Bravo", valid_from=T_LATER, content="bravo charlie")
     )

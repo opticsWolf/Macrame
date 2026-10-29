@@ -66,6 +66,30 @@ EXPECTED: dict[str, tuple[str, str, dict]] = {
         "IntegrityError",
         {"source_id": "src-1", "target_id": "tgt-1", "edge_type": "LINKS"},
     ),
+    "OverlappingConcept": (
+        "OverlappingConceptError",
+        "IntegrityError",
+        {
+            "concept_id": "concept-1",
+            "valid_from": "2026-03-01T00:00:00.000000Z",
+            "valid_to": "2026-09-01T00:00:00.000000Z",
+            "existing_from": "2026-01-01T00:00:00.000000Z",
+            "existing_to": "2026-06-01T00:00:00.000000Z",
+            "within_batch": False,
+        },
+    ),
+    "ConceptSingleOpen": (
+        "ConceptSingleOpenError",
+        "IntegrityError",
+        {
+            "concept_id": "concept-1",
+            "valid_from": "2026-03-01T00:00:00.000000Z",
+            "valid_to": "9999-12-31T23:59:59.999999Z",
+            "existing_from": "2026-01-01T00:00:00.000000Z",
+            "existing_to": "9999-12-31T23:59:59.999999Z",
+            "within_batch": False,
+        },
+    ),
     "NegativeEdgeWeight": (
         "NegativeEdgeWeightError",
         "IntegrityError",

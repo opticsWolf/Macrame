@@ -260,6 +260,8 @@ pub enum DbError {
         .overlap.valid_from, .overlap.valid_to
     )]
     OverlappingInterval { overlap: Box<Overlap> },
+    OverlappingConcept { overlap: Box<ConceptOverlap> },
+    ConceptSingleOpen { overlap: Box<ConceptOverlap> },
 
     #[error("links_current drift detected: {n} intervals diverge")]
     CurrentDrift { n: usize },
@@ -320,7 +322,7 @@ The 0.5.0 RecordedAtRegression variant surfaces the concept monotonicity trigger
 
 **One variant, two guards, and the message says which ([D-180](s13-decision-register.md#d-180), 0.13.7).** `reject_overlapping_interval` compares an assertion against committed rows; `reject_overlaps_within` compares a batch against itself before the transaction opens. Only the first is talking about the database, and the message said "already holds" for both — so a caller whose 20,000-row import was refused went looking for a row that had never been written and never would be, since the batch is refused whole. `Overlap::within_batch` carries the distinction and `Overlap::provenance` renders it, closing the message with either *is already recorded* or *this same batch also asserts*. It crosses to Python as a `within_batch` attribute.
 
-**`OverlappingInterval` is boxed, and it is the only variant that is ([D-075](s13-decision-register.md#d-075)).** Seven `String`s is 168 bytes, which put `DbError` — and therefore every `Result` in the crate, on the `Ok` path too — over `clippy::result_large_err`'s threshold the moment [D-060](s13-decision-register.md#d-060) added it. Boxing the rarest variant keeps the whole error small rather than trimming what a caller is told, and `matches!(err, OverlappingInterval { .. })` is unaffected. A unit test pins the size at 128 bytes, because the failure mode is a warning in a build log rather than a broken test.
+**`OverlappingInterval` and the two concept variants are boxed ([D-075](s13-decision-register.md#d-075), [D-291](s13-decision-register.md#d-291)).** Seven `String`s is 168 bytes, which put `DbError` — and therefore every `Result` in the crate, on the `Ok` path too — over `clippy::result_large_err`'s threshold the moment [D-060](s13-decision-register.md#d-060) added it. Boxing the rarest variant keeps the whole error small rather than trimming what a caller is told, and `matches!(err, OverlappingInterval { .. })` is unaffected. A unit test pins the size at 128 bytes, because the failure mode is a warning in a build log rather than a broken test.
 
 **Guard aborts are classified in exactly one place.** SQLite reports a `RAISE(ABORT)` as a generic constraint failure carrying the message, so the message is the only thing separating "you violated the single-open-interval rule" from "the disk is full". `error::abort_kind` matches on it, once, against the `schema::ddl` constants spliced into the triggers themselves, so guard and classifier cannot drift. Scattered across call sites, an upstream wording change would silently degrade an unknown number of typed errors into opaque ones.
 

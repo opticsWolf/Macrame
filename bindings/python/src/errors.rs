@@ -225,6 +225,25 @@ create_exception!(
 );
 create_exception!(
     macrame,
+    OverlappingConceptError,
+    IntegrityError,
+    "Two valid-time intervals for one concept claim the same instant.\n\n\
+     Attributes: `concept_id`, the asserted `valid_from` / `valid_to`, the \
+     `existing_from` / `existing_to` it collides with, and `within_batch`. \
+     Both intervals are reported because neither alone identifies the \
+     conflict.\n\n\
+     `within_batch` says which guard raised this, as for `OverlappingIntervalError`."
+);
+create_exception!(
+    macrame,
+    ConceptSingleOpenError,
+    IntegrityError,
+    "The concept already has an open interval from another start; close it \
+     first. Attributes: `concept_id`, the asserted `valid_from` / `valid_to`, \
+     the `existing_from` / `existing_to` it collides with, and `within_batch`."
+);
+create_exception!(
+    macrame,
     NegativeEdgeWeightError,
     IntegrityError,
     "An edge weight shortest-path analytics cannot use. \
@@ -959,6 +978,26 @@ fn build(py: Python<'_>, err: DbError) -> PyErr {
                 e.setattr("within_batch", overlap.within_batch)
             })
         }
+        DbError::OverlappingConcept { overlap } => {
+            raise::<OverlappingConceptError, _>(py, m, |e| {
+                e.setattr("concept_id", overlap.id)?;
+                e.setattr("valid_from", overlap.valid_from)?;
+                e.setattr("valid_to", overlap.valid_to)?;
+                e.setattr("existing_from", overlap.existing_from)?;
+                e.setattr("existing_to", overlap.existing_to)?;
+                e.setattr("within_batch", overlap.within_batch)
+            })
+        }
+        DbError::ConceptSingleOpen { overlap } => {
+            raise::<ConceptSingleOpenError, _>(py, m, |e| {
+                e.setattr("concept_id", overlap.id)?;
+                e.setattr("valid_from", overlap.valid_from)?;
+                e.setattr("valid_to", overlap.valid_to)?;
+                e.setattr("existing_from", overlap.existing_from)?;
+                e.setattr("existing_to", overlap.existing_to)?;
+                e.setattr("within_batch", overlap.within_batch)
+            })
+        }
 
         DbError::CurrentDrift { n } => raise::<CurrentDriftError, _>(py, m, |e| e.setattr("n", n)),
 
@@ -1086,6 +1125,8 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
         // integrity
         OverlappingIntervalError,
         SingleOpenViolationError,
+        OverlappingConceptError,
+        ConceptSingleOpenError,
         NegativeEdgeWeightError,
         CurrentDriftError,
         RebuildFailedError,
