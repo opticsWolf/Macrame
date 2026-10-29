@@ -592,10 +592,19 @@ release:
   **Batch this once per work session rather than running it after each edit.** The
   delta is computed per *directory*, not per file: measured on this release's own
   commits, editing one document in `docs/` reported "1 changed dir(s), 22 changed
-  files out of 49 total" and re-embedded all 22 in **263 s** on the GPU. A
-  rename needs `--prune-missing`, or the old filename's concept survives as an
-  orphan with no source file — the id is path-derived, so a rename is a delete plus
-  an add rather than an update.
+  files out of 49 total" and re-embedded all 22 in **263 s** on the GPU.
+
+  Note which direction is expensive, because it is the one this section asks for.
+  The directory hash is computed recursively but the re-import set is that
+  directory's direct children, so a file edited in `docs/architecture/` invalidates
+  `docs/` as well and queues **38 of 49** files — the 22 above is the *best* case,
+  for a root-level edit. Editing an architecture document and a release note in the
+  same sitting costs no more than editing either alone, which is the whole argument
+  for batching. A rename needs `--prune-missing`, or the old filename's concept
+  survives as an orphan with no source file — the id is path-derived, so a rename is
+  a delete plus an add rather than an update. Both findings are written up as Issue G
+  in the dated okfgraph issue file beside the sibling checkout, with the probe that
+  measures the fan-out without paying for a re-embed.
 
 * **Search before re-deriving.** The 0.19.1 narrowing record
   (`macrame-0.19.1-loader-temporal-closure-consolidated.md`, corrections C1–C9) is
