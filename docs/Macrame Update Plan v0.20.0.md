@@ -582,11 +582,20 @@ release:
   the database. If it does, decide deliberately whether those files are tracked —
   they would otherwise arrive in the next commit unreviewed.
 * **Re-import after documentation edits**, so the index tracks the tree rather than
-  drifting from it. The import is delta-aware, so only changed files are re-embedded:
+  drifting from it:
 
   ```bash
-  okf import --all --bundle-path docs
+  okf import --all --bundle-path docs            # after edits
+  okf import --all --bundle-path docs --prune-missing   # after a rename or delete
   ```
+
+  **Batch this once per work session rather than running it after each edit.** The
+  delta is computed per *directory*, not per file: measured on this release's own
+  commits, editing one document in `docs/` reported "1 changed dir(s), 22 changed
+  files out of 49 total" and re-embedded all 22 in **263 s** on the GPU. A
+  rename needs `--prune-missing`, or the old filename's concept survives as an
+  orphan with no source file — the id is path-derived, so a rename is a delete plus
+  an add rather than an update.
 
 * **Search before re-deriving.** The 0.19.1 narrowing record
   (`macrame-0.19.1-loader-temporal-closure-consolidated.md`, corrections C1–C9) is
