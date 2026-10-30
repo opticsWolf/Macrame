@@ -24,15 +24,56 @@
 //! file nobody rereads while writing code, that is wrong in a way no reader
 //! of the code can see. It was found by a user rather than by this file.
 //!
+//! # The quickref, and the document that described it
+//!
+//! Since 0.19.4 it reaches `docs/quickref.md`, which drifted exactly as the
+//! revision history had and for the same reason: no test read it. Its header
+//! said v0.18.0 against a 0.19.4 crate, its footer dated itself to v0.12.0 and
+//! 2026-08-08, its §9 table stopped at D-277 against a register holding D-296,
+//! and §5's struct listing had been missing two shipped `ConceptUpsert` fields
+//! since 0.14.8 and 0.18.0.
+//!
+//! **The finding that made this a gate rather than a sweep is one document
+//! further out again.** The entry for the quickref in the top-level `README.md`
+//! *described* the quickref's staleness in detail — and was itself the staler
+//! of the two, advertising an unscheduled prose refresh for several releases
+//! after that refresh had largely happened, while being wrong about the schema
+//! rung and the newest decisions. A document whose job is to say another
+//! document is out of date goes out of date the same way. Prose that admits a
+//! gap is not a gate on it; `doc_sync_tests` and `perf_claim_tests` already
+//! pinned parts of the quickref — the analytics types, the `Subgraph`
+//! accessors, the performance numbers — and the drift happened in the space
+//! between them.
+//!
 //! # What it deliberately does not check
 //!
 //! That the prose in a row is *true*. No test can. It checks that a row exists
 //! for the release the crate is at, that the register range is the register's
 //! range, and that the header names this version — the mechanical claims, which
 //! are the ones that rot silently. A wrong row is at least a row someone wrote.
+//!
+//! The quickref assertions inherit that limit and add one of their own. A
+//! bounded *lag* is not currency: [`MAX_DECISION_LAG`] says the document has
+//! been touched since the register moved, not that what it says about the
+//! decisions it cites is right. It is a staleness bound, and the thing it
+//! actually buys is that a reader can tell how old the worst case is.
+
+/// How far behind the register the quickref's newest citation may fall.
+///
+/// Not every decision belongs in an API quickref — a CI pin says nothing about
+/// the surface — so demanding the register's highest anchor would force
+/// unrelated entries into the document to keep a test quiet, which is how a
+/// gate starts producing the drift it was meant to catch. The bound is set at
+/// about one release instead: no single release in this crate's history has
+/// produced ten decisions, so a lag inside this window is a release that has
+/// not been written up yet, and a lag outside it is a document nobody has
+/// opened in a while. The drift this file was extended for was **nineteen**.
+const MAX_DECISION_LAG: u32 = 10;
 
 const MANIFEST: &str = include_str!("../Cargo.toml");
 const ARCH_README: &str = include_str!("../docs/architecture/README.md");
+const QUICKREF: &str = include_str!("../docs/quickref.md");
+const MIGRATIONS: &str = include_str!("../src/schema/migrations.rs");
 const REGISTER: &str = include_str!("../docs/architecture/s13-decision-register.md");
 const README: &str = include_str!("../README.md");
 
@@ -85,6 +126,52 @@ fn highest_decision() -> u32 {
         })
         .max()
         .expect("the register defines decisions")
+}
+
+/// `SCHEMA_VERSION` as the migration runner declares it.
+///
+/// The authority on the ladder, which the quickref's §4.3 note says in so many
+/// words: the table is a transcription, and this is the number.
+fn schema_version() -> u32 {
+    MIGRATIONS
+        .lines()
+        .map(str::trim)
+        .find_map(|l| l.strip_prefix("pub const SCHEMA_VERSION: u32 = "))
+        .and_then(|rest| rest.trim_end_matches(';').parse().ok())
+        .expect("migrations.rs declares SCHEMA_VERSION")
+}
+
+/// The highest rung the quickref's §4.3 ladder transcribes.
+///
+/// The rows are `| vNN | …`; nothing else in the document opens a table cell
+/// with a bare `v` and digits.
+fn quickref_ladder_top() -> u32 {
+    QUICKREF
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("| v"))
+        .filter_map(|rest| {
+            let n: String = rest.chars().take_while(char::is_ascii_digit).collect();
+            n.parse::<u32>().ok()
+        })
+        .max()
+        .expect("the quickref transcribes a schema ladder")
+}
+
+/// The highest `D-NNN` the quickref cites anywhere.
+///
+/// Prose citations, table cells and link targets all count: the question is
+/// whether anyone has written about the register's recent entries here, not
+/// where in the document they did it.
+fn quickref_highest_decision() -> u32 {
+    QUICKREF
+        .match_indices("D-")
+        .filter_map(|(i, _)| {
+            let rest = &QUICKREF[i + 2..];
+            let n: String = rest.chars().take_while(char::is_ascii_digit).collect();
+            (n.len() == 3).then(|| n.parse::<u32>().ok())?
+        })
+        .max()
+        .expect("the quickref cites decisions")
 }
 
 /// The version the README's Rust quick start tells a new user to depend on.
@@ -178,6 +265,89 @@ fn the_file_table_offers_the_decisions_the_register_actually_holds() {
 }
 
 #[test]
+fn the_quickref_header_and_footer_name_the_release_they_describe() {
+    let version = crate_version();
+
+    assert!(
+        QUICKREF.contains(&format!("**v{version} ·")),
+        "docs/quickref.md's header does not say v{version}, which is what the \
+         crate is at. The header is the first thing a reader checks, and it \
+         said v0.18.0 into 0.19.4."
+    );
+    assert!(
+        QUICKREF.contains(&format!("· v{version} ·")),
+        "docs/quickref.md's footer does not say v{version}. The footer claims \
+         the document is *synced against* the architecture set as of a \
+         version; it said v0.12.0 and 2026-08-08 for seven minor releases, \
+         which is a sync claim for a document that had moved on without it."
+    );
+}
+
+#[test]
+fn the_quickref_ladder_reaches_the_schema_the_code_is_at() {
+    let code = schema_version();
+    let doc = quickref_ladder_top();
+
+    assert_eq!(
+        doc, code,
+        "docs/quickref.md's §4.3 ladder stops at v{doc} and the migration \
+         runner declares SCHEMA_VERSION = {code}. This table stopped at v10 \
+         for seven rungs and fourteen releases before anyone noticed, and a \
+         missing rung looks exactly like a rung that was never added."
+    );
+}
+
+#[test]
+fn the_quickref_cites_the_registers_recent_decisions() {
+    let highest = highest_decision();
+    let cited = quickref_highest_decision();
+    let lag = highest.saturating_sub(cited);
+
+    assert!(
+        lag <= MAX_DECISION_LAG,
+        "docs/quickref.md's newest citation is D-{cited:03} and the register \
+         holds D-{highest:03} — a lag of {lag}, over the {MAX_DECISION_LAG} \
+         this file allows. Either the document has not been written up for \
+         the releases in between, or it has and the citation was left out. \
+         The drift that added this assertion was a lag of nineteen, sitting \
+         under a §9 table whose last row read D-277."
+    );
+}
+
+#[test]
+fn the_readme_does_not_advertise_a_quickref_version_it_is_not_at() {
+    let version = crate_version();
+    let entry = README
+        .lines()
+        .find(|l| l.contains("[Architecture Quick Reference](docs/quickref.md)"))
+        .expect("the README points at the quickref");
+
+    // The entry is allowed to say nothing about the version. What it is not
+    // allowed to do is name a *different* one, which is the failure mode that
+    // put this test here: the paragraph described the quickref's state in
+    // detail and was wrong about it, for several releases, in a file that is
+    // the first thing a new reader opens.
+    for token in entry.split_whitespace() {
+        let Some(named) = token
+            .trim_start_matches(['(', '*', '_', '`'])
+            .strip_prefix("v0.")
+        else {
+            continue;
+        };
+        let named = named.trim_end_matches([')', ',', '.', '*', '_', '`', ';', ':']);
+        assert_eq!(
+            format!("0.{named}"),
+            version,
+            "the README's quickref entry says v0.{named} while the crate is \
+             at {version}. An entry that names a version is making a claim \
+             about another document's currency; this one said the quickref's \
+             prose dated to v0.12.0 for several releases after it no longer \
+             did."
+        );
+    }
+}
+
+#[test]
 fn the_documents_are_shaped_the_way_these_tests_assume() {
     // A parser that matches nothing passes the three tests above.
     let rows = revision_rows();
@@ -198,5 +368,35 @@ fn the_documents_are_shaped_the_way_these_tests_assume() {
         readme_dep_pin().is_some(),
         "the README no longer contains a `macrame-db = \"x.y\"` line; the \
          quickstart moved and the pin test is measuring nothing"
+    );
+
+    // The quickref parsers, same hazard: each returns a max over a filter, so
+    // a format change makes them return something small rather than fail.
+    assert!(
+        schema_version() >= 22,
+        "SCHEMA_VERSION parsed as {} — the declaration moved and the ladder \
+         test is comparing against nothing",
+        schema_version()
+    );
+    assert_eq!(
+        quickref_ladder_top(),
+        schema_version(),
+        "the quickref ladder parser and SCHEMA_VERSION disagree here, which \
+         the ladder test should have caught first; if that test passed and \
+         this one failed, the parser is matching rows it should not"
+    );
+    assert!(
+        quickref_highest_decision() >= 277,
+        "the quickref's decision parser found D-{:03} at most. The §9 table \
+         held D-277 before this file was extended, so anything below that is \
+         a parser that stopped matching citations",
+        quickref_highest_decision()
+    );
+    assert!(
+        QUICKREF.len() > 40_000,
+        "docs/quickref.md is {} bytes; it was ~60k when these assertions were \
+         written, and a document that shrank by a third is not the document \
+         they describe",
+        QUICKREF.len()
     );
 }
