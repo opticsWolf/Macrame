@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 
 use crate::branch::Ancestor;
 use crate::error::{ConceptOverlap, DbError, Overlap, OverlapProvenance, Result};
-use crate::temporal::as_of::{valid_interval_contains, NodeAttributes};
+use crate::temporal::as_of::NodeAttributes;
+use crate::temporal::interval::Interval;
 use crate::util::timestamp::OPEN_SENTINEL;
 
 /// One lineage's belief about one edge, at the instant a fold asked (§15.2).
@@ -168,6 +169,15 @@ pub struct MaterializedState {
     /// may not land in a release that bumps the schema.
     #[serde(default)]
     pub predates_recorded_history: bool,
+    /// **This state is at a valid instant, not a recorded one** (0.19.5, D-298).
+    ///
+    /// Set by the valid-axis fold behind [`crate::Database::reconstruct_as_of`].
+    /// Such a state is not a belief at a recorded instant, and saved as a snapshot
+    /// it would become a recorded-axis anchor that later reconstructions compose
+    /// on, so [`crate::temporal::save_snapshot`] refuses it. Never serialised: a
+    /// state that could be saved never carries it.
+    #[serde(skip)]
+    pub(crate) valid_axis: bool,
 }
 
 impl MaterializedState {
@@ -188,6 +198,7 @@ impl MaterializedState {
             concepts: HashMap::new(),
             edges: Vec::new(),
             predates_recorded_history: false,
+            valid_axis: false,
         }
     }
 }
@@ -562,7 +573,7 @@ const HOT_FOLD: &str = r#"
 /// was true: a concept with two valid starts has two current beliefs, and the
 /// entity partition hands the whole entity to whichever was written last. Adding
 /// the start to the partition gives each its own current belief. The valid
-/// selection is then made in Rust by [`fold_valid_delta`], which has to see every
+/// selection is then made in Rust by [`select_valid`], which has to see every
 /// surviving start to tell one belief from two.
 ///
 /// Belief at the present on the valid axis: no recorded bound, so no placeholder.
@@ -1021,9 +1032,10 @@ async fn reconstruct_from(
 /// recorded, so a snapshot cannot stand in for a valid one (plan §5.3).
 ///
 /// **The archive is consulted whenever one is present, whatever the recorded
-/// bound.** `LOG_ARCHIVABLE` keys on `entity_id`, so a concept's superseded starts
-/// leave the hot log once a later start exists, though each may still be the
-/// belief for its own interval. The newest-row argument behind [`hot_log_reach`]
+/// bound.** Until 0.19.5 `LOG_ARCHIVABLE` keyed concept rows on `entity_id`, so
+/// an archive written then can hold a concept's superseded starts, each of which
+/// may still be the belief for its own interval (D-298 keeps them hot from 0.19.5
+/// on). The newest-row argument behind [`hot_log_reach`]
 /// covers the newest row per entity, which is enough for the recorded fold and not
 /// for this one, so the shortcut that answers `reconstruct(now)` from the hot log
 /// does not apply here. With no archive file the hot log is the whole ledger,
@@ -1035,10 +1047,32 @@ pub(crate) async fn reconstruct_valid(
     recorded: Option<&str>,
     archive_path: Option<&Path>,
 ) -> Result<MaterializedState> {
+    let what = format!("state at {valid} on the valid axis");
+    let rows = valid_rows(conn, &what, recorded, archive_path).await?;
+    // The state is at the valid instant, so that is its timestamp, and it is
+    // marked so it cannot be saved as a snapshot (D-298).
+    let mut state = select_valid(rows, valid)?.apply_to(MaterializedState::empty(valid), valid);
+    state.valid_axis = true;
+    Ok(state)
+}
+
+/// The rows a valid-axis read selects from: one current belief per valid start,
+/// read from hot and cold together when an archive is present (0.20.0, P2, D-292).
+///
+/// The one source for [`reconstruct_valid`] and [`concept_interval_overlaps`], so
+/// the two cannot disagree about which rows the ledger holds or how it refuses
+/// when it cannot reach them (0.19.5, D-298). `what` names the read in that
+/// refusal.
+async fn valid_rows(
+    conn: &libsql::Connection,
+    what: &str,
+    recorded: Option<&str>,
+    archive_path: Option<&Path>,
+) -> Result<Vec<ValidStart>> {
     if let Some(archive) = archive_path.filter(|p| crate::temporal::archive::archive_present(p)) {
         let cold_shape = attach_cold(conn, archive).await?;
         let query = valid_cold_fold(cold_shape, recorded.is_some());
-        let result = fold_valid(conn, valid, recorded, &query).await;
+        let result = collect_valid_rows(conn, &query, recorded).await;
         detach_cold(conn).await;
         return result;
     }
@@ -1046,7 +1080,7 @@ pub(crate) async fn reconstruct_valid(
         return Err(DbError::ReplayCorrupt {
             seq: 0,
             reason: format!(
-                "state at {valid} on the valid axis needs rows the archive holds, \
+                "{what} needs rows the archive holds, \
                  and no archive database was found; {}",
                 archive_hint(conn).await
             ),
@@ -1057,7 +1091,7 @@ pub(crate) async fn reconstruct_valid(
     } else {
         VALID_FOLD
     };
-    fold_valid(conn, valid, recorded, query).await
+    collect_valid_rows(conn, query, recorded).await
 }
 
 /// ATTACH the archive as `cold` and read its lineage shape. Every caller must
@@ -2022,6 +2056,15 @@ struct ValidStart {
     payload: serde_json::Value,
 }
 
+impl ValidStart {
+    /// The belief's valid interval, so containment and overlap are
+    /// [`Interval`]'s rules, the ones the write guard applies (D-298).
+    fn interval(&self) -> Interval {
+        let (from, to) = valid_bounds(self);
+        Interval::new(from, to)
+    }
+}
+
 /// [`fold_delta`] on the valid axis: the beliefs whose validity contains `valid`
 /// (0.20.0, P2, D-292).
 ///
@@ -2032,37 +2075,17 @@ struct ValidStart {
 /// fold refuses it too, naming both intervals, rather than picking one: which of
 /// two contradictory assertions to keep is the judgement the crate does not make
 /// on the caller's behalf (Doctrine III, plan §5.4).
-async fn fold_valid_delta(
-    conn: &libsql::Connection,
-    query: &str,
-    params: impl libsql::params::IntoParams,
-    valid: &str,
-) -> Result<Delta> {
-    let mut rows = conn.query(query, params).await?;
+fn select_valid(rows: Vec<ValidStart>, valid: &str) -> Result<Delta> {
     let mut claims: BTreeMap<(String, String, String), Vec<ValidStart>> = BTreeMap::new();
-    while let Some(row) = rows.next().await? {
-        let seq_id: i64 = row.get(0)?;
-        let table_name: String = row.get(1)?;
-        let entity_id: String = row.get(2)?;
-        let op: String = row.get(3)?;
-        let payload_str: String = row.get(4)?;
-        let branch_id: String = row.get(5)?;
-
-        let payload = parse_log_row(seq_id, &table_name, &entity_id, &op, &payload_str)?;
-        if !valid_interval_contains(&payload, valid) {
+    for start in rows {
+        if !start.interval().contains(valid) {
             continue;
         }
-        let key = overlap_key(&table_name, &entity_id, &payload);
+        let key = overlap_key(&start.table_name, &start.entity_id, &start.payload);
         claims
-            .entry((table_name.clone(), key, branch_id.clone()))
+            .entry((start.table_name.clone(), key, start.branch_id.clone()))
             .or_default()
-            .push(ValidStart {
-                seq_id,
-                table_name,
-                entity_id,
-                branch_id,
-                payload,
-            });
+            .push(start);
     }
 
     let mut d = Delta::default();
@@ -2155,7 +2178,7 @@ fn valid_overlap(existing: &ValidStart, asserted: &ValidStart) -> DbError {
 
 /// A belief's `(valid_from, valid_to)` as its payload records them. An absent
 /// `valid_from` is the earliest instant and an absent `valid_to` is open, the
-/// same reading [`valid_interval_contains`] gives them.
+/// same reading `as_of::valid_interval_contains` gives them.
 fn valid_bounds(s: &ValidStart) -> (String, String) {
     let field = |name: &str, absent: &str| {
         s.payload
@@ -2165,32 +2188,6 @@ fn valid_bounds(s: &ValidStart) -> (String, String) {
             .to_string()
     };
     (field("valid_from", ""), field("valid_to", OPEN_SENTINEL))
-}
-
-/// Every valid start's current belief with no valid instant: the rows
-/// [`reconstruct_valid`] selects from, before its selection (0.20.0, P2, D-292).
-async fn current_valid_rows(
-    conn: &libsql::Connection,
-    archive_path: Option<&Path>,
-) -> Result<Vec<ValidStart>> {
-    if let Some(archive) = archive_path.filter(|p| crate::temporal::archive::archive_present(p)) {
-        let cold_shape = attach_cold(conn, archive).await?;
-        let query = valid_cold_fold(cold_shape, false);
-        let result = collect_valid_rows(conn, &query, None).await;
-        detach_cold(conn).await;
-        return result;
-    }
-    if !hot_log_is_intact(conn).await? {
-        return Err(DbError::ReplayCorrupt {
-            seq: 0,
-            reason: format!(
-                "the concept interval check needs rows the archive holds, \
-                 and no archive database was found; {}",
-                archive_hint(conn).await
-            ),
-        });
-    }
-    collect_valid_rows(conn, VALID_FOLD, None).await
 }
 
 /// Run a valid-axis fold and collect its rows as [`ValidStart`]s.
@@ -2232,7 +2229,7 @@ pub(crate) async fn concept_interval_overlaps(
     archive_path: Option<&Path>,
 ) -> Result<Vec<ConceptOverlap>> {
     let mut groups: BTreeMap<(String, String), Vec<ValidStart>> = BTreeMap::new();
-    for start in current_valid_rows(conn, archive_path).await? {
+    for start in valid_rows(conn, "the concept interval check", None, archive_path).await? {
         if start.table_name == "concepts" {
             groups
                 .entry((start.entity_id.clone(), start.branch_id.clone()))
@@ -2245,14 +2242,14 @@ pub(crate) async fn concept_interval_overlaps(
     for mut starts in groups.into_values() {
         starts.sort_by_key(|s| s.seq_id);
         for (i, existing) in starts.iter().enumerate() {
-            let (existing_from, existing_to) = valid_bounds(existing);
+            let held = existing.interval();
             for asserted in &starts[i + 1..] {
-                let (asserted_from, asserted_to) = valid_bounds(asserted);
-                if asserted_from < existing_to && existing_from < asserted_to {
+                let claimed = asserted.interval();
+                if claimed.overlaps(&held) {
                     out.push(ConceptOverlap::new(
                         &existing.entity_id,
-                        (asserted_from, asserted_to),
-                        (existing_from.clone(), existing_to.clone()),
+                        (claimed.valid_from, claimed.valid_to),
+                        (held.valid_from.as_str(), held.valid_to.as_str()),
                         OverlapProvenance::BothRecorded,
                     ));
                 }
@@ -2268,18 +2265,6 @@ fn valid_bind(recorded: Option<&str>) -> Vec<libsql::Value> {
     recorded
         .map(|r| vec![libsql::Value::Text(r.to_string())])
         .unwrap_or_default()
-}
-
-/// [`fold`] on the valid axis. The state is at the valid instant, so that is its
-/// timestamp. It is not a recorded instant, and must not be saved as a snapshot.
-async fn fold_valid(
-    conn: &libsql::Connection,
-    valid: &str,
-    recorded: Option<&str>,
-    query: &str,
-) -> Result<MaterializedState> {
-    let delta = fold_valid_delta(conn, query, valid_bind(recorded), valid).await?;
-    Ok(delta.apply_to(MaterializedState::empty(valid), valid))
 }
 
 impl Delta {
@@ -2321,6 +2306,7 @@ impl Delta {
             // A delta was applied, so there was history to fold. `reconstruct`
             // sets the flag on the one path that never gets here.
             predates_recorded_history: false,
+            valid_axis: false,
         }
     }
 }

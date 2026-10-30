@@ -234,6 +234,13 @@ async fn two_open_starts_claiming_one_instant_are_refused_by_name() {
         matches!(err, DbError::ConceptSingleOpen { .. }),
         "got {err:?}"
     );
+    // Nothing was written, so the read does not word itself as a refused write
+    // (0.19.5, D-298).
+    let message = err.to_string();
+    assert!(
+        message.contains("is recorded") && !message.contains("is refused"),
+        "{message}"
+    );
 
     db.close().await.unwrap();
 }
@@ -312,10 +319,10 @@ async fn a_link_answers_each_valid_instant_with_the_start_that_holds_it() {
     db.close().await.unwrap();
 }
 
-/// The archive arm. `LOG_ARCHIVABLE` keys on the entity, so a concept's superseded
-/// start leaves the hot log once a later row for the entity exists, though it may
-/// still be the belief for its own interval. A valid read must find it in the
-/// archive; a read from the hot log alone would answer with nothing for July.
+/// The archive arm. Since 0.19.5 `LOG_ARCHIVABLE` sends a concept row cold only
+/// once a newer row exists for the same start (D-298), so the superseded January
+/// row goes and the June start's only belief stays hot, where the write guard
+/// reads it. The valid read folds hot and cold together and answers each start.
 #[tokio::test]
 async fn a_superseded_start_archived_away_still_answers_its_valid_read() {
     let harness = TestHarness::new();
@@ -329,8 +336,17 @@ async fn a_superseded_start_archived_away_still_answers_its_valid_read() {
 
     let report = db.archive(FAR).await.unwrap();
     assert!(
-        report.log_entries_archived >= 2,
-        "the fixture needs the June row archived: {report:?}"
+        report.log_entries_archived >= 1,
+        "the fixture needs the first January row archived: {report:?}"
+    );
+    assert_eq!(
+        count(
+            &db,
+            "SELECT COUNT(*) FROM transaction_log WHERE json_extract(payload, '$.title') = 'jan'"
+        )
+        .await,
+        0,
+        "the superseded January row has left the hot log"
     );
     assert_eq!(
         count(
@@ -338,8 +354,8 @@ async fn a_superseded_start_archived_away_still_answers_its_valid_read() {
             "SELECT COUNT(*) FROM transaction_log WHERE json_extract(payload, '$.title') = 'jun'"
         )
         .await,
-        0,
-        "the June row has left the hot log"
+        1,
+        "the June start's current belief stays hot (D-298)"
     );
 
     let in_march = db.reconstruct_as_of(AsOf::valid_at(MAR)).await.unwrap();
@@ -348,8 +364,7 @@ async fn a_superseded_start_archived_away_still_answers_its_valid_read() {
     let in_july = db.reconstruct_as_of(AsOf::valid_at(JUL)).await.unwrap();
     assert_eq!(
         titles(&in_july).get("a").map(String::as_str),
-        Some("jun"),
-        "the June belief lives only in the archive"
+        Some("jun")
     );
 
     db.close().await.unwrap();
@@ -464,4 +479,56 @@ async fn verify_still_runs_once_superseded_rows_are_archived() {
     assert!(db.verify_concept_intervals().await.unwrap().is_empty());
 
     db.close().await.unwrap();
+}
+
+/// A valid-axis state is not a belief at a recorded instant, and `save_snapshot`
+/// refuses it rather than let it become an anchor (0.19.5, D-298).
+#[tokio::test]
+async fn a_valid_axis_state_cannot_be_saved_as_a_snapshot() {
+    let harness = TestHarness::new();
+    let db = open_db(&harness).await;
+    upsert(&db, concept("a", "jan", JAN, None)).await;
+
+    let state = db.reconstruct_as_of(AsOf::valid_at(MAR)).await.unwrap();
+    let dir = harness.db_path.with_extension("valid-snapshots");
+    let err = macrame::temporal::save_snapshot(&dir, &state)
+        .expect_err("a valid-axis state is refused");
+    assert!(matches!(err, DbError::SnapshotWriteFailed { .. }), "got {err:?}");
+
+    db.close().await.unwrap();
+}
+
+/// Concurrent valid reads on an archived database do not DETACH the archive under
+/// each other (0.19.5, D-298): each fold ATTACHes it, so they run on a connection
+/// of their own rather than on the shared `read_conn`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_valid_reads_on_an_archived_database_do_not_collide() {
+    let harness = TestHarness::new();
+    let db = open_db(&harness).await;
+    upsert(&db, concept("a", "jan", JAN, Some(JUN))).await;
+    upsert(&db, concept("a", "jun", JUN, None)).await;
+    upsert(&db, concept("a", "jan-corrected", JAN, Some(JUN))).await;
+    db.archive(FAR).await.unwrap();
+
+    let db = std::sync::Arc::new(db);
+    let tasks: Vec<_> = (0..8)
+        .map(|i| {
+            let db = db.clone();
+            tokio::spawn(async move {
+                for _ in 0..25 {
+                    if i % 2 == 0 {
+                        let s = db.reconstruct_as_of(AsOf::valid_at(JUL)).await.unwrap();
+                        assert_eq!(titles(&s)["a"], "jun");
+                    } else {
+                        assert!(db.verify_concept_intervals().await.unwrap().is_empty());
+                    }
+                }
+            })
+        })
+        .collect();
+    for t in tasks {
+        t.await.unwrap();
+    }
+
+    std::sync::Arc::into_inner(db).unwrap().close().await.unwrap();
 }

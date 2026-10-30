@@ -1322,6 +1322,9 @@ pub struct Database {
     ///
     /// [D-288]: ../../docs/architecture/s13-decision-register.md#d-288
     cold_blob_reader: tokio::sync::Mutex<Option<libsql::Connection>>,
+    /// A `SQLITE_OPEN_READ_ONLY` connection for the valid-axis folds, once an
+    /// archive exists (0.19.5, D-298); see [`Database::with_valid_fold_conn`].
+    valid_fold_conn: tokio::sync::Mutex<Option<libsql::Connection>>,
     /// [`Tuning::max_blob_bytes`], resolved.
     max_blob_bytes: usize,
     writer: Option<tokio::task::JoinHandle<()>>,
@@ -1891,6 +1894,7 @@ impl Database {
             reader_cache_size,
             diagnostic_conn: tokio::sync::Mutex::new(None),
             cold_blob_reader: tokio::sync::Mutex::new(None),
+            valid_fold_conn: tokio::sync::Mutex::new(None),
             max_blob_bytes,
             writer: Some(writer),
             cadence_stop,
@@ -2931,6 +2935,45 @@ impl Database {
         res
     }
 
+    /// Run a valid-axis fold on a connection no other reader shares (0.19.5,
+    /// D-298).
+    ///
+    /// The valid fold ATTACHes the archive on every call once one exists, and the
+    /// ATTACH region is per-connection and unsynchronised, so two such reads on
+    /// `read_conn` could DETACH the handle under each other: the hazard the cadence
+    /// and [`Self::with_cold_blobs`] were given connections of their own for. With
+    /// no archive file nothing is attached and `read_conn` serves. Otherwise the
+    /// valid reads take turns on one read-only connection, opened on first use and
+    /// dropped after an engine error so the next call reopens it.
+    async fn with_valid_fold_conn<T, F, Fut>(&self, f: F) -> Result<T>
+    where
+        F: FnOnce(libsql::Connection) -> Fut,
+        Fut: std::future::Future<Output = Result<T>>,
+    {
+        if !crate::temporal::archive::archive_present(&self.archive_path) {
+            return f(self.read_conn.clone()).await;
+        }
+        let mut slot = self.valid_fold_conn.lock().await;
+        let conn = match slot.as_ref() {
+            Some(conn) => conn.clone(),
+            None => {
+                let db = libsql::Builder::new_local(&self.path)
+                    .flags(libsql::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                    .build()
+                    .await?;
+                let conn = db.connect()?;
+                configure_common(&conn, self.reader_cache_size).await?;
+                *slot = Some(conn.clone());
+                conn
+            }
+        };
+        let res = f(conn).await;
+        if matches!(res, Err(DbError::Engine(_))) {
+            *slot = None;
+        }
+        res
+    }
+
     /// A handle on one lineage (§15.4, 0.14.9, [D-226]).
     ///
     /// Takes `&Arc<Self>` rather than `&self` because the view holds the handle
@@ -3525,8 +3568,14 @@ impl Database {
             .map(ConceptUpsert::normalized)
             .collect::<Result<_>>()
             .map_err(before_any_chunk)?;
-        self.low_chunked(
+        // Every row of one concept travels in one chunk, so the guard judges a
+        // concept's part of the batch whole and its verdict cannot depend on where
+        // an adaptive boundary falls (D-298). Input order is kept, so `written`
+        // is still a prefix of what the caller passed.
+        let group_end = concept_group_ends(&concepts);
+        self.low_chunked_grouped(
             concepts,
+            &group_end,
             chunk_rows::CONCEPTS,
             control,
             |chunk, responder| LowPriCommand::WriteConceptsChunk { chunk, responder },
@@ -3562,7 +3611,10 @@ impl Database {
     /// instant it asks about, so this reports the overlaps no read has reached yet.
     /// A ledger written through the write guard returns none.
     pub async fn verify_concept_intervals(&self) -> Result<Vec<crate::ConceptOverlap>> {
-        crate::temporal::concept_interval_overlaps(&self.read_conn, Some(&self.archive_path)).await
+        self.with_valid_fold_conn(|conn| async move {
+            crate::temporal::concept_interval_overlaps(&conn, Some(&self.archive_path)).await
+        })
+        .await
     }
 
     /// State at `at`, on either axis or both (0.20.0, P2, D-292).
@@ -3603,12 +3655,15 @@ impl Database {
             .await;
         };
         let valid = timestamp::normalize(&valid)?;
-        crate::temporal::reconstruct_valid(
-            &self.read_conn,
-            &valid,
-            recorded.as_deref(),
-            Some(&self.archive_path),
-        )
+        self.with_valid_fold_conn(|conn| async move {
+            crate::temporal::reconstruct_valid(
+                &conn,
+                &valid,
+                recorded.as_deref(),
+                Some(&self.archive_path),
+            )
+            .await
+        })
         .await
     }
 
@@ -4442,12 +4497,39 @@ impl Database {
         control: BulkControl,
         make: impl Fn(Vec<T>, oneshot::Sender<Result<ChunkOutcome>>) -> LowPriCommand,
     ) -> BulkResult<usize> {
+        self.low_chunked_grouped(items, &[], ceiling, control, make)
+            .await
+    }
+
+    /// [`Self::low_chunked`] with no boundary inside a group (0.19.5, D-298).
+    ///
+    /// `group_end[i]` is the index of the last item in item `i`'s group, and a
+    /// chunk grows past its size until it holds the last item of every group it
+    /// started. An empty slice is no grouping.
+    async fn low_chunked_grouped<T>(
+        &self,
+        items: Vec<T>,
+        group_end: &[usize],
+        ceiling: usize,
+        control: BulkControl,
+        make: impl Fn(Vec<T>, oneshot::Sender<Result<ChunkOutcome>>) -> LowPriCommand,
+    ) -> BulkResult<usize> {
         let total = items.len();
         let mut items = items.into_iter();
         let mut size = ceiling.max(1);
         let mut written = 0usize;
+        let mut start = 0usize;
         loop {
-            let chunk: Vec<T> = items.by_ref().take(size).collect();
+            let mut end = (start + size).min(total);
+            let mut i = start;
+            while i < end {
+                if let Some(&last) = group_end.get(i) {
+                    end = end.max(last + 1);
+                }
+                i += 1;
+            }
+            let chunk: Vec<T> = items.by_ref().take(end - start).collect();
+            start = end;
             if chunk.is_empty() {
                 // Emptiness is checked before cancellation on purpose: a token
                 // raised after the last chunk committed is asking to stop work
@@ -6068,6 +6150,32 @@ const CURRENT_CONCEPT_INTERVALS: &str = "
     )
     WHERE rn = 1";
 
+/// [`CURRENT_CONCEPT_INTERVALS`] for a whole batch in one pass (0.19.5, D-298).
+///
+/// `?1` is a JSON array of `[id, bound]` pairs, one per concept the batch writes
+/// on lineage `?2`. `CROSS JOIN` keeps the batch on the outside, so each id is one
+/// seek on the fold partition, as the single-row query is, rather than one query
+/// per concept under the write lock.
+const CURRENT_CONCEPT_INTERVALS_BATCH: &str = "
+    SELECT id, valid_from, valid_to FROM (
+        SELECT want.id AS id,
+               json_extract(t.payload, '$.valid_from') AS valid_from,
+               json_extract(t.payload, '$.valid_to') AS valid_to,
+               ROW_NUMBER() OVER (
+                   PARTITION BY want.id, json_extract(t.payload, '$.valid_from')
+                   ORDER BY t.seq_id DESC
+               ) AS rn
+        FROM (SELECT json_extract(value, '$[0]') AS id,
+                     json_extract(value, '$[1]') AS bound
+              FROM json_each(?1)) AS want
+        CROSS JOIN transaction_log AS t
+        WHERE t.table_name = 'concepts'
+          AND t.entity_id = want.id
+          AND json_extract(t.payload, '$.valid_from') < want.bound
+          AND t.branch_id = ?2
+    )
+    WHERE rn = 1";
+
 /// The intervals the lineage `branch` currently believes for one concept, one per
 /// valid start, bounded above by `before` (0.19.2, D-291).
 async fn current_concept_intervals(
@@ -6222,27 +6330,67 @@ fn reject_concept_overlaps_within(concepts: &[ConceptUpsert]) -> Result<()> {
 /// The batch checked against the committed ledger, inside the transaction and
 /// before its first insert (0.19.2, D-291).
 ///
-/// Each concept is read once, bounded by the largest end the batch proposes for
-/// it, and compared with what the batch will leave. A start the batch rewrites
-/// is superseded and cannot clash with its own rewrite.
+/// Each concept is read bounded by the largest end the batch proposes for it, and
+/// compared with what the batch will leave. A start the batch rewrites is
+/// superseded and cannot clash with its own rewrite. One query per lineage reads
+/// every concept of it (D-298); the groups arrive ordered by lineage.
 async fn check_batch_against_ledger(
     conn: &libsql::Connection,
     concepts: &[ConceptUpsert],
 ) -> Result<()> {
-    for (branch, id, proposed) in final_concept_intervals(concepts) {
-        let bound = proposed
+    let groups = final_concept_intervals(concepts);
+    for lineage in groups.chunk_by(|a, b| a.0 == b.0) {
+        let branch = lineage[0].0;
+        let want: Vec<serde_json::Value> = lineage
             .iter()
-            .map(|i| i.valid_to.as_str())
-            .max()
-            .unwrap_or(timestamp::OPEN_SENTINEL);
-        let current = current_concept_intervals(conn, id, bound, branch).await?;
-        let kept: Vec<Interval> = current
-            .into_iter()
-            .filter(|e| !proposed.iter().any(|p| p.valid_from == e.valid_from))
+            .map(|(_, id, proposed)| {
+                let bound = proposed
+                    .iter()
+                    .map(|i| i.valid_to.as_str())
+                    .max()
+                    .unwrap_or(timestamp::OPEN_SENTINEL);
+                serde_json::json!([id, bound])
+            })
             .collect();
-        check_concept_against(id, &proposed, &kept)?;
+        let mut rows = conn
+            .query(
+                CURRENT_CONCEPT_INTERVALS_BATCH,
+                libsql::params![serde_json::Value::Array(want).to_string(), branch],
+            )
+            .await?;
+        let mut current: std::collections::HashMap<String, Vec<Interval>> =
+            std::collections::HashMap::new();
+        while let Some(row) = rows.next().await? {
+            current
+                .entry(row.get::<String>(0)?)
+                .or_default()
+                .push(Interval::new(row.get::<String>(1)?, row.get::<String>(2)?));
+        }
+        for (_, id, proposed) in lineage {
+            let kept: Vec<Interval> = current
+                .remove(*id)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|e| !proposed.iter().any(|p| p.valid_from == e.valid_from))
+                .collect();
+            check_concept_against(id, proposed, &kept)?;
+        }
     }
     Ok(())
+}
+
+/// For each concept row, the index of the last row of the same (lineage, id), so
+/// the chunker can keep a concept's rows together (0.19.5, D-298).
+fn concept_group_ends(concepts: &[ConceptUpsert]) -> Vec<usize> {
+    let mut last: std::collections::HashMap<(&str, &str), usize> =
+        std::collections::HashMap::new();
+    for (i, concept) in concepts.iter().enumerate() {
+        last.insert((concept.branch_name(), concept.id.as_str()), i);
+    }
+    concepts
+        .iter()
+        .map(|c| last[&(c.branch_name(), c.id.as_str())])
+        .collect()
 }
 
 /// Whether this pair is the storage layer's case rather than this guard's.

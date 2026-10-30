@@ -163,6 +163,15 @@ impl ConceptOverlap {
             OverlapProvenance::BothRecorded => "is also already recorded",
         }
     }
+
+    /// What became of the later open interval: a write refuses it, and a read
+    /// finds it already stored (0.19.5, D-298).
+    pub(crate) fn verdict(&self) -> &'static str {
+        match self.provenance {
+            OverlapProvenance::AlreadyRecorded | OverlapProvenance::SameBatch => "is refused",
+            OverlapProvenance::BothRecorded => "is recorded",
+        }
+    }
 }
 
 /// The closing clause for an **edge** collision: an interval already recorded,
@@ -855,8 +864,8 @@ pub enum DbError {
     /// the same partition [`Self::OverlappingConcept`] keeps against edges'
     /// [`Self::OverlappingInterval`].
     #[error(
-        "concept {}: a second open interval from {} is refused; one from {} {}",
-        .overlap.id, .overlap.valid_from, .overlap.existing_from,
+        "concept {}: a second open interval from {} {}; one from {} {}",
+        .overlap.id, .overlap.valid_from, .overlap.verdict(), .overlap.existing_from,
         .overlap.clause()
     )]
     ConceptSingleOpen { overlap: Box<ConceptOverlap> },

@@ -64,10 +64,12 @@
 /// the surface — so demanding the register's highest anchor would force
 /// unrelated entries into the document to keep a test quiet, which is how a
 /// gate starts producing the drift it was meant to catch. The bound is set at
-/// about one release instead: no single release in this crate's history has
-/// produced ten decisions, so a lag inside this window is a release that has
-/// not been written up yet, and a lag outside it is a document nobody has
-/// opened in a while. The drift this file was extended for was **nineteen**.
+/// about one ordinary release instead. Some releases have produced more (0.5.4
+/// recorded seventeen, 0.7.0 and 0.8.0 fifteen each), and after one of those
+/// the gate fires at once: that is intended, since a release that large has
+/// moved the surface the quickref describes, and the quickref is updated in it.
+/// A lag inside the window is a small release not yet written up. The drift
+/// this file was extended for was **nineteen**.
 const MAX_DECISION_LAG: u32 = 10;
 
 const MANIFEST: &str = include_str!("../Cargo.toml");
@@ -76,6 +78,7 @@ const QUICKREF: &str = include_str!("../docs/quickref.md");
 const MIGRATIONS: &str = include_str!("../src/schema/migrations.rs");
 const REGISTER: &str = include_str!("../docs/architecture/s13-decision-register.md");
 const README: &str = include_str!("../README.md");
+const SITE: &str = include_str!("../site/index.html");
 
 /// The crate's version, from the `[package]` table's first `version =`.
 fn crate_version() -> String {
@@ -185,6 +188,27 @@ fn readme_dep_pin() -> Option<String> {
         .find_map(|l| l.strip_prefix("macrame-db = \""))
         .and_then(|rest| rest.split('"').next())
         .map(str::to_string)
+}
+
+/// Every `X.Y.Z` the landing page names, parsed.
+fn site_versions() -> Vec<(u32, u32, u32)> {
+    SITE.split(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .filter_map(|tok| {
+            let parts: Vec<u32> = tok
+                .split('.')
+                .map(|p| p.parse().ok())
+                .collect::<Option<_>>()?;
+            match parts.as_slice() {
+                [a, b, c] => Some((*a, *b, *c)),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+fn parse_version(v: &str) -> (u32, u32, u32) {
+    let parts: Vec<u32> = v.split('.').map(|p| p.parse().expect("numeric")).collect();
+    (parts[0], parts[1], parts[2])
 }
 
 /// The series the crate is at, as the README would have to spell it.
@@ -345,6 +369,42 @@ fn the_readme_does_not_advertise_a_quickref_version_it_is_not_at() {
              did."
         );
     }
+}
+
+/// The landing page names one release, of the series the crate is at (0.19.5,
+/// D-298).
+///
+/// It advertises what is **published**, which this test cannot see: the site
+/// deploys from main, and on a development branch the crate is ahead of the
+/// last release. So it bounds rather than equates. The page names one version
+/// throughout, no later than the crate's, and in the crate's series, so a new
+/// series cannot ship under a page that still advertises the last one. And its
+/// docs link points at the architecture set, not at a plan a later plan
+/// superseded.
+#[test]
+fn the_site_advertises_one_release_of_the_series_the_crate_is_at() {
+    let named = site_versions();
+    let first = *named.first().expect("site/index.html names a version");
+    assert!(
+        named.iter().all(|v| *v == first),
+        "site/index.html names more than one version: {named:?}"
+    );
+    let crate_v = parse_version(&crate_version());
+    assert!(
+        first <= crate_v && (first.0, first.1) == (crate_v.0, crate_v.1),
+        "site/index.html advertises {}.{}.{}, but the crate is at {} — the page \
+         must name a release of the series {} and no later than the crate",
+        first.0,
+        first.1,
+        first.2,
+        crate_version(),
+        crate_series()
+    );
+    assert!(
+        !SITE.contains("Update%20Plan") && !SITE.contains("Update Plan"),
+        "site/index.html links a plan document; plans are superseded, so the \
+         docs link belongs on the architecture set or the README"
+    );
 }
 
 #[test]

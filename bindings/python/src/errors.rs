@@ -231,10 +231,12 @@ create_exception!(
     IntegrityError,
     "Two valid-time intervals for one concept claim the same instant.\n\n\
      Attributes: `concept_id`, the asserted `valid_from` / `valid_to`, the \
-     `existing_from` / `existing_to` it collides with, and `within_batch`. \
+     `existing_from` / `existing_to` it collides with, and `provenance`. \
      Both intervals are reported because neither alone identifies the \
      conflict.\n\n\
-     `within_batch` says which guard raised this, as for `OverlappingIntervalError`."
+     `provenance` says where the second interval came from: \"already_recorded\", \
+     \"same_batch\" when the same call asserted it, or \"both_recorded\" when a \
+     read found both in the ledger and the caller asserted neither (D-295)."
 );
 create_exception!(
     macrame,
@@ -242,7 +244,10 @@ create_exception!(
     IntegrityError,
     "The concept already has an open interval from another start; close it \
      first. Attributes: `concept_id`, the asserted `valid_from` / `valid_to`, \
-     the `existing_from` / `existing_to` it collides with, and `within_batch`."
+     the `existing_from` / `existing_to` it collides with, and `provenance`.\n\n\
+     `provenance` says where the second interval came from: \"already_recorded\", \
+     \"same_batch\" when the same call asserted it, or \"both_recorded\" when a \
+     read found both in the ledger and the caller asserted neither (D-295)."
 );
 create_exception!(
     macrame,

@@ -112,11 +112,6 @@ pub(crate) fn belief_to_py<'py>(py: Python<'py>, e: &EdgeBelief) -> PyResult<Bou
     )
 }
 
-/// One pair of concept beliefs whose valid intervals overlap (0.20.0, P4, D-294).
-///
-/// Both intervals are reported, because neither alone identifies the conflict.
-/// `within_batch` says whether the collision is with another row in the same
-/// call (D-180), as it is for an edge overlap.
 /// `OverlapProvenance` as the string the Python surface spells it (D-295).
 ///
 /// The wildcard arm is required, not defensive: the enum is
@@ -131,6 +126,10 @@ pub(crate) fn provenance_name(provenance: OverlapProvenance) -> &'static str {
     }
 }
 
+/// One pair of concept beliefs whose valid intervals overlap (0.20.0, P4, D-294).
+///
+/// Both intervals are reported, because neither alone identifies the conflict.
+/// `provenance` says where the second interval came from (D-295).
 #[pyclass(name = "ConceptOverlap", module = "macrame", frozen)]
 pub(crate) struct PyConceptOverlap {
     pub(crate) inner: macrame::ConceptOverlap,

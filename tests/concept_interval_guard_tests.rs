@@ -17,6 +17,7 @@ const MAR: &str = "2026-03-01T00:00:00.000000Z";
 const JUN: &str = "2026-06-01T00:00:00.000000Z";
 const SEP: &str = "2026-09-01T00:00:00.000000Z";
 const DEC: &str = "2026-12-01T00:00:00.000000Z";
+const FAR: &str = "2030-01-01T00:00:00.000000Z";
 
 fn concept(id: &str, from: &str, to: Option<&str>) -> ConceptUpsert {
     let c = ConceptUpsert::new(id, id).valid_from(from);
@@ -300,4 +301,71 @@ async fn a_trunk_restatement_of_a_branch_concept_is_cross_lineage_not_an_overlap
     assert!(matches!(err, DbError::CrossLineage { .. }), "got {err:?}");
 
     db.close().await.unwrap();
+}
+
+/// Archiving keeps each start's current belief hot (0.19.5, D-298). Until then
+/// `LOG_ARCHIVABLE` keyed on the entity, so a later start sent `[Jan, Jun)` cold,
+/// the guard stopped seeing it, and a write inside it was admitted.
+#[tokio::test]
+async fn a_start_a_later_start_superseded_still_blocks_after_archiving() {
+    let harness = TestHarness::new();
+    let db = open_db(&harness).await;
+
+    upsert(&db, concept("a", JAN, Some(JUN))).await.unwrap();
+    upsert(&db, concept("a", JUN, None)).await.unwrap();
+    db.archive(FAR).await.unwrap();
+
+    let err = upsert(&db, concept("a", MAR, Some(JUN)))
+        .await
+        .expect_err("[Mar, Jun) overlaps the archived ledger's [Jan, Jun)");
+    let DbError::OverlappingConcept { ref overlap } = err else {
+        panic!("expected OverlappingConcept, got {err:?}");
+    };
+    assert_eq!(
+        (overlap.existing_from.as_str(), overlap.existing_to.as_str()),
+        (JAN, JUN)
+    );
+    assert!(db.verify_concept_intervals().await.unwrap().is_empty());
+
+    db.close().await.unwrap();
+}
+
+/// One concept's rows travel in one chunk, so where they sit in the batch does not
+/// change the verdict (0.19.5, D-298). The batch opens a new start and closes the
+/// old one. Until 0.19.5 that depended on the adaptive chunker: with the two rows
+/// in different chunks the first was refused as `ConceptSingleOpen` after earlier
+/// chunks had committed, and in one chunk the shared stamp was refused by the
+/// monotonic `recorded_at` trigger. Now both placements meet the same refusal, and
+/// the concept's ledger is untouched by either.
+#[tokio::test]
+async fn a_concepts_rows_meet_the_same_verdict_wherever_the_chunker_would_split() {
+    for gap in [0usize, 100] {
+        let harness = TestHarness::new();
+        let db = open_db(&harness).await;
+
+        upsert(&db, concept("a", JAN, None)).await.unwrap();
+        let mut batch = vec![concept("a", JUN, None)];
+        batch.extend((0..gap).map(|i| concept(&format!("b{i}"), JAN, None)));
+        batch.push(concept("a", JAN, Some(JUN)));
+
+        let err = write(&db, batch)
+            .await
+            .expect_err("one concept twice in one chunk shares a stamp");
+        assert!(
+            matches!(err.cause, DbError::RecordedAtRegression { .. }),
+            "gap {gap}: {:?}",
+            err.cause
+        );
+        assert_eq!(
+            count(
+                &db,
+                "SELECT COUNT(*) FROM transaction_log WHERE entity_id = 'a'"
+            )
+            .await,
+            1,
+            "gap {gap}: the concept's ledger is untouched"
+        );
+
+        db.close().await.unwrap();
+    }
 }

@@ -396,12 +396,22 @@ const LINKS_ARCHIVABLE: &str = r#"
 ///
 /// [D-269]: ../../docs/architecture/s13-decision-register.md#d-269
 /// [D-229]: ../../docs/architecture/s13-decision-register.md#d-229
+///
+/// **A concept row needs a newer row for its own valid start** (0.19.5, D-298).
+/// A concept holds one current belief per start, and the write guard (D-291)
+/// reads those from the hot log. Superseded by a *different* start, a row is
+/// still the belief for its own interval, and archiving it would hide that
+/// interval from the guard, which would then admit a write overlapping it.
 const LOG_ARCHIVABLE: &str = r#"
     recorded_at < :cutoff AND EXISTS (
         SELECT 1 FROM transaction_log newer
         WHERE newer.entity_id = transaction_log.entity_id
           AND newer.branch_id = transaction_log.branch_id
           AND newer.seq_id    > transaction_log.seq_id
+          AND (transaction_log.table_name <> 'concepts'
+               OR (newer.table_name = 'concepts'
+                   AND json_extract(newer.payload, '$.valid_from')
+                     = json_extract(transaction_log.payload, '$.valid_from')))
           AND NOT EXISTS (
                 SELECT 1 FROM branches b
                 WHERE b.forked_at IS NOT NULL

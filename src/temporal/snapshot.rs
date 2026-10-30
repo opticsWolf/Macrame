@@ -262,6 +262,16 @@ pub fn save_snapshot(snapshots_dir: &Path, state: &MaterializedState) -> Result<
         reason: format!("{what}: {e}"),
     };
 
+    // A valid-axis state is not a belief at a recorded instant. Saved, it would
+    // become an anchor that `reconstruct` composes on, and every later answer
+    // built on it would be wrong without an error (0.19.5, D-298).
+    if state.valid_axis {
+        return Err(fail(
+            "refused",
+            &"the state is at a valid instant, not a recorded one (reconstruct_as_of with a valid instant)",
+        ));
+    }
+
     fs::create_dir_all(snapshots_dir)
         .map_err(|e| fail("failed to create snapshot directory", &e))?;
 
@@ -1045,6 +1055,7 @@ mod tests {
             concepts,
             edges: Vec::new(),
             predates_recorded_history: false,
+            valid_axis: false,
         }
     }
 
@@ -1322,6 +1333,7 @@ mod tests {
                 branch_id: crate::schema::ddl::MAIN_BRANCH.to_string(),
             }],
             predates_recorded_history: false,
+            valid_axis: false,
         }
     }
 
