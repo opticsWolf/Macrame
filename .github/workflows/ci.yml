@@ -62,7 +62,14 @@ env:
 # Not bumped, because they are already fine: `Swatinem/rust-cache@v2` and
 # `PyO3/maturin-action@v1` both declare `node24` on their current major, and
 # `pypa/gh-action-pypi-publish@release/v1` is a composite action with no Node
-# runtime at all. `dtolnay/rust-toolchain` is a branch ref by design.
+# runtime at all. `dtolnay/rust-toolchain` is a branch ref by design: the ref
+# *is* the channel, and tracking `stable` is the point.
+#
+# One exception, added in 0.19.4 ([D-296]): the `fuzz` job pins a dated
+# nightly through `@master`, as the MSRV job already pins a version. Tracking a
+# channel is right for a job that type-checks the crate and wrong for the one
+# job that compiles under a sanitizer, where the toolchain's instrumentation is
+# an input to the result rather than a detail of how it was reached.
 
 # Every job below carries a `timeout-minutes`, and so does one step (0.15.25,
 # [D-267]).
@@ -513,7 +520,14 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@nightly
+      # Pinned, where every other job tracks a channel (0.19.4, [D-296]).
+      # `fuzz/Cargo.lock` is gitignored and this job builds under a sanitizer,
+      # so it is the one job whose result depends on the toolchain's own
+      # instrumentation. A floating `@nightly` made it the only job that could
+      # break without a commit, and it did.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-10-28
       - uses: Swatinem/rust-cache@v2
         with:
           # Two Cargo workspaces: the crate, and the fuzz crate that deliberately
@@ -521,8 +535,11 @@ jobs:
           workspaces: |
             . -> target
             fuzz -> fuzz/target
+      # Pinned for the same reason as the toolchain: `--locked` fixes this
+      # tool's own dependencies, not which version of it gets installed, so
+      # without `--version` a cargo-fuzz release lands here uninvited.
       - name: install cargo-fuzz
-        run: cargo install cargo-fuzz --locked
+        run: cargo install cargo-fuzz --locked --version 0.13.2
 
       # Generated, never committed: a corpus of valid v3 files goes stale the
       # moment SNAP_FORMAT_VERSION moves, and a stale corpus still looks like a
@@ -530,6 +547,26 @@ jobs:
       - name: seed the corpus
         working-directory: fuzz
         run: cargo run --bin seed
+
+      # Build every target once, with leak detection off, and only for this
+      # step ([D-296]).
+      #
+      # cargo-fuzz exports `-fsanitize=address` to the `cc` crate, so a C
+      # helper a dependency's build script compiles is instrumented too.
+      # `libsql-sqlite3-parser` builds `rlemon` (the lemon parser generator,
+      # C) and asserts it exits zero. Lemon never frees, so LeakSanitizer
+      # reports at exit, rlemon exits non-zero, and the assert fails the
+      # build -- before a single fuzz target runs.
+      #
+      # `detect_leaks=0` here and not on the runs below: build scripts run at
+      # build time, so once this step has built them, the runs reuse the
+      # artifacts and keep leak detection for our own code, which is what the
+      # snapshot targets are partly looking for. If a `cargo fuzz run` below
+      # ever rebuilds, this breaks again and says so in the same way.
+      - name: build the targets
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+        run: cargo fuzz build
 
       - name: snapshot_container
         run: cargo fuzz run snapshot_container -- -max_total_time=90 -rss_limit_mb=2048 -malloc_limit_mb=256
