@@ -65,11 +65,13 @@ env:
 # runtime at all. `dtolnay/rust-toolchain` is a branch ref by design: the ref
 # *is* the channel, and tracking `stable` is the point.
 #
-# One exception, added in 0.19.4 ([D-296]): the `fuzz` job pins a dated
-# nightly through `@master`, as the MSRV job already pins a version. Tracking a
-# channel is right for a job that type-checks the crate and wrong for the one
-# job that compiles under a sanitizer, where the toolchain's instrumentation is
-# an input to the result rather than a detail of how it was reached.
+# Two exceptions, added in 0.19.4 ([D-296]): the `fuzz` and `public-api` jobs
+# pin a dated nightly through `@master`, as the MSRV job already pins a
+# version. Tracking a channel is right for a job that type-checks the crate
+# against `stable`, and wrong for the two whose *answer* comes from the
+# toolchain -- one compiles under a sanitizer, the other renders the public
+# surface through rustc. For those, the toolchain is an input to the result
+# rather than a detail of how the result was reached.
 
 # Every job below carries a `timeout-minutes`, and so does one step (0.15.25,
 # [D-267]).
@@ -633,10 +635,18 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@nightly
+      # Pinned for the reason the `fuzz` job is ([D-296]): `cargo public-api`
+      # renders the surface *through* rustc, so the text it prints is the
+      # toolchain's and a nightly that renders one signature differently would
+      # fail this diff with no commit behind the change. The baseline is a file
+      # in the repository, so the tool that reads it has to be as fixed as the
+      # file is.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-10-28
       - uses: Swatinem/rust-cache@v2
       - name: install cargo-public-api
-        run: cargo install cargo-public-api --locked
+        run: cargo install cargo-public-api --locked --version 0.52.0
       - name: diff against the baseline
         shell: bash
         run: |
