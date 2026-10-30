@@ -1,8 +1,8 @@
 # Macrame Update Plan v0.20.0 — a valid-axis state fold
 
-**Status:** P1–P4 built on `dev/0.20.0`; not released, version label open · **Branch:** `dev/0.20.0` (cut, not merged) · **Date:** 2026-10-29
+**Status:** P1–P4 built, reviewed twice (0.19.5, 0.19.6) and released as **0.20.0** on 2026-10-30 · **Branch:** `dev/0.20.0`, merged to `main` · **Date:** 2026-10-29, released 2026-10-30
 **From:** 0.19.1 (schema v22, concepts payload v3, snapshot v5, surface 1,909 items + 1 Python keyword)
-**To:** 0.20.0 (**schema v22 — unchanged**; payload and snapshot unchanged)
+**To:** 0.20.0 (schema v22 → **v23**, index-only — D-300 and D-301, the two write regressions the release bench found and the tag waited for; payload unchanged; snapshot container v5 → v6, D-299)
 **Supersedes:** this file's own earlier form, a *request* drafted the same day against
 `main` at `5098722`. §13 records what the request got wrong.
 **Requested by:** CodeRadar P5 (DR-41, commit-driven ingestion),

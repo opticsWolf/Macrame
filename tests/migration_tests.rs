@@ -450,7 +450,7 @@ async fn plan_string(conn: &libsql::Connection, sql: &str) -> String {
 #[test]
 fn a_version_bump_must_bring_its_own_rung_test() {
     assert_eq!(
-        SCHEMA_VERSION, 22,
+        SCHEMA_VERSION, 23,
         "SCHEMA_VERSION moved. Add a test for the new rung — one that starts \
          from a database at the previous version and asserts what the rung is \
          *for*, not merely that `run` reached the top."
@@ -3126,6 +3126,71 @@ async fn a_v21_database_climbs_to_v22_and_gains_a_guarded_blob_store() {
         )
         .await,
         1
+    );
+}
+
+/// **v22 → v23 on a populated database (0.20.0, [D-300], [D-301]).**
+///
+/// What the rung is *for*: the concept interval guard's read seeks one valid
+/// start at a time instead of reading a concept's whole history, and the log
+/// stops paying for `idx_txlog_entity` on every write. Asserted as the plan
+/// the guard's per-start read gets and as the index set, because the rung
+/// moves no data and has no behaviour of its own to observe.
+///
+/// [D-300]: ../docs/architecture/s13-decision-register.md#d-300
+/// [D-301]: ../docs/architecture/s13-decision-register.md#d-301
+#[tokio::test]
+async fn a_v22_database_climbs_to_v23_and_the_concept_guard_seeks_its_starts() {
+    let harness = TestHarness::new();
+    let conn = connect(&harness).await;
+    macrame::schema::run_migrations(&conn).await.unwrap();
+
+    v11_schema::wind_back_to_v22(&conn).await;
+    conn.execute("PRAGMA user_version = 22", ()).await.unwrap();
+    let index = |name: &'static str| {
+        format!("SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = '{name}'")
+    };
+    assert_eq!(scalar(&conn, &index("idx_txlog_concept_starts")).await, 0);
+    assert_eq!(
+        scalar(&conn, &index("idx_txlog_entity")).await,
+        1,
+        "the fixture is not starting from a v22 database"
+    );
+
+    // Populated: a concept and its log entry, so the climb runs over a ledger.
+    conn.execute(
+        "INSERT INTO concepts (id, title, content, valid_from, valid_to, recorded_at) \
+         VALUES ('before', 'Before', '', ?1, ?2, ?1)",
+        libsql::params![TS, OPEN],
+    )
+    .await
+    .unwrap();
+
+    // `run_migrations` ends in `verify`, so reaching the top is "verify clean".
+    macrame::schema::run_migrations(&conn).await.unwrap();
+    assert_eq!(user_version(&conn).await, SCHEMA_VERSION);
+    assert_eq!(scalar(&conn, "SELECT COUNT(*) FROM concepts").await, 1);
+
+    // 1. The guard's per-start read seeks the new index.
+    let plan = plan_string(
+        &conn,
+        "SELECT json_extract(payload, '$.valid_to') FROM transaction_log \
+         WHERE table_name = 'concepts' AND entity_id = 'before' AND branch_id = 'main' \
+           AND json_extract(payload, '$.valid_from') = '2026-01-01' \
+         ORDER BY seq_id DESC LIMIT 1",
+    )
+    .await;
+    assert!(
+        plan.contains("USING INDEX idx_txlog_concept_starts"),
+        "the concept guard's read does not seek its starts: {plan}"
+    );
+
+    // 2. The entity index is gone: nothing reads it, and every log write paid
+    //    for it.
+    assert_eq!(
+        scalar(&conn, &index("idx_txlog_entity")).await,
+        0,
+        "the rung left idx_txlog_entity on the write path"
     );
 }
 

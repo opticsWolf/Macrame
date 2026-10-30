@@ -676,6 +676,14 @@ ORDER BY w.node_id;
     /// valid-interval predicate here — the projection decides *which ids
     /// survive*, and validity is hydration's question (W7.1), exactly the
     /// division of labour the live join keeps.
+    ///
+    /// **The bound is `+recorded_at`, a filter and never an access path**
+    /// (0.20.0, D-300). With `ANALYZE` statistics on the concept guard's
+    /// partial index the planner learned how few log rows are concepts and
+    /// took `idx_txlog_time` instead — a range over every table's rows and a
+    /// full window sort, where the `table_name` seek on
+    /// `idx_txlog_fold_partition` reads only concept rows and sorts only the
+    /// right part. Pinned by `bitemporal_plan_tests`.
     fn concepts_at_instant_sql(&self, shape: LineageShape) -> String {
         format!(
             r#"SELECT entity_id AS node_id FROM (
@@ -683,7 +691,7 @@ ORDER BY w.node_id;
            ROW_NUMBER() OVER (PARTITION BY entity_id ORDER BY seq_id DESC) AS rn
     FROM transaction_log
     WHERE table_name = 'concepts'
-      AND recorded_at <= ?{}
+      AND +recorded_at <= ?{}
 ) WHERE rn = 1 AND COALESCE(json_extract(payload, '$.retired'), 0) = 0"#,
             Self::recorded_slot(shape)
         )

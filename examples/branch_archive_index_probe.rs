@@ -298,9 +298,20 @@ async fn run_arm(
 
     // Before the seed, so every insert below pays for them — which is the cost
     // side of the question and cannot be measured by adding them afterwards.
+    //
+    // An arm that names an index the schema now ships (0.15.30 shipped the
+    // `partial` pair as `idx_links_branch` and `idx_txlog_branch`) replaces it
+    // rather than failing on it, so each arm measures its own set.
     {
         let conn = db.raw().connect()?;
         for ddl in indexes {
+            if let Some(name) = ddl
+                .strip_prefix("CREATE INDEX ")
+                .and_then(|rest| rest.split_whitespace().next())
+            {
+                conn.execute(&format!("DROP INDEX IF EXISTS {name}"), ())
+                    .await?;
+            }
             conn.execute(ddl, ()).await?;
         }
     }

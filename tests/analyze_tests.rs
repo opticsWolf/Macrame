@@ -125,7 +125,7 @@ async fn analyze_creates_statistics_that_did_not_exist() {
         "idx_lc_open_interval",
         "idx_lc_lineage_cut",
         "idx_txlog_time",
-        "idx_txlog_entity",
+        "idx_txlog_fold_partition",
     ] {
         assert!(
             after.iter().any(|(_, i)| i == idx),

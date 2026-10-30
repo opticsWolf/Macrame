@@ -404,16 +404,26 @@ const LINKS_ARCHIVABLE: &str = r#"
 /// interval from the guard, which would then admit a write overlapping it.
 /// The starts compare with `IS`, so a payload with no `valid_from` matches
 /// another without one, as the fold's `PARTITION BY` groups them (0.19.6, D-299).
+///
+/// **Only a row of the same table supersedes** (0.20.0, [D-301]). The fold
+/// partitions on `(table_name, entity_id, branch_id)`, and a concept's id and a
+/// link's synthetic key are not disjoint namespaces, so a newer row of another
+/// table is a different entity and never made this one stale. Binding it also
+/// gives the subquery all three of `idx_txlog_fold_partition`'s equality
+/// columns, which is what let `idx_txlog_entity` — this test's last index —
+/// leave the write path.
+///
+/// [D-301]: ../../docs/architecture/s13-decision-register.md#d-301
 const LOG_ARCHIVABLE: &str = r#"
     recorded_at < :cutoff AND EXISTS (
         SELECT 1 FROM transaction_log newer
-        WHERE newer.entity_id = transaction_log.entity_id
+        WHERE newer.table_name = transaction_log.table_name
+          AND newer.entity_id = transaction_log.entity_id
           AND newer.branch_id = transaction_log.branch_id
           AND newer.seq_id    > transaction_log.seq_id
           AND (transaction_log.table_name <> 'concepts'
-               OR (newer.table_name = 'concepts'
-                   AND json_extract(newer.payload, '$.valid_from')
-                     IS json_extract(transaction_log.payload, '$.valid_from')))
+               OR json_extract(newer.payload, '$.valid_from')
+                    IS json_extract(transaction_log.payload, '$.valid_from'))
           AND NOT EXISTS (
                 SELECT 1 FROM branches b
                 WHERE b.forked_at IS NOT NULL

@@ -301,6 +301,12 @@ pub fn tables_v11() -> Vec<String> {
 /// dozen lines below. The failure without the exclusion is identical and just
 /// as legible: eleven rung tests dying in the fixture with `no such column:
 /// branch_id` before the rung they name has run.
+///
+/// **And one the baseline no longer declares.** `idx_txlog_entity` was in every
+/// schema from the first to v22, and v23 drops it (0.20.0, D-301), so it is
+/// appended from [`TXLOG_ENTITY_V22`] rather than filtered out of today's list.
+/// `idx_txlog_concept_starts` is the v23 index and names `branch_id`, so it is
+/// excluded on both counts.
 pub fn indices_v11() -> Vec<&'static str> {
     ddl::CREATE_INDICES
         .iter()
@@ -312,9 +318,16 @@ pub fn indices_v11() -> Vec<&'static str> {
                 && !sql.contains("idx_txlog_branch")
                 && !sql.contains("idx_concepts_extra_layer")
                 && !sql.contains("idx_blobs_put_at")
+                && !sql.contains("idx_txlog_concept_starts")
         })
+        .chain(std::iter::once(TXLOG_ENTITY_V22))
         .collect()
 }
+
+/// `idx_txlog_entity` as every schema through v22 declared it. The v22 -> v23
+/// rung drops it (0.20.0, D-301), so a fixture below v23 lays it from here.
+pub const TXLOG_ENTITY_V22: &str =
+    "CREATE INDEX IF NOT EXISTS idx_txlog_entity ON transaction_log (entity_id);";
 
 /// The caller stamps `user_version` after seeding, for the reason
 /// [`v7_schema::v7_schema`] gives: a database stamped before its rows exist is
@@ -352,6 +365,17 @@ pub async fn v11_schema(conn: &libsql::Connection) {
 /// `branch_id`, and the live `trg_links_current_sync` then fails with
 /// `no such column: NEW.branch_id`. A rung is a statement about a shape, so the
 /// shape has to be there.
+/// Undo v23 on a database built from today's baseline (0.20.0, D-300, D-301).
+///
+/// The rung's two halves in reverse: the concept guard's partial index goes,
+/// and the log's entity index comes back. Idempotent, like the rest.
+pub async fn wind_back_to_v22(conn: &libsql::Connection) {
+    conn.execute("DROP INDEX IF EXISTS idx_txlog_concept_starts", ())
+        .await
+        .unwrap();
+    conn.execute(TXLOG_ENTITY_V22, ()).await.unwrap();
+}
+
 /// Undo v22 on a database built from today's baseline (0.19.0, D-288).
 ///
 /// The blob store is a table, an index and two triggers that nothing else
@@ -359,6 +383,8 @@ pub async fn v11_schema(conn: &libsql::Connection) {
 /// `DROP TABLE` would take them anyway. Spelled out so the wind-back says what
 /// v22 added. Idempotent, like the rest.
 pub async fn wind_back_to_v21(conn: &libsql::Connection) {
+    // v23 first, so every caller below v22 is also below v23.
+    wind_back_to_v22(conn).await;
     for stmt in [
         "DROP TRIGGER IF EXISTS trg_blobs_frozen_update",
         "DROP TRIGGER IF EXISTS trg_blobs_guard_delete",

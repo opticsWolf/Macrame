@@ -105,7 +105,7 @@ const QUERIES: &[(&str, &str)] = &[
     ),
     (
         "archive supersession",
-        "SELECT seq_id FROM transaction_log WHERE recorded_at < ?1 AND EXISTS (            SELECT 1 FROM transaction_log newer            WHERE newer.entity_id = transaction_log.entity_id              AND newer.seq_id > transaction_log.seq_id)",
+        "SELECT seq_id FROM transaction_log WHERE recorded_at < ?1 AND EXISTS (            SELECT 1 FROM transaction_log newer            WHERE newer.table_name = transaction_log.table_name              AND newer.entity_id = transaction_log.entity_id              AND newer.branch_id = transaction_log.branch_id              AND newer.seq_id > transaction_log.seq_id)",
     ),
     (
         "links archive cutoff",

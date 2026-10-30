@@ -1,6 +1,6 @@
 # Macrame — Architecture Quick Reference
 
-**v0.19.6 · A Bitemporal Graph Ledger on libSQL**
+**v0.20.0 · A Bitemporal Graph Ledger on libSQL**
 
 ---
 
@@ -186,6 +186,7 @@ Every temporal column is exactly 27 characters: `YYYY-MM-DDTHH:MM:SS.ffffffZ`
 | v20 | `kv_store` — operational state with no log trigger, no archive membership and no `branch_id` ([D-280](architecture/s13-decision-register.md#d-280)) |
 | v21 | `concepts.extra`, a JSON object logged like every other column; concepts payload v3 ([D-278](architecture/s13-decision-register.md#d-278)) |
 | v22 | `blobs`, `idx_blobs_put_at`, an unconditional update guard and a marker-gated delete guard; `cold.blobs` arrives with the first session ([D-281](architecture/s13-decision-register.md#d-281), [D-288](architecture/s13-decision-register.md#d-288)) |
+| v23 | `idx_txlog_concept_starts`, partial over the log's concept rows, so the concept interval guard seeks one row per valid start instead of reading the concept's history; and `idx_txlog_entity` **dropped**, its last reader moved to the fold partition. Index-only ([D-300](architecture/s13-decision-register.md#d-300), [D-301](architecture/s13-decision-register.md#d-301)) |
 
 **This table stopped at v10 for seven rungs and fourteen releases** (corrected while writing the 0.16.0 release note). `tests/doc_currency_tests.rs` gates `docs/architecture/README.md`'s revision history and the register's `D-001…D-NNN` line; it does not read this file, which is why the drift here ran longer than anywhere the gate looks. The authority on the ladder is `src/schema/migrations.rs`'s `STEPS`, and `SCHEMA_VERSION` is the number to trust over this table.
 
@@ -266,7 +267,7 @@ impl Database {
 
 **`normalized()`**: Validates and normalizes the concept — edge types are checked against `[A-Za-z0-9_:.\-]+` — one case per kind, 64 characters at most — identifiers are validated, timestamps are canonicalized.
 
-**`write_concepts()`**: Low-priority chunked write for analytics write-back. Each chunk commits under its own `recorded_at`; not transaction-time atomic. Since 0.12.0 the chunk boundaries are machine-dependent, so the number of stamps is not reproducible across runs (§5.1.6).
+**`write_concepts()`**: Low-priority chunked write for analytics write-back. Each chunk commits under its own `recorded_at`; not transaction-time atomic. Since 0.12.0 the chunk boundaries are machine-dependent, so the number of stamps is not reproducible across runs (§5.1.6). A concept named twice starts a new chunk at its repeat, so the later row commits last wherever the boundaries fall, and a batch that contradicts itself is refused before the first chunk commits (0.19.6, [D-299](architecture/s13-decision-register.md#d-299)).
 
 **`extra`** (0.18.0, [D-278](architecture/s13-decision-register.md#d-278), schema v21): a JSON **object** on the concept, logged like every other column — it is ledger data, not a side table, so it folds and reconstructs with the row. Four rules travel with it. It is an object or absent, never a bare scalar or array. **Omission preserves rather than clears** ([D-283](architecture/s13-decision-register.md#d-283)): `None` on an upsert leaves a stored `extra` standing, because the upsert arm is how every unrelated write arrives and a column that cleared itself on omission would make every title edit a silent data loss; passing `{}` is how a caller actually empties it. The size ceiling is **per shape, not global** ([D-285](architecture/s13-decision-register.md#d-285)). And an application that wants to index inside it registers an expression index that **re-asserts on open and keeps no registry** ([D-284](architecture/s13-decision-register.md#d-284)), so the database file never holds a dangling reference to an index this crate would have to know about.
 
@@ -959,4 +960,4 @@ A synchronous Python binding built on pyo3 0.29 and maturin, delivered as a whee
 
 ---
 
-*Last updated: 2026-10-30 · v0.19.6 · Synced against architecture (s4–s14, appendices A–C) · Pinned by `tests/doc_sync_tests.rs` and `tests/perf_claim_tests.rs`*
+*Last updated: 2026-10-30 · v0.20.0 · Synced against architecture (s4–s14, appendices A–C) · Pinned by `tests/doc_sync_tests.rs` and `tests/perf_claim_tests.rs`*

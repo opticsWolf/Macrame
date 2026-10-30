@@ -1443,7 +1443,19 @@ pub const CREATE_INDICES: &[&str] = &[
     // walking `links_current` directly, so they can no longer share an index.
     LC_LINEAGE_CUT,
     "CREATE INDEX IF NOT EXISTS idx_txlog_time ON transaction_log (recorded_at);",
-    "CREATE INDEX IF NOT EXISTS idx_txlog_entity ON transaction_log (entity_id);",
+    // `idx_txlog_entity ON transaction_log (entity_id)` stood here from the
+    // baseline to v22, and the v22 -> v23 rung drops it (0.20.0, [D-301]).
+    // `idx_txlog_fold_partition` below took its readers one at a time — the
+    // concept hydrate at 0.15.12, the lineage log arm at 0.15.29 — until the
+    // archive's supersession test was the last, and that test now binds
+    // `table_name` as well, so the fold partition serves it on three equality
+    // columns where this served it on one. Priced on the way out by
+    // `examples/edge_chunk_index_cost_probe.rs`: **1.10 ms of a 4.9 ms
+    // 90-edge chunk**, the dearest index on the edge write path, because every
+    // assertion writes a log row and a link's `entity_id` is its synthetic
+    // `source|target|type|valid_from` key.
+    //
+    // [D-301]: ../../docs/architecture/s13-decision-register.md#d-301
     // The fold's partition and its order (0.15.12, W15.2, review C-4, shipped
     // v16 -> v17).
     //
@@ -1506,13 +1518,43 @@ pub const CREATE_INDICES: &[&str] = &[
     // double.
     //
     // The other readers of this table were checked before and after and none of
-    // them moved: the archive's log predicate keeps `idx_txlog_entity`, and the
+    // them moved: the archive's log predicate kept `idx_txlog_entity` (until
+    // 0.20.0, when it moved here and that index was dropped — D-301), and the
     // two aggregates keep `idx_txlog_time` as a covering scan. `idx_txlog_time`
     // does lose the fold, which was the reader `index_plan_tests` recorded for
     // it — its entry there now names the aggregates that remain, because an
     // index justified by a query that has left it is D-089 waiting to happen.
     "CREATE INDEX IF NOT EXISTS idx_txlog_fold_partition ON transaction_log \
      (table_name, entity_id, branch_id, seq_id DESC);",
+    // A concept's valid starts, in order (0.20.0, [D-300], shipped v22 -> v23).
+    //
+    // The concept interval guard ([D-291]) asks, before every concept write,
+    // for the latest interval at each valid start the concept has held. The
+    // `concepts` projection keeps one row per id, so the answer lives only in
+    // the log, and with nothing to seek a start on the guard read every log row
+    // of the concept and `json_extract`ed each one: **O(history) per write**.
+    // The 0.20.0 release bench found it — `upsert_concept` at 6.96 ms against
+    // a ≤ 3 ms budget, from a fixture that renames one concept per iteration,
+    // and `examples/concept_guard_cost_probe.rs` priced the slope at
+    // 2.2 ms / 6.1 ms / 27.8 ms for histories of 1,000 / 3,000 / 10,000
+    // against a flat ~230 µs on a fresh id.
+    //
+    // Keyed so both of the guard's questions are seeks: the next start after
+    // one already seen (`> ? ORDER BY start LIMIT 1`), and that start's latest
+    // row (`= ? ORDER BY seq_id DESC LIMIT 1`). The guard then costs one seek
+    // per distinct start — almost always one — instead of one row per version.
+    //
+    // **Partial on `table_name = 'concepts'`**, so link log rows, which are
+    // most of the log and whose payloads the guard never reads, are not in it:
+    // the write cost lands only on concept writes, and the rung's build writes
+    // only their entries. The expression is spelled exactly as the guard's
+    // queries spell it, because SQLite matches an expression index textually.
+    //
+    // [D-291]: ../../docs/architecture/s13-decision-register.md#d-291
+    // [D-300]: ../../docs/architecture/s13-decision-register.md#d-300
+    "CREATE INDEX IF NOT EXISTS idx_txlog_concept_starts ON transaction_log \
+     (entity_id, branch_id, json_extract(payload, '$.valid_from'), seq_id DESC) \
+     WHERE table_name = 'concepts';",
     // The archive cutoff's seek column on the ledger table (0.12.6, W3.1,
     // D-151, review §2.1, shipped v10 -> v11).
     //

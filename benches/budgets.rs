@@ -264,7 +264,7 @@ fn write_path(c: &mut Criterion) {
     let mut group = controlled_group(c, "chunk_commit");
     group.sample_size(10);
     group.bench_function("500_rows_trigger_amplified (§9 ≤ 3 ms)", |b| {
-        b.iter_batched(
+        b.iter_batched_ref(
             || {
                 rt.block_on(async {
                     let fx = fixture().await;
@@ -372,6 +372,20 @@ const INSERT_LINK_SQL: &str = "INSERT INTO links \
 /// reason: `assert!(elapsed <= 3ms)` on unknown CI hardware asserts something
 /// about the runner. What makes the bound falsifiable is that these four numbers
 /// are printed next to it.
+/// **Every batched routine here borrows its fixture** (0.20.0, [D-302]).
+///
+/// Through 0.19.x they took it by value (`iter_batched`), so the fixture was
+/// dropped inside the timed region: the `Database` closing — a WAL
+/// checkpoint of everything the routine just wrote — and the `TempDir`
+/// unlinking its files. Criterion times the routine, and the routine's last
+/// act was teardown. On `edges/90` that was about 1.1 ms of a 4.9 ms reading,
+/// none of it under the write lock the 3 ms budget is about.
+/// `iter_batched_ref` drops inputs after the clock stops, which is the
+/// documented fix; every reading in this file from 0.20.0 on is the operation
+/// alone, and a comparison with an earlier release has to say which side of
+/// the change it is on.
+///
+/// [D-302]: ../docs/architecture/s13-decision-register.md#d-302
 fn chunk_budget(c: &mut Criterion) {
     let rt = runtime();
 
@@ -381,7 +395,7 @@ fn chunk_budget(c: &mut Criterion) {
     group.bench_function(
         format!("edges/{} (§5.1.5 ≤ 3 ms)", chunk_rows::EDGES),
         |b| {
-            b.iter_batched(
+            b.iter_batched_ref(
                 || {
                     rt.block_on(async {
                         let fx = fixture().await;
@@ -427,7 +441,7 @@ fn chunk_budget(c: &mut Criterion) {
             chunk_rows::EDGES
         ),
         |b| {
-            b.iter_batched(
+            b.iter_batched_ref(
                 || {
                     rt.block_on(async {
                         let fx = fixture().await;
@@ -461,7 +475,7 @@ fn chunk_budget(c: &mut Criterion) {
     group.bench_function(
         format!("concepts/{} (§5.1.5 ≤ 3 ms)", chunk_rows::CONCEPTS),
         |b| {
-            b.iter_batched(
+            b.iter_batched_ref(
                 || {
                     rt.block_on(async {
                         let fx = fixture().await;
@@ -487,7 +501,7 @@ fn chunk_budget(c: &mut Criterion) {
     group.bench_function(
         format!("annotations/{} (§5.1.5 ≤ 3 ms)", chunk_rows::ANNOTATIONS),
         |b| {
-            b.iter_batched(
+            b.iter_batched_ref(
                 || {
                     rt.block_on(async {
                         let fx = fixture().await;
@@ -512,7 +526,7 @@ fn chunk_budget(c: &mut Criterion) {
     group.bench_function(
         format!("embeddings/{} (§5.1.5 ≤ 3 ms)", chunk_rows::EMBEDDINGS),
         |b| {
-            b.iter_batched(
+            b.iter_batched_ref(
                 || {
                     rt.block_on(async {
                         let fx = fixture().await;
@@ -532,7 +546,7 @@ fn chunk_budget(c: &mut Criterion) {
                             )
                         })
                         .collect();
-                    rt.block_on(fx.db.upsert_embeddings(&model, rows)).unwrap()
+                    rt.block_on(fx.db.upsert_embeddings(model, rows)).unwrap()
                 },
                 BatchSize::PerIteration,
             )
@@ -583,7 +597,7 @@ fn chunk_scaling(c: &mut Criterion) {
 
     for n in SIZES {
         group.bench_with_input(BenchmarkId::new("edges", n), &n, |b, &n| {
-            b.iter_batched(
+            b.iter_batched_ref(
                 || {
                     rt.block_on(async {
                         let fx = fixture().await;
@@ -606,7 +620,7 @@ fn chunk_scaling(c: &mut Criterion) {
         });
 
         group.bench_with_input(BenchmarkId::new("concepts", n), &n, |b, &n| {
-            b.iter_batched(
+            b.iter_batched_ref(
                 || {
                     rt.block_on(async {
                         let fx = fixture().await;
@@ -629,7 +643,7 @@ fn chunk_scaling(c: &mut Criterion) {
         });
 
         group.bench_with_input(BenchmarkId::new("annotations", n), &n, |b, &n| {
-            b.iter_batched(
+            b.iter_batched_ref(
                 || {
                     rt.block_on(async {
                         let fx = fixture().await;
@@ -651,7 +665,7 @@ fn chunk_scaling(c: &mut Criterion) {
         });
 
         group.bench_with_input(BenchmarkId::new("embeddings", n), &n, |b, &n| {
-            b.iter_batched(
+            b.iter_batched_ref(
                 || {
                     rt.block_on(async {
                         let fx = fixture().await;
@@ -671,7 +685,7 @@ fn chunk_scaling(c: &mut Criterion) {
                             )
                         })
                         .collect();
-                    rt.block_on(fx.db.upsert_embeddings(&model, rows)).unwrap()
+                    rt.block_on(fx.db.upsert_embeddings(model, rows)).unwrap()
                 },
                 BatchSize::PerIteration,
             )
@@ -711,7 +725,7 @@ fn bulk_chunks(c: &mut Criterion) {
     group.sample_size(10);
 
     group.bench_function("concepts_500 (upsert + FTS triggers)", |b| {
-        b.iter_batched(
+        b.iter_batched_ref(
             || {
                 rt.block_on(async {
                     let fx = fixture().await;
@@ -737,7 +751,7 @@ fn bulk_chunks(c: &mut Criterion) {
     });
 
     group.bench_function("annotations_500 (no triggers — the control)", |b| {
-        b.iter_batched(
+        b.iter_batched_ref(
             || {
                 rt.block_on(async {
                     let fx = fixture().await;
@@ -757,7 +771,7 @@ fn bulk_chunks(c: &mut Criterion) {
     });
 
     group.bench_function("embeddings_500 (DiskANN maintenance)", |b| {
-        b.iter_batched(
+        b.iter_batched_ref(
             || {
                 rt.block_on(async {
                     let fx = fixture().await;
@@ -777,7 +791,7 @@ fn bulk_chunks(c: &mut Criterion) {
                         )
                     })
                     .collect();
-                rt.block_on(fx.db.upsert_embeddings(&model, rows)).unwrap()
+                rt.block_on(fx.db.upsert_embeddings(model, rows)).unwrap()
             },
             BatchSize::PerIteration,
         )
@@ -1025,7 +1039,7 @@ fn snapshot(c: &mut Criterion) {
     // A fresh directory per iteration, or retention starts deleting mid-measure
     // and the timing includes a variable amount of unlinking.
     group.bench_function("save_snapshot (§9 ≤ 2 s @ 100K edges)", |b| {
-        b.iter_batched(
+        b.iter_batched_ref(
             || tempfile::TempDir::new().unwrap(),
             |dir| save_snapshot(dir.path(), &state).unwrap(),
             BatchSize::SmallInput,
@@ -1187,7 +1201,7 @@ fn overlap_guard(c: &mut Criterion) {
                 // matching `chunk_budget` above: `to_async` drives the setup
                 // closure on the runtime's own thread, so a `block_on` inside it
                 // panics with "cannot start a runtime from within a runtime".
-                b.iter_batched(
+                b.iter_batched_ref(
                     || {
                         rt.block_on(async {
                             let fx = fixture().await;
@@ -1235,7 +1249,7 @@ fn archive_cost(c: &mut Criterion) {
     group.sample_size(10);
 
     group.bench_function("archive_superseded", |b| {
-        b.iter_batched(
+        b.iter_batched_ref(
             || {
                 rt.block_on(async {
                     let fx = fixture().await;
@@ -1281,7 +1295,7 @@ fn archive_cost(c: &mut Criterion) {
     // archivable. Its number should stay flat as `MACRAME_BENCH_SCALE` grows;
     // before the keyed repair it grew with the fixture.
     group.bench_function("archive_small_slice", |b| {
-        b.iter_batched(
+        b.iter_batched_ref(
             || {
                 rt.block_on(async {
                     let fx = fixture().await;
@@ -1414,7 +1428,7 @@ fn blob_archive(c: &mut Criterion) {
 
     for candidates in [0usize, 10, 10_000] {
         group.bench_function(BenchmarkId::new("archive_with_blobs", candidates), |b| {
-            b.iter_batched(
+            b.iter_batched_ref(
                 || {
                     rt.block_on(async {
                         let fx = fixture().await;
@@ -1524,9 +1538,9 @@ fn rehydrate_cost(c: &mut Criterion) {
     for n in [1usize, 10, 100, 1_000, 10_000] {
         let n = n * scale();
         group.bench_with_input(BenchmarkId::new("rehydrate", n), &n, |b, &n| {
-            b.iter_batched(
+            b.iter_batched_ref(
                 || rt.block_on(archived(n, None, 0)),
-                |fx| rt.block_on(rehydrate_all(&fx, n)),
+                |fx| rt.block_on(rehydrate_all(fx, n)),
                 BatchSize::PerIteration,
             )
         });
@@ -1547,7 +1561,7 @@ fn rehydrate_cost(c: &mut Criterion) {
     for n in [1_000usize, 10_000] {
         let n = n * scale();
         group.bench_with_input(BenchmarkId::new("rehydrate_no_fts", n), &n, |b, &n| {
-            b.iter_batched(
+            b.iter_batched_ref(
                 || {
                     rt.block_on(async {
                         let fx = archived(n, None, 0).await;
@@ -1561,7 +1575,7 @@ fn rehydrate_cost(c: &mut Criterion) {
                         fx
                     })
                 },
-                |fx| rt.block_on(rehydrate_all(&fx, n)),
+                |fx| rt.block_on(rehydrate_all(fx, n)),
                 BatchSize::PerIteration,
             )
         });
@@ -1576,7 +1590,7 @@ fn rehydrate_cost(c: &mut Criterion) {
     // table going out, a loop going back.
     let n = 1_000 * scale();
     group.bench_with_input(BenchmarkId::new("archive_detached", n), &n, |b, &n| {
-        b.iter_batched(
+        b.iter_batched_ref(
             || {
                 rt.block_on(async {
                     let fx = fixture().await;
@@ -1621,9 +1635,9 @@ fn rehydrate_matrix(c: &mut Criterion) {
             BenchmarkId::new("rehydrate_100", shape.name()),
             &n,
             |b, &n| {
-                b.iter_batched(
+                b.iter_batched_ref(
                     || rt.block_on(archived(n, Some(shape), nodes)),
-                    |fx| rt.block_on(rehydrate_all(&fx, n)),
+                    |fx| rt.block_on(rehydrate_all(fx, n)),
                     BatchSize::PerIteration,
                 )
             },
@@ -1735,7 +1749,7 @@ fn chunk_index_cost(c: &mut Criterion) {
         ("hub2000/no_index", 2_000, false),
     ] {
         group.bench_function(label, |b| {
-            b.iter_batched(
+            b.iter_batched_ref(
                 || {
                     rt.block_on(async {
                         let fx = fixture().await;
@@ -2072,6 +2086,8 @@ fn exempt_kinds(c: &mut Criterion) {
             |(fx, build_start, epoch)| {
                 rt.block_on(fx.db.shadow_step(ShadowStep::Swap { build_start, epoch }))
                     .unwrap();
+                // Returned, so criterion drops it after the clock stops (D-302).
+                fx
             },
             BatchSize::PerIteration,
         )

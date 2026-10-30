@@ -162,36 +162,23 @@ const REGISTRY: &[(&str, Justification)] = &[
         },
     ),
     (
-        "idx_txlog_entity",
+        "idx_txlog_concept_starts",
         Query {
-            // **The concept hydrate left this index at 0.15.12** and the
-            // supersession test did not, which is the whole reason this entry
-            // is unchanged. `hydrate_at_time` folds
-            // `WHERE table_name = 'concepts' AND entity_id IN (…)` and used to
-            // seek here on `(entity_id=?)`; `idx_txlog_fold_partition` binds
-            // both of those columns, so the planner prefers it and this index
-            // lost a reader it was not registered for.
-            //
-            // It gained nothing by moving. That fold partitions on `entity_id`
-            // **alone** — see `temporal::as_of` for why, and it is correct —
-            // so the new index's `branch_id` sits between the partition and
-            // the order, and `USE TEMP B-TREE FOR RIGHT PART OF ORDER BY` is
-            // in the plan before and after. Measured at +8% on a 0.10 ms call
-            // (`examples/txlog_fold_index_probe.rs --arm other-folds`), which
-            // is the honest cost of the rung and is recorded here rather than
-            // rounded away.
-            //
-            // The entry stays because the archive's supersession test still
-            // seeks here — the probe checked its plan across the change and it
-            // did not move — so this is a reader leaving, not D-089's failure.
-            label: "the archive's supersession test",
-            sql: "SELECT seq_id FROM transaction_log WHERE recorded_at < ?1 AND EXISTS ( \
-                    SELECT 1 FROM transaction_log newer \
-                    WHERE newer.entity_id = transaction_log.entity_id \
-                      AND newer.seq_id > transaction_log.seq_id)",
+            // The concept interval guard's second seek: one start's latest
+            // row (0.20.0, D-300). Its first — the next start after one seen —
+            // binds the same three columns and ranges on the expression, so a
+            // plan that serves this one serves that one; this is the one whose
+            // loss would put the guard back to reading a concept's history.
+            // The partial `table_name = 'concepts'` is a literal in the query,
+            // which is what lets SQLite prove the index applies.
+            label: "the concept interval guard's latest row at one start",
+            sql: "SELECT json_extract(payload, '$.valid_to') FROM transaction_log \
+                  WHERE table_name = 'concepts' AND entity_id = ?1 AND branch_id = ?3 \
+                    AND json_extract(payload, '$.valid_from') = ?2 \
+                  ORDER BY seq_id DESC LIMIT 1",
             source: Some((
-                include_str!("../src/temporal/archive.rs"),
-                "newer.entity_id = transaction_log.entity_id",
+                include_str!("../src/connection.rs"),
+                "AND json_extract(payload, '$.valid_from') = starts.valid_from",
             )),
         },
     ),
@@ -765,6 +752,34 @@ const QUERY_REGISTRY: &[(&str, &str, Expect)] = &[
             note: "0.15.12, W15.2, D-254. The concept hydrate reads the log by                    entity for AttributeMode::AtTime. It moved off idx_txlog_entity                    when the fold index arrived; what must not change is that it                    seeks at all.",
         },
     ),
+    (
+        "the archive's supersession test seeks the fold partition",
+        "SELECT seq_id FROM transaction_log WHERE recorded_at < ?1 AND EXISTS ( \
+           SELECT 1 FROM transaction_log newer \
+           WHERE newer.table_name = transaction_log.table_name \
+             AND newer.entity_id = transaction_log.entity_id \
+             AND newer.branch_id = transaction_log.branch_id \
+             AND newer.seq_id    > transaction_log.seq_id)",
+        Expect {
+            // Was, through 0.19.x, with no `table_name` in the probe:
+            //   SEARCH newer USING INDEX idx_txlog_entity (entity_id=?)
+            //
+            // Now (0.20.0, D-301), with `idx_txlog_entity` dropped:
+            //   SEARCH newer USING COVERING INDEX idx_txlog_fold_partition
+            //     (table_name=? AND entity_id=? AND branch_id=? AND seq_id>?)
+            //
+            // This was `idx_txlog_entity`'s registry entry and its last
+            // reader. The index is gone, so the claim moves here: the probe
+            // runs once per archive candidate, and a `SCAN newer` would make
+            // archiving quadratic in the log. Binding `table_name` is what
+            // gives the fold partition all of its equality columns; an edit
+            // that drops it from `LOG_ARCHIVABLE` would leave the planner one
+            // leading column short and this pin red.
+            fragment: "SEARCH newer USING COVERING INDEX idx_txlog_fold_partition",
+            forbidden: "SCAN newer",
+            note: "0.20.0, D-301. The archive's supersession probe moved from                    idx_txlog_entity to the fold partition when it began binding                    table_name, which is what let that index leave the edge write                    path (1.10 ms of a 90-edge chunk).",
+        },
+    ),
 ];
 
 /// The plan a registered query is **measured** to get, with what that means.
@@ -909,4 +924,28 @@ fn every_reproduced_query_still_exists_in_its_source() {
              this file explains is a query nobody runs"
         );
     }
+}
+
+/// The reactive pin on the archive's supersession test reproduces its probe,
+/// and the probe's `table_name` binding is the whole of what that pin is for
+/// (0.20.0, D-301): without it the planner has one leading column of
+/// `idx_txlog_fold_partition` short, and nothing else on the log serves it now
+/// that `idx_txlog_entity` is gone. A pin that only plans its own copy of the
+/// SQL would stay green while the shipped predicate lost the binding, so the
+/// binding is checked where it ships.
+#[test]
+fn the_archive_supersession_test_still_binds_the_table() {
+    let flat = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let text = flat(include_str!("../src/temporal/archive.rs"));
+    assert!(
+        text.contains(
+            "SELECT 1 FROM transaction_log newer \
+             WHERE newer.table_name = transaction_log.table_name \
+             AND newer.entity_id = transaction_log.entity_id \
+             AND newer.branch_id = transaction_log.branch_id"
+        ),
+        "LOG_ARCHIVABLE's supersession probe no longer binds table_name, \
+         entity_id and branch_id together, so it no longer seeks \
+         idx_txlog_fold_partition"
+    );
 }

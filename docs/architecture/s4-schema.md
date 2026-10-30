@@ -425,6 +425,22 @@ CREATE TABLE transaction_log (
 --     fold partitions on entity_id alone, so branch_id sits between its
 --     partition and its order and the sort survives. Recorded rather than
 --     repaired -- see D-254 for the arithmetic that declined a third index.
+--
+-- Corrected at 0.20.0 (D-300, D-301), schema v23. idx_txlog_entity is gone.
+-- The supersession probe above now binds table_name as well, which is both
+-- the right rule (a newer row of another table is another entity) and the
+-- fold partition's leading column, so it seeks idx_txlog_fold_partition on
+-- three equality columns. With no reader left, the index was a write per log
+-- row for nothing: 1.10 ms of a 4.9 ms 90-edge chunk, the dearest index on
+-- the edge write path.
+--
+--   idx_txlog_concept_starts ON transaction_log
+--     (entity_id, branch_id, json_extract(payload, '$.valid_from'), seq_id DESC)
+--     WHERE table_name = 'concepts'
+--   serves the concept interval guard (D-291): one seek per distinct valid
+--   start, then one for that start's latest row. Partial, so a link's log row
+--   never pays for it; the guard's write cost was O(the concept's history)
+--   without it -- 27.8 ms at 10,000 versions, 0.27 ms with it.
 ```
 
 **The trigger set (restored 0.5.4, from `schema::ddl` — see the note below).**

@@ -28,13 +28,16 @@
 //!
 //! # The candidates
 //!
-//! - **shipped** — what `overlap_candidates_resolved` emits today, copied.
+//! - **pre-D-272** — what `overlap_candidates_resolved` emitted until 0.15.29,
+//!   copied. Labelled `shipped` until 0.20.0, which it stopped being when
+//!   D-272 shipped the next arm.
 //! - **cross** — the same statement with the log arm's join order forced:
 //!   `churned` drives and `transaction_log` is the inner loop. `CROSS JOIN` is
-//!   SQLite's documented way to say so.
+//!   SQLite's documented way to say so. **Shipped since 0.15.29.**
 //! - **indexed** — the shipped order with `INDEXED BY idx_txlog_entity`, which
 //!   is the access path this arm had before 0.15.12 added
-//!   `idx_txlog_fold_partition` and the planner moved.
+//!   `idx_txlog_fold_partition` and the planner moved. The schema dropped that
+//!   index at 0.20.0 (D-301), so the probe lays it itself.
 //! - **materialized** — `churned AS MATERIALIZED`, which
 //!   `overlap_candidates_resolved`'s rustdoc records as measured and refused in
 //!   0.15.8. It is re-run here because it was refused against a table that did
@@ -283,6 +286,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let dir = tempfile::tempdir()?;
     let db = Database::open(dir.path().join("probe.db")).await?;
+    // The `indexed` arm names an index the schema stopped declaring at v23.
+    db.raw()
+        .connect()?
+        .execute(
+            "CREATE INDEX IF NOT EXISTS idx_txlog_entity ON transaction_log (entity_id)",
+            (),
+        )
+        .await?;
 
     println!("branch write guard, trunk {trunk} edges, batch {batch} edges\n");
 
@@ -322,7 +333,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  fork cutoff {cutoff}\n");
 
     let candidates: Vec<(&str, String)> = vec![
-        ("shipped", resolved(CHURNED, ARM_SHIPPED)),
+        ("pre-D-272", resolved(CHURNED, ARM_SHIPPED)),
         ("cross", resolved(CHURNED, ARM_CROSS)),
         ("indexed", resolved(CHURNED, ARM_INDEXED)),
         ("materialized", resolved(CHURNED_MAT, ARM_SHIPPED)),

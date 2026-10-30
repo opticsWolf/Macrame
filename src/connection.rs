@@ -6134,50 +6134,74 @@ async fn upsert_concept(
 /// it may write are its own, and reading the rest would let the trigger's
 /// `CrossLineage` refusal arrive as an overlap instead.
 ///
-/// Seeks on the `(table_name, entity_id)` prefix of `idx_txlog_fold_partition`,
-/// the index the fold reads, so the cost is the concept's own history and not
-/// the ledger's.
+/// **A skip-scan over `idx_txlog_concept_starts`, not a fold** (0.20.0,
+/// [D-300]). Until 0.20.0 this windowed every log row of the concept, which
+/// is O(history) per write: 27.8 ms on a concept with 10,000 versions. Now
+/// `starts` steps from one distinct start to the next with a seek each, and
+/// each start's latest row is one more seek, so the cost is the number of
+/// distinct starts below the bound — almost always one. The expression must
+/// stay spelled as the index spells it, or SQLite will not match the two.
+///
+/// [D-300]: ../docs/architecture/s13-decision-register.md#d-300
 const CURRENT_CONCEPT_INTERVALS: &str = "
-    SELECT valid_from, valid_to FROM (
-        SELECT json_extract(payload, '$.valid_from') AS valid_from,
-               json_extract(payload, '$.valid_to') AS valid_to,
-               ROW_NUMBER() OVER (
-                   PARTITION BY json_extract(payload, '$.valid_from')
-                   ORDER BY seq_id DESC
-               ) AS rn
-        FROM transaction_log
-        WHERE table_name = 'concepts'
-          AND entity_id = ?1
-          AND json_extract(payload, '$.valid_from') < ?2
-          AND branch_id = ?3
+    WITH RECURSIVE starts(valid_from) AS (
+        SELECT (SELECT json_extract(payload, '$.valid_from') FROM transaction_log
+                WHERE table_name = 'concepts' AND entity_id = ?1 AND branch_id = ?3
+                  AND json_extract(payload, '$.valid_from') IS NOT NULL
+                ORDER BY json_extract(payload, '$.valid_from') LIMIT 1)
+        UNION ALL
+        SELECT (SELECT json_extract(payload, '$.valid_from') FROM transaction_log
+                WHERE table_name = 'concepts' AND entity_id = ?1 AND branch_id = ?3
+                  AND json_extract(payload, '$.valid_from') > starts.valid_from
+                ORDER BY json_extract(payload, '$.valid_from') LIMIT 1)
+        FROM starts
+        WHERE starts.valid_from < ?2
     )
-    WHERE rn = 1";
+    SELECT valid_from,
+           (SELECT json_extract(payload, '$.valid_to') FROM transaction_log
+            WHERE table_name = 'concepts' AND entity_id = ?1 AND branch_id = ?3
+              AND json_extract(payload, '$.valid_from') = starts.valid_from
+            ORDER BY seq_id DESC LIMIT 1) AS valid_to
+    FROM starts
+    WHERE valid_from < ?2";
 
 /// [`CURRENT_CONCEPT_INTERVALS`] for a whole batch in one pass (0.19.5, D-298).
 ///
 /// `?1` is a JSON array of `[id, bound]` pairs, one per concept the batch writes
-/// on lineage `?2`. `CROSS JOIN` keeps the batch on the outside, so each id is one
-/// seek on the fold partition, as the single-row query is, rather than one query
-/// per concept under the write lock.
+/// on lineage `?2`. The batch drives the recursion, so each id walks its own
+/// starts by the single-row query's seeks (0.20.0, [D-300]), rather than one
+/// query per concept under the write lock.
+///
+/// [D-300]: ../docs/architecture/s13-decision-register.md#d-300
 const CURRENT_CONCEPT_INTERVALS_BATCH: &str = "
-    SELECT id, valid_from, valid_to FROM (
-        SELECT want.id AS id,
-               json_extract(t.payload, '$.valid_from') AS valid_from,
-               json_extract(t.payload, '$.valid_to') AS valid_to,
-               ROW_NUMBER() OVER (
-                   PARTITION BY want.id, json_extract(t.payload, '$.valid_from')
-                   ORDER BY t.seq_id DESC
-               ) AS rn
-        FROM (SELECT json_extract(value, '$[0]') AS id,
-                     json_extract(value, '$[1]') AS bound
-              FROM json_each(?1)) AS want
-        CROSS JOIN transaction_log AS t
-        WHERE t.table_name = 'concepts'
-          AND t.entity_id = want.id
-          AND json_extract(t.payload, '$.valid_from') < want.bound
-          AND t.branch_id = ?2
+    WITH RECURSIVE
+    want(id, bound) AS (
+        SELECT json_extract(value, '$[0]'), json_extract(value, '$[1]')
+        FROM json_each(?1)
+    ),
+    starts(id, bound, valid_from) AS (
+        SELECT want.id, want.bound,
+               (SELECT json_extract(payload, '$.valid_from') FROM transaction_log
+                WHERE table_name = 'concepts' AND entity_id = want.id AND branch_id = ?2
+                  AND json_extract(payload, '$.valid_from') IS NOT NULL
+                ORDER BY json_extract(payload, '$.valid_from') LIMIT 1)
+        FROM want
+        UNION ALL
+        SELECT starts.id, starts.bound,
+               (SELECT json_extract(payload, '$.valid_from') FROM transaction_log
+                WHERE table_name = 'concepts' AND entity_id = starts.id AND branch_id = ?2
+                  AND json_extract(payload, '$.valid_from') > starts.valid_from
+                ORDER BY json_extract(payload, '$.valid_from') LIMIT 1)
+        FROM starts
+        WHERE starts.valid_from < starts.bound
     )
-    WHERE rn = 1";
+    SELECT id, valid_from,
+           (SELECT json_extract(payload, '$.valid_to') FROM transaction_log
+            WHERE table_name = 'concepts' AND entity_id = starts.id AND branch_id = ?2
+              AND json_extract(payload, '$.valid_from') = starts.valid_from
+            ORDER BY seq_id DESC LIMIT 1) AS valid_to
+    FROM starts
+    WHERE valid_from < bound";
 
 /// The intervals the lineage `branch` currently believes for one concept, one per
 /// valid start, bounded above by `before` (0.19.2, D-291).

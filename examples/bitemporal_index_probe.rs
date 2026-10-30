@@ -129,6 +129,20 @@ async fn main() {
         "
 ===== the fold's window, and where its ordering comes from ====="
     );
+    // The entity index as the schema declared it through v22; 0.20.0 dropped
+    // it (D-301), so the forced arm lays it first. ANALYZE again so the
+    // planner's-choice arm is choosing with it present, as it did when this
+    // arm was written.
+    {
+        let w = db.raw().connect().unwrap();
+        w.execute(
+            "CREATE INDEX IF NOT EXISTS idx_txlog_entity ON transaction_log (entity_id)",
+            (),
+        )
+        .await
+        .unwrap();
+        let _ = w.query("ANALYZE", ()).await.unwrap();
+    }
     for (label, from) in [
         ("planner's choice", "transaction_log"),
         (

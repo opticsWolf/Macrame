@@ -99,42 +99,40 @@ benchmark that can time a wrong answer is worse than none.
 
 ## Latest readings (scale 1 → 3, preliminary)
 
-**The branch column predates 0.16.0's last two releases and the edge-bulk
-ladder predates D-274** — see `diagnostics/` for the spike-ladder harness that
-found and fixed the fresh-file bulk-import defect, whose before/after table
-lives in [D-274](../docs/architecture/s13-decision-register.md#d-274). The
+**Measured at 0.20.0, release build, both columns from the same run;** all 13
+assertions passed at both scales. See `diagnostics/` for the spike-ladder
+harness that found and fixed the fresh-file bulk-import defect, whose
+before/after table lives in [D-274](../docs/architecture/s13-decision-register.md#d-274). The
 vector-build dissection (plan §9.1, [D-276](../docs/architecture/s13-decision-register.md#d-276))
 ran as `examples/vector_build_probe.rs`; its before/after table is in the
 register entry.
 
 | Class | Trunk | Branch |
 |---|---|---|
-| T2 point slice | 0.7–1.9 → 2–7 ms | 2.4–7.1 → 13–22 ms |
-| T5 history fold | 11.9 → 38.6 ms | 12.7 → 49 ms (`reconstruct_on`) |
-| T6a valid-slice @ txn point | 12.2 → 42 ms | — |
-| T6b txn-versions @ valid point | 64 → 629 ms (partly OR-chunking) | — |
-| K1 key history | 0.30 → 0.71 ms | — |
-| R1 state change | 2.4 → 7.7 ms | 8.5 → 29.6 ms |
-| R3 agg × 6 instants | 6.7 → 26.5 ms | 25.9 → 79.8 ms |
-| Q3 traverse (36 nodes) | 0.46 → 0.47 ms (flat) | 19 → 66 ms; chain d1–d10 flat |
-| fork | — | 0.16 → 0.19 ms (flat, O(1)) |
+| T2 point slice | 0.63–1.73 → 1.95–5.68 ms | 2.37–6.64 → 7.25–19.6 ms |
+| T5 history fold | 10.9 → 34.1 ms | 13.3 → 40.9 ms (`reconstruct_on`) |
+| T6a valid-slice @ txn point | 11.8 → 35.7 ms | — |
+| T6b txn-versions @ valid point | 57.7 → 507 ms (partly OR-chunking) | — |
+| K1 key history | 0.26 → 0.62 ms | — |
+| R1 state change | 2.28 → 7.29 ms | 7.50 → 22.8 ms |
+| R3 agg × 6 instants | 6.33 → 19.7 ms | 22.1 → 66.0 ms |
+| Q3 traverse (36 nodes) | 0.42 → 0.44 ms (flat) | 16.8 → 49.3 ms; chain d1–d5 flat, d10 +15% |
+| fork | — | 0.145 → 0.159 ms (flat, O(1)) |
 
 Headline findings: fork latency flat across 3× data (empirical O(1));
 transaction-dimension work an order pricier than valid-dimension work (T6);
-branch cost is ancestry, not divergence (zero-write fork ≈ divergent fork);
-chain reads flat across depths 1–10. The branched-traversal *level* sits well
-above trunk on slice and traversal paths at these scales, with up to 4×
-session-order variance suggesting plan sensitivity — under investigation. The
-Rust port reproduces every Python figure within ~20%, ruling out binding
-overhead.
+branch cost is ancestry, not divergence (zero-write fork 15.9 ms ≈ divergent
+fork 16.8 ms at scale 1); chain reads flat from depth 1 to 5 and 15% dearer
+at 10. The branched read *level* sits 3–4× above trunk on slices and
+aggregates, and about 40× above it on traversal, at these scales. The Rust
+port (`rs-tpcbih`, scale 1) reads the branched paths within ~10% of Python
+(slice 2.32–6.04 ms, `reconstruct_on` 12.5 ms, Q3 17.5 ms), so binding
+overhead is not in them; on sub-millisecond trunk reads Python is up to 1.7×
+slower (Q3 0.24 against 0.42 ms), which is the per-call cost of the binding.
 
-**These figures predate 0.16.0's last two releases and have not been
-re-derived against them.** [D-272](../docs/architecture/s13-decision-register.md#d-272)
-took a branched write from 68.0 s to 49.0 ms on one shape and moved every
-branched current-belief read with it, and
-[D-273](../docs/architecture/s13-decision-register.md#d-273) halved
-`archive_branch`. The branch column above is the column those two releases
-were about, so treat it as a floor on the improvement rather than as current.
+Every column since the last reading moved down, the branch column most: the
+previous figures predated [D-272](../docs/architecture/s13-decision-register.md#d-272)
+and [D-273](../docs/architecture/s13-decision-register.md#d-273).
 
 ## Using these to improve performance
 

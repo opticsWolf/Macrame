@@ -266,6 +266,17 @@ async fn adding_the_valid_instant_does_not_reach_the_plan() {
 /// exact terms: the links fold declines the candidate, and the concepts fold
 /// uses it on the leading column only. Either term breaking re-opens the
 /// arithmetic for real.
+///
+/// **Closed off at 0.20.0 (D-300), and the gate tightens to zero.** The
+/// concept guard's partial index gave `ANALYZE` an exact count of the log's
+/// concept rows, and with it the planner took the time range *without* any
+/// candidate: `idx_txlog_time` and a full window sort, the shape D-254 retired
+/// and `a_transaction_time_read_seeks_rather_than_scans` forbids. The fold's
+/// bound is now `+recorded_at <= ?`, which keeps it a filter and never an
+/// access path, so the fold is back on the `table_name` seek with the partial
+/// sort and the triple is `(4, 4, 9)` again. A time-leading index can no
+/// longer serve it at all, which is the strongest form of D-196's decline: the
+/// candidate has no consumer.
 #[tokio::test]
 async fn a_two_dimensional_candidate_is_used_as_a_one_dimensional_one() {
     let harness = TestHarness::new();
@@ -291,19 +302,12 @@ async fn a_two_dimensional_candidate_is_used_as_a_one_dimensional_one() {
         after.contains("idx_txlog_fold_partition"),
         "the established fold started reaching for the candidate too: {after}"
     );
-    // ... while the concepts fold uses it exactly once ...
+    // ... and so does the concepts fold, whose bound is a filter since 0.20.0.
     assert_eq!(
         after.matches("probe_txlog_two_d").count(),
-        1,
-        "the candidate serves more than the one new consumer, so a second \
-         access path wants it: {after}"
-    );
-    // ... and on the leading column only. The second column stays dead, which
-    // is the load-bearing half of D-196's decline.
-    assert!(
-        after.contains("probe_txlog_two_d (recorded_at<?)"),
-        "the candidate is used past its leading column, and the arithmetic \
-         underneath D-196 no longer holds: {after}"
+        0,
+        "the candidate found a consumer, so the arithmetic underneath D-196 \
+         is open again: {after}"
     );
 }
 

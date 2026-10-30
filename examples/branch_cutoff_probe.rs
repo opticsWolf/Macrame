@@ -166,12 +166,35 @@ WHERE c.retired = 0
 ORDER BY w.node_id
 "#;
 
-/// The shipped branched read, taken from the builder rather than copied.
-fn shipped(depth: usize) -> String {
+/// The shipped branched read, run through the builder rather than copied.
+///
+/// **Executed, not built.** Until 0.20.0 this returned `build_sql()` and ran
+/// the string against `branched_params`. Since 0.15.17 that string carries
+/// the *implied* ancestry — the branch alone, no parents, no cutoff — which
+/// `build_sql`'s own docs call a floor rather than the answer, so every
+/// "shipped" cell here read only `b`'s own rows and §4's assertion fired at
+/// zero churn. `execute_ids` resolves the ancestry against `branches` first,
+/// which is the read a caller gets, and its timing includes that one probe.
+async fn shipped_ids(conn: &libsql::Connection, depth: usize, floor: f64) -> Vec<String> {
     TraversalBuilder::new("n0")
         .max_depth(depth)
+        .min_weight(floor)
         .on_branch(BRANCH)
-        .build_sql()
+        .execute_ids(conn, NOW)
+        .await
+        .unwrap()
+}
+
+/// [`best_of`] for [`shipped_ids`].
+async fn shipped_best_of(conn: &libsql::Connection, depth: usize) -> Duration {
+    let _ = shipped_ids(conn, depth, 0.0).await;
+    let mut best = Duration::MAX;
+    for _ in 0..REPEATS {
+        let t = Instant::now();
+        let _ = shipped_ids(conn, depth, 0.0).await;
+        best = best.min(t.elapsed());
+    }
+    best
 }
 
 /// The shipped *unbranched* read — `LineageShape::Trunk`, no resolution at all.
@@ -328,7 +351,7 @@ async fn section_1() {
     );
     println!(
         "    b, 0.14.6 (shipped)          {:?}",
-        ids(&conn, &shipped(5), p.clone()).await
+        shipped_ids(&conn, 5, 0.0).await
     );
     let leaked = ids(&conn, NO_CUTOFF, p).await.iter().any(|n| n == "n4");
     println!("\n    0.14.4 absorbed the post-fork trunk write: {leaked}");
@@ -493,8 +516,11 @@ async fn section_3() {
         let mut params = branched_params(5);
         params[3] = kind.floor().into();
         let mut cells = Vec::new();
-        for sql in [NO_CUTOFF, NAIVE_FILTER, &shipped(5)] {
-            let got = ids(&conn, sql, params.clone()).await;
+        for sql in [Some(NO_CUTOFF), Some(NAIVE_FILTER), None] {
+            let got = match sql {
+                Some(sql) => ids(&conn, sql, params.clone()).await,
+                None => shipped_ids(&conn, 5, kind.floor()).await,
+            };
             cells.push(if got == want {
                 "ok".to_string()
             } else {
@@ -611,13 +637,11 @@ async fn section_4() {
 
         let plain_ms = best_of(&conn, &plain(DEPTH), plain_params(DEPTH)).await;
         let old_ms = best_of(&conn, NO_CUTOFF, branched_params(DEPTH)).await;
-        let new_ms = best_of(&conn, &shipped(DEPTH), branched_params(DEPTH)).await;
+        let new_ms = shipped_best_of(&conn, DEPTH).await;
 
         // Every form must still reach the whole tree: the churn is a reweight,
         // so a form that changed the reachable set has a defect, not a cost.
-        let reached = ids(&conn, &shipped(DEPTH), branched_params(DEPTH))
-            .await
-            .len();
+        let reached = shipped_ids(&conn, DEPTH, 0.0).await.len();
         assert_eq!(
             reached,
             total + 1,
@@ -677,10 +701,10 @@ async fn section_5() {
         churn(&conn, &edges, n).await;
         conn.execute("ANALYZE", ()).await.unwrap();
 
-        let before = best_of(&conn, &shipped(DEPTH), branched_params(DEPTH)).await;
+        let before = shipped_best_of(&conn, DEPTH).await;
         conn.execute(LC_LINEAGE_RECORDED, ()).await.unwrap();
         conn.execute("ANALYZE", ()).await.unwrap();
-        let after = best_of(&conn, &shipped(DEPTH), branched_params(DEPTH)).await;
+        let after = shipped_best_of(&conn, DEPTH).await;
 
         println!(
             "    {:>8} {:>6.0}% {:>10.3}ms {:>10.3}ms {:>8.0}%",
@@ -719,16 +743,16 @@ async fn section_6() {
     let _ = build_tree(&conn).await;
     conn.execute("ANALYZE", ()).await.unwrap();
 
-    for (label, sql) in [
-        ("0.14.4", NO_CUTOFF.to_string()),
-        ("shipped", shipped(DEPTH)),
-    ] {
-        println!("    {label}");
-        for line in plan_of(&conn, &sql, branched_params(DEPTH)).await {
-            println!("      {line}");
-        }
-        println!();
+    println!("    0.14.4");
+    for line in plan_of(&conn, NO_CUTOFF, branched_params(DEPTH)).await {
+        println!("      {line}");
     }
+    println!();
+    println!("    The shipped plan is not printed since 0.20.0: the resolved");
+    println!("    statement is built inside the crate against the ancestry it");
+    println!("    reads from `branches`, and `build_sql()` from out here is the");
+    println!("    root-only floor. What 0.14.6 recorded against it:");
+    println!();
 
     println!("    Three differences, and the row count is not one of them:");
     println!("    * `lineage` goes CO-ROUTINE -> MATERIALIZE, because three CTEs");

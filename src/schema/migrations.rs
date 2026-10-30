@@ -13,7 +13,7 @@ use crate::schema::ddl::*;
 /// guarantee D-029 buys would be void on it while `user_version` insisted all
 /// was well. Reserving 1 as a value this build refuses by name is what makes
 /// "no legacy support" an enforced property instead of a README sentence.
-pub const SCHEMA_VERSION: u32 = 22;
+pub const SCHEMA_VERSION: u32 = 23;
 
 type StepFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
 
@@ -244,6 +244,16 @@ const STEPS: &[Step] = &[
         // and no row for a constraint to disagree with.
         suspends_foreign_keys: false,
         apply: |conn| Box::pin(add_blob_store(conn)),
+    },
+    Step {
+        from: 22,
+        to: 23,
+        name: "concept-starts-index",
+        // One partial `CREATE INDEX` and one `DROP INDEX`, both on the log,
+        // which references no other table. The v16 -> v17 rung's ground:
+        // nothing to defer.
+        suspends_foreign_keys: false,
+        apply: |conn| Box::pin(add_concept_starts_index(conn)),
     },
     Step {
         from: 16,
@@ -1850,6 +1860,32 @@ async fn create_indices(conn: &libsql::Connection, names: &[&str]) -> Result<()>
             .unwrap_or_else(|| panic!("{name} is not declared in ddl::CREATE_INDICES"));
         conn.execute(ddl, ()).await?;
     }
+    Ok(())
+}
+
+/// v22 → v23: the concept interval guard's starts, and the log index nothing
+/// reads any more (0.20.0, [D-300], [D-301]).
+///
+/// Index-only, on the log, on the ground the v16 → v17 rung stands on: one
+/// `CREATE INDEX` and one `DROP INDEX` inside the ladder's own transaction, no
+/// data movement and no shape change. The create turns the concept guard's
+/// read into one seek per distinct valid start instead of one row per version
+/// of the concept. The drop retires `idx_txlog_entity`, whose last reader — the
+/// archive's supersession test — now binds `table_name` and seeks
+/// `idx_txlog_fold_partition`; it was the dearest index on the edge write path.
+/// Create first, as [`add_traversal_cover`] does, for peak disk only.
+///
+/// A rung rather than a line in `CREATE_INDICES` alone, for
+/// [`add_fold_partition_index`]'s reason: a guard that stays O(history) on
+/// every file an earlier build created is not the repair the measurement
+/// describes. The build reads the log once and writes only the concept rows.
+///
+/// [D-300]: ../../docs/architecture/s13-decision-register.md#d-300
+/// [D-301]: ../../docs/architecture/s13-decision-register.md#d-301
+async fn add_concept_starts_index(conn: &libsql::Connection) -> Result<()> {
+    create_indices(conn, &["idx_txlog_concept_starts"]).await?;
+    conn.execute("DROP INDEX IF EXISTS idx_txlog_entity", ())
+        .await?;
     Ok(())
 }
 

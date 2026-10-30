@@ -141,7 +141,7 @@ const COLD_FOLD: &str = r#"
 /// lost its reader and the rung owes a decision about it.
 const OTHER_READERS: &[(&str, &str)] = &[
     (
-        "the archive's log predicate (idx_txlog_time, idx_txlog_entity)",
+        "the archive's log predicate (idx_txlog_time; idx_txlog_entity through v22)",
         "SELECT seq_id FROM transaction_log WHERE recorded_at < ?1 AND EXISTS ( \
            SELECT 1 FROM transaction_log newer \
            WHERE newer.entity_id = transaction_log.entity_id \
