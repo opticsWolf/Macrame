@@ -646,7 +646,8 @@ def test_verify_concept_intervals_reports_the_overlap_by_both_intervals(one_conc
     with macrame.Database.open(one_concept, snapshot_every_entries=None) as handle:
         (overlap,) = handle.verify_concept_intervals()
     assert overlap.id == "x"
-    assert overlap.within_batch is False
+    # A read found both intervals in the ledger; the caller asserted neither.
+    assert overlap.provenance == "both_recorded"
     intervals = {
         (overlap.valid_from, overlap.valid_to),
         (overlap.existing_from, overlap.existing_to),
@@ -656,7 +657,7 @@ def test_verify_concept_intervals_reports_the_overlap_by_both_intervals(one_conc
         (dt.datetime(2026, 1, 1, tzinfo=UTC), None),
     }
     assert repr(overlap).startswith("<macrame.ConceptOverlap id=")
-    assert repr(overlap).endswith("within_batch=False>")
+    assert repr(overlap).endswith('provenance="both_recorded">')
 
 
 def test_verify_concept_intervals_is_empty_on_a_guarded_ledger(db):

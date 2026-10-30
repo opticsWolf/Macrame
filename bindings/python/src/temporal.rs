@@ -70,6 +70,7 @@ use macrame::temporal::{
 
 use crate::graph::PyNodeAttributes;
 use crate::timestamps::from_canonical;
+use macrame::OverlapProvenance;
 
 /// `(source, target, edge_type, valid_from, valid_to)`, timestamps rendered.
 ///
@@ -116,6 +117,20 @@ pub(crate) fn belief_to_py<'py>(py: Python<'py>, e: &EdgeBelief) -> PyResult<Bou
 /// Both intervals are reported, because neither alone identifies the conflict.
 /// `within_batch` says whether the collision is with another row in the same
 /// call (D-180), as it is for an edge overlap.
+/// `OverlapProvenance` as the string the Python surface spells it (D-295).
+///
+/// The wildcard arm is required, not defensive: the enum is
+/// `#[non_exhaustive]`, so this crate cannot match it exhaustively, and a
+/// state added upstream must still have a name here.
+pub(crate) fn provenance_name(provenance: OverlapProvenance) -> &'static str {
+    match provenance {
+        OverlapProvenance::AlreadyRecorded => "already_recorded",
+        OverlapProvenance::SameBatch => "same_batch",
+        OverlapProvenance::BothRecorded => "both_recorded",
+        _ => "unknown",
+    }
+}
+
 #[pyclass(name = "ConceptOverlap", module = "macrame", frozen)]
 pub(crate) struct PyConceptOverlap {
     pub(crate) inner: macrame::ConceptOverlap,
@@ -153,22 +168,24 @@ impl PyConceptOverlap {
         from_canonical(py, &self.inner.existing_to)
     }
 
-    /// True when the collision is with another row written in the same call.
+    /// Where the second interval came from: `"already_recorded"`,
+    /// `"same_batch"`, or `"both_recorded"` when a read found both intervals
+    /// in the ledger and the caller asserted neither (D-295).
+    ///
+    /// A string rather than a bool, because there are three cases; a string
+    /// rather than an enum class, because `OverlapProvenance` is
+    /// `#[non_exhaustive]` and a fourth case should widen this without adding
+    /// a type to the surface.
     #[getter]
-    fn within_batch(&self) -> bool {
-        self.inner.within_batch
+    fn provenance(&self) -> &'static str {
+        provenance_name(self.inner.provenance)
     }
 
     fn __repr__(&self) -> String {
         format!(
-            "<macrame.ConceptOverlap id={:?} within_batch={}>",
+            "<macrame.ConceptOverlap id={:?} provenance={:?}>",
             self.inner.id,
-            // Rust prints `false`; Python spells it `False`.
-            if self.inner.within_batch {
-                "True"
-            } else {
-                "False"
-            }
+            provenance_name(self.inner.provenance)
         )
     }
 }

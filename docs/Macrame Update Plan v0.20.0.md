@@ -338,6 +338,8 @@ truths".
 
 **Superseded in the build (0.20.0, P2, D-292).** No new variant. P1 had already added `OverlappingConcept` and `ConceptSingleOpen`, the valid fold reuses them, and a link uses `OverlappingInterval`. `DbError` stays at 49 variants. The refusal is the one this section chose; only the variant names differ from the sketch above.
 
+**What reuse cost, and how it was paid (0.19.4, D-295).** Reusing the write guard's variants meant reusing its vocabulary, and the payload's `within_batch` bool had only the two write cases. A refused *read* — where the caller asserted neither interval — had to borrow one, so it printed "the asserted" about a row it had merely found. The bit that was missing went into the payload rather than into a 50th variant: `ConceptOverlap` now carries an `OverlapProvenance` with `AlreadyRecorded`, `SameBatch` and `BothRecorded`. Both write messages are unchanged. Taken in 0.19.4 because `ConceptOverlap` has not shipped, which makes the field free to widen now and breaking afterwards.
+
 A `verify`-time probe reports the same condition ahead of a read, so an operator can
 find it without waiting for a query to fail. Rejected: *refusing to open such a
 file* (the overlap affects one concept's history; the rest of the ledger is sound and

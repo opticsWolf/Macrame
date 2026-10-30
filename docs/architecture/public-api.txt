@@ -374,6 +374,10 @@ impl macrame::error::ErrorKind
 pub fn macrame::error::ErrorKind::as_str(self) -> &'static str
 impl core::fmt::Display for macrame::error::ErrorKind
 pub fn macrame::error::ErrorKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+#[non_exhaustive] pub enum macrame::error::OverlapProvenance
+pub macrame::error::OverlapProvenance::AlreadyRecorded
+pub macrame::error::OverlapProvenance::BothRecorded
+pub macrame::error::OverlapProvenance::SameBatch
 #[non_exhaustive] pub enum macrame::error::StatedInstants
 pub macrame::error::StatedInstants::Both
 pub macrame::error::StatedInstants::Both::recorded: alloc::string::String
@@ -414,12 +418,13 @@ pub fn macrame::error::BulkInterrupted::fmt(&self, &mut core::fmt::Formatter<'_>
 pub macrame::error::ConceptOverlap::existing_from: alloc::string::String
 pub macrame::error::ConceptOverlap::existing_to: alloc::string::String
 pub macrame::error::ConceptOverlap::id: alloc::string::String
+pub macrame::error::ConceptOverlap::provenance: macrame::error::OverlapProvenance
 pub macrame::error::ConceptOverlap::valid_from: alloc::string::String
 pub macrame::error::ConceptOverlap::valid_to: alloc::string::String
-pub macrame::error::ConceptOverlap::within_batch: bool
 impl macrame::error::ConceptOverlap
-pub fn macrame::error::ConceptOverlap::new(impl core::convert::Into<alloc::string::String>, (impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>), (impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>), bool) -> Self
-pub fn macrame::error::ConceptOverlap::provenance(&self) -> &'static str
+pub fn macrame::error::ConceptOverlap::clause(&self) -> &'static str
+pub fn macrame::error::ConceptOverlap::new(impl core::convert::Into<alloc::string::String>, (impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>), (impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>), macrame::error::OverlapProvenance) -> Self
+pub fn macrame::error::ConceptOverlap::subject(&self) -> &'static str
 #[non_exhaustive] pub struct macrame::error::Overlap
 pub macrame::error::Overlap::edge_type: alloc::string::String
 pub macrame::error::Overlap::existing_from: alloc::string::String
@@ -877,6 +882,10 @@ pub fn macrame::error::ErrorKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> c
 pub macrame::prelude::FutureStampPolicy::Allow
 pub macrame::prelude::FutureStampPolicy::Default
 pub macrame::prelude::FutureStampPolicy::Tolerance(core::time::Duration)
+#[non_exhaustive] pub enum macrame::prelude::OverlapProvenance
+pub macrame::prelude::OverlapProvenance::AlreadyRecorded
+pub macrame::prelude::OverlapProvenance::BothRecorded
+pub macrame::prelude::OverlapProvenance::SameBatch
 #[non_exhaustive] pub enum macrame::prelude::StatedInstants
 pub macrame::prelude::StatedInstants::Both
 pub macrame::prelude::StatedInstants::Both::recorded: alloc::string::String
@@ -982,12 +991,13 @@ pub fn macrame::connection::CheckpointReport::is_complete(&self) -> bool
 pub macrame::prelude::ConceptOverlap::existing_from: alloc::string::String
 pub macrame::prelude::ConceptOverlap::existing_to: alloc::string::String
 pub macrame::prelude::ConceptOverlap::id: alloc::string::String
+pub macrame::prelude::ConceptOverlap::provenance: macrame::error::OverlapProvenance
 pub macrame::prelude::ConceptOverlap::valid_from: alloc::string::String
 pub macrame::prelude::ConceptOverlap::valid_to: alloc::string::String
-pub macrame::prelude::ConceptOverlap::within_batch: bool
 impl macrame::error::ConceptOverlap
-pub fn macrame::error::ConceptOverlap::new(impl core::convert::Into<alloc::string::String>, (impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>), (impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>), bool) -> Self
-pub fn macrame::error::ConceptOverlap::provenance(&self) -> &'static str
+pub fn macrame::error::ConceptOverlap::clause(&self) -> &'static str
+pub fn macrame::error::ConceptOverlap::new(impl core::convert::Into<alloc::string::String>, (impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>), (impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>), macrame::error::OverlapProvenance) -> Self
+pub fn macrame::error::ConceptOverlap::subject(&self) -> &'static str
 #[non_exhaustive] pub struct macrame::prelude::ConceptUpsert
 pub macrame::prelude::ConceptUpsert::branch: core::option::Option<macrame::branch::BranchId>
 pub macrame::prelude::ConceptUpsert::content: alloc::string::String
@@ -1713,6 +1723,10 @@ pub fn macrame::error::ErrorKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> c
 pub macrame::FutureStampPolicy::Allow
 pub macrame::FutureStampPolicy::Default
 pub macrame::FutureStampPolicy::Tolerance(core::time::Duration)
+#[non_exhaustive] pub enum macrame::OverlapProvenance
+pub macrame::OverlapProvenance::AlreadyRecorded
+pub macrame::OverlapProvenance::BothRecorded
+pub macrame::OverlapProvenance::SameBatch
 #[non_exhaustive] pub enum macrame::StatedInstants
 pub macrame::StatedInstants::Both
 pub macrame::StatedInstants::Both::recorded: alloc::string::String
@@ -1813,12 +1827,13 @@ pub fn macrame::connection::CheckpointReport::is_complete(&self) -> bool
 pub macrame::ConceptOverlap::existing_from: alloc::string::String
 pub macrame::ConceptOverlap::existing_to: alloc::string::String
 pub macrame::ConceptOverlap::id: alloc::string::String
+pub macrame::ConceptOverlap::provenance: macrame::error::OverlapProvenance
 pub macrame::ConceptOverlap::valid_from: alloc::string::String
 pub macrame::ConceptOverlap::valid_to: alloc::string::String
-pub macrame::ConceptOverlap::within_batch: bool
 impl macrame::error::ConceptOverlap
-pub fn macrame::error::ConceptOverlap::new(impl core::convert::Into<alloc::string::String>, (impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>), (impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>), bool) -> Self
-pub fn macrame::error::ConceptOverlap::provenance(&self) -> &'static str
+pub fn macrame::error::ConceptOverlap::clause(&self) -> &'static str
+pub fn macrame::error::ConceptOverlap::new(impl core::convert::Into<alloc::string::String>, (impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>), (impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>), macrame::error::OverlapProvenance) -> Self
+pub fn macrame::error::ConceptOverlap::subject(&self) -> &'static str
 #[non_exhaustive] pub struct macrame::ConceptUpsert
 pub macrame::ConceptUpsert::branch: core::option::Option<macrame::branch::BranchId>
 pub macrame::ConceptUpsert::content: alloc::string::String

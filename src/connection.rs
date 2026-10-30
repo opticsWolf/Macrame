@@ -3,7 +3,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::error::{classify, BulkInterrupted, BulkResult, DbError, Result, WriteOp};
+use crate::error::{
+    classify, BulkInterrupted, BulkResult, DbError, OverlapProvenance, Result, WriteOp,
+};
 use crate::graph::edge::EdgeAssertion;
 use crate::graph::lineage::{Ancestor, LineageShape, Lineages};
 use crate::integrity::{rebuild_current, RebuildReport};
@@ -6099,14 +6101,14 @@ fn concept_clash(
     id: &str,
     asserted: &Interval,
     existing: &Interval,
-    within_batch: bool,
+    provenance: OverlapProvenance,
 ) -> Option<DbError> {
     let pair = || {
         crate::error::ConceptOverlap::new(
             id,
             (asserted.valid_from.as_str(), asserted.valid_to.as_str()),
             (existing.valid_from.as_str(), existing.valid_to.as_str()),
-            within_batch,
+            provenance,
         )
     };
     if asserted.is_open() && existing.is_open() {
@@ -6124,7 +6126,7 @@ fn concept_clash(
 fn check_concept_against(id: &str, proposed: &[Interval], current: &[Interval]) -> Result<()> {
     for asserted in proposed {
         for existing in current {
-            if let Some(err) = concept_clash(id, asserted, existing, false) {
+            if let Some(err) = concept_clash(id, asserted, existing, OverlapProvenance::AlreadyRecorded) {
                 return Err(err);
             }
         }
@@ -6201,8 +6203,8 @@ fn reject_concept_overlaps_within(concepts: &[ConceptUpsert]) -> Result<()> {
         for asserted in &intervals {
             let clash = first_open
                 .filter(|_| asserted.is_open())
-                .and_then(|open| concept_clash(id, asserted, open, true))
-                .or_else(|| widest.and_then(|w| concept_clash(id, asserted, w, true)));
+                .and_then(|open| concept_clash(id, asserted, open, OverlapProvenance::SameBatch))
+                .or_else(|| widest.and_then(|w| concept_clash(id, asserted, w, OverlapProvenance::SameBatch)));
             if let Some(err) = clash {
                 return Err(err);
             }

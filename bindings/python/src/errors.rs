@@ -84,6 +84,8 @@ use pyo3::{create_exception, PyErr, PyTypeInfo};
 
 use macrame::{BulkInterrupted, DbError};
 
+use crate::temporal::provenance_name;
+
 // The module name is `macrame`, not `_macrame`: it is what shows up in a
 // traceback and in `repr(exc)`, and the extension module is an implementation
 // detail the package re-exports from.
@@ -985,7 +987,7 @@ fn build(py: Python<'_>, err: DbError) -> PyErr {
                 e.setattr("valid_to", overlap.valid_to)?;
                 e.setattr("existing_from", overlap.existing_from)?;
                 e.setattr("existing_to", overlap.existing_to)?;
-                e.setattr("within_batch", overlap.within_batch)
+                e.setattr("provenance", provenance_name(overlap.provenance))
             })
         }
         DbError::ConceptSingleOpen { overlap } => {
@@ -995,7 +997,7 @@ fn build(py: Python<'_>, err: DbError) -> PyErr {
                 e.setattr("valid_to", overlap.valid_to)?;
                 e.setattr("existing_from", overlap.existing_from)?;
                 e.setattr("existing_to", overlap.existing_to)?;
-                e.setattr("within_batch", overlap.within_batch)
+                e.setattr("provenance", provenance_name(overlap.provenance))
             })
         }
 

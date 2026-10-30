@@ -1007,7 +1007,7 @@ fn the_concept_overlap_constructor_does_not_swap_the_two_intervals() {
         "a",
         ("2026-02-01T00:00:00.000000Z", "2026-02-02T00:00:00.000000Z"),
         ("2026-03-01T00:00:00.000000Z", "2026-03-02T00:00:00.000000Z"),
-        false,
+        macrame::OverlapProvenance::AlreadyRecorded,
     );
 
     assert_eq!(

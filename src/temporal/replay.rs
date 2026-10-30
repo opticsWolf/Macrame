@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::branch::Ancestor;
-use crate::error::{ConceptOverlap, DbError, Overlap, Result};
+use crate::error::{ConceptOverlap, DbError, Overlap, OverlapProvenance, Result};
 use crate::temporal::as_of::{valid_interval_contains, NodeAttributes};
 use crate::util::timestamp::OPEN_SENTINEL;
 
@@ -2107,8 +2107,13 @@ fn overlap_key(table_name: &str, entity_id: &str, payload: &serde_json::Value) -
 /// The refusal for two beliefs that both claim the instant, worded as the write
 /// guard words it (D-291): a concept whose two open intervals meet is
 /// `ConceptSingleOpen`, any other concept overlap is `OverlappingConcept`, and a
-/// link is `OverlappingInterval`. `existing` is the earlier write, `asserted` the
-/// later one.
+/// link is `OverlappingInterval`. `existing` is the earlier row, `asserted` the
+/// later one, ordered by `seq_id`.
+///
+/// Both rows are in the ledger, so the concept refusals carry
+/// `OverlapProvenance::BothRecorded` and say so: the caller asserted neither,
+/// and the remedy is to repair the data, not the call (0.19.4, D-295). A link
+/// still words it as a write, because [`Overlap`] keeps its shipped bool.
 fn valid_overlap(existing: &ValidStart, asserted: &ValidStart) -> DbError {
     let (asserted_from, asserted_to) = valid_bounds(asserted);
     let (existing_from, existing_to) = valid_bounds(existing);
@@ -2139,7 +2144,7 @@ fn valid_overlap(existing: &ValidStart, asserted: &ValidStart) -> DbError {
         &existing.entity_id,
         (asserted_from, asserted_to),
         (existing_from, existing_to),
-        false,
+        OverlapProvenance::BothRecorded,
     ));
     if both_open {
         DbError::ConceptSingleOpen { overlap }
@@ -2248,7 +2253,7 @@ pub(crate) async fn concept_interval_overlaps(
                         &existing.entity_id,
                         (asserted_from, asserted_to),
                         (existing_from.clone(), existing_to.clone()),
-                        false,
+                        OverlapProvenance::BothRecorded,
                     ));
                 }
             }

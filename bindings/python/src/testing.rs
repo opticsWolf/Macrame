@@ -257,7 +257,7 @@ fn sample(name: &str) -> Option<DbError> {
                 "concept-1",
                 ("2026-03-01T00:00:00.000000Z", "2026-09-01T00:00:00.000000Z"),
                 ("2026-01-01T00:00:00.000000Z", "2026-06-01T00:00:00.000000Z"),
-                false,
+                macrame::OverlapProvenance::AlreadyRecorded,
             )),
         },
         "ConceptSingleOpen" => DbError::ConceptSingleOpen {
@@ -265,7 +265,7 @@ fn sample(name: &str) -> Option<DbError> {
                 "concept-1",
                 ("2026-03-01T00:00:00.000000Z", "9999-12-31T23:59:59.999999Z"),
                 ("2026-01-01T00:00:00.000000Z", "9999-12-31T23:59:59.999999Z"),
-                false,
+                macrame::OverlapProvenance::AlreadyRecorded,
             )),
         },
         "CurrentDrift" => DbError::CurrentDrift { n: 4242 },

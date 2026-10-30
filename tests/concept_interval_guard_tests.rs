@@ -10,7 +10,7 @@
 mod harness;
 
 use harness::TestHarness;
-use macrame::{BranchId, ConceptUpsert, Database, DbError};
+use macrame::{BranchId, ConceptUpsert, Database, DbError, OverlapProvenance};
 
 const JAN: &str = "2026-01-01T00:00:00.000000Z";
 const MAR: &str = "2026-03-01T00:00:00.000000Z";
@@ -75,7 +75,11 @@ async fn an_overlapping_closed_interval_is_refused_naming_both() {
         (overlap.existing_from.as_str(), overlap.existing_to.as_str()),
         (JAN, JUN)
     );
-    assert!(!overlap.within_batch, "the collision is with a recorded row");
+    assert_eq!(
+        overlap.provenance,
+        OverlapProvenance::AlreadyRecorded,
+        "the collision is with a recorded row"
+    );
 
     db.close().await.unwrap();
 }
@@ -121,7 +125,11 @@ async fn a_batch_that_contradicts_itself_is_refused_with_nothing_written() {
     let DbError::OverlappingConcept { ref overlap } = err.cause else {
         panic!("expected OverlappingConcept, got {:?}", err.cause);
     };
-    assert!(overlap.within_batch, "the collision is inside the call: {overlap:?}");
+    assert_eq!(
+        overlap.provenance,
+        OverlapProvenance::SameBatch,
+        "the collision is inside the call: {overlap:?}"
+    );
     assert!(err.cause.to_string().contains("this same batch"));
 
     assert_eq!(
@@ -241,7 +249,11 @@ async fn a_batch_clashing_with_the_ledger_is_refused_with_nothing_written() {
     let DbError::OverlappingConcept { ref overlap } = err.cause else {
         panic!("expected OverlappingConcept, got {:?}", err.cause);
     };
-    assert!(!overlap.within_batch, "the collision is with a recorded row");
+    assert_eq!(
+        overlap.provenance,
+        OverlapProvenance::AlreadyRecorded,
+        "the collision is with a recorded row"
+    );
     assert_eq!(
         count(&db, "SELECT COUNT(*) FROM transaction_log").await,
         before,

@@ -694,8 +694,10 @@ class ConceptOverlap:
         """`None` when open."""
 
     @property
-    def within_batch(self) -> bool:
-        """True when the collision is with another row written in the same call."""
+    def provenance(self) -> str:
+        """Where the second interval came from: `"already_recorded"`,
+        `"same_batch"`, or `"both_recorded"` when a read found both intervals
+        in the ledger and the caller asserted neither (0.19.4, D-295)."""
 
 
 class ChainCheck:
@@ -1997,7 +1999,12 @@ class OverlappingConceptError(IntegrityError):
     valid_to: str
     existing_from: str
     existing_to: str
-    within_batch: bool
+    provenance: str
+    """Where the second interval came from: `"already_recorded"`,
+    `"same_batch"` when the same call asserted it, or `"both_recorded"` when
+    a read found both intervals in the ledger and the caller asserted neither
+    (0.19.4, D-295). A `"both_recorded"` refusal means the data needs repair,
+    not the call."""
 
 class ConceptSingleOpenError(IntegrityError):
     """A second open valid interval for one concept, from a different start. Two
@@ -2009,7 +2016,12 @@ class ConceptSingleOpenError(IntegrityError):
     valid_to: str
     existing_from: str
     existing_to: str
-    within_batch: bool
+    provenance: str
+    """Where the second interval came from: `"already_recorded"`,
+    `"same_batch"` when the same call asserted it, or `"both_recorded"` when
+    a read found both intervals in the ledger and the caller asserted neither
+    (0.19.4, D-295). A `"both_recorded"` refusal means the data needs repair,
+    not the call."""
 
 class OverlappingIntervalError(IntegrityError):
     """The fields are flattened onto the exception rather than nested behind an

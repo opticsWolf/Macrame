@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 
 use harness::TestHarness;
 use macrame::temporal::{AsOf, MaterializedState};
-use macrame::{ConceptUpsert, Database, DbError};
+use macrame::{ConceptUpsert, Database, DbError, OverlapProvenance};
 
 const PRE: &str = "2025-06-01T00:00:00.000000Z";
 const JAN: &str = "2026-01-01T00:00:00.000000Z";
@@ -256,9 +256,14 @@ async fn two_closed_concept_intervals_claiming_one_instant_are_refused() {
         panic!("expected OverlappingConcept, got {err:?}");
     };
     assert_eq!(overlap.id, "a");
+    assert_eq!(
+        overlap.provenance,
+        OverlapProvenance::BothRecorded,
+        "a read finds the collision in the ledger, asserted by nobody (D-295)"
+    );
     assert!(
-        !overlap.within_batch,
-        "a read finds the collision in the ledger"
+        err.to_string().contains("the recorded"),
+        "a read must not word its refusal as a write: {err}"
     );
 
     db.close().await.unwrap();
