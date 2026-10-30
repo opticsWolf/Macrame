@@ -532,3 +532,84 @@ async fn concurrent_valid_reads_on_an_archived_database_do_not_collide() {
 
     std::sync::Arc::into_inner(db).unwrap().close().await.unwrap();
 }
+
+/// The valid-axis mark survives a serde round trip, so a state decoded from a
+/// cache is still refused as a snapshot (0.19.6, D-299).
+#[tokio::test]
+async fn a_valid_axis_state_round_tripped_through_serde_is_still_refused() {
+    let harness = TestHarness::new();
+    let db = open_db(&harness).await;
+    upsert(&db, concept("a", "jan", JAN, None)).await;
+
+    let state = db.reconstruct_as_of(AsOf::valid_at(MAR)).await.unwrap();
+    let json = serde_json::to_string(&state).unwrap();
+    let decoded: MaterializedState = serde_json::from_str(&json).unwrap();
+    let dir = harness.db_path.with_extension("valid-snapshots");
+    let err = macrame::temporal::save_snapshot(&dir, &decoded)
+        .expect_err("the decoded state is still at a valid instant");
+    assert!(matches!(err, DbError::SnapshotWriteFailed { .. }), "got {err:?}");
+
+    db.close().await.unwrap();
+}
+
+/// A start whose only belief is in the archive, as an archive written before
+/// 0.19.5 can hold (D-298): the valid read and the interval check both reach it
+/// (0.19.6, D-299). The fixture moves the row cold by hand, as the old
+/// `LOG_ARCHIVABLE` did once a later start existed.
+#[tokio::test]
+async fn a_start_held_only_in_the_archive_answers_its_valid_read() {
+    let harness = TestHarness::new();
+    let db = open_db(&harness).await;
+    upsert(&db, concept("a", "jan", JAN, Some(JUN))).await;
+    upsert(&db, concept("a", "jun", JUN, None)).await;
+    upsert(&db, concept("a", "jan-corrected", JAN, Some(JUN))).await;
+    db.archive(FAR).await.unwrap();
+    let archive = db.archive_path().to_path_buf();
+    db.close().await.unwrap();
+
+    let raw = libsql::Builder::new_local(&harness.db_path)
+        .build()
+        .await
+        .unwrap()
+        .connect()
+        .unwrap();
+    raw.execute(
+        "ATTACH DATABASE ?1 AS cold",
+        libsql::params![archive.to_string_lossy().to_string()],
+    )
+    .await
+    .unwrap();
+    raw.execute_batch(
+        "CREATE TABLE macrame_archive_session (x);
+         INSERT INTO cold.transaction_log
+             (seq_id, table_name, entity_id, operation, payload, recorded_at, branch_id)
+         SELECT seq_id, table_name, entity_id, operation, payload, recorded_at, branch_id
+         FROM main.transaction_log WHERE json_extract(payload, '$.title') = 'jun';
+         DELETE FROM main.transaction_log WHERE json_extract(payload, '$.title') = 'jun';
+         DROP TABLE macrame_archive_session;
+         DETACH DATABASE cold;",
+    )
+    .await
+    .unwrap();
+    drop(raw);
+
+    let db = open_db(&harness).await;
+    assert_eq!(
+        count(
+            &db,
+            "SELECT COUNT(*) FROM transaction_log WHERE json_extract(payload, '$.title') = 'jun'"
+        )
+        .await,
+        0,
+        "the June start's only belief is cold"
+    );
+    let in_july = db.reconstruct_as_of(AsOf::valid_at(JUL)).await.unwrap();
+    assert_eq!(
+        titles(&in_july).get("a").map(String::as_str),
+        Some("jun"),
+        "the June belief lives only in the archive"
+    );
+    assert!(db.verify_concept_intervals().await.unwrap().is_empty());
+
+    db.close().await.unwrap();
+}

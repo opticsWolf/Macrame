@@ -192,9 +192,16 @@ fn readme_dep_pin() -> Option<String> {
 
 /// Every `X.Y.Z` the landing page names, parsed.
 fn site_versions() -> Vec<(u32, u32, u32)> {
-    SITE.split(|c: char| !(c.is_ascii_digit() || c == '.'))
+    versions_in(SITE)
+}
+
+/// Every `X.Y.Z` in `text`. Dots around a token are punctuation, so `0.18.2.`
+/// is read as `0.18.2` rather than dropped (D-299).
+fn versions_in(text: &str) -> Vec<(u32, u32, u32)> {
+    text.split(|c: char| !(c.is_ascii_digit() || c == '.'))
         .filter_map(|tok| {
             let parts: Vec<u32> = tok
+                .trim_matches('.')
                 .split('.')
                 .map(|p| p.parse().ok())
                 .collect::<Option<_>>()?;
@@ -404,6 +411,16 @@ fn the_site_advertises_one_release_of_the_series_the_crate_is_at() {
         !SITE.contains("Update%20Plan") && !SITE.contains("Update Plan"),
         "site/index.html links a plan document; plans are superseded, so the \
          docs link belongs on the architecture set or the README"
+    );
+}
+
+/// A version that ends a sentence is still read (0.19.6, D-299): split on
+/// everything but digits and dots, it arrives with the full stop attached.
+#[test]
+fn a_version_at_the_end_of_a_sentence_is_read() {
+    assert_eq!(
+        versions_in("Badge 0.19.1, and in prose: now at 0.18.4."),
+        vec![(0, 19, 1), (0, 18, 4)]
     );
 }
 

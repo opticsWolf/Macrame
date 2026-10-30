@@ -367,10 +367,11 @@ async fn a_snapshot_carries_its_header_and_reloads() {
     // v2 (D-054) added the snapshot's own instant; v3 (W8.2, D-185) added both
     // lengths and the checksum over them; v4 (D-222) changed the payload's edge
     // shape and left the header alone; v5 (0.18.0, D-278) did the same to the
-    // *concept* shape, which gained `extra`. Restated here rather than read
+    // *concept* shape, which gained `extra`; v6 (0.19.6, D-299) serialises the
+    // state's valid-axis mark. Restated here rather than read
     // from the crate, deliberately — the constant is private and this is the
     // assertion that a bump was intended rather than incidental.
-    assert_eq!(u16::from_le_bytes([raw[4], raw[5]]), 5, "format version");
+    assert_eq!(u16::from_le_bytes([raw[4], raw[5]]), 6, "format version");
     assert_eq!(
         u32::from_le_bytes([raw[6], raw[7], raw[8], raw[9]]),
         macrame::schema::SCHEMA_VERSION,

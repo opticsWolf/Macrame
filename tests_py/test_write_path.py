@@ -482,23 +482,22 @@ def test_a_token_cancelled_before_the_call_writes_nothing(db):
 def test_a_failure_partway_says_how_much_of_the_batch_survived(db):
     """The §4.2 case, in the shape a caller meets it.
 
-    Two upserts of the same id in one chunk share a stamp, so the second is an
-    UPDATE whose `recorded_at` does not advance — `trg_concepts_monotonic_ra`.
-    Putting that pair last makes the earlier chunks commit first.
+    `dup` already holds an open interval from T0, and the last row opens a
+    second from T1, which the concept guard refuses against the ledger (D-291).
+    Putting that row last makes the earlier chunks commit first. (Until 0.19.6
+    this used a repeat inside one chunk; a repeat now starts a chunk, D-299.)
     """
+    db.upsert_concept(macrame.ConceptUpsert("dup", "First", valid_from=T0))
     n = macrame.CHUNK_ROWS_CONCEPTS
-    batch = _many_concepts(n) + [
-        macrame.ConceptUpsert("dup", "First", valid_from=T0),
-        macrame.ConceptUpsert("dup", "Second", valid_from=T0),
-    ]
-    with pytest.raises(macrame.RecordedAtRegressionError) as caught:
+    batch = _many_concepts(n) + [macrame.ConceptUpsert("dup", "Second", valid_from=T1)]
+    with pytest.raises(macrame.ConceptSingleOpenError) as caught:
         db.write_concepts(batch)
 
     # The class is still chosen by the cause -- `written` is added, not
-    # substituted, which is what keeps `except RecordedAtRegressionError`
+    # substituted, which is what keeps `except ConceptSingleOpenError`
     # working across this change.
     assert caught.value.written == n
-    assert db.diagnostic_query("SELECT COUNT(*) FROM concepts WHERE id = 'dup'")[0][0] == 0
+    assert db.diagnostic_query("SELECT COUNT(*) FROM concepts WHERE title = 'Second'")[0][0] == 0
 
 
 def test_a_progress_callback_that_raises_stops_the_write(db):
@@ -583,6 +582,7 @@ def test_written_is_readable_on_anything_caught_as_a_macrame_error(db):
     inside itself — that replaces the failure being recorded with a failure
     about the recording, in the one place a caller has no second chance.
     """
+    db.upsert_concept(macrame.ConceptUpsert("dup", "First", valid_from=T0))
     calls = [
         # A construction-time refusal, which reaches the same mapping layer by
         # a different route than a failed write does.
@@ -595,10 +595,7 @@ def test_written_is_readable_on_anything_caught_as_a_macrame_error(db):
         ),
         lambda: db.write_concepts(
             _many_concepts(macrame.CHUNK_ROWS_CONCEPTS)
-            + [
-                macrame.ConceptUpsert("dup", "First", valid_from=T0),
-                macrame.ConceptUpsert("dup", "Second", valid_from=T0),
-            ]
+            + [macrame.ConceptUpsert("dup", "Second", valid_from=T1)]
         ),
     ]
     seen = []

@@ -174,9 +174,10 @@ pub struct MaterializedState {
     /// Set by the valid-axis fold behind [`crate::Database::reconstruct_as_of`].
     /// Such a state is not a belief at a recorded instant, and saved as a snapshot
     /// it would become a recorded-axis anchor that later reconstructions compose
-    /// on, so [`crate::temporal::save_snapshot`] refuses it. Never serialised: a
-    /// state that could be saved never carries it.
-    #[serde(skip)]
+    /// on, so [`crate::temporal::save_snapshot`] refuses it. Serialised, so a
+    /// serde round trip cannot clear it and let the state be saved after all
+    /// (0.19.6, D-299); snapshot container v6 carries it.
+    #[serde(default)]
     pub(crate) valid_axis: bool,
 }
 

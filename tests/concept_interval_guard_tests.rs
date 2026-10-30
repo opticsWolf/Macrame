@@ -330,13 +330,13 @@ async fn a_start_a_later_start_superseded_still_blocks_after_archiving() {
     db.close().await.unwrap();
 }
 
-/// One concept's rows travel in one chunk, so where they sit in the batch does not
-/// change the verdict (0.19.5, D-298). The batch opens a new start and closes the
-/// old one. Until 0.19.5 that depended on the adaptive chunker: with the two rows
-/// in different chunks the first was refused as `ConceptSingleOpen` after earlier
-/// chunks had committed, and in one chunk the shared stamp was refused by the
-/// monotonic `recorded_at` trigger. Now both placements meet the same refusal, and
-/// the concept's ledger is untouched by either.
+/// No two rows of one concept share a chunk, so where they sit in the batch does
+/// not change the verdict (0.19.6, D-299). The batch opens a new start and closes
+/// the old one. Until 0.19.5 that depended on the adaptive chunker: in different
+/// chunks the first row was refused as `ConceptSingleOpen`, and in one chunk the
+/// shared stamp was refused by the monotonic `recorded_at` trigger. Now a repeat
+/// always starts a chunk, so the rows apply in order and both placements meet the
+/// `ConceptSingleOpen` the first row earns, leaving the concept's ledger untouched.
 #[tokio::test]
 async fn a_concepts_rows_meet_the_same_verdict_wherever_the_chunker_would_split() {
     for gap in [0usize, 100] {
@@ -350,9 +350,9 @@ async fn a_concepts_rows_meet_the_same_verdict_wherever_the_chunker_would_split(
 
         let err = write(&db, batch)
             .await
-            .expect_err("one concept twice in one chunk shares a stamp");
+            .expect_err("[Jun, inf) opens while [Jan, inf) is still open");
         assert!(
-            matches!(err.cause, DbError::RecordedAtRegression { .. }),
+            matches!(err.cause, DbError::ConceptSingleOpen { .. }),
             "gap {gap}: {:?}",
             err.cause
         );
@@ -368,4 +368,71 @@ async fn a_concepts_rows_meet_the_same_verdict_wherever_the_chunker_would_split(
 
         db.close().await.unwrap();
     }
+}
+
+/// A batch that names a concept twice commits, last row winning, wherever the rows
+/// sit (0.19.6, D-299). In 0.19.5 they were held in one chunk, where the shared
+/// stamp made the second a `RecordedAtRegression`.
+#[tokio::test]
+async fn a_concept_repeated_in_a_batch_commits_with_its_later_row() {
+    for gap in [0usize, 100] {
+        let harness = TestHarness::new();
+        let db = open_db(&harness).await;
+
+        let mut batch = vec![ConceptUpsert::new("x", "first").valid_from(JAN)];
+        batch.extend((0..gap).map(|i| concept(&format!("b{i}"), JAN, None)));
+        batch.push(ConceptUpsert::new("x", "corrected").valid_from(JAN));
+
+        let written = write(&db, batch).await.expect("a repeat is a later write");
+        assert_eq!(written, gap + 2, "gap {gap}");
+        assert_eq!(
+            count(
+                &db,
+                "SELECT COUNT(*) FROM concepts WHERE id = 'x' AND title = 'corrected'"
+            )
+            .await,
+            1,
+            "gap {gap}: the later row is the projection"
+        );
+
+        db.close().await.unwrap();
+    }
+}
+
+/// A concept row with no `valid_from` in its payload is archived once a newer one
+/// without one exists: the starts compare with `IS`, as the fold groups them
+/// (0.19.6, D-299). With `=` such rows stayed hot forever.
+#[tokio::test]
+async fn concept_rows_without_a_start_still_archive() {
+    let harness = TestHarness::new();
+    let raw = libsql::Builder::new_local(&harness.db_path)
+        .build()
+        .await
+        .unwrap()
+        .connect()
+        .unwrap();
+    macrame::schema::run_migrations(&raw).await.unwrap();
+    for (title, at) in [("old", JAN), ("new", MAR)] {
+        raw.execute(
+            "INSERT INTO transaction_log (table_name, entity_id, operation, payload, recorded_at) \
+             VALUES ('concepts', 'legacy', 'U', json_object('v', 1, 'title', ?1), ?2)",
+            libsql::params![title, at],
+        )
+        .await
+        .unwrap();
+    }
+    drop(raw);
+
+    let db = open_db(&harness).await;
+    db.archive(FAR).await.unwrap();
+    assert_eq!(
+        count(
+            &db,
+            "SELECT COUNT(*) FROM transaction_log WHERE entity_id = 'legacy'"
+        )
+        .await,
+        1,
+        "the superseded start-less row has left the hot log"
+    );
+    db.close().await.unwrap();
 }

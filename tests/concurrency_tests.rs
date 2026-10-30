@@ -458,25 +458,29 @@ async fn a_violation_in_a_single_chunk_batch_commits_nothing() {
 
 /// The same per-chunk boundary on the concepts path.
 ///
-/// The failure here is `trg_concepts_monotonic_ra`: every row in a chunk shares
-/// one stamp, so a chunk that upserts the same id twice makes the second write
-/// an UPDATE whose `recorded_at` does not advance.
+/// The failure here is the concept guard against the committed ledger (D-291):
+/// `DUP` already holds an open interval from `T1`, and the second chunk opens
+/// another from `T2`. Until 0.19.6 this test used a repeat inside one chunk,
+/// which the monotonic `recorded_at` trigger refused; a repeat now starts a
+/// chunk of its own (D-299), so that is no longer a way to fail one.
 #[tokio::test]
 async fn write_concepts_commits_earlier_chunks_when_a_later_one_fails() {
     let harness = TestHarness::new();
     let db = Database::open(&harness.db_path).await.unwrap();
+    db.upsert_concept(ConceptUpsert::new("DUP", "First").valid_from(T1))
+        .await
+        .unwrap();
 
     let n = chunk_rows::CONCEPTS;
     let mut concepts: Vec<ConceptUpsert> = (0..n)
         .map(|i| ConceptUpsert::new(format!("C{i}"), format!("Concept {i}")).valid_from(T1))
         .collect();
     concepts.push(ConceptUpsert::new("KEEP_ME", "Good row in a doomed chunk").valid_from(T1));
-    concepts.push(ConceptUpsert::new("DUP", "First").valid_from(T1));
-    concepts.push(ConceptUpsert::new("DUP", "Second").valid_from(T1));
+    concepts.push(ConceptUpsert::new("DUP", "Second").valid_from(T2));
 
     let err = db.write_concepts(concepts).await.unwrap_err();
     assert!(
-        matches!(err.cause, DbError::RecordedAtRegression { .. }),
+        matches!(err.cause, DbError::ConceptSingleOpen { .. }),
         "got {err:?}"
     );
     assert_eq!(
@@ -486,13 +490,13 @@ async fn write_concepts_commits_earlier_chunks_when_a_later_one_fails() {
 
     assert_eq!(
         count(&db, "SELECT COUNT(*) FROM concepts").await,
-        n as i64,
-        "chunk one is committed and stays committed"
+        n as i64 + 1,
+        "chunk one is committed and stays committed, beside the seeded DUP"
     );
     assert_eq!(
         count(
             &db,
-            "SELECT COUNT(*) FROM concepts WHERE id IN ('KEEP_ME', 'DUP')"
+            "SELECT COUNT(*) FROM concepts WHERE id = 'KEEP_ME' OR title = 'Second'"
         )
         .await,
         0,

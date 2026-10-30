@@ -151,7 +151,7 @@ fn the_documents_are_shaped_the_way_these_tests_assume() {
     // And that `const_value` still finds a constant it is pointed at: a parser
     // that returned the empty string would make the check above vacuous. The
     // literal moves with the container format -- 4 through 0.17, 5 from 0.18
-    // (D-278) -- and the cost of restating it here is the point, because the
+    // (D-278), 6 from 0.19.6 (D-299) -- and the cost of restating it here is the point, because the
     // alternative is a self-test that reads the value it is testing.
-    assert_eq!(const_value(SNAPSHOT_RS, "SNAP_FORMAT_VERSION"), "5");
+    assert_eq!(const_value(SNAPSHOT_RS, "SNAP_FORMAT_VERSION"), "6");
 }

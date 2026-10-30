@@ -803,7 +803,7 @@ Minor-version changes, and several of them are expected rather than merely permi
 
 **4. The schema version and its migration rungs.** **v22** today. Rungs are forward-only and run at `open()`; adding one is a minor version, and refusing to open a database from a *newer* build is the behaviour, not a bug.
 
-**5. The snapshot container format.** **v5** today. A snapshot is a cache of a fold the ledger can always reproduce, so the format is versioned and an unrecognised version is **refused rather than parsed** ([D-043](s13-decision-register.md#d-043)); a build that cannot read an old snapshot folds from the log instead. Losing every snapshot costs time and no information.
+**5. The snapshot container format.** **v6** today. A snapshot is a cache of a fold the ledger can always reproduce, so the format is versioned and an unrecognised version is **refused rather than parsed** ([D-043](s13-decision-register.md#d-043)); a build that cannot read an old snapshot folds from the log instead. Losing every snapshot costs time and no information.
 
 **6. Performance figures.** [§9](s6-s10-flows-to-dependencies.md#9-performance-budgets)'s budgets are measurements on one machine at one population ([D-055](s13-decision-register.md#d-055)), and R15's rate is a property of the machine rather than of this crate ([D-147](s13-decision-register.md#d-147)). Nothing here is a latency promise to a caller.
 

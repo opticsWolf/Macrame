@@ -402,6 +402,8 @@ const LINKS_ARCHIVABLE: &str = r#"
 /// reads those from the hot log. Superseded by a *different* start, a row is
 /// still the belief for its own interval, and archiving it would hide that
 /// interval from the guard, which would then admit a write overlapping it.
+/// The starts compare with `IS`, so a payload with no `valid_from` matches
+/// another without one, as the fold's `PARTITION BY` groups them (0.19.6, D-299).
 const LOG_ARCHIVABLE: &str = r#"
     recorded_at < :cutoff AND EXISTS (
         SELECT 1 FROM transaction_log newer
@@ -411,7 +413,7 @@ const LOG_ARCHIVABLE: &str = r#"
           AND (transaction_log.table_name <> 'concepts'
                OR (newer.table_name = 'concepts'
                    AND json_extract(newer.payload, '$.valid_from')
-                     = json_extract(transaction_log.payload, '$.valid_from')))
+                     IS json_extract(transaction_log.payload, '$.valid_from')))
           AND NOT EXISTS (
                 SELECT 1 FROM branches b
                 WHERE b.forked_at IS NOT NULL

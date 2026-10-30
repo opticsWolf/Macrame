@@ -25,6 +25,8 @@ const SNAP_MAGIC: [u8; 4] = *b"MACR";
 /// * **v3 (0.13.12)** adds both lengths and a checksum (W8.2, D-185).
 /// * **v4 (0.14.5)** labels each edge with the lineage holding it (D-221).
 /// * **v5 (0.18.0)** carries each concept's app-defined attributes (D-278).
+/// * **v6 (0.19.6)** carries `MaterializedState::valid_axis`, which a v5 decode
+///   would read past the end of (D-299).
 ///
 /// A v2 file meets a v3 build as [`DbError::SnapshotIncompatible`], which is
 /// the case this versioned container was built for: the scan skips it and
@@ -58,7 +60,7 @@ const SNAP_MAGIC: [u8; 4] = *b"MACR";
 ///
 /// [D-278]: ../../docs/architecture/s13-decision-register.md#d-278
 /// [D-282]: ../../docs/architecture/s13-decision-register.md#d-282
-const SNAP_FORMAT_VERSION: u16 = 5;
+const SNAP_FORMAT_VERSION: u16 = 6;
 
 /// The v3 container header, little-endian throughout:
 ///

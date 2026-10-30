@@ -1,6 +1,6 @@
 # Macrame — Architecture Quick Reference
 
-**v0.19.5 · A Bitemporal Graph Ledger on libSQL**
+**v0.19.6 · A Bitemporal Graph Ledger on libSQL**
 
 ---
 
@@ -959,4 +959,4 @@ A synchronous Python binding built on pyo3 0.29 and maturin, delivered as a whee
 
 ---
 
-*Last updated: 2026-10-30 · v0.19.5 · Synced against architecture (s4–s14, appendices A–C) · Pinned by `tests/doc_sync_tests.rs` and `tests/perf_claim_tests.rs`*
+*Last updated: 2026-10-30 · v0.19.6 · Synced against architecture (s4–s14, appendices A–C) · Pinned by `tests/doc_sync_tests.rs` and `tests/perf_claim_tests.rs`*

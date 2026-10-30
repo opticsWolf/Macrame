@@ -1322,9 +1322,6 @@ pub struct Database {
     ///
     /// [D-288]: ../../docs/architecture/s13-decision-register.md#d-288
     cold_blob_reader: tokio::sync::Mutex<Option<libsql::Connection>>,
-    /// A `SQLITE_OPEN_READ_ONLY` connection for the valid-axis folds, once an
-    /// archive exists (0.19.5, D-298); see [`Database::with_valid_fold_conn`].
-    valid_fold_conn: tokio::sync::Mutex<Option<libsql::Connection>>,
     /// [`Tuning::max_blob_bytes`], resolved.
     max_blob_bytes: usize,
     writer: Option<tokio::task::JoinHandle<()>>,
@@ -1894,7 +1891,6 @@ impl Database {
             reader_cache_size,
             diagnostic_conn: tokio::sync::Mutex::new(None),
             cold_blob_reader: tokio::sync::Mutex::new(None),
-            valid_fold_conn: tokio::sync::Mutex::new(None),
             max_blob_bytes,
             writer: Some(writer),
             cadence_stop,
@@ -2912,12 +2908,7 @@ impl Database {
         let conn = match slot.as_ref() {
             Some(conn) => conn.clone(),
             None => {
-                let db = libsql::Builder::new_local(&self.archive_path)
-                    .flags(libsql::OpenFlags::SQLITE_OPEN_READ_ONLY)
-                    .build()
-                    .await?;
-                let conn = db.connect()?;
-                configure_common(&conn, self.reader_cache_size).await?;
+                let conn = self.open_read_only(&self.archive_path).await?;
                 *slot = Some(conn.clone());
                 conn
             }
@@ -2935,43 +2926,45 @@ impl Database {
         res
     }
 
+    /// A `SQLITE_OPEN_READ_ONLY` connection on `path`, configured as the readers
+    /// are: the one opener for the side connections (0.19.6, D-299).
+    async fn open_read_only(&self, path: &Path) -> Result<libsql::Connection> {
+        let db = libsql::Builder::new_local(path)
+            .flags(libsql::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .build()
+            .await?;
+        let conn = db.connect()?;
+        configure_common(&conn, self.reader_cache_size).await?;
+        Ok(conn)
+    }
+
     /// Run a valid-axis fold on a connection no other reader shares (0.19.5,
-    /// D-298).
+    /// D-298; 0.19.6, D-299).
     ///
     /// The valid fold ATTACHes the archive on every call once one exists, and the
     /// ATTACH region is per-connection and unsynchronised, so two such reads on
     /// `read_conn` could DETACH the handle under each other: the hazard the cadence
-    /// and [`Self::with_cold_blobs`] were given connections of their own for. With
-    /// no archive file nothing is attached and `read_conn` serves. Otherwise the
-    /// valid reads take turns on one read-only connection, opened on first use and
-    /// dropped after an engine error so the next call reopens it.
+    /// and [`Self::with_cold_blobs`] were given connections of their own for.
+    ///
+    /// Whether to attach is decided **once, here**, and `f` is told it: with no
+    /// archive file `read_conn` serves and the fold never attaches, so an archive
+    /// created mid-call cannot put an ATTACH on the shared connection. Such a
+    /// call, refused because the hot log no longer holds everything, is run again
+    /// with the archive. With an archive each call opens its own connection, so
+    /// valid reads run side by side; the open is small next to a hot and cold fold.
     async fn with_valid_fold_conn<T, F, Fut>(&self, f: F) -> Result<T>
     where
-        F: FnOnce(libsql::Connection) -> Fut,
+        F: Fn(libsql::Connection, bool) -> Fut,
         Fut: std::future::Future<Output = Result<T>>,
     {
-        if !crate::temporal::archive::archive_present(&self.archive_path) {
-            return f(self.read_conn.clone()).await;
-        }
-        let mut slot = self.valid_fold_conn.lock().await;
-        let conn = match slot.as_ref() {
-            Some(conn) => conn.clone(),
-            None => {
-                let db = libsql::Builder::new_local(&self.path)
-                    .flags(libsql::OpenFlags::SQLITE_OPEN_READ_ONLY)
-                    .build()
-                    .await?;
-                let conn = db.connect()?;
-                configure_common(&conn, self.reader_cache_size).await?;
-                *slot = Some(conn.clone());
-                conn
+        let archived = crate::temporal::archive::archive_present(&self.archive_path);
+        if !archived {
+            let res = f(self.read_conn.clone(), false).await;
+            if res.is_ok() || !crate::temporal::archive::archive_present(&self.archive_path) {
+                return res;
             }
-        };
-        let res = f(conn).await;
-        if matches!(res, Err(DbError::Engine(_))) {
-            *slot = None;
         }
-        res
+        f(self.open_read_only(&self.path).await?, true).await
     }
 
     /// A handle on one lineage (§15.4, 0.14.9, [D-226]).
@@ -3568,14 +3561,21 @@ impl Database {
             .map(ConceptUpsert::normalized)
             .collect::<Result<_>>()
             .map_err(before_any_chunk)?;
-        // Every row of one concept travels in one chunk, so the guard judges a
-        // concept's part of the batch whole and its verdict cannot depend on where
-        // an adaptive boundary falls (D-298). Input order is kept, so `written`
+        // The batch against itself, whole and before any chunk commits: once its
+        // repeats are split across chunks no one chunk sees the contradiction
+        // (D-291's gate 3, kept by D-299).
+        reject_concept_overlaps_within(&concepts).map_err(before_any_chunk)?;
+        // No two rows of one concept share a chunk (D-299). One chunk is one
+        // transaction and one stamp, and the projection holds one row per concept,
+        // so a second row there is refused by the monotonic `recorded_at` trigger.
+        // A repeat starts the next chunk instead: the batch is its rows applied in
+        // order wherever the adaptive boundaries fall, so its verdict cannot depend
+        // on them, and chunks only ever shrink. Input order is kept, so `written`
         // is still a prefix of what the caller passed.
-        let group_end = concept_group_ends(&concepts);
-        self.low_chunked_grouped(
+        let prev = concept_previous_rows(&concepts);
+        self.low_chunked_split(
             concepts,
-            &group_end,
+            &prev,
             chunk_rows::CONCEPTS,
             control,
             |chunk, responder| LowPriCommand::WriteConceptsChunk { chunk, responder },
@@ -3611,8 +3611,10 @@ impl Database {
     /// instant it asks about, so this reports the overlaps no read has reached yet.
     /// A ledger written through the write guard returns none.
     pub async fn verify_concept_intervals(&self) -> Result<Vec<crate::ConceptOverlap>> {
-        self.with_valid_fold_conn(|conn| async move {
-            crate::temporal::concept_interval_overlaps(&conn, Some(&self.archive_path)).await
+        let archive_path = self.archive_path.as_path();
+        self.with_valid_fold_conn(|conn, archived| async move {
+            crate::temporal::concept_interval_overlaps(&conn, archived.then_some(archive_path))
+                .await
         })
         .await
     }
@@ -3655,12 +3657,14 @@ impl Database {
             .await;
         };
         let valid = timestamp::normalize(&valid)?;
-        self.with_valid_fold_conn(|conn| async move {
+        let (valid, recorded) = (valid.as_str(), recorded.as_deref());
+        let archive_path = self.archive_path.as_path();
+        self.with_valid_fold_conn(|conn, archived| async move {
             crate::temporal::reconstruct_valid(
                 &conn,
-                &valid,
-                recorded.as_deref(),
-                Some(&self.archive_path),
+                valid,
+                recorded,
+                archived.then_some(archive_path),
             )
             .await
         })
@@ -4497,19 +4501,20 @@ impl Database {
         control: BulkControl,
         make: impl Fn(Vec<T>, oneshot::Sender<Result<ChunkOutcome>>) -> LowPriCommand,
     ) -> BulkResult<usize> {
-        self.low_chunked_grouped(items, &[], ceiling, control, make)
+        self.low_chunked_split(items, &[], ceiling, control, make)
             .await
     }
 
-    /// [`Self::low_chunked`] with no boundary inside a group (0.19.5, D-298).
+    /// [`Self::low_chunked`] with no two items of one group in a chunk (0.19.6,
+    /// D-299).
     ///
-    /// `group_end[i]` is the index of the last item in item `i`'s group, and a
-    /// chunk grows past its size until it holds the last item of every group it
-    /// started. An empty slice is no grouping.
-    async fn low_chunked_grouped<T>(
+    /// `prev[i]` is the index of the previous item in item `i`'s group, and a
+    /// chunk ends before an item whose previous one it already holds. So a chunk
+    /// is never larger than its adaptive size, and an empty slice is no grouping.
+    async fn low_chunked_split<T>(
         &self,
         items: Vec<T>,
-        group_end: &[usize],
+        prev: &[Option<usize>],
         ceiling: usize,
         control: BulkControl,
         make: impl Fn(Vec<T>, oneshot::Sender<Result<ChunkOutcome>>) -> LowPriCommand,
@@ -4521,12 +4526,10 @@ impl Database {
         let mut start = 0usize;
         loop {
             let mut end = (start + size).min(total);
-            let mut i = start;
-            while i < end {
-                if let Some(&last) = group_end.get(i) {
-                    end = end.max(last + 1);
-                }
-                i += 1;
+            if let Some(repeat) =
+                (start + 1..end).find(|&i| matches!(prev.get(i), Some(Some(p)) if *p >= start))
+            {
+                end = repeat;
             }
             let chunk: Vec<T> = items.by_ref().take(end - start).collect();
             start = end;
@@ -6379,17 +6382,15 @@ async fn check_batch_against_ledger(
     Ok(())
 }
 
-/// For each concept row, the index of the last row of the same (lineage, id), so
-/// the chunker can keep a concept's rows together (0.19.5, D-298).
-fn concept_group_ends(concepts: &[ConceptUpsert]) -> Vec<usize> {
-    let mut last: std::collections::HashMap<(&str, &str), usize> =
+/// For each concept row, the index of the previous row of the same (lineage, id),
+/// so the chunker can put a repeat in a chunk of its own (0.19.6, D-299).
+fn concept_previous_rows(concepts: &[ConceptUpsert]) -> Vec<Option<usize>> {
+    let mut seen: std::collections::HashMap<(&str, &str), usize> =
         std::collections::HashMap::new();
-    for (i, concept) in concepts.iter().enumerate() {
-        last.insert((concept.branch_name(), concept.id.as_str()), i);
-    }
     concepts
         .iter()
-        .map(|c| last[&(c.branch_name(), c.id.as_str())])
+        .enumerate()
+        .map(|(i, c)| seen.insert((c.branch_name(), c.id.as_str()), i))
         .collect()
 }
 
