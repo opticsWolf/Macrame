@@ -1,6 +1,6 @@
 # Macrame — Architecture Quick Reference
 
-**v0.18.0 · A Bitemporal Graph Ledger on libSQL**
+**v0.19.4 · A Bitemporal Graph Ledger on libSQL**
 
 ---
 
@@ -242,6 +242,8 @@ pub struct ConceptUpsert {
     pub valid_from: String,
     pub valid_to: String,
     pub retired: bool,
+    pub branch: Option<BranchId>,    // 0.14.8, D-225 -- `None` is the trunk
+    pub extra: Option<String>,       // 0.18.0, D-278 -- JSON object, schema v21
 }
 
 impl ConceptUpsert {
@@ -250,7 +252,9 @@ impl ConceptUpsert {
     pub fn embedding_model(mut self, model: impl Into<String>) -> Self
     pub fn valid_from(mut self, ts: impl Into<String>) -> Self
     pub fn valid_to(mut self, ts: impl Into<String>) -> Self
+    pub fn on_branch(mut self, branch: BranchId) -> Self
     pub fn retired(mut self, retired: bool) -> Self
+    pub fn extra(mut self, extra: impl Into<String>) -> Self
     pub fn normalized(mut self) -> Result<Self>
 }
 
@@ -263,6 +267,10 @@ impl Database {
 **`normalized()`**: Validates and normalizes the concept — edge types are checked against `[A-Za-z0-9_:.\-]+` — one case per kind, 64 characters at most — identifiers are validated, timestamps are canonicalized.
 
 **`write_concepts()`**: Low-priority chunked write for analytics write-back. Each chunk commits under its own `recorded_at`; not transaction-time atomic. Since 0.12.0 the chunk boundaries are machine-dependent, so the number of stamps is not reproducible across runs (§5.1.6).
+
+**`extra`** (0.18.0, [D-278](architecture/s13-decision-register.md#d-278), schema v21): a JSON **object** on the concept, logged like every other column — it is ledger data, not a side table, so it folds and reconstructs with the row. Four rules travel with it. It is an object or absent, never a bare scalar or array. **Omission preserves rather than clears** ([D-283](architecture/s13-decision-register.md#d-283)): `None` on an upsert leaves a stored `extra` standing, because the upsert arm is how every unrelated write arrives and a column that cleared itself on omission would make every title edit a silent data loss; passing `{}` is how a caller actually empties it. The size ceiling is **per shape, not global** ([D-285](architecture/s13-decision-register.md#d-285)). And an application that wants to index inside it registers an expression index that **re-asserts on open and keeps no registry** ([D-284](architecture/s13-decision-register.md#d-284)), so the database file never holds a dangling reference to an index this crate would have to know about.
+
+On the read side `extra` is **opt-in on the subgraph path, and the type says so** ([D-286](architecture/s13-decision-register.md#d-286)) — the same reasoning as `content` (D-116, D-123): `None` must mean *not loaded* and cannot be faked with an empty object, which is a legal value.
 
 ### 5.3 Edges
 
@@ -496,6 +504,28 @@ impl Database {
 **`hydrate_attributes()`**: Attributes for a result set, per `AttributeMode`. Under `AtTime` with `as_of.recorded` set it folds the hot `transaction_log`, so it raises `RecordedInstantUnreachable` once rows have been archived out of it (0.13.16, [D-189](architecture/s13-decision-register.md#d-189)) — the same refusal `as_of_recorded` makes, at the surface that fixes the *text* rather than the topology. The other three cells read live `concepts` and are unaffected.
 
 **`reconstruct()`**: Transaction-time replay from `transaction_log`. Composes from newest snapshot at or before `ts` plus anchored fold. Requires `archive_path` if history extends before the archive cutoff.
+
+**`reconstruct_as_of(at: AsOf)`** (0.19.3, [D-292](architecture/s13-decision-register.md#d-292)): the **bitemporal** reconstruction — *what did we believe at `recorded` about what was true at `valid`*. The state fold learned the valid axis to do it: `VALID_FOLD` extends the fold's `ROW_NUMBER() OVER (PARTITION BY …)` with `json_extract(payload, '$.valid_from')`, so each valid start keeps its own current belief instead of the row collapsing to one, and the selection among those starts happens in Rust (`fold_valid_delta`). `HOT_FOLD` is untouched and byte-identical, so a reconstruction that names no valid instant costs exactly what it did before. With `at.valid` absent this delegates to `reconstruct`. The bound moved into the method's own text in 0.19.3 ([D-293](architecture/s13-decision-register.md#d-293)), where the plan's measurements were re-taken against the shape that actually ships rather than the one the plan projected.
+
+**`verify_concept_intervals()`** (0.19.2, [D-291](architecture/s13-decision-register.md#d-291)): returns `Vec<ConceptOverlap>`. The invariant it checks is **one belief per valid start, and at most one open interval** — the concept counterpart of `trg_links_single_open`, which has no concept twin, so this is enforced in the actor and reported here rather than by a trigger.
+
+```rust
+pub struct ConceptOverlap {
+    pub id: String,
+    pub valid_from: String,
+    pub valid_to: String,
+    pub existing_from: String,
+    pub existing_to: String,
+    pub provenance: OverlapProvenance,   // 0.19.4, D-295
+}
+
+#[non_exhaustive]
+pub enum OverlapProvenance { AlreadyRecorded, SameBatch, BothRecorded }
+```
+
+**Why the provenance is an enum and not a bool** (0.19.4, [D-295](architecture/s13-decision-register.md#d-295)): edges' `Overlap` carries `within_batch: bool`, which has exactly two stories to tell — *you asserted this against something stored*, or *against something else in this same batch*. The read path has a third: **the ledger holds both intervals and the caller asserted neither**. A bool forced that case to borrow write vocabulary, so a refused *read* printed "the asserted … is already recorded" about two rows the caller never wrote. The falsehood was in the half of the sentence *before* the clause, which is why `ConceptOverlap` grew a `subject()` alongside `clause()` rather than just another message. `ConceptOverlap` had never shipped when this landed, so widening it cost no compatibility; `Overlap` **has** shipped and keeps its bool, which leaves the link arm of the valid fold still wording a read as a write — deferred and recorded, not fixed.
+
+**Historical loads hydrate belief-at-instant** (0.19.1, [D-289](architecture/s13-decision-register.md#d-289), [D-290](architecture/s13-decision-register.md#d-290)), gated on `as_of_recorded`: a loader asked for a past instant returns what was believed then, and `execute_ids`' node projections match the loader at instants by reusing the recorded slot rather than growing a second one.
 
 **`reconstruct_on(ts, branch)`** (0.15.17, [D-259](architecture/s13-decision-register.md#d-259)): the same replay, for **one lineage's view**. `reconstruct` returns every lineage's belief unresolved — the nearest-ancestor rule lived only inside the readers' SQL, so a caller holding a `MaterializedState` on a forked database had rows a reader would never see. This folds with the ancestry joined in, each ancestor cut at its own fork point, and `edges` comes back resolved: one belief per key, held by the nearest lineage that has one. It agrees edge for edge with `db.edges(ReadPlan::new().on(branch)…)`, which is what its test asserts.
 
@@ -873,11 +903,19 @@ The surface itself *is* pinned: `tests/doc_sync_tests.rs` fails the build when t
 | **NaN is not a schema gap** | D-078 | `weight REAL NOT NULL` rejects NaN; listing it as a gap claimed the schema was silent where it is strict |
 | **`weight >= 0.0` via `CHECK`** | D-083 | Schema v7 closes the third §4.7 invariant; negative and text weights refused at engine level |
 | ~~**Deferred: `rowid_pk` (D-084)**~~ | D-084 → **D-119** | **Both halves landed.** `rowid_pk` shipped on the `v7 → v8` rung in 0.8.0, *ahead* of its stated trigger, because D-036 forbids a primary-key change after 1.0; concept archival — the trigger — shipped in 0.9.0 (D-128…D-132) |
+| **Edge kinds may be namespaced, in one case, up to 64 chars** | D-279 | `okf:cites` without a rename step; one case per kind narrows the near-miss class but does not close it (`okf:cites` vs `OKF:CITES` still differ), and the cap refuses only new writes because nothing re-validates a stored kind |
+| **`concepts.extra` is ledger data, not a side table** | D-278 | It folds and reconstructs with the row; omission preserves (D-283) so an unrelated title edit is not a silent delete |
+| **The payload ceiling is per shape, not global** | D-285 | One global number either refuses a legal concept or admits an abusive edge; the shapes have different budgets |
+| **`kv_store` has no log trigger, no archive, no `branch_id`** | D-280 | Operational state is not a ledger fact; giving it ledger machinery would make it replay |
+| **A concept has one belief per valid start, one open interval** | D-291 | The concept counterpart of `trg_links_single_open`, which has no concept twin — enforced in the actor, reported by `verify_concept_intervals` |
+| **The state fold learned the valid axis** | D-292 | `VALID_FOLD` partitions on `valid_from` too, so each valid start keeps its own belief; `HOT_FOLD` is byte-identical, so the non-bitemporal path costs what it did |
+| **Overlap provenance is a three-state enum, not a bool** | D-295 | A refused *read* has no asserter, so a bool made it print write vocabulary about two stored rows; `Overlap` keeps its bool because it had already shipped |
+| **Two CI jobs pin the toolchain; the rest track a channel** | D-296 | A job whose answer is *produced by* the toolchain (a sanitizer build, a surface rendered through rustc) must name it, or it changes its answer with no commit behind the change |
 | **Deferred: `Subgraph` interning (D-087)** | D-087 | Deferred to 0.7.0 — cost/benefit assessed post-baseline, `hydrate`'s N+1 buries it |
 
 ---
 
-## 10. Python Bindings (v0.12.0)
+## 10. Python Bindings
 
 A synchronous Python binding built on pyo3 0.29 and maturin, delivered as a wheel alongside the Rust crate. The binding is **synchronous** (D-095): the Write Actor serialises every write through one channel, so exposing `await` on the write path advertises concurrency the architecture does not grant. A mixed async/sync surface is worse than either pure form.
 
@@ -894,6 +932,8 @@ A synchronous Python binding built on pyo3 0.29 and maturin, delivered as a whee
 **Packaging.** Distribution `macrame-db`, import `macrame`. Wheels: `manylinux_2_28` x86_64 + aarch64, macOS universal2, Windows x86_64. `abi3-py310` (D-094): one wheel per platform rather than one per Python minor version. The wheel ships with `metrics` on (D-093) because a feature flag does not survive into a binary artifact. Smoke test asserts `engine_linked()` and `metrics().turns > 0` — a wheel that imports but has no engine or no counters would pass a bare import test. Cold build ~54–62 s; wheel 4.3 MiB compressed. Uploads use Trusted Publishing (OIDC), no token stored.
 
 **Testing.** `tests_py/` runs single-process (no xdist), because `pytest-xdist` opens a database per worker — exactly the concurrent-open shape that reproduces R15. R15 is transparent to the boundary: `block_on` releases the GIL, so 48 concurrent opens from 48 threads fault 2/12, matching the Rust control arm. The gate (`run_suite.py`) checks summary, failure count, collected count and exit code against each other, naming four outcomes (`CRASH`, `FAILED`, `INCOMPLETE`, `TEARDOWN`) and retrying only `CRASH`. The reporting hazard differs from Rust: pytest runs one process, so a mid-run crash gives exit code 3 with no summary line (exit code *is* sufficient), but a fault during interpreter teardown after a green summary gives a green summary with non-zero exit (exit code alone is wrong).
+
+**The valid axis at the boundary** (0.19.3/0.19.4, [D-294](architecture/s13-decision-register.md#d-294), [D-295](architecture/s13-decision-register.md#d-295)). `reconstruct_as_of` takes **both instants by keyword**, so neither clock can be passed positionally into the other's slot — the mistake D-174 split the Rust method to prevent. `verify_concept_intervals` reports overlaps as `ConceptOverlap` objects. Provenance crosses as a **string** (`"already_recorded"`, `"same_batch"`, `"both_recorded"`), not an enum class, because `OverlapProvenance` is `#[non_exhaustive]` and cannot be matched exhaustively outside `macrame-db`: the wildcard arm in `provenance_name` is required, not defensive. `OverlappingIntervalError` keeps its `within_batch` bool, matching the Rust `Overlap` it maps.
 
 **Stubs.** Hand-written `_macrame.pyi`, compared to the live extension both ways and to `errors.rs`, verified by five injection tests. `mypy --strict` in CI. `py.typed` marker ensures stubs are consulted. Stub conventions: timestamps **in** are `str | datetime` (aware only), **out** are always aware UTC `datetime`; open interval is `None`; `astar`'s heuristic is `Callable[[str, str], float]`.
 
@@ -914,8 +954,9 @@ A synchronous Python binding built on pyo3 0.29 and maturin, delivered as a whee
 | **`Subgraph` as opaque handle** | D-101 | Delivered in P4.2 — converting eagerly doubles peak memory |
 | **`astar` heuristic** | D-104 | Resolved: does not release GIL; raising heuristic captured and re-raised; `NaN` refused by name |
 | **`traverse` vs `traverse_ids`** | D-102, D-103 | `OMIT` on `traverse` is refused (points to `traverse_ids`); unstated `min_weight` is `-inf`, not `0.0` |
+| **`Overlap` keeps its bool** | D-295 | Deferred — the edge overlap had already shipped `within_batch: bool`, so the link arm of the valid fold still words a refused read as a refused write. Closing it is a breaking change to a shipped field, and waits for one |
 | **`ChainCheck` anchors** | D-105 | `composed_anchor` and `folded_anchor` may legitimately differ and must never be compared — `diverged()` is the method |
 
 ---
 
-*Last updated: 2026-08-08 · v0.12.0 · Synced against architecture (s4–s14, appendices A–C) · Pinned by `tests/doc_sync_tests.rs` and `tests/perf_claim_tests.rs`*
+*Last updated: 2026-10-30 · v0.19.4 · Synced against architecture (s4–s14, appendices A–C) · Pinned by `tests/doc_sync_tests.rs` and `tests/perf_claim_tests.rs`*
