@@ -434,7 +434,7 @@ async fn the_hot_fold_answers_the_rule_for_its_marked_pairs() {
     // A mark with no log rows: the correction must answer nothing for it.
     mark_disordered(&db, "src/ghost.rs", "main").await;
 
-    let state = reconstruct(&db.read_conn(), FAR, None, None).await.unwrap();
+    let state = reconstruct(db.read_conn(), FAR, None, None).await.unwrap();
     assert_eq!(
         state.concepts["src/a.rs"].title, "C2",
         "the marked pair answers with the rule row, not the seq winner"
@@ -466,7 +466,7 @@ async fn a_ledger_without_the_marks_table_folds_unchanged() {
     // not a ledger that never created one.
     drop_marks_table(&db).await;
 
-    let state = reconstruct(&db.read_conn(), FAR, None, None).await.unwrap();
+    let state = reconstruct(db.read_conn(), FAR, None, None).await.unwrap();
     assert_eq!(
         state.concepts["src/a.rs"].title, "C1",
         "the plain fold is the last writer, which is what this ledger is"
@@ -488,7 +488,7 @@ async fn an_empty_marks_table_folds_without_the_correction() {
     upsert(&db, concept("src/a.rs", "second", JUN, None)).await;
     ensure_marks_table(&db).await;
 
-    let state = reconstruct(&db.read_conn(), FAR, None, None).await.unwrap();
+    let state = reconstruct(db.read_conn(), FAR, None, None).await.unwrap();
     assert_eq!(
         state.concepts["src/a.rs"].title, "second",
         "the greatest start is also the last write here, so the rules agree"
@@ -552,10 +552,10 @@ async fn a_pair_without_a_mark_folds_exactly_as_the_plain_fold() {
     // plain fold answers the January row, the rule window would answer the
     // August one.
     raw_log_row(&db, "src/raw.rs", "real", AUG, None, JAN).await;
-    let later = bump_us(&JAN);
+    let later = bump_us(JAN);
     raw_log_row(&db, "src/raw.rs", "written-last", JAN, None, &later).await;
 
-    let state = reconstruct(&db.read_conn(), FAR, None, None).await.unwrap();
+    let state = reconstruct(db.read_conn(), FAR, None, None).await.unwrap();
     assert_eq!(
         state.concepts["src/raw.rs"].title, "written-last",
         "without a mark the pair is nobody's business: the fold is the plain \
@@ -579,7 +579,7 @@ async fn at_time_hydration_answers_the_rule_for_marked_pairs() {
     mark_disordered(&db, "src/a.rs", "main").await;
 
     let attrs = hydrate_attributes(
-        &db.read_conn(),
+        db.read_conn(),
         &["src/a.rs".to_string()],
         &AsOf::recorded_at(FAR),
         AttributeMode::AtTime,
@@ -640,7 +640,7 @@ async fn the_projection_and_the_fold_agree_only_when_the_mark_holds() {
 
     // The write path's own mark: the fold and the projection agree, and the
     // projection is the one the rule answers.
-    let marked = reconstruct(&db.read_conn(), FAR, None, None).await.unwrap();
+    let marked = reconstruct(db.read_conn(), FAR, None, None).await.unwrap();
     assert_eq!(marked.concepts["src/a.rs"].title, "C2");
     let (title, from, to, fts_title) = projection(&db, "src/a.rs").await;
     assert_eq!(title, "C2");
@@ -654,7 +654,7 @@ async fn the_projection_and_the_fold_agree_only_when_the_mark_holds() {
     // hand-marks helper because the write path is what restored the mark.
     drop_marks_table(&db).await;
     ensure_marks_table(&db).await;
-    let unmarked = reconstruct(&db.read_conn(), FAR, None, None).await.unwrap();
+    let unmarked = reconstruct(db.read_conn(), FAR, None, None).await.unwrap();
     assert_eq!(
         unmarked.concepts["src/a.rs"].title, "C1",
         "without the mark the fold is yesterday's answer"
@@ -669,7 +669,7 @@ async fn the_projection_and_the_fold_agree_only_when_the_mark_holds() {
     // One more skipped write: the mark returns by the same signal that
     // writes the log row, and the identity is back.
     upsert(&db, concept("src/a.rs", "C1c", JAN, Some(JUN))).await;
-    let remarked = reconstruct(&db.read_conn(), FAR, None, None).await.unwrap();
+    let remarked = reconstruct(db.read_conn(), FAR, None, None).await.unwrap();
     assert_eq!(
         remarked.concepts["src/a.rs"].title, "C2",
         "the write path re-marks the pair on its next skip"
@@ -750,7 +750,7 @@ async fn past_reads_never_change_around_a_backfill_and_its_heal() {
     mark_disordered(&db, "src/a.rs", "main").await;
 
     // Read at the stamped instant: only pre-backfill rows can answer.
-    let before = reconstruct(&db.read_conn(), &open_stamp, None, None)
+    let before = reconstruct(db.read_conn(), &open_stamp, None, None)
         .await
         .unwrap();
 
@@ -759,7 +759,7 @@ async fn past_reads_never_change_around_a_backfill_and_its_heal() {
     // open row rather than the heal.
     upsert(&db, concept("src/a.rs", "C4-heals", JUN, None)).await;
 
-    let after_heal = reconstruct(&db.read_conn(), &open_stamp, None, None)
+    let after_heal = reconstruct(db.read_conn(), &open_stamp, None, None)
         .await
         .unwrap();
     assert_eq!(
@@ -775,7 +775,7 @@ async fn past_reads_never_change_around_a_backfill_and_its_heal() {
 
     // At the present the rule answers the healing write: same start, so it
     // is the correction and it is the state.
-    let now_state = reconstruct(&db.read_conn(), FAR, None, None).await.unwrap();
+    let now_state = reconstruct(db.read_conn(), FAR, None, None).await.unwrap();
     assert_eq!(now_state.concepts["src/a.rs"].title, "C4-heals");
 
     db.close().await.unwrap();
@@ -795,7 +795,7 @@ async fn the_rule_row_retires_the_concept_from_the_fold() {
     upsert(&db, retire).await;
     mark_disordered(&db, "src/a.rs", "main").await;
 
-    let state = reconstruct(&db.read_conn(), FAR, None, None).await.unwrap();
+    let state = reconstruct(db.read_conn(), FAR, None, None).await.unwrap();
     assert!(
         !state.concepts.contains_key("src/a.rs"),
         "a retired row from the correction removes the concept like a fold row would"
@@ -891,7 +891,7 @@ async fn a_bounded_read_never_moves_around_the_archive_pass() {
 
     // And the present answers the heal, the fold and the projection thing as
     // one, with the mark still standing.
-    let now_state = reconstruct(&db.read_conn(), FAR, None, None).await.unwrap();
+    let now_state = reconstruct(db.read_conn(), FAR, None, None).await.unwrap();
     assert_eq!(now_state.concepts["src/a.rs"].title, "C2-heal");
     let (title, from, to, fts_title) = projection(&db, "src/a.rs").await;
     assert_eq!(

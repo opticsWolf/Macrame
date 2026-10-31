@@ -1617,7 +1617,7 @@ async fn a_pre_rule_snapshot_is_refused_and_reconstruct_folds_from_the_log() {
     // own read of this ledger — the seq winner.
     drop_marks_table(&db).await;
     ensure_marks_table(&db).await;
-    let pre_rule = reconstruct(&db.read_conn(), &ts, None, None).await.unwrap();
+    let pre_rule = reconstruct(db.read_conn(), &ts, None, None).await.unwrap();
     assert_eq!(
         pre_rule.concepts["src/a.rs"].title, "C1",
         "without marks the fold is yesterday's answer"
@@ -1628,9 +1628,7 @@ async fn a_pre_rule_snapshot_is_refused_and_reconstruct_folds_from_the_log() {
     // The mark returns — what the v24 rung's fill leaves, and what this
     // build's own write path leaves — and the ledger answers the rule now.
     mark_disordered(&db, "src/a.rs", "main").await;
-    let with_mark = reconstruct(&db.read_conn(), &far, None, None)
-        .await
-        .unwrap();
+    let with_mark = reconstruct(db.read_conn(), far, None, None).await.unwrap();
     assert_eq!(with_mark.concepts["src/a.rs"].title, "C2");
 
     // The snapshot still carries the 0.20.0 fold *and* this build's stamp:
@@ -1641,7 +1639,7 @@ async fn a_pre_rule_snapshot_is_refused_and_reconstruct_folds_from_the_log() {
     // refusal is the honest move even when this build could rescue it, and it
     // is the honest move by D-032's own rule, not a warning.
     let anchor_ts = max_recorded_at_stamped(&db).await;
-    let composed_wrong = reconstruct(&db.read_conn(), &anchor_ts, None, Some(&snaps))
+    let composed_wrong = reconstruct(db.read_conn(), &anchor_ts, None, Some(&snaps))
         .await
         .unwrap();
     assert_eq!(
@@ -1667,10 +1665,10 @@ async fn a_pre_rule_snapshot_is_refused_and_reconstruct_folds_from_the_log() {
 
     // And the read that found it skipped it: the answer is the genesis fold's
     // answer, which — since the pair is marked — is the rule row.
-    let read = reconstruct(&db.read_conn(), &anchor_ts, None, Some(&snaps))
+    let read = reconstruct(db.read_conn(), &anchor_ts, None, Some(&snaps))
         .await
         .unwrap();
-    let genesis = reconstruct(&db.read_conn(), &anchor_ts, None, None)
+    let genesis = reconstruct(db.read_conn(), &anchor_ts, None, None)
         .await
         .unwrap();
     assert_eq!(
@@ -1703,7 +1701,7 @@ async fn a_v24_snapshot_composes_a_backfilled_ledger_to_the_genesis_fold() {
 
     // The snapshot at the backfill instant: the rule row, on both sides.
     let ts = max_recorded_at_stamped(&db).await;
-    let base = reconstruct(&db.read_conn(), &ts, None, None).await.unwrap();
+    let base = reconstruct(db.read_conn(), &ts, None, None).await.unwrap();
     assert_eq!(base.concepts["src/a.rs"].title, "C2");
     let snaps = harness.temp_dir.path().join("gate7-compose");
     save_snapshot(&snaps, &base).unwrap();
@@ -1718,10 +1716,10 @@ async fn a_v24_snapshot_composes_a_backfilled_ledger_to_the_genesis_fold() {
     );
 
     for (ts, want) in [(ts.as_str(), "C2"), ("2027-01-01T00:00:00.000000Z", "C2b")] {
-        let composed = reconstruct(&db.read_conn(), ts, None, Some(&snaps))
+        let composed = reconstruct(db.read_conn(), ts, None, Some(&snaps))
             .await
             .unwrap();
-        let genesis = reconstruct(&db.read_conn(), ts, None, None).await.unwrap();
+        let genesis = reconstruct(db.read_conn(), ts, None, None).await.unwrap();
         assert_eq!(
             composed.concepts["src/a.rs"].title, want,
             "the composed read at {ts} stopped answering the rule: {}",

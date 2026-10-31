@@ -3229,7 +3229,7 @@ async fn an_ungated_blob_delete_guard_is_refused_at_open() {
 /// build ships already follows the rule: a `Database` open here would repair
 /// nothing and mark nothing, and the fixture would have nothing to find.
 async fn v23_ledger_with_backfill(harness: &TestHarness) -> libsql::Connection {
-    let conn = connect(&harness).await;
+    let conn = connect(harness).await;
     macrame::schema::run_migrations(&conn).await.unwrap();
     v11_schema::wind_back_to_v23(&conn).await;
 

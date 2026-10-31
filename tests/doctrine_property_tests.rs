@@ -245,7 +245,7 @@ async fn step(db: &Database, op: Op) {
                                 .valid_to(open_from.as_deref().unwrap()),
                         )
                         .await;
-                    mark_disordered(&db, entity, "main").await;
+                    mark_disordered(db, entity, "main").await;
                     return;
                 }
             }
