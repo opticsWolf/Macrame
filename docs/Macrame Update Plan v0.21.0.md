@@ -408,7 +408,9 @@ same epoch: **the never-clear steady state is ≈ +8% at 5% incidence**, the cor
 deep-history pathology keeps its order of magnitude (correction alone 8.3–15.3 ms at
 100% incidence; that station is noisy under any load). Both figures are provisional until
 the release bench re-measures them through criterion at implementation — that is where
-gate 9 signs.
+gate 9 signs. **Signed 2026-11-01 at the tag bench (idle machine): steady state
++9.5% at 5% incidence, +37.7% at 100% (a noisy station), healthy folds indistinguishable
+— gate 9's record carries the criterion rerun beside these.**
 
 Gate 8 grows named mutations: *mark left behind* (a skipped upsert that forgets the mark,
 caught by the rule-identity test), *correction run for an absent pair* (caught by
@@ -577,10 +579,24 @@ unblessed additions ride the same bless); the stability contract carries the fig
 9. **Release bench.** The write side's only shape-5 costs are the projection `WHERE`'s
    comparison on every write and one insert on a backfill: `write_path/upsert_concept`
    stays within 10% of the session baseline (`main-0.20.0`, 2026-10-31: 0.42 ms) and the
-   `concepts/70` chunk within 10% of 3.30 ms. The read side's steady state carries the
-   probe's preview (§3.6: ≈ +8% at 5% incidence, fully healed, and +44% at 100%
-   incidence) — **gate 9 signs on the criterion rerun at implementation**, which
-   re-measures fold, correction and writer in one harness against the same baseline.
+   `concepts/70` chunk within 10% of 3.30 ms. **Write side signed (2026-10-31, machine at
+   4%, criterion vs `main-0.20.0`):** `upsert_concept` 407–418 µs, median **−4.5%**
+   (p = 0.01); `chunk_scaling/concepts/70` 3.18–3.38 ms, median **+5.1%** (p = 0.15).
+   **Read side signed at the tag bench (2026-11-01, machine at 2%):** the same criterion
+   harness, with the replay stations' `main-0.20.0` baseline recorded on a worktree at
+   `v0.20.0` (full fold 16.59 ms, composed 2.98 ms) and re-measured on `dev/0.21.0`.
+   `reconstruct_full_fold` **+0.20%** (16.540 ms, p = 0.52 — none detected);
+   `reconstruct_composed` **+1.34%** (2.997 ms, p < 0.05 ≈ 40 µs — the owed-probe and
+   statement-prep visible only because the fold itself is unchanged). The probe's
+   stations, re-measured on the final code: healthy folds indistinguishable
+   (`bench_healthy` +0.6%, `mixed_log` −0.3%, `mixed_starts` clean −0.6%); the probe
+   alone 0.5 µs per 1,000 calls at bench size; at 5% incidence the disordered fold
+   reads +6.6% and the healed steady state **+9.5%** (10.81 vs 9.87 ms med at NOW,
+   marks persist 250 → 250, pre/post-heal stability Δ0 on both stations) — §3.6's
+   figure-of-record was ≈ +8%; at 100% incidence **+37.7%** (30.99 vs 22.50 ms,
+   bounded-vs-bounded; §3.6 recorded +44% on a station the plan itself calls noisy),
+   correction alone 8.0 ms for 400 pairs. §3.6's preview is confirmed in kind and in
+   order of magnitude, station-relative.
 10. **Suites and doc gates** green on both feature sets, with figures recorded against a
     baseline taken **before** P1 starts. 0.20.0 could not compare because it took none.
     (Run 2026-10-31 through the CI runner: default suite 901 passed across 67 targets,
