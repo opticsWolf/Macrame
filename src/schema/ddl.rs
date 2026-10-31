@@ -44,6 +44,11 @@ macro_rules! canonical_ts_check {
 ///
 /// [D-278]: ../../docs/architecture/s13-decision-register.md#d-278
 /// [D-285]: ../../docs/architecture/s13-decision-register.md#d-285
+/// Exported at the crate root because a caller outside this module — the
+/// write-side's self-inserted log row, [`concepts_log_payload!`] — composes
+/// with it, and a macro a distant site expands must resolve its own
+/// dependencies there too.
+#[macro_export]
 macro_rules! payload_v_concepts {
     () => {
         "3"
@@ -1855,6 +1860,39 @@ pub const CREATE_LINKS_SINGLE_OPEN: &str = concat!(
     "#
 );
 
+/// The `json_object(...)` body both concept-log writers share: the update
+/// trigger builds it from `NEW` and — 0.21.0, D-303 — the write path builds
+/// the same row itself when the projection's update is skipped (a backfill),
+/// because a skipped update fires no trigger and the log row is the write.
+/// One source for both writers is the whole point (D-056: two writers of one
+/// payload is the drift D-056 exists to prevent); the alias arrives as a
+/// literal so the trigger text stays byte-identical to the 0.20.0 body older
+/// files carry.
+#[macro_export]
+macro_rules! concepts_log_payload {
+    ($alias: literal) => {
+        concat!(
+            "json_object('v', ",
+            $crate::payload_v_concepts!(),
+            ", 'title', ",
+            $alias,
+            ".title, 'content', ",
+            $alias,
+            ".content,\n                            'valid_from', ",
+            $alias,
+            ".valid_from, 'valid_to', ",
+            $alias,
+            ".valid_to,\n                            'retired', ",
+            $alias,
+            ".retired,\n                            'embedding_model', ",
+            $alias,
+            ".embedding_model,\n                            'extra', json(",
+            $alias,
+            ".extra)"
+        )
+    };
+}
+
 /// The update half of the concepts log. See [`CREATE_CONCEPTS_LOG_INSERT`].
 ///
 /// Unconditional where its insert sibling is marker-gated, and the asymmetry is
@@ -1874,13 +1912,9 @@ pub const CREATE_CONCEPTS_LOG_UPDATE: &str = concat!(
     BEGIN
         INSERT INTO transaction_log (table_name, entity_id, operation, payload, recorded_at, branch_id)
         VALUES ('concepts', NEW.id, 'U',
-                json_object('v', "#,
-    payload_v_concepts!(),
-    r#", 'title', NEW.title, 'content', NEW.content,
-                            'valid_from', NEW.valid_from, 'valid_to', NEW.valid_to,
-                            'retired', NEW.retired,
-                            'embedding_model', NEW.embedding_model,
-                            'extra', json(NEW.extra)),
+                "#,
+    concepts_log_payload!("NEW"),
+    r#"),
                 NEW.recorded_at, NEW.branch_id);
     END;
 "#
@@ -2090,6 +2124,41 @@ mod tests {
     /// so this fails if a trigger is ever rewritten with the literal back in
     /// place of the macro — which is how the two came to need holding together
     /// in the first place.
+    #[test]
+    fn the_trigger_text_is_the_0_20_0_bytes_and_the_skip_path_composes_with_it() {
+        // Older files keep their own trigger body (the `IF NOT EXISTS` problem
+        // in this module's header), so the shipped text is now a compat
+        // surface twice over: the trigger this build creates and the payload
+        // the Rust self-insert writes behind the skipped projection update
+        // must read exactly like the trigger 0.20.0 files already run. Pin
+        // both, and pin that the alias is the only thing that changes.
+        const TRIGGER_GOLDEN: &str = r#"
+    CREATE TRIGGER IF NOT EXISTS trg_concepts_log_update
+    AFTER UPDATE ON concepts
+    BEGIN
+        INSERT INTO transaction_log (table_name, entity_id, operation, payload, recorded_at, branch_id)
+        VALUES ('concepts', NEW.id, 'U',
+                json_object('v', 3, 'title', NEW.title, 'content', NEW.content,
+                            'valid_from', NEW.valid_from, 'valid_to', NEW.valid_to,
+                            'retired', NEW.retired,
+                            'embedding_model', NEW.embedding_model,
+                            'extra', json(NEW.extra)),
+                NEW.recorded_at, NEW.branch_id);
+    END;
+"#;
+        assert_eq!(super::CREATE_CONCEPTS_LOG_UPDATE, TRIGGER_GOLDEN);
+
+        const PAYLOAD_GOLDEN: &str =
+            "json_object('v', 3, 'title', NEW.title, 'content', NEW.content,
+                            'valid_from', NEW.valid_from, 'valid_to', NEW.valid_to,
+                            'retired', NEW.retired,
+                            'embedding_model', NEW.embedding_model,
+                            'extra', json(NEW.extra)";
+        let from_trigger = PAYLOAD_GOLDEN.replace("NEW", "v0");
+        assert_eq!(crate::concepts_log_payload!("NEW"), PAYLOAD_GOLDEN);
+        assert_eq!(crate::concepts_log_payload!("v0"), from_trigger);
+    }
+
     #[test]
     fn each_payload_marker_matches_its_shape_constant() {
         assert_eq!(

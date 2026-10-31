@@ -5226,6 +5226,17 @@ fn edge_params<'a>(edge: &'a EdgeAssertion, stamp: &'a str) -> [libsql::Value; 9
 /// Shared by the single-concept write and the chunked one, so the two paths
 /// cannot drift into upserting different column sets — and so the chunk has a
 /// statement text it can prepare once (D-056).
+///
+/// The update arm carries a `WHERE` since 0.21.0 ([D-303]): **the projection
+/// follows the rule** — an equal start is a correction of the current belief,
+/// a later start is a new version, and an *earlier* start is a backfill that
+/// leaves the projection alone (`excluded.valid_from < concepts.valid_from`
+/// skips the update; SQLite reports it as zero changed rows and fires no
+/// update trigger). A skipped write still belongs in the log — the write path
+/// detects the zero and inserts the row itself through
+/// [`SKIP_BACKFILL_LOG`], whose payload is the trigger's own composed by
+/// [`concepts_log_payload!`]; the log must look like any other update, and
+/// D-056 forbids drift between the two writers.
 const UPSERT_CONCEPT: &str = "INSERT INTO concepts \
      (id, title, content, embedding_model, valid_from, valid_to, recorded_at, retired, \
       branch_id, extra) \
@@ -5238,7 +5249,8 @@ const UPSERT_CONCEPT: &str = "INSERT INTO concepts \
          valid_to = excluded.valid_to, \
          recorded_at = excluded.recorded_at, \
          retired = excluded.retired, \
-         extra = COALESCE(?10, concepts.extra)";
+         extra = COALESCE(?10, concepts.extra) \
+     WHERE excluded.valid_from >= concepts.valid_from";
 // `extra` is in that list and **reads the bind parameter, not `excluded`**
 // (0.18.0, D-283). `excluded.extra` is what the insert arm would have written
 // — `'{}'` when the caller said nothing — so assigning it like every other
@@ -5284,6 +5296,119 @@ fn concept_params<'a>(concept: &'a ConceptUpsert, stamp: &'a str) -> [libsql::Va
             .as_deref()
             .map_or(libsql::Value::Null, Into::into),
     ]
+}
+
+/// A skipped backfill still belongs in the log: this is the row the trigger
+/// would have written, written by the path that detected the skip — one
+/// statement, one transaction with the guard's refusal, payload composed by
+/// the same [`concepts_log_payload!`] the trigger body builds from (D-056;
+/// D-303, plan §3.2). The CTE row's columns reuse the projection row's
+/// spelling (`valid_from`, …) so the payload body is substitutable verbatim.
+const SKIP_BACKFILL_LOG: &str = concat!(
+    "WITH v0 (id, title, content, embedding_model, valid_from, valid_to, retired, extra, recorded_at) AS (VALUES \
+     (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)) \
+     INSERT INTO transaction_log (table_name, entity_id, operation, payload, recorded_at, branch_id) \
+     SELECT 'concepts', v0.id, 'U', ",
+    crate::concepts_log_payload!("v0"),
+    // The payload macro ends inside the `json_object`; the outer paren and
+    // the stamp follow here, as the trigger's own trailing piece does.
+    "), v0.recorded_at, ?10 FROM v0"
+);
+
+/// The skipped write's log row, in the order [`SKIP_BACKFILL_LOG`] binds: the
+/// caller's own asserted fields, the chosen `extra` (below), and the branch.
+fn skipped_backfill_params(
+    concept: &ConceptUpsert,
+    stamp: &str,
+    extra: Option<&str>,
+) -> [libsql::Value; 10] {
+    [
+        concept.id.as_str().into(),
+        concept.title.as_str().into(),
+        concept.content.as_str().into(),
+        concept
+            .embedding_model
+            .as_deref()
+            .map_or(libsql::Value::Null, Into::into),
+        concept.valid_from.as_str().into(),
+        concept.valid_to.as_str().into(),
+        (concept.retired as i64).into(),
+        extra.map_or(libsql::Value::Null, Into::into),
+        stamp.into(),
+        concept.branch_name().into(),
+    ]
+}
+
+/// A backfill's log row inherits the wrong version's attributes if it
+/// silently inherits the projection row's — D-278 made `extra` versioned, so
+/// preserve-on-omission (D-283) reads **within one start**: the caller's own
+/// extra when it bound one, otherwise the extra the latest *same-start* row
+/// already holds, otherwise the first-appearance default `{}`. A later write
+/// whose start carries no prior row is a new belief, not an attribute carry.
+async fn skipped_backfill_extra(
+    conn: &libsql::Connection,
+    concept: &ConceptUpsert,
+) -> Result<String> {
+    if let Some(extra) = concept.extra.as_deref() {
+        return Ok(extra.to_owned());
+    }
+    const SAME_START_EXTRA: &str = "SELECT json_extract(payload, '$.extra') \
+     FROM transaction_log \
+     WHERE table_name = 'concepts' AND entity_id = ?1 AND branch_id = ?2 \
+       AND json_extract(payload, '$.valid_from') = ?3 \
+     ORDER BY seq_id DESC LIMIT 1";
+    let mut rows = conn
+        .query(
+            SAME_START_EXTRA,
+            libsql::params![
+                concept.id.as_str(),
+                concept.branch_name(),
+                concept.valid_from.as_str()
+            ],
+        )
+        .await?;
+    let row = match rows.next().await? {
+        Some(row) => row,
+        None => return Ok("{}".to_owned()),
+    };
+    // The extract is NULL when the payload's extra is json null, which the
+    // schema cannot produce from a write (v3 spells `{}` at worst), but the
+    // default answers the case all the same: no same-start attributes to
+    // inherit.
+    let inherited = row
+        .get::<String>(0)
+        .ok()
+        .filter(|s| !s.is_empty() && s != "null")
+        .unwrap_or_else(|| "{}".to_owned());
+    Ok(inherited)
+}
+
+/// The write path handler for a zero-changed upsert: the backfill's log row.
+///
+/// Note what deliberately does **not** happen here: nothing clears or reads a
+/// helper table, and no decision computes whether this write heals a pair —
+/// the skipped projection upsert *is* the classification, and the never-
+/// cleared mark of the shape-5 read (§3.6 of the plan) inserts from this same
+/// signal once the v24 rung adds the table it lives in.
+async fn record_skipped_backfill(
+    conn: &libsql::Connection,
+    concept: &ConceptUpsert,
+    stamp: &str,
+) -> Result<()> {
+    let extra: String = skipped_backfill_extra(conn, concept).await?;
+    let changed = conn
+        .execute(
+            SKIP_BACKFILL_LOG,
+            skipped_backfill_params(concept, stamp, Some(extra.as_str())),
+        )
+        .await
+        .map_err(DbError::Engine)?;
+    debug_assert_eq!(
+        changed, 1,
+        "a skipped backfill's log insert wrote {changed}"
+    );
+    let _ = changed;
+    Ok(())
 }
 
 /// The `CREATE INDEX` for one validated JSON path.
@@ -6100,6 +6225,10 @@ async fn upsert_concept(
         .await;
 
     match res {
+        // Zero changed rows is the backfill branch: the projection's `WHERE`
+        // declined the update, no trigger fired, and the write still belongs
+        // in the log — so the path writes the row itself (D-303, §3.2).
+        Ok(0) => record_skipped_backfill(conn, concept, stamp).await,
         Ok(_) => Ok(()),
         Err(e) => Err(classify(
             conn,
@@ -6212,7 +6341,10 @@ async fn current_concept_intervals(
     branch: &str,
 ) -> Result<Vec<Interval>> {
     let mut rows = conn
-        .query(CURRENT_CONCEPT_INTERVALS, libsql::params![id, before, branch])
+        .query(
+            CURRENT_CONCEPT_INTERVALS,
+            libsql::params![id, before, branch],
+        )
         .await?;
     let mut intervals = Vec::new();
     while let Some(row) = rows.next().await? {
@@ -6251,9 +6383,11 @@ fn concept_clash(
             overlap: Box::new(pair()),
         });
     }
-    asserted.overlaps(existing).then(|| DbError::OverlappingConcept {
-        overlap: Box::new(pair()),
-    })
+    asserted
+        .overlaps(existing)
+        .then(|| DbError::OverlappingConcept {
+            overlap: Box::new(pair()),
+        })
 }
 
 /// Refuse proposed intervals that clash with `current`, the intervals the ledger
@@ -6261,7 +6395,9 @@ fn concept_clash(
 fn check_concept_against(id: &str, proposed: &[Interval], current: &[Interval]) -> Result<()> {
     for asserted in proposed {
         for existing in current {
-            if let Some(err) = concept_clash(id, asserted, existing, OverlapProvenance::AlreadyRecorded) {
+            if let Some(err) =
+                concept_clash(id, asserted, existing, OverlapProvenance::AlreadyRecorded)
+            {
                 return Err(err);
             }
         }
@@ -6280,13 +6416,9 @@ async fn reject_overlapping_concept(
     let asserted = concept_interval(concept);
     // A start at or after the asserted end cannot overlap it, so only earlier
     // starts are read. An open end admits all of them.
-    let current = current_concept_intervals(
-        conn,
-        &concept.id,
-        &asserted.valid_to,
-        concept.branch_name(),
-    )
-    .await?;
+    let current =
+        current_concept_intervals(conn, &concept.id, &asserted.valid_to, concept.branch_name())
+            .await?;
     // Re-asserting an existing start supersedes that start's belief (Doctrine
     // III), so it cannot clash with what it replaces.
     let current: Vec<Interval> = current
@@ -6339,7 +6471,10 @@ fn reject_concept_overlaps_within(concepts: &[ConceptUpsert]) -> Result<()> {
             let clash = first_open
                 .filter(|_| asserted.is_open())
                 .and_then(|open| concept_clash(id, asserted, open, OverlapProvenance::SameBatch))
-                .or_else(|| widest.and_then(|w| concept_clash(id, asserted, w, OverlapProvenance::SameBatch)));
+                .or_else(|| {
+                    widest
+                        .and_then(|w| concept_clash(id, asserted, w, OverlapProvenance::SameBatch))
+                });
             if let Some(err) = clash {
                 return Err(err);
             }
@@ -6409,8 +6544,7 @@ async fn check_batch_against_ledger(
 /// For each concept row, the index of the previous row of the same (lineage, id),
 /// so the chunker can put a repeat in a chunk of its own (0.19.6, D-299).
 fn concept_previous_rows(concepts: &[ConceptUpsert]) -> Vec<Option<usize>> {
-    let mut seen: std::collections::HashMap<(&str, &str), usize> =
-        std::collections::HashMap::new();
+    let mut seen: std::collections::HashMap<(&str, &str), usize> = std::collections::HashMap::new();
     concepts
         .iter()
         .enumerate()
@@ -6949,10 +7083,13 @@ async fn write_concepts_atomic(
 
     for concept in concepts {
         stmt.reset();
-        let res = stmt.execute(concept_params(concept, stamp)).await;
-
-        if let Err(e) = res {
-            let typed = classify(
+        // Same branch as the single path: zero changed rows is the skipped
+        // backfill, whose log row is written here inside the same
+        // transaction — the D-056 statement the trigger would have written.
+        let res = match stmt.execute(concept_params(concept, stamp)).await {
+            Ok(0) => record_skipped_backfill(&tx, concept, stamp).await,
+            Ok(_) => Ok(()),
+            Err(e) => Err(classify(
                 &tx,
                 e,
                 WriteOp::Concept {
@@ -6961,10 +7098,13 @@ async fn write_concepts_atomic(
                     branch: concept.branch_name(),
                 },
             )
-            .await;
+            .await),
+        };
+
+        if let Err(e) = res {
             drop(stmt);
             let _ = tx.rollback().await;
-            return Err(typed);
+            return Err(e);
         }
     }
 
