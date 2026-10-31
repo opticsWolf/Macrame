@@ -497,6 +497,74 @@ async fn an_empty_marks_table_folds_without_the_correction() {
     db.close().await.unwrap();
 }
 
+/// A log row written past the write path: no projection upsert ran, so no
+/// skipped-upsert signal fired and nothing can have marked the pair. This is
+/// what the healthy ledgers of §3.6 actually look like on disk when their
+/// history is disordered — pieces of a ledger that predate the write path's
+/// marks, carried whole into a v24 file.
+async fn raw_log_row(
+    db: &Database,
+    id: &str,
+    title: &str,
+    from: &str,
+    to: Option<&str>,
+    stamp: &str,
+) {
+    let conn = db.raw().connect().unwrap();
+    conn.execute(
+        "INSERT INTO transaction_log (table_name, entity_id, operation, payload, recorded_at) \
+         VALUES ('concepts', ?1, 'I', \
+                 json_object('title', ?2, 'content', '', 'valid_from', ?3, \
+                             'valid_to', ?4, 'retired', 0), ?5)",
+        libsql::params![
+            id,
+            title,
+            from,
+            match to {
+                Some(to) => libsql::Value::from(to),
+                None => libsql::Value::Null,
+            },
+            stamp
+        ],
+    )
+    .await
+    .unwrap();
+}
+
+/// Gate 8's fold-vs-s0 equality on a disordered-but-unmarked pair: the
+/// correction statement runs only for rows that carry a mark, so a pair whose
+/// log is disordered but which no mark names folds to the plain fold's own
+/// answer — the row written last. Under the mutant that runs the correction
+/// for pairs *without* a mark (the `concept_disorder` join dropped), the rule
+/// window moves the winning row and this fold answers `real` — caught.
+#[tokio::test]
+async fn a_pair_without_a_mark_folds_exactly_as_the_plain_fold() {
+    let harness = TestHarness::new();
+    let db = open_db(&harness).await;
+
+    // A different pair carries a mark, so the probe's one-scan answer is
+    // "owed": the correction statement runs. The raw pair stays unmarked,
+    // which is the point — no write-path skip happened at v24 in the way of
+    // `src/raw.rs`, whose rows were never written through the path at all.
+    mark_disordered(&db, "src/other.rs", "main").await;
+
+    // An August start recorded first, a January start recorded second: the
+    // plain fold answers the January row, the rule window would answer the
+    // August one.
+    raw_log_row(&db, "src/raw.rs", "real", AUG, None, JAN).await;
+    let later = bump_us(&JAN);
+    raw_log_row(&db, "src/raw.rs", "written-last", JAN, None, &later).await;
+
+    let state = reconstruct(&db.read_conn(), FAR, None, None).await.unwrap();
+    assert_eq!(
+        state.concepts["src/raw.rs"].title, "written-last",
+        "without a mark the pair is nobody's business: the fold is the plain \
+         fold, whose winner is the row the ledger wrote last"
+    );
+
+    db.close().await.unwrap();
+}
+
 /// The same rule the recorded fold answers is what hydration answers, in one
 /// call: `AttributeMode::AtTime` folds the same log per id, so a marked
 /// backfill must not put the backfill's title on the node at a recorded

@@ -513,15 +513,21 @@ the break here is the user's call. **Default: carried, not built.**
 7. **Snapshots.** A 0.20.0 snapshot is skipped with a warning and the result equals the
    genesis fold. A snapshot taken at v24 composes to the same state as the genesis fold on a
    backfilled ledger.
-8. **Mutations, each caught by a named test:**
-   - `>=` → `>` in the projection `WHERE`, caught by the correction-at-same-start case;
-   - dropping the skipped-update log insert, caught by the log row count;
-   - `valid_from DESC` → `ASC` in the correction, caught by gate 2;
-   - removing the trigger drop from the rung, caught by gate 5's row count;
-   - a mark forgotten on a skipped upsert (*mark left behind*), caught by the rule-identity
-     test — the fold then keeps a winner the rule window would replace;
-   - a correction run for an absent pair, caught by fold-vs-s0 equality on healthy ledgers;
-   - a heal clearing a mark, caught by gate 11 (*a later write changed a past read*).
+8. **Mutations, each caught by a named test (run 2026-10-31: eight mutants of `connection.rs`, `replay.rs` and `migrations.rs`, each caught and restored):**
+   - `>=` → `>` in the projection `WHERE` — caught by `a_correction_at_the_same_start_still_overwrites_the_projection` (projection stayed `C2`, expected `C2-corrected`);
+   - dropping the skipped-update log insert — caught by `a_skipped_backfill_writes_its_own_log_row` (the row type read `I` instead of `U`);
+   - `valid_from DESC` → `ASC` in the correction — caught by gate 2's `the_backfilled_ledger_answers_each_axis_its_own_way` (the fold fell back to `C1`);
+   - removing the trigger drop from the rung — caught by gate 5's row count in `a_v23_ledger_with_a_backfill_opens_repaired`;
+   - a mark forgotten on a skipped upsert (*mark left behind*) — caught by
+     `the_skipped_upsert_marks_the_pair_itself` (`[]` vs the marked pair);
+   - a correction run for an absent pair (the `concept_disorder` join dropped) — caught by
+     `a_pair_without_a_mark_folds_exactly_as_the_plain_fold`, whose sidecar carries a mark for
+     a *different* pair so the probe's answer is owed while `src/raw.rs` stays clean
+     (an earlier draft of the fixture left the sidecar empty and saw nothing: `state_rule_owed`
+     is pair-blind — the probe opens the statement, the statement's join filters the pairs);
+   - a heal clearing a mark — caught by gate 11's `past_reads_never_change_around_a_backfill_and_its_heal`;
+   - the bounded correction unbound (`recorded_at <= ?1` tautologised) — caught by the same
+     test (a healing write at t2 moved the winner a t1 read answers).
 9. **Release bench.** The write side's only shape-5 costs are the projection `WHERE`'s
    comparison on every write and one insert on a backfill: `write_path/upsert_concept`
    stays within 10% of the session baseline (`main-0.20.0`, 2026-10-31: 0.42 ms) and the
