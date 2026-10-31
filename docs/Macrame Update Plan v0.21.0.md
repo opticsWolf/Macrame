@@ -1,6 +1,6 @@
 # Macrame Update Plan v0.21.0 — one rule for a concept's state
 
-**Status:** P1 shape decided — two-statement shape 5 (§3.6): fold text unchanged, a write-maintained `concept_disorder` table, bounded correction; implementation is next · **Branch:** `dev/0.21.0` from `main` at `634740f` · **Date:** 2026-10-31
+**Status:** built and closes on `dev/0.21.0` at `b13e688` — P1 on two-statement shape 5 (§3.6), P2–P4 measured with their figures in the register and the plan, P5 built on the user's say ([D-305](s13-decision-register.md#d-305)); gates 1–11 green with their figures, the final sweep 901/67 completed and Python 695/2 on the rebuilt binding · **Branch:** `dev/0.21.0` from `main` at `634740f` · **Date:** 2026-10-31 (runs to 2026-11-01)
 **From:** 0.20.0 (schema v23, concepts payload v3, snapshot container v6, public API 1,972 items)
 **To:** 0.21.0 (schema v23 → **v24** for the repair rung §3.3; payload unchanged; snapshots from
 0.20.0 become unreadable through the schema stamp they carry and are skipped, §3.4)
