@@ -457,6 +457,16 @@ consumer in the concepts fold, and the D-196 candidate gate now reads "not used"
 index is traded for write speed without the user's say, and that stands. The adaptive chunk
 loop (D-143) keeps holding the bound either way.
 
+**Run (2026-11-01, machine at 4%):** baseline with all indexes 3.910 ms; savings when dropped —
+`idx_lc_lineage_cut` 0.837, `idx_links_recorded_at` 0.219, `idx_links_target` 0.196,
+`idx_lc_traversal_cover` 0.169, `idx_lc_open_interval` 0.152, `idx_links_branch` 0.105;
+three `transaction_log` indexes measured **negative**: `idx_txlog_branch` −0.077,
+`idx_txlog_fold_partition` −0.982, `idx_txlog_time` −2.478, `idx_txlog_concept_starts`
+−2.491. Registered readers named in D-304 (`hot_stamp`'s extremes, the bounded valid fold's
+pinned window, the `+recorded_at` filter; and the write-side consumers only the drop
+experiment finds). **Recommendation recorded in D-304: drop nothing** — and "not used" is a
+reader-list fact, not a cost fact.
+
 ### P3 — R15 against a clean baseline (time-boxed, ≤ 0.5 d)
 
 0.20.0 could not say whether its crash rate differs from 0.19's, because no baseline was run on
