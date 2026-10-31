@@ -1182,6 +1182,29 @@ pub(crate) async fn detach_stale_cold(conn: &libsql::Connection) {
 
 /// Reconstruct database state as believed at past instant `ts` using window-function log fold (§5.5, D-026).
 ///
+/// **The state rule (`D-303`, 0.21.0): a concept's state is its open belief, or,
+/// when no interval is open at this instant, its latest-starting belief** — the
+/// greatest `valid_from` among the rows recorded ≤ `ts`, ties by `seq_id` — read
+/// over the same rows this fold has always admitted. A later write never changes
+/// what any past read at `ts` returned: rows beyond the bound are not there for
+/// the rule any more than for the fold, and the marks that drive the correction
+/// never clear. A future-dated write (its `valid_from` beyond `ts`) is not open
+/// *yet* and is answered by its start only once the bound reaches it — the rule
+/// answers per instant, never per ledger.
+///
+/// Mechanically the fold text is today's unchanged; a probe over
+/// `concept_disorder` (filled by the write path's skipped-upsert signal, filled
+/// from history by the v24 rung) decides whether any pair owes the correction, and
+/// the correction replaces the winning rows of exactly the marked pairs. A ledger
+/// without the sidecar folds unchanged — no mark can exist without the table — so
+/// the v23 behavior is the v24 behavior everywhere the rule has not been invoked.
+///
+/// The projection's single row follows the same rule through the write path's
+/// `DO UPDATE … WHERE excluded.valid_from >= concepts.valid_from` and the skipped
+/// write goes to the log; the rule is one rule for every recorded read, (`§2.4`
+/// of the 0.21.0 plan), which is why `reconstruct` on a backfilled ledger now
+/// answers the state the projection already held.
+///
 /// When `ts` predates the hot log's horizon the cold database is ATTACHed for
 /// exactly one fold and DETACHed unconditionally on the way out, error paths
 /// included. ATTACH is not transactional and survives ROLLBACK, so a handle

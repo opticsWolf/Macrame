@@ -1579,3 +1579,202 @@ async fn the_header_instant_matches_the_payload() {
         "the header instant must be the payload's timestamp, not an approximation"
     );
 }
+
+// -- Gate 7 (0.21.0, D-303, plan §3.4) --------------------------------------
+const JUN: &str = "2026-06-01T00:00:00.000000Z";
+const JAN: &str = "2026-01-01T00:00:00.000000Z";
+
+use harness::{drop_marks_table, ensure_marks_table, mark_disordered};
+
+/// The snapshot whose content predates the rule: the 0.20.0 fold taken over a
+/// backfilled ledger.
+///
+/// The marks are emptied for exactly one instant — the snapshot's — and are the
+/// rung's fill before the first read after it, so the file on disk holds the
+/// seq-winner state and the ledger answers the rule. Two things are asserted on
+/// the same fixture: writing the wrong rows *forward* (why a stale snapshot
+/// must not be trusted to compose), and the skip that makes the read honest —
+/// refused at the header, warned, and equal to the genesis fold.
+///
+/// The stamp flip is how "a 0.20.0 snapshot" is made here: a 0.20.0 build
+/// stamped exactly this field with 23, and its fold is exactly the state the
+/// marks-empty instant produces.
+#[tokio::test]
+async fn a_pre_rule_snapshot_is_refused_and_reconstruct_folds_from_the_log() {
+    use macrame::temporal::save_snapshot;
+
+    let harness = TestHarness::new();
+    let db = macrame::Database::open(&harness.db_path).await.unwrap();
+    use macrame::prelude::*;
+    upsert_concept("src/a.rs", "C2", JUN, None, &db).await;
+    upsert_concept("src/a.rs", "C1", JAN, Some(JUN), &db).await;
+
+    let ts = max_recorded_at_stamped(&db).await;
+    let far = "2027-01-01T00:00:00.000000Z";
+
+    // The marks go dark for the snapshot's instant: with the table dropped and
+    // rebuilt empty, the probe answers "nothing owed" and the fold is 0.20.0's
+    // own read of this ledger — the seq winner.
+    drop_marks_table(&db).await;
+    ensure_marks_table(&db).await;
+    let pre_rule = reconstruct(&db.read_conn(), &ts, None, None).await.unwrap();
+    assert_eq!(
+        pre_rule.concepts["src/a.rs"].title, "C1",
+        "without marks the fold is yesterday's answer"
+    );
+    let snaps = harness.temp_dir.path().join("gate7-snaps");
+    let path = save_snapshot(&snaps, &pre_rule).unwrap();
+
+    // The mark returns — what the v24 rung's fill leaves, and what this
+    // build's own write path leaves — and the ledger answers the rule now.
+    mark_disordered(&db, "src/a.rs", "main").await;
+    let with_mark = reconstruct(&db.read_conn(), &far, None, None)
+        .await
+        .unwrap();
+    assert_eq!(with_mark.concepts["src/a.rs"].title, "C2");
+
+    // The snapshot still carries the 0.20.0 fold *and* this build's stamp:
+    // nothing about its header says "do not trust me". What this build does
+    // with it is not to carry the wrong rows forward — the correction runs on
+    // the composed path too, and the answer comes out right — but composing
+    // onto stale content is the shape the bump must refuse all the same: a
+    // refusal is the honest move even when this build could rescue it, and it
+    // is the honest move by D-032's own rule, not a warning.
+    let anchor_ts = max_recorded_at_stamped(&db).await;
+    let composed_wrong = reconstruct(&db.read_conn(), &anchor_ts, None, Some(&snaps))
+        .await
+        .unwrap();
+    assert_eq!(
+        composed_wrong.concepts["src/a.rs"].title, "C2",
+        "the composed path runs the correction too: a stale base does not \
+         poison the read while the marks hold — the refusal below is the bump's \
+         property, not the answer's"
+    );
+
+    // Stamp it as 0.20.0's own file. The loader refuses it before parsing.
+    let mut raw = std::fs::read(&path).unwrap();
+    raw[6..10].copy_from_slice(&(macrame::schema::SCHEMA_VERSION - 1).to_le_bytes());
+    std::fs::write(&path, &raw).unwrap();
+    match macrame::temporal::load_snapshot(&path).unwrap_err() {
+        macrame::error::DbError::SnapshotIncompatible { reason, .. } => {
+            assert!(
+                reason.contains("schema v23"),
+                "the refusal should name the stamp it found: {reason}"
+            );
+        }
+        other => panic!("expected SnapshotIncompatible, got {other:?}"),
+    }
+
+    // And the read that found it skipped it: the answer is the genesis fold's
+    // answer, which — since the pair is marked — is the rule row.
+    let read = reconstruct(&db.read_conn(), &anchor_ts, None, Some(&snaps))
+        .await
+        .unwrap();
+    let genesis = reconstruct(&db.read_conn(), &anchor_ts, None, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        read.concepts["src/a.rs"].title, "C2",
+        "skipping the refused snapshot answered the rule"
+    );
+    assert_eq!(
+        read.concepts["src/a.rs"].title, genesis.concepts["src/a.rs"].title,
+        "the skipped read equals the genesis fold"
+    );
+
+    db.close().await.unwrap();
+}
+
+/// A snapshot taken at v24 composes to the same state the genesis fold
+/// answers, on a ledger whose backfill was healed after the snapshot was
+/// taken. The snapshot's own state was corrected when it was taken (the fold
+/// inside `save_snapshot` runs with the rule); the heal that follows moves
+/// both reads the same way: the present answers the heal, and the bound read
+/// that predates the heal still answers C2, anchor or no anchor.
+#[tokio::test]
+async fn a_v24_snapshot_composes_a_backfilled_ledger_to_the_genesis_fold() {
+    use macrame::temporal::save_snapshot;
+
+    let harness = TestHarness::new();
+    let db = macrame::Database::open(&harness.db_path).await.unwrap();
+    use macrame::prelude::*;
+    upsert_concept("src/a.rs", "C2", JUN, None, &db).await;
+    upsert_concept("src/a.rs", "C1", JAN, Some(JUN), &db).await;
+
+    // The snapshot at the backfill instant: the rule row, on both sides.
+    let ts = max_recorded_at_stamped(&db).await;
+    let base = reconstruct(&db.read_conn(), &ts, None, None).await.unwrap();
+    assert_eq!(base.concepts["src/a.rs"].title, "C2");
+    let snaps = harness.temp_dir.path().join("gate7-compose");
+    save_snapshot(&snaps, &base).unwrap();
+
+    // The heal: same start, recorded later. The mark stays (never cleared),
+    // the projection moves to the heal, and both reads move with it.
+    upsert_concept("src/a.rs", "C2b", JUN, None, &db).await;
+    assert_eq!(
+        marks_of_pair(&db).await,
+        vec![("src/a.rs".to_string(), "main".to_string())],
+        "the heal does not clear the write path's own mark"
+    );
+
+    for (ts, want) in [(ts.as_str(), "C2"), ("2027-01-01T00:00:00.000000Z", "C2b")] {
+        let composed = reconstruct(&db.read_conn(), ts, None, Some(&snaps))
+            .await
+            .unwrap();
+        let genesis = reconstruct(&db.read_conn(), ts, None, None).await.unwrap();
+        assert_eq!(
+            composed.concepts["src/a.rs"].title, want,
+            "the composed read at {ts} stopped answering the rule: {}",
+            composed.concepts["src/a.rs"].title
+        );
+        assert_eq!(
+            genesis.concepts["src/a.rs"].title, want,
+            "the genesis read at {ts} stopped answering the rule: {}",
+            genesis.concepts["src/a.rs"].title
+        );
+    }
+    db.close().await.unwrap();
+}
+
+async fn upsert_concept(
+    id: &str,
+    title: &str,
+    from: &str,
+    to: Option<&str>,
+    db: &macrame::Database,
+) {
+    use macrame::prelude::*;
+    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    let c = match to {
+        Some(to) => ConceptUpsert::new(id, title).valid_from(from).valid_to(to),
+        None => ConceptUpsert::new(id, title).valid_from(from),
+    };
+    db.upsert_concept(c).await.unwrap();
+}
+
+async fn max_recorded_at_stamped(db: &macrame::Database) -> String {
+    db.read_conn()
+        .query("SELECT MAX(recorded_at) FROM transaction_log", ())
+        .await
+        .unwrap()
+        .next()
+        .await
+        .unwrap()
+        .unwrap()
+        .get(0)
+        .unwrap()
+}
+
+async fn marks_of_pair(db: &macrame::Database) -> Vec<(String, String)> {
+    let mut marks: Vec<(String, String)> = Vec::new();
+    let mut rows = db
+        .read_conn()
+        .query("SELECT entity_id, branch_id FROM concept_disorder", ())
+        .await
+        .unwrap();
+    while let Some(row) = rows.next().await.unwrap() {
+        marks.push((row.get(0).unwrap(), row.get(1).unwrap()));
+    }
+    marks.sort();
+    marks
+}
