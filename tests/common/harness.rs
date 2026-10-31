@@ -66,3 +66,88 @@ impl TestHarness {
         self.clock.advance(d);
     }
 }
+
+// -- The state-rule side table (0.21.0, D-303) --------------------------------
+//
+// `concept_disorder` arrives with the v24 rung (plan §3.3). Until that rung
+// lands, the tests that must behave like post-rung ledgers provision it
+// themselves — same shape, same key, same never-clears semantics. When the
+// rung lands these helpers become truth-neutral (the rung's own DDL and the
+// write path's inserts take over) and they stay for the pre-v24 fallback
+// test, which is the one place a ledger without the table is built on
+// purpose.
+
+/// The one-off local write handle the marks DDL and inserts go through.
+///
+/// `db.read_conn()` is read-only, and every other write queueues through the
+/// crate's write actor; a fixture's DDL is neither. This is also the handle
+/// discipline the shape-5 probe paid for: local libsql keeps per-connection
+/// caches, so the test opens the fixture handle only for its own write and
+/// drops it before any read runs.
+#[allow(dead_code)]
+async fn marks_conn(path: &std::path::Path) -> libsql::Connection {
+    libsql::Builder::new_local(path)
+        .build()
+        .await
+        .unwrap()
+        .connect()
+        .unwrap()
+}
+
+/// Provision the side table with the rung's shape: `(entity_id, branch_id)`,
+/// one row per pair a skipped backfill was ever written on.
+#[allow(dead_code)]
+pub async fn ensure_marks_table(db: &Database) {
+    marks_conn(db.path())
+        .await
+        .execute(
+            "CREATE TABLE IF NOT EXISTS concept_disorder (             entity_id TEXT NOT NULL, branch_id TEXT NOT NULL,              PRIMARY KEY (entity_id, branch_id))",
+            (),
+        )
+        .await
+        .unwrap();
+}
+
+/// Add a mark, as the skip handler (post-rung) and the rung's fill (for
+/// history) will: idempotent, and never removing anything.
+#[allow(dead_code)]
+pub async fn mark_disordered(db: &Database, entity: &str, branch: &str) {
+    ensure_marks_table(db).await;
+    marks_conn(db.path())
+        .await
+        .execute(
+            "INSERT OR IGNORE INTO concept_disorder (entity_id, branch_id)              VALUES (?1, ?2)",
+            (entity, branch),
+        )
+        .await
+        .unwrap();
+}
+
+/// Every pair the side table holds, stable-ordered for assertions.
+#[allow(dead_code)]
+pub async fn marks(db: &Database) -> Vec<(String, String)> {
+    let mut rows = marks_conn(db.path())
+        .await
+        .query(
+            "SELECT entity_id, branch_id FROM concept_disorder              ORDER BY entity_id, branch_id",
+            (),
+        )
+        .await
+        .unwrap();
+    let mut out = Vec::new();
+    while let Some(row) = rows.next().await.unwrap() {
+        out.push((row.get::<String>(0).unwrap(), row.get::<String>(1).unwrap()));
+    }
+    out
+}
+
+/// The marks table removed: features what a pre-v24 ledger is, and the state
+/// the missing-table fallback in the read side exists for.
+#[allow(dead_code)]
+pub async fn drop_marks_table(db: &Database) {
+    marks_conn(db.path())
+        .await
+        .execute("DROP TABLE IF EXISTS concept_disorder", ())
+        .await
+        .unwrap();
+}

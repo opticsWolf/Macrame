@@ -461,8 +461,14 @@ pub async fn reconstruct_on(
 
     let state = match hot_log_reach(conn, ts, archive_path).await? {
         HotLogReach::Covers => {
-            let delta =
-                fold_delta(conn, &bounded_hot_fold(rows, ANCESTRY_SLOT), params.clone()).await?;
+            let delta = fold_delta_state_rule(
+                conn,
+                &bounded_hot_fold(rows, ANCESTRY_SLOT),
+                params.clone(),
+                &disorder_correction_lineage(rows, ANCESTRY_SLOT),
+                params.clone(),
+            )
+            .await?;
             Some(delta.apply_to(MaterializedState::empty(ts), ts))
         }
         HotLogReach::PredatesRecordedHistory => {
@@ -508,9 +514,11 @@ pub async fn reconstruct_on(
             )
             .await?;
             let cold_shape = cold_lineage(conn).await;
-            let result = fold_delta(
+            let result = fold_delta_state_rule(
                 conn,
                 &bounded_cold_fold(cold_shape, rows, ANCESTRY_SLOT),
+                params.clone(),
+                &disorder_correction_lineage_cold(cold_shape, rows, ANCESTRY_SLOT),
                 params,
             )
             .await;
@@ -762,6 +770,247 @@ const ANCHORED_HOT_FOLD: &str = r#"
     ) WHERE rn = 1
 "#;
 
+// -- The state rule reads (0.21.0, P1, D-303) ---------------------------------
+//
+// §1 of the plan found one correct answer a plain `seq_id` fold cannot give: a
+// backfill — an upsert whose `valid_from` is earlier than the partition's
+// then-greatest start — is the newest *row* and a *state* the ledger never
+// held. The decided rule (D-303): a concept's state is its open belief, else
+// its latest-starting belief; under D-291's non-overlapping starts that is the
+// row of greatest `(valid_from, seq_id)`, which is how the correction seeks.
+//
+// The formulation is shape 5 (§3.6, decided against a single-statement UNION
+// twice over): **the fold statements above are untouched** — a Rust probe asks
+// the side table whether any work is owed, and only then a bounded correction
+// seeks the rule row per marked pair, merged in Rust over the fold's rows keyed
+// the same way. A never-marked concept satisfies the rule without correction,
+// by induction, so the healthy ledger pays one `EXISTS`.
+//
+// The marks live in `concept_disorder` and are written by the path that knows
+// there is one (§3.2's skip) and filled from history by the v24 rung. They are
+// never cleared: a cleared mark would let a later write change what a past read
+// returned, which is the property gate 11 names.
+//
+// The correction arrives in three sizes, one per fold family, each a seek per
+// marked pair rather than a scan per pair:
+//
+// * [`DISORDER_CORRECTION`] — the hot log, bound at `?1`. Serves `reconstruct`'s
+//   hot arms, anchored or not.
+// * [`DISORDER_CORRECTION_COLD`] — both files under one rule, for the archive
+//   folds: the archive keeps a `main`-qualifier because the *fold* is the
+//   statement that owns the union's meaning, and the correction must not let
+//   its rows out of the same files the fold read them from.
+// * [`disorder_correction_lineage`] — the lineage folds (`reconstruct_on`),
+//   bounded by the ancestry's own cutoffs: the rule winner must come from rows
+//   the reader can see, or the correction would hand back the one row in the
+//   ledger the reader is not entitled to.
+//
+// Two lessons the probe paid for are glued into the text (`.0` probe, §3.6):
+// the bound rides **only the subquery** — putting it on the join as well was
+// logically redundant and cost ~17× on libsql once feet rows sat beyond the
+// bound — and in the union form every correlation names its sources explicitly,
+// because an unqualified name binds to the correction arm's own aliases.
+const DISORDER_PROBE: &str = "SELECT EXISTS (SELECT 1 FROM concept_disorder LIMIT 1)";
+
+/// The rule row per ever-disordered pair, off the hot log, with the fold's own
+/// recorded bound riding the subquery only.
+///
+/// The rows are merged over the fold's by (table, entity, branch) in Rust, so
+/// this statement is only run for pairs the fold returned. `concept_disorder`
+/// lists every pair that ever held a disorder — no read of it carries an
+/// instant — so the statement never filters the mark set itself; the bound does
+/// that for the row.
+const DISORDER_CORRECTION: &str = r#"
+    SELECT t.seq_id, t.table_name, t.entity_id, t.operation, t.payload, t.branch_id
+    FROM concept_disorder cd
+    JOIN transaction_log t
+      ON t.entity_id = cd.entity_id AND t.branch_id = cd.branch_id
+    WHERE t.table_name = 'concepts'
+      AND t.seq_id = (
+            SELECT t2.seq_id FROM transaction_log t2
+            WHERE t2.table_name = 'concepts'
+              AND t2.entity_id = t.entity_id AND t2.branch_id = t.branch_id
+              AND t2.recorded_at <= ?1
+            ORDER BY json_extract(t2.payload, '$.valid_from') DESC, t2.seq_id DESC
+            LIMIT 1
+          )
+"#;
+
+/// [`DISORDER_CORRECTION`] over hot and cold together, for the archive folds.
+///
+/// Requires `cold` to be ATTACHed. The seek spans both files because the
+/// archive can hold the rule row: a bounded read at a past `ts` can need a
+/// same-start row that was later superseded *and archived* (plan §3.6), and the
+/// fold this statement accompanies reads both files, so the correction must
+/// too. The archive has its own file judgment while folds are running; the
+/// statement inside a fold's lifetime reads it as the fold does.
+const DISORDER_CORRECTION_COLD_PREFIX: &str = r#"
+    SELECT t.seq_id, t.table_name, t.entity_id, t.operation, t.payload, t.branch_id
+    FROM concept_disorder cd
+    JOIN (
+        SELECT seq_id, table_name, entity_id, operation, payload, recorded_at, branch_id
+        FROM main.transaction_log
+        UNION ALL
+        SELECT seq_id, table_name, entity_id, operation, payload, recorded_at, {cold}
+        FROM cold.transaction_log
+    ) t
+      ON t.entity_id = cd.entity_id AND t.branch_id = cd.branch_id
+    WHERE t.table_name = 'concepts'
+      AND t.seq_id = (
+            SELECT t2.seq_id FROM (
+                SELECT seq_id, table_name, entity_id, operation, payload, recorded_at, branch_id
+                FROM main.transaction_log
+                UNION ALL
+                SELECT seq_id, table_name, entity_id, operation, payload, recorded_at, {cold}
+                FROM cold.transaction_log
+            ) t2
+            WHERE t2.table_name = 'concepts'
+              AND t2.entity_id = t.entity_id AND t2.branch_id = t.branch_id
+              AND t2.recorded_at <= ?1
+            ORDER BY json_extract(t2.payload, '$.valid_from') DESC, t2.seq_id DESC
+            LIMIT 1
+          )
+"#;
+
+/// [`DISORDER_CORRECTION`] under a reading lineage (`reconstruct_on`): the
+/// ancestry joins the *correction* as well as the fold, with the same slots the
+/// fold itself binds (`?1` the instant, ancestry `?{first_slot}…`).
+///
+/// The lineage is what makes a read answer *which rows the reader can see*, and
+/// the rule is a function of the visible rows only — a correction that sought
+/// beyond it would hand back a belief the ledger withheld from this reader. The
+/// cutoff lands inside the subquery for the reason the bounded fold states: the
+/// cut happens before the winner is chosen.
+fn disorder_correction_lineage(rows: usize, first_slot: usize) -> String {
+    format!(
+        r#"WITH {lineage}
+    SELECT t.seq_id, t.table_name, t.entity_id, t.operation, t.payload, t.branch_id
+    FROM concept_disorder cd
+    JOIN lineage g ON g.branch_id = cd.branch_id
+    JOIN transaction_log t
+      ON t.entity_id = cd.entity_id AND t.branch_id = cd.branch_id
+    WHERE t.table_name = 'concepts'
+      AND t.seq_id = (
+            SELECT t2.seq_id FROM transaction_log t2
+            JOIN lineage g2 ON g2.branch_id = t2.branch_id
+            WHERE t2.table_name = 'concepts'
+              AND t2.entity_id = t.entity_id AND t2.branch_id = t.branch_id
+              AND t2.recorded_at <= ?1
+              AND (g2.cutoff IS NULL OR t2.recorded_at <= g2.cutoff)
+            ORDER BY json_extract(t2.payload, '$.valid_from') DESC, t2.seq_id DESC
+            LIMIT 1
+          )
+"#,
+        lineage = crate::graph::lineage::ancestry_values(rows, first_slot, "")
+    )
+}
+
+/// The lineage correction over hot and cold together, for
+/// [`bounded_cold_fold`]. Same slots, same cutoff rule, both files.
+fn disorder_correction_lineage_cold(
+    cold_lineage: ColdLineage,
+    rows: usize,
+    first_slot: usize,
+) -> String {
+    format!(
+        r#"WITH {lineage}
+    SELECT t.seq_id, t.table_name, t.entity_id, t.operation, t.payload, t.branch_id
+    FROM concept_disorder cd
+    JOIN lineage g ON g.branch_id = cd.branch_id
+    JOIN (
+        SELECT seq_id, table_name, entity_id, operation, payload, recorded_at, branch_id
+        FROM main.transaction_log
+        UNION ALL
+        SELECT seq_id, table_name, entity_id, operation, payload, recorded_at, {cold}
+        FROM cold.transaction_log
+    ) t
+      ON t.entity_id = cd.entity_id AND t.branch_id = cd.branch_id
+    WHERE t.table_name = 'concepts'
+      AND t.seq_id = (
+            SELECT t2.seq_id FROM (
+                SELECT seq_id, table_name, entity_id, operation, payload, recorded_at, branch_id
+                FROM main.transaction_log
+                UNION ALL
+                SELECT seq_id, table_name, entity_id, operation, payload, recorded_at, {cold}
+                FROM cold.transaction_log
+            ) t2
+            JOIN lineage g2 ON g2.branch_id = t2.branch_id
+            WHERE t2.table_name = 'concepts'
+              AND t2.entity_id = t.entity_id AND t2.branch_id = t.branch_id
+              AND t2.recorded_at <= ?1
+              AND (g2.cutoff IS NULL OR t2.recorded_at <= g2.cutoff)
+            ORDER BY json_extract(t2.payload, '$.valid_from') DESC, t2.seq_id DESC
+            LIMIT 1
+          )
+"#,
+        lineage = crate::graph::lineage::ancestry_values(rows, first_slot, ""),
+        cold = cold_lineage.projection()
+    )
+}
+
+fn disorder_correction_cold(cold_lineage: ColdLineage) -> String {
+    DISORDER_CORRECTION_COLD_PREFIX.replace("{cold}", cold_lineage.projection())
+}
+
+/// Whether any pair owes the correction: the shape 5 probe, and the whole
+/// healthy-ledger cost of the rule.
+///
+/// `pub(crate)` because `as_of.rs`'s per-entity fold answers the same rule with
+/// the same probe, and the two must not disagree about what is owed or what a
+/// missing table means.
+pub(crate) async fn state_rule_owed(conn: &libsql::Connection) -> Result<bool> {
+    match conn.query(DISORDER_PROBE, ()).await {
+        Ok(mut rows) => {
+            let Some(row) = rows.next().await? else {
+                return Err(DbError::ReplayCorrupt {
+                    seq: 0,
+                    reason: "the disorder probe answered with no row".to_string(),
+                });
+            };
+            Ok(row.get::<i64>(0)? == 1)
+        }
+        // A ledger the v24 rung has not reached has no marks table at all. No
+        // mark can ever have been written on such a file — §3.2 writes one on
+        // the same signal the table came with — so the plain fold is the rule
+        // there *by induction*, not by luck, and the missing table can never
+        // hide a correction somebody owed. The code-and-text match is the same
+        // bargain `error::abort_kind` documents: the constant is matched against
+        // a variant that carries it, free text stays the fallback.
+        Err(e) if marks_table_missing(&e) => Ok(false),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// The missing-side-table verdict for [`state_rule_owed`]: SQLite's own
+/// "no such table" needle, because that is the engine's classification of
+/// exactly this and nothing else.
+fn marks_table_missing(e: &libsql::Error) -> bool {
+    static NEEDLE: &str = "no such table: concept_disorder";
+    match e {
+        libsql::Error::SqliteFailure(code, msg) if *code == 1 && msg.contains(NEEDLE) => true,
+        _ => e.to_string().contains(NEEDLE),
+    }
+}
+
+/// [`fold_delta`], plus the state rule: the fold runs first and unchanged, then
+/// the probe, and only where the probe answers yes the correction runs and
+/// merges over the fold's rows by (table, entity, branch) — the same keys the
+/// fold itself partitions on.
+async fn fold_delta_state_rule(
+    conn: &libsql::Connection,
+    fold: &str,
+    fold_params: impl libsql::params::IntoParams,
+    correction: &str,
+    corr_params: impl libsql::params::IntoParams,
+) -> Result<Delta> {
+    let mut d = Delta::default();
+    absorb_fold_rows(conn, fold, fold_params, &mut d).await?;
+    if state_rule_owed(conn).await? {
+        absorb_fold_rows(conn, correction, corr_params, &mut d).await?;
+    }
+    Ok(d)
+}
+
 /// Fold over hot **and cold** above a snapshot anchor (§5.5, 0.5.5).
 ///
 /// The union is what lets composition survive an archive. Rows keep their
@@ -951,11 +1200,17 @@ async fn reconstruct_from(
         HotLogReach::Covers => {
             if let Some(base) = base {
                 let anchor = base.seq_anchor;
-                let delta =
-                    fold_delta(conn, ANCHORED_HOT_FOLD, libsql::params![ts, anchor]).await?;
+                let delta = fold_delta_state_rule(
+                    conn,
+                    ANCHORED_HOT_FOLD,
+                    libsql::params![ts, anchor],
+                    DISORDER_CORRECTION,
+                    libsql::params![ts],
+                )
+                .await?;
                 return Ok(delta.apply_to(base, ts));
             }
-            return fold(conn, ts, HOT_FOLD).await;
+            return fold(conn, ts, HOT_FOLD, DISORDER_CORRECTION).await;
         }
         HotLogReach::PredatesRecordedHistory => {
             // Nothing had been recorded by `ts`, and nothing has been removed
@@ -1008,15 +1263,25 @@ async fn reconstruct_from(
     let result = match base {
         Some(base) => {
             let anchor = base.seq_anchor;
-            fold_delta(
+            fold_delta_state_rule(
                 conn,
                 &anchored_cold_fold(cold_shape),
                 libsql::params![ts, anchor],
+                &disorder_correction_cold(cold_shape),
+                libsql::params![ts],
             )
             .await
             .map(|delta| delta.apply_to(base, ts))
         }
-        None => fold(conn, ts, &cold_fold(cold_shape)).await,
+        None => {
+            fold(
+                conn,
+                ts,
+                &cold_fold(cold_shape),
+                &disorder_correction_cold(cold_shape),
+            )
+            .await
+        }
     };
 
     // Unconditional: see the ATTACH note above.
@@ -1891,20 +2156,40 @@ pub(crate) async fn hot_log_answers_for(conn: &libsql::Connection, ts: &str) -> 
     ))
 }
 
-/// Run one fold query from nothing — the unanchored path.
-async fn fold(conn: &libsql::Connection, ts: &str, query: &str) -> Result<MaterializedState> {
-    let delta = fold_delta(conn, query, libsql::params![ts]).await?;
+/// Run one fold query from nothing — the unanchored path, with the state rule
+/// folded in (the fold text stays what it always was; see the rule block).
+///
+/// `correction` is the statement the fold's own family wants: plain for hot
+/// folds, both-files for archive folds. The params are the fold reader's — the
+/// same count, the same layout, the bound at the same slot.
+async fn fold(
+    conn: &libsql::Connection,
+    ts: &str,
+    query: &str,
+    correction: &str,
+) -> Result<MaterializedState> {
+    let delta = fold_delta_state_rule(
+        conn,
+        query,
+        libsql::params![ts],
+        correction,
+        libsql::params![ts],
+    )
+    .await?;
     Ok(delta.apply_to(MaterializedState::empty(ts), ts))
 }
 
-/// Run one fold query and collect the winning rows, deletions included.
-async fn fold_delta(
+/// Consume one fold query into a delta: the row loop every fold arm runs, the
+/// fold's own rows and the state-rule correction's alike, so the merge into the
+/// delta is by the exact path the fold used — the correction replaces the fold
+/// row for a pair, it does not coexist with it.
+async fn absorb_fold_rows(
     conn: &libsql::Connection,
     query: &str,
     params: impl libsql::params::IntoParams,
-) -> Result<Delta> {
+    d: &mut Delta,
+) -> Result<()> {
     let mut rows = conn.query(query, params).await?;
-    let mut d = Delta::default();
     while let Some(row) = rows.next().await? {
         let seq_id: i64 = row.get(0)?;
         let table_name: String = row.get(1)?;
@@ -1921,10 +2206,10 @@ async fn fold_delta(
         }
 
         let payload = parse_log_row(seq_id, &table_name, &entity_id, &op, &payload_str)?;
-        absorb_row(&mut d, &table_name, entity_id, branch_id, &payload)?;
+        absorb_row(d, &table_name, entity_id, branch_id, &payload)?;
     }
 
-    Ok(d)
+    Ok(())
 }
 
 /// The checks every fold makes on a log row before it reads the row's contents.

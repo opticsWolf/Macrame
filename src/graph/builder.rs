@@ -636,6 +636,101 @@ ORDER BY w.node_id;
     /// this reuses the slot rather than appending a parameter. `execute` with
     /// `AtTime` is repaired transitively: it hydrates whatever ids this
     /// returns, so the narrowed set used to starve the fold before it ran.
+    /// `build_sql_at_recorded` over a ledger that carries marks (0.21.0,
+    /// D-303 — the shape 5 spelling the plan's union probe ruled in only
+    /// under a Rust-gated probe).
+    ///
+    /// Same walk, same placeholder layout, same row shape. The concept
+    /// relation is the marked window instead of the plain window: the plain
+    /// window's fold drops every pair the side table names, and the rule row
+    /// arrives through the second arm so the same retire test reads it. The
+    /// two arms are disjoint by construction — the first drops exactly the
+    /// pairs the second adds — so neither arm's rows can duplicate the other's;
+    /// one id per concept still comes out (`DISTINCT` in the projection).
+    ///
+    /// The probe the executor ran before choosing this statement is what makes
+    /// the union safe: on an empty table the engine once planned a whole-log
+    /// scan per pair that nobody needed (the shape 5 probe's §3.6 lesson), so
+    /// the marked statement is *never* built for a ledger without marks.
+    fn build_sql_at_recorded_marked(&self, shape: LineageShape, ancestry: &[Ancestor]) -> String {
+        let concepts = self.concepts_at_instant_sql_marked(shape);
+        let projection = if self.limit.is_some() {
+            format!(
+                r#"
+SELECT r.n, w.node_id
+FROM (SELECT COUNT(*) AS n FROM walk) r
+LEFT JOIN (
+    SELECT DISTINCT w.node_id AS node_id
+    FROM walk w JOIN ({concepts}) c ON c.node_id = w.node_id
+) w ON 1 = 1
+ORDER BY w.node_id;
+                    "#
+            )
+        } else {
+            format!(
+                r#"
+SELECT DISTINCT w.node_id
+FROM walk w JOIN ({concepts}) c ON c.node_id = w.node_id
+ORDER BY w.node_id;
+                "#
+            )
+        };
+        format!("{}{}", self.walk_cte(shape, ancestry), projection)
+    }
+
+    /// The marked concept window for the `as_of_recorded` traversal: the
+    /// fold's window with marked pairs dropped, unioned with the rule row per
+    /// marked pair, both bounded at the traversal's recorded instant.
+    ///
+    /// The correlation is fully qualified (`q` in the first arm, `t`/`t2` in
+    /// the second): the shape 5 probe caught its first version letting a bare
+    /// `entity_id` bind to the correction arm's own alias — SQLite resolves a
+    /// bare name against the innermost scope first, and once `concept_disorder`
+    /// held rows, the NOT EXISTS thus answered about the wrong table and
+    /// dropped every concept in the ledger.
+    ///
+    /// The bound rides every arm at [`Self::recorded_slot`], which `bind_params`
+    /// already fills — no parameter layout change. The second arm is a seek per
+    /// marked pair; a first arm whose `NOT EXISTS` costs nothing per row is
+    /// still the clean-reading cost, because the probe already told Rust marks
+    /// exist at all.
+    fn concepts_at_instant_sql_marked(&self, shape: LineageShape) -> String {
+        let slot = Self::recorded_slot(shape);
+        format!(
+            r#"SELECT DISTINCT entity_id AS node_id FROM (
+    SELECT q.entity_id AS entity_id
+    FROM (
+        SELECT entity_id, payload,
+               ROW_NUMBER() OVER (PARTITION BY entity_id ORDER BY seq_id DESC) AS rn
+        FROM transaction_log
+        WHERE table_name = 'concepts'
+          AND +recorded_at <= ?{slot}
+    ) AS q
+    WHERE q.rn = 1
+      AND COALESCE(json_extract(q.payload, '$.retired'), 0) = 0
+      AND NOT EXISTS (
+            SELECT 1 FROM concept_disorder cd WHERE cd.entity_id = q.entity_id
+        )
+    UNION ALL
+    SELECT t.entity_id
+    FROM concept_disorder cd
+    JOIN transaction_log t
+      ON t.entity_id = cd.entity_id
+    WHERE t.table_name = 'concepts'
+      AND t.seq_id = (
+            SELECT t2.seq_id FROM transaction_log t2
+            WHERE t2.table_name = 'concepts'
+              AND t2.entity_id = t.entity_id
+              AND t2.recorded_at <= ?{slot}
+            ORDER BY json_extract(t2.payload, '$.valid_from') DESC, t2.seq_id DESC
+            LIMIT 1
+          )
+      AND COALESCE(json_extract(t.payload, '$.retired'), 0) = 0
+)"#
+        )
+    }
+
+    /// `concepts` relation as—the plain at-recorded fold this sits beside.
     fn build_sql_at_recorded(&self, shape: LineageShape, ancestry: &[Ancestor]) -> String {
         // The fold hoists out so the final `format!` stays flat: one producer
         // of the parameter list (`bind_params`), one interpolation of the text.
@@ -1081,7 +1176,26 @@ WITH RECURSIVE {prelude}walk(node_id, depth) AS (
         // lineage's rows at once. See `build_sql` for why the pure function
         // cannot answer this and does not pretend to.
         let (shape, ancestry) = resolve_for(conn, self.branch.as_deref()).await?;
-        let sql = self.build_sql_with(shape, &ancestry);
+        // The state rule reaches the traversal as well (0.21.0, P1, D-303):
+        // the walk decides what the instant reached, and the concept window
+        // decides what of that stays live — and a marked concept's window
+        // winner is the backfill, not the rule row, so its *live* test would
+        // read the wrong payload's retired flag. The probe runs only where the
+        // statement would otherwise fold concepts, and the plain statement
+        // runs whenever the ledger carries no marks. When marks exist, the
+        // marked window (below) replaces the fold's one with the probe-stated
+        // shape 5: the plain window drops every marked pair, and the rule row
+        // per pair is appended so the same test reads it. The window itself —
+        // the bytes every golden pins — is built by the ordinary path when no
+        // marks are owed, so this arm never changes what a healthy ledger
+        // read before.
+        let sql = if self.as_of_recorded.is_some()
+            && crate::temporal::replay::state_rule_owed(conn).await?
+        {
+            self.build_sql_at_recorded_marked(shape, &ancestry)
+        } else {
+            self.build_sql_with(shape, &ancestry)
+        };
         let params = self.bind_params(now_ts, shape, &ancestry);
 
         let mut rows = conn.query(&sql, params).await?;

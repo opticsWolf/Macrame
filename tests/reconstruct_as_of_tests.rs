@@ -11,7 +11,7 @@ mod harness;
 
 use std::collections::BTreeMap;
 
-use harness::TestHarness;
+use harness::{ensure_marks_table, mark_disordered, TestHarness};
 use macrame::temporal::{AsOf, MaterializedState};
 use macrame::{ConceptUpsert, Database, DbError, OverlapProvenance};
 
@@ -370,10 +370,15 @@ async fn a_superseded_start_archived_away_still_answers_its_valid_read() {
     db.close().await.unwrap();
 }
 
-/// Gate 7: §3.3's worked example, in the order P5 produces it. C2 is ingested first,
-/// valid from June, and C1 is backfilled after it, valid from January to June. A
-/// valid read at August answers with C2, and the recorded read answers with C1, the
-/// row written last. Both answers are right, and their difference is the gate.
+/// Gate 7 (with gate 2's flip): §3.3's worked example. C2 is ingested first,
+/// valid from June open, and C1 is backfilled after it, valid from January to
+/// June. The valid axis answers per start, so August is C2 and March is C1;
+/// the **recorded** read follows the one state rule now — the pair is marked
+/// (the skip handler's job once v24 provisions the table, the rung's fill for
+/// history), and its recorded read is C2, the open belief, *equal to
+/// `reconstruct`* — the fold-equals-projection property (§2.2) is kept by the
+/// same mechanism, not by coincidence. Asserting `reconstruct` beside it is
+/// the property: a mutant that corrects one read and not the other dies here.
 #[tokio::test]
 async fn the_backfilled_ledger_answers_each_axis_its_own_way() {
     let harness = TestHarness::new();
@@ -381,6 +386,10 @@ async fn the_backfilled_ledger_answers_each_axis_its_own_way() {
 
     upsert(&db, concept("src/a.rs", "C2", JUN, None)).await;
     upsert(&db, concept("src/a.rs", "C1", JAN, Some(JUN))).await;
+    // The pair the rung's fill will hold in history; same side table, same
+    // semantics (marks never clear).
+    ensure_marks_table(&db).await;
+    mark_disordered(&db, "src/a.rs", "main").await;
 
     let in_august = db.reconstruct_as_of(AsOf::valid_at(AUG)).await.unwrap();
     assert_eq!(titles(&in_august)["src/a.rs"], "C2");
@@ -389,11 +398,14 @@ async fn the_backfilled_ledger_answers_each_axis_its_own_way() {
     assert_eq!(titles(&in_march)["src/a.rs"], "C1");
 
     let recorded = db.reconstruct_as_of(AsOf::recorded_at(FAR)).await.unwrap();
-    assert_eq!(titles(&recorded)["src/a.rs"], "C1", "the row written last");
+    assert_eq!(
+        titles(&recorded)["src/a.rs"], "C2",
+        "the rule answers the recorded read as it does every recorded read"
+    );
     assert_eq!(
         titles(&recorded),
         titles(&db.reconstruct(FAR).await.unwrap()),
-        "the recorded read is reconstruct"
+        "the recorded read is reconstruct, under the rule as before it"
     );
 
     db.close().await.unwrap();

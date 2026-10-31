@@ -354,3 +354,326 @@ async fn a_backfill_owns_the_extra_its_caller_bound() {
 
     db.close().await.unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// The read side (D-303, §2.2 and §3.6; gates 8 and 11 named by its mutations)
+// ---------------------------------------------------------------------------
+//
+// The rule is one rule for every recorded read, which is what makes it
+// D-303 instead of a projection fix. The folds run unchanged and then merge
+// the rule rows the marks table names — the shape-5 pair. Each test names
+// the mutation it dies under: a mark left behind (the fold keeps a seq
+// winner the rule window replaces), a correction run for an absent pair
+// (fold equals seq fold where nothing is marked), a heal that must not
+// clear the mark, and gate 11: past reads never change.
+
+use harness::marks as mark_list;
+use harness::{drop_marks_table, ensure_marks_table, mark_disordered};
+use macrame::graph::{AttributeMode, TraversalBuilder};
+use macrame::temporal::{hydrate_attributes, reconstruct, AsOf};
+use macrame::BranchId;
+
+/// A "now" beyond every stamp the fixtures can write: the clock reads a real
+/// date, so a recorded bound that far out keeps everything.
+const FAR: &str = "2030-01-01T00:00:00.000000Z";
+
+/// The rule row is the greatest `(valid_from, seq_id)` of the pair: on a
+/// marked backfill, the fold's own winner (the row written last, the
+/// backfill) is replaced by the open belief — the row the projection already
+/// holds at write time. The unmarked neighbor must be untouched, and a mark
+/// naming a pair with no log rows must be harmless: that is gate 8's
+/// *correction run for an absent pair*.
+#[tokio::test]
+async fn the_hot_fold_answers_the_rule_for_its_marked_pairs() {
+    let harness = TestHarness::new();
+    let db = open_db(&harness).await;
+
+    upsert(&db, concept("src/a.rs", "C2", JUN, None)).await;
+    upsert(&db, concept("src/a.rs", "C1", JAN, Some(JUN))).await;
+    upsert(&db, concept("src/neighbor.rs", "N", JAN, None)).await;
+
+    mark_disordered(&db, "src/a.rs", "main").await;
+    // A mark with no log rows: the correction must answer nothing for it.
+    mark_disordered(&db, "src/ghost.rs", "main").await;
+
+    let state = reconstruct(&db.read_conn(), FAR, None, None).await.unwrap();
+    assert_eq!(
+        state.concepts["src/a.rs"].title, "C2",
+        "the marked pair answers with the rule row, not the seq winner"
+    );
+    assert_eq!(
+        state.concepts["src/neighbor.rs"].title, "N",
+        "the unmarked neighbor reads the way it always did"
+    );
+    assert!(
+        !state.concepts.contains_key("src/ghost.rs"),
+        "a mark with no log rows folds to nothing, like its ledger"
+    );
+
+    db.close().await.unwrap();
+}
+
+/// A ledger without the marks table folds plainly: the pre-v24 file every
+/// current ledger is, and the state the fallback exists for. The probe reads
+/// the missing-table error and answers "nothing is owed", so the read is
+/// byte-for-byte the 0.20.0 behaviour rather than an error.
+#[tokio::test]
+async fn a_ledger_without_the_marks_table_folds_unchanged() {
+    let harness = TestHarness::new();
+    let db = open_db(&harness).await;
+
+    upsert(&db, concept("src/a.rs", "C2", JUN, None)).await;
+    upsert(&db, concept("src/a.rs", "C1", JAN, Some(JUN))).await;
+    // Provisioned then dropped: the test proves the *dropped* state, notably
+    // not a ledger that never created one.
+    drop_marks_table(&db).await;
+
+    let state = reconstruct(&db.read_conn(), FAR, None, None).await.unwrap();
+    assert_eq!(
+        state.concepts["src/a.rs"].title, "C1",
+        "the plain fold is the last writer, which is what this ledger is"
+    );
+
+    db.close().await.unwrap();
+}
+
+/// An empty marks table changes nothing either way — gate 8's healthy-ledger
+/// equality: with nothing marked, the fold and the rule window agree,
+/// because a never-marked concept satisfies the rule without correction
+/// (§3.6's induction).
+#[tokio::test]
+async fn an_empty_marks_table_folds_without_the_correction() {
+    let harness = TestHarness::new();
+    let db = open_db(&harness).await;
+
+    upsert(&db, concept("src/a.rs", "first", JAN, Some(JUN))).await;
+    upsert(&db, concept("src/a.rs", "second", JUN, None)).await;
+    ensure_marks_table(&db).await;
+
+    let state = reconstruct(&db.read_conn(), FAR, None, None).await.unwrap();
+    assert_eq!(
+        state.concepts["src/a.rs"].title, "second",
+        "the greatest start is also the last write here, so the rules agree"
+    );
+
+    db.close().await.unwrap();
+}
+
+/// The same rule the recorded fold answers is what hydration answers, in one
+/// call: `AttributeMode::AtTime` folds the same log per id, so a marked
+/// backfill must not put the backfill's title on the node at a recorded
+/// instant.
+#[tokio::test]
+async fn at_time_hydration_answers_the_rule_for_marked_pairs() {
+    let harness = TestHarness::new();
+    let db = open_db(&harness).await;
+
+    upsert(&db, concept("src/a.rs", "C2", JUN, None)).await;
+    upsert(&db, concept("src/a.rs", "C1", JAN, Some(JUN))).await;
+    mark_disordered(&db, "src/a.rs", "main").await;
+
+    let attrs = hydrate_attributes(
+        &db.read_conn(),
+        &["src/a.rs".to_string()],
+        &AsOf::recorded_at(FAR),
+        AttributeMode::AtTime,
+    )
+    .await
+    .unwrap();
+    assert_eq!(attrs.len(), 1);
+    assert_eq!(attrs[0].title, "C2", "the rule row, not the backfill");
+
+    db.close().await.unwrap();
+}
+
+/// The recorded walk's window reads the same rule: the SQL folded in
+/// `concepts_at_instant_sql` decides which reached concepts stay live, so a
+/// retired backfill (retired = 1, last written) must not drop the concept the
+/// rule keeps live. This is the case the plain window cannot answer and the
+/// marked window exists for.
+#[tokio::test]
+async fn a_retired_backfill_does_not_drop_the_concept_from_a_recorded_walk() {
+    let harness = TestHarness::new();
+    let db = open_db(&harness).await;
+
+    upsert(&db, concept("src/a.rs", "C2", JUN, None)).await;
+    // The backfill carries its own retired flag: a historical interval that
+    // was closed. The projection (already the rule) keeps the concept live;
+    // the plain fold's window, folding the last written row, would drop it.
+    let backfill = concept("src/a.rs", "C1", JAN, Some(JUN)).retired(true);
+    upsert(&db, backfill).await;
+    mark_disordered(&db, "src/a.rs", "main").await;
+
+    let mut walk = TraversalBuilder::new("src/a.rs")
+        .as_of_recorded(FAR)
+        .execute_ids(db.read_conn(), "2030-01-02T00:00:00.000000Z")
+        .await
+        .unwrap();
+    walk.sort();
+    assert_eq!(walk, vec!["src/a.rs".to_string()]);
+
+    db.close().await.unwrap();
+}
+
+/// The jump the rung has to make is shown in one test rather than its
+/// results in three: unmarked history folds last-writer-wins (the §1
+/// defect, `bounded now to the two rows the fixture wrote`), the projection
+/// answers the rule, and the mark is what makes the two agree. When the rung
+/// lands and fills marks from history, the first assertion inverts on its
+/// own fixture (marked) and the middle one keeps standing.
+#[tokio::test]
+async fn the_projection_and_the_fold_agree_only_when_the_mark_holds() {
+    let harness = TestHarness::new();
+    let db = open_db(&harness).await;
+
+    upsert(&db, concept("src/a.rs", "C2", JUN, None)).await;
+    upsert(&db, concept("src/a.rs", "C1", JAN, Some(JUN))).await;
+
+    // No mark: the divergence, named on purpose.
+    let state = reconstruct(&db.read_conn(), FAR, None, None).await.unwrap();
+    assert_eq!(state.concepts["src/a.rs"].title, "C1");
+    let (title, from, to, fts_title) = projection(&db, "src/a.rs").await;
+    assert_eq!(title, "C2");
+    assert_eq!(from, JUN);
+    assert_eq!(to, OPEN);
+    assert_eq!(fts_title, "C2");
+
+    // The mark lands and the fold agrees with the projection.
+    mark_disordered(&db, "src/a.rs", "main").await;
+    let marked = reconstruct(&db.read_conn(), FAR, None, None).await.unwrap();
+    assert_eq!(marked.concepts["src/a.rs"].title, "C2");
+    let (title2, from2, to2, fts2) = projection(&db, "src/a.rs").await;
+    assert_eq!(
+        (title2, from2, to2, fts2),
+        (title, from, to, fts_title),
+        "the mark is what makes the fold equal the projection"
+    );
+
+    db.close().await.unwrap();
+}
+
+/// The lineage fold's correction stays inside its reader's ancestry: the
+/// correction joins `lineage` the way the fold itself does, so a pair marked
+/// on a branch this reader cannot see leaks nothing, and a pair marked on an
+/// inherited branch is corrected within the cutoffs the fork point set.
+#[tokio::test]
+async fn the_lineage_fold_corrects_within_the_branches_its_reader_sees() {
+    let harness = TestHarness::new();
+    let db = open_db(&harness).await;
+
+    upsert(&db, concept("src/a.rs", "C2", JUN, None)).await;
+    upsert(&db, concept("src/a.rs", "C1", JAN, Some(JUN))).await;
+    mark_disordered(&db, "src/a.rs", "main").await;
+
+    let alt = BranchId::new("alt").unwrap();
+    db.fork(alt, BranchId::main()).await.unwrap();
+
+    // A mark whose pair's rows are not in this reader's ancestry must drop
+    // rather than surface: the mark alone cannot conjure a row the fold's
+    // own window did not carry.
+    mark_disordered(&db, "src/other.rs", "alt").await;
+
+    let state = db.reconstruct_on(FAR, "alt").await.unwrap();
+    assert_eq!(
+        state.concepts["src/a.rs"].title, "C2",
+        "the inherited pair is corrected inside the reader's lineages"
+    );
+    assert!(
+        !state.concepts.contains_key("src/other.rs"),
+        "a mark beyond the reader's ancestry folds to nothing"
+    );
+
+    db.close().await.unwrap();
+}
+
+/// Gate 11: past reads never change. The read at the open row's stamp fixes
+/// the winners; the backfill is recorded *after* that stamp, so the read must
+/// not change; and a healing write (recorded later still) must not change it
+/// either. If the heal cleared the mark, the third read would fall to the seq
+/// winner — exactly the mutation gate 11 exists to catch — so the mark's
+/// persistence is asserted beside the read's stability.
+#[tokio::test]
+async fn past_reads_never_change_around_a_backfill_and_its_heal() {
+    let harness = TestHarness::new();
+    let db = open_db(&harness).await;
+
+    upsert(&db, concept("src/a.rs", "C2", JUN, None)).await;
+    let open_stamp: String = db
+        .read_conn()
+        .query(
+            "SELECT recorded_at FROM transaction_log \
+             WHERE entity_id = 'src/a.rs' AND json_extract(payload, '$.title') = 'C2'",
+            (),
+        )
+        .await
+        .unwrap()
+        .next()
+        .await
+        .unwrap()
+        .unwrap()
+        .get(0)
+        .unwrap();
+
+    let title_of = |state: &macrame::temporal::MaterializedState| -> Option<String> {
+        state.concepts.get("src/a.rs").map(|a| a.title.clone())
+    };
+
+    // The backfill is recorded strictly later (the monotonic trigger), so it
+    // sits beyond this bound.
+    upsert(&db, concept("src/a.rs", "C1", JAN, Some(JUN))).await;
+    mark_disordered(&db, "src/a.rs", "main").await;
+
+    // Read at the stamped instant: only pre-backfill rows can answer.
+    let before = reconstruct(&db.read_conn(), &open_stamp, None, None)
+        .await
+        .unwrap();
+
+    // The healing write: a correction at Jun (same start), recorded after
+    // the bound. Marks never clear; the rule row within this bound stays the
+    // open row rather than the heal.
+    upsert(&db, concept("src/a.rs", "C4-heals", JUN, None)).await;
+
+    let after_heal = reconstruct(&db.read_conn(), &open_stamp, None, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        title_of(&before),
+        title_of(&after_heal),
+        "a healing write does not change a past read bound before it"
+    );
+    assert_eq!(
+        mark_list(&db).await,
+        vec![("src/a.rs".to_string(), "main".to_string())],
+        "the mark survives the heal: marks never clear (§3.6)"
+    );
+
+    // At the present the rule answers the healing write: same start, so it
+    // is the correction and it is the state.
+    let now_state = reconstruct(&db.read_conn(), FAR, None, None).await.unwrap();
+    assert_eq!(now_state.concepts["src/a.rs"].title, "C4-heals");
+
+    db.close().await.unwrap();
+}
+
+/// A retired rule row is the state: the fold removes the concept rather than
+/// resists. Rows from the fold behave identically to fold rows, which is
+/// what makes the merge a merge and not a special case.
+#[tokio::test]
+async fn the_rule_row_retires_the_concept_from_the_fold() {
+    let harness = TestHarness::new();
+    let db = open_db(&harness).await;
+
+    upsert(&db, concept("src/a.rs", "C2", JUN, Some(DEC))).await;
+    upsert(&db, concept("src/a.rs", "C3-dec", DEC, None)).await;
+    let retire = concept("src/a.rs", "C3-dec", DEC, None).retired(true);
+    upsert(&db, retire).await;
+    mark_disordered(&db, "src/a.rs", "main").await;
+
+    let state = reconstruct(&db.read_conn(), FAR, None, None).await.unwrap();
+    assert!(
+        !state.concepts.contains_key("src/a.rs"),
+        "a retired row from the correction removes the concept like a fold row would"
+    );
+
+    db.close().await.unwrap();
+}

@@ -406,6 +406,12 @@ pub(crate) async fn fold_concepts_at(
 ) -> Result<HashMap<String, serde_json::Value>> {
     let mut folded = HashMap::new();
 
+    // The state rule reaches this fold before its first chunk (0.21.0, D-303):
+    // one probe, then the correction per marked chunk. The probe is cheap, but
+    // it is per *call* and not per chunk on purpose — the chunking is an IO
+    // shape, and what is owed does not change inside one read.
+    let owed = super::replay::state_rule_owed(conn).await?;
+
     for chunk in node_ids.chunks(HYDRATE_CHUNK) {
         // **`entity_id` alone, and unlike the link folds that is correct here.**
         //
@@ -460,6 +466,48 @@ pub(crate) async fn fold_concepts_at(
                 })?;
 
             folded.insert(id, payload);
+        }
+
+        // The state rule's merge, chunk shaped (D-303): one seek per marked
+        // id in the chunk, the rule row overwriting the fold's own winner for
+        // that id. The seek joins by `entity_id` only — `concept_disorder`'s
+        // branch is provenance for a concept, exactly the reason the fold
+        // above partitions on `entity_id` alone.
+        if owed {
+            let patched = format!(
+                r#"
+            SELECT t.entity_id, t.seq_id, t.payload
+            FROM concept_disorder cd
+            JOIN transaction_log t
+              ON t.entity_id = cd.entity_id
+            WHERE t.table_name = 'concepts'
+              AND t.entity_id IN ({})
+              AND t.seq_id = (
+                    SELECT t2.seq_id FROM transaction_log t2
+                    WHERE t2.table_name = 'concepts'
+                      AND t2.entity_id = t.entity_id
+                      AND t2.recorded_at <= ?1
+                    ORDER BY json_extract(t2.payload, '$.valid_from') DESC, t2.seq_id DESC
+                    LIMIT 1
+                  )
+            "#,
+                placeholders(2, chunk.len())
+            );
+            let mut params: Vec<libsql::Value> = Vec::with_capacity(chunk.len() + 1);
+            params.push(libsql::Value::Text(ts.to_string()));
+            params.extend(chunk.iter().map(|id| libsql::Value::Text(id.clone())));
+            let mut rows = conn.query(&patched, params).await?;
+            while let Some(row) = rows.next().await? {
+                let id: String = row.get(0)?;
+                let seq_id: i64 = row.get(1)?;
+                let payload_str: String = row.get(2)?;
+                let payload: serde_json::Value =
+                    serde_json::from_str(&payload_str).map_err(|e| DbError::ReplayCorrupt {
+                        seq: seq_id,
+                        reason: format!("Failed to parse payload JSON: {e}"),
+                    })?;
+                folded.insert(id, payload);
+            }
         }
     }
 
