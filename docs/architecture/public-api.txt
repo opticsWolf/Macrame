@@ -429,14 +429,15 @@ pub fn macrame::error::ConceptOverlap::subject(&self) -> &'static str
 pub macrame::error::Overlap::edge_type: alloc::string::String
 pub macrame::error::Overlap::existing_from: alloc::string::String
 pub macrame::error::Overlap::existing_to: alloc::string::String
+pub macrame::error::Overlap::provenance: macrame::error::OverlapProvenance
 pub macrame::error::Overlap::source_id: alloc::string::String
 pub macrame::error::Overlap::target_id: alloc::string::String
 pub macrame::error::Overlap::valid_from: alloc::string::String
 pub macrame::error::Overlap::valid_to: alloc::string::String
-pub macrame::error::Overlap::within_batch: bool
 impl macrame::error::Overlap
-pub fn macrame::error::Overlap::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, (impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>), (impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>), bool) -> Self
-pub fn macrame::error::Overlap::provenance(&self) -> &'static str
+pub fn macrame::error::Overlap::clause(&self) -> &'static str
+pub fn macrame::error::Overlap::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, (impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>), (impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>), macrame::error::OverlapProvenance) -> Self
+pub fn macrame::error::Overlap::subject(&self) -> &'static str
 pub fn macrame::error::abort_kind(&libsql::errors::Error) -> macrame::error::AbortKind
 pub async fn macrame::error::classify(&libsql::connection::Connection, libsql::errors::Error, macrame::error::WriteOp<'_>) -> macrame::error::DbError
 pub type macrame::error::BulkResult<T> = core::result::Result<T, macrame::error::BulkInterrupted>
@@ -1217,14 +1218,15 @@ pub fn macrame::vector::ModelName::fmt(&self, &mut core::fmt::Formatter<'_>) -> 
 pub macrame::prelude::Overlap::edge_type: alloc::string::String
 pub macrame::prelude::Overlap::existing_from: alloc::string::String
 pub macrame::prelude::Overlap::existing_to: alloc::string::String
+pub macrame::prelude::Overlap::provenance: macrame::error::OverlapProvenance
 pub macrame::prelude::Overlap::source_id: alloc::string::String
 pub macrame::prelude::Overlap::target_id: alloc::string::String
 pub macrame::prelude::Overlap::valid_from: alloc::string::String
 pub macrame::prelude::Overlap::valid_to: alloc::string::String
-pub macrame::prelude::Overlap::within_batch: bool
 impl macrame::error::Overlap
-pub fn macrame::error::Overlap::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, (impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>), (impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>), bool) -> Self
-pub fn macrame::error::Overlap::provenance(&self) -> &'static str
+pub fn macrame::error::Overlap::clause(&self) -> &'static str
+pub fn macrame::error::Overlap::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, (impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>), (impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>), macrame::error::OverlapProvenance) -> Self
+pub fn macrame::error::Overlap::subject(&self) -> &'static str
 #[non_exhaustive] pub struct macrame::prelude::ReadPlan
 pub macrame::prelude::ReadPlan::branch: core::option::Option<macrame::branch::BranchId>
 pub macrame::prelude::ReadPlan::limit: core::option::Option<usize>
@@ -1365,7 +1367,9 @@ pub const macrame::schema::ddl::CREATE_CONCEPTS_GUARD_DELETE: &str
 pub const macrame::schema::ddl::CREATE_CONCEPTS_GUARD_LINEAGE: &str
 pub const macrame::schema::ddl::CREATE_CONCEPTS_LOG_INSERT: &str
 pub const macrame::schema::ddl::CREATE_CONCEPTS_LOG_UPDATE: &str
+pub const macrame::schema::ddl::CREATE_CONCEPTS_MONOTONIC_RA: &str
 pub const macrame::schema::ddl::CREATE_CONCEPTS_TABLE: &str
+pub const macrame::schema::ddl::CREATE_CONCEPT_DISORDER_TABLE: &str
 pub const macrame::schema::ddl::CREATE_INDICES: &[&str]
 pub const macrame::schema::ddl::CREATE_KV_STORE_TABLE: &str
 pub const macrame::schema::ddl::CREATE_LINKS_CURRENT_SYNC: &str
@@ -1577,6 +1581,8 @@ pub async fn macrame::vector::keyword_search(&libsql::connection::Connection, &s
 pub fn macrame::vector::reciprocal_rank_fusion(&[alloc::string::String], &[alloc::string::String], usize) -> alloc::vec::Vec<(alloc::string::String, f64)>
 pub async fn macrame::vector::registered_models(&libsql::connection::Connection) -> macrame::error::Result<alloc::vec::Vec<macrame::vector::ModelName>>
 pub async fn macrame::vector::search_vector(&libsql::connection::Connection, &[f32], &macrame::vector::ModelName, usize, core::option::Option<&str>, core::option::Option<core::time::Duration>) -> macrame::error::Result<alloc::vec::Vec<macrame::vector::VectorSearchResult>>
+pub macro macrame::concepts_log_payload!
+pub macro macrame::payload_v_concepts!
 #[non_exhaustive] pub enum macrame::BlobLocation
 pub macrame::BlobLocation::Cold
 pub macrame::BlobLocation::Hot
@@ -1936,14 +1942,15 @@ pub macrame::Divergence::weight: f64
 pub macrame::Overlap::edge_type: alloc::string::String
 pub macrame::Overlap::existing_from: alloc::string::String
 pub macrame::Overlap::existing_to: alloc::string::String
+pub macrame::Overlap::provenance: macrame::error::OverlapProvenance
 pub macrame::Overlap::source_id: alloc::string::String
 pub macrame::Overlap::target_id: alloc::string::String
 pub macrame::Overlap::valid_from: alloc::string::String
 pub macrame::Overlap::valid_to: alloc::string::String
-pub macrame::Overlap::within_batch: bool
 impl macrame::error::Overlap
-pub fn macrame::error::Overlap::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, (impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>), (impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>), bool) -> Self
-pub fn macrame::error::Overlap::provenance(&self) -> &'static str
+pub fn macrame::error::Overlap::clause(&self) -> &'static str
+pub fn macrame::error::Overlap::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, (impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>), (impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>), macrame::error::OverlapProvenance) -> Self
+pub fn macrame::error::Overlap::subject(&self) -> &'static str
 #[non_exhaustive] pub struct macrame::ReadPlan
 pub macrame::ReadPlan::branch: core::option::Option<macrame::branch::BranchId>
 pub macrame::ReadPlan::limit: core::option::Option<usize>

@@ -630,7 +630,11 @@ const VALID_FOLD_BOUNDED: &str = r#"
 /// never interact. Both logs are then bounded by their own `recorded_at` index
 /// (0.20.0, P3, D-293).
 fn valid_cold_fold(cold_lineage: ColdLineage, bounded: bool) -> String {
-    let filter = if bounded { "WHERE recorded_at <= ?1" } else { "" };
+    let filter = if bounded {
+        "WHERE recorded_at <= ?1"
+    } else {
+        ""
+    };
     format!(
         r#"
     SELECT seq_id, table_name, entity_id, operation, payload, branch_id
@@ -2492,7 +2496,10 @@ fn valid_overlap(existing: &ValidStart, asserted: &ValidStart) -> DbError {
                 field("edge_type"),
                 (asserted_from, asserted_to),
                 (existing_from, existing_to),
-                false,
+                // A read: the caller asserted neither interval, so "the
+                // asserted" was always a lie here (D-292; D-305 fixes the
+                // wording the bool could not say).
+                OverlapProvenance::BothRecorded,
             )),
         };
     }
@@ -2935,7 +2942,10 @@ mod valid_fold_plan {
     /// one in two. `recorded_at` climbs one second a row, which the monotonic trigger
     /// requires.
     pub(super) async fn hot_log() -> libsql::Connection {
-        let db = libsql::Builder::new_local(":memory:").build().await.unwrap();
+        let db = libsql::Builder::new_local(":memory:")
+            .build()
+            .await
+            .unwrap();
         let conn = db.connect().unwrap();
         crate::schema::run_migrations(&conn).await.unwrap();
         conn.execute(
@@ -3003,7 +3013,10 @@ mod valid_fold_plan {
             p.contains("SCAN transaction_log USING INDEX idx_txlog_fold_partition"),
             "{p}"
         );
-        assert!(p.contains("USE TEMP B-TREE FOR RIGHT PART OF ORDER BY"), "{p}");
+        assert!(
+            p.contains("USE TEMP B-TREE FOR RIGHT PART OF ORDER BY"),
+            "{p}"
+        );
         assert!(!p.contains("idx_txlog_time"), "{p}");
     }
 
@@ -3042,7 +3055,9 @@ mod valid_fold_plan {
 
         let bounded = plan(&conn, VALID_FOLD_BOUNDED, at(EARLY)).await;
         assert!(
-            bounded.contains("SEARCH transaction_log USING INDEX valid_axis_candidate (recorded_at<?)"),
+            bounded.contains(
+                "SEARCH transaction_log USING INDEX valid_axis_candidate (recorded_at<?)"
+            ),
             "{bounded}"
         );
         let open = plan(&conn, VALID_FOLD, Vec::new()).await;
@@ -3078,12 +3093,9 @@ mod valid_fold_plan {
         )
         .await
         .unwrap();
-        conn.execute(
-            &format!("CREATE TABLE {ARCHIVE_SESSION_MARKER} (x)"),
-            (),
-        )
-        .await
-        .unwrap();
+        conn.execute(&format!("CREATE TABLE {ARCHIVE_SESSION_MARKER} (x)"), ())
+            .await
+            .unwrap();
         conn.execute(
             "DELETE FROM main.transaction_log WHERE recorded_at <= ?1",
             libsql::params![RECORDED],
@@ -3098,7 +3110,9 @@ mod valid_fold_plan {
 
         let recorded = plan(&conn, &cold_fold(ColdLineage::Stamped), at(EARLY)).await;
         assert!(
-            recorded.contains("SEARCH cold.transaction_log USING INDEX idx_cold_txlog_time (recorded_at<?)"),
+            recorded.contains(
+                "SEARCH cold.transaction_log USING INDEX idx_cold_txlog_time (recorded_at<?)"
+            ),
             "{recorded}"
         );
 
@@ -3121,11 +3135,14 @@ mod valid_fold_plan {
         )
         .await;
         assert!(
-            bounded.contains("SEARCH cold.transaction_log USING INDEX idx_cold_txlog_time (recorded_at<?)"),
+            bounded.contains(
+                "SEARCH cold.transaction_log USING INDEX idx_cold_txlog_time (recorded_at<?)"
+            ),
             "{bounded}"
         );
         assert!(
-            bounded.contains("SEARCH main.transaction_log USING INDEX idx_txlog_time (recorded_at<?)"),
+            bounded
+                .contains("SEARCH main.transaction_log USING INDEX idx_txlog_time (recorded_at<?)"),
             "{bounded}"
         );
     }

@@ -887,9 +887,11 @@ async fn a_batch_carrying_its_own_overlap_is_refused_whole() {
     };
     // The interval it names is in this batch and not in the file, and the
     // count below is what makes that a fact rather than a phrasing choice
-    // (0.13.7, D-180).
-    assert!(
-        overlap.within_batch,
+    // (0.13.7, D-180; the field carried the same meaning as a bool until
+    // 0.21.0's D-305 widening).
+    assert_eq!(
+        overlap.provenance,
+        macrame::OverlapProvenance::SameBatch,
         "a batch refused before the transaction opened cannot say the edge \
          already holds anything: {overlap:?}"
     );

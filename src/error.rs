@@ -15,20 +15,30 @@ pub struct Overlap {
     /// The interval the caller asserted.
     pub valid_from: String,
     pub valid_to: String,
-    /// The interval it collides with — see [`Overlap::within_batch`] for where
+    /// The interval it collides with — see [`Overlap::provenance`] for where
     /// that one is, because it is not always in the database.
     pub existing_from: String,
     pub existing_to: String,
-    /// Whether the collision is with another edge in the *same call* (0.13.7,
-    /// D-180).
+    /// Which of the three ways this is (0.21.0, [D-305]): the second interval
+    /// is already recorded, it is another edge in the *same call* (D-180), or
+    /// — the state a bool could not express and the valid fold needed — the
+    /// caller asserted *neither*, because this is a **read** and the ledger
+    /// holds both intervals (D-292, D-305).
     ///
-    /// Two guards raise this one error. `reject_overlapping_interval` compares
-    /// the assertion against committed rows; `reject_overlaps_within` compares
-    /// a batch against itself, before the transaction opens, and nothing it
-    /// names is in the database — the batch is refused whole, so nothing it
-    /// names ever will be. A caller told an edge "already holds" an interval
-    /// goes looking for a row that is not there.
-    pub within_batch: bool,
+    /// Two write guards raise this one error. `reject_overlapping_interval`
+    /// compares the assertion against committed rows; `reject_overlaps_within`
+    /// compares a batch against itself, before the transaction opens, and
+    /// nothing it names is in the database — the batch is refused whole, so
+    /// nothing it names ever will be. A caller told an edge "already holds" an
+    /// interval goes looking for a row that is not there. The valid fold (D-292
+    /// initially, D-305 since 0.21.0) raises the read's own state.
+    ///
+    /// The bbox's history: `within_batch: bool` from 0.13.7, widened to
+    /// [`OverlapProvenance`] in 0.21.0 with the user's say (a pre-1.0 minor may
+    /// break; D-305 records the call).
+    ///
+    /// [D-305]: ../../docs/architecture/s13-decision-register.md#d-305
+    pub provenance: OverlapProvenance,
 }
 
 impl Overlap {
@@ -51,7 +61,7 @@ impl Overlap {
         edge_type: impl Into<String>,
         asserted: (impl Into<String>, impl Into<String>),
         existing: (impl Into<String>, impl Into<String>),
-        within_batch: bool,
+        provenance: OverlapProvenance,
     ) -> Self {
         Self {
             source_id: source_id.into(),
@@ -61,8 +71,14 @@ impl Overlap {
             valid_to: asserted.1.into(),
             existing_from: existing.0.into(),
             existing_to: existing.1.into(),
-            within_batch,
+            provenance,
         }
+    }
+
+    /// How the message names the first interval: the caller's assertion, or a
+    /// row the ledger already holds.
+    pub fn subject(&self) -> &'static str {
+        subject_of(self.provenance)
     }
 
     /// The message's closing clause: where the second interval came from.
@@ -70,16 +86,17 @@ impl Overlap {
     /// A method rather than two `#[error]` strings, because one variant gets
     /// one format string, and rather than a `String` because this is on a
     /// `Display` path.
-    pub fn provenance(&self) -> &'static str {
-        provenance_of(self.within_batch)
+    pub fn clause(&self) -> &'static str {
+        clause_of(self.provenance)
     }
 }
 
-/// Where a concept collision's two intervals came from (0.19.4, D-295).
+/// Where a collision's two intervals came from — introduced for concepts in
+/// 0.19.4 (D-295), extended to edges in 0.21.0 (D-305, below).
 ///
-/// [`Overlap`] carries a `within_batch` bool for edges, and a bool has two
-/// states: the second interval is already recorded, or this same call asserts
-/// it. Both describe a **write** being refused. The valid-axis fold also
+/// A bool has two states: the second interval is already recorded, or this
+/// same call asserts it. Both describe a **write** being refused. The
+/// valid-axis fold also
 /// refuses a **read**, when the ledger it folds already holds two beliefs
 /// claiming one instant (D-292) — and there the caller asserted neither
 /// interval, so the remedy is to repair the data rather than to fix the call.
@@ -87,9 +104,12 @@ impl Overlap {
 /// operator reading a log needs: a refused write is a caller's ordinary
 /// mistake, a refused read is a contradiction already on disk.
 ///
-/// [`Overlap`] keeps its bool. It shipped in 0.15.x, and widening a public
-/// field would break callers for a wording gain, so the link arm of the valid
-/// fold still words its refusal as a write. D-295 records that as deferred.
+/// [`Overlap`] widened from its `within_batch` bool to this same enum in
+/// 0.21.0 ([D-305]) — the deferred widening D-295 recorded, spent with the
+/// user's say on a pre-1.0 minor. Its two write wordings did not move: the
+/// messages 0.13.7 and 0.19.2 printed are byte-identical.
+///
+/// [D-305]: ../../docs/architecture/s13-decision-register.md#d-305
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum OverlapProvenance {
@@ -107,8 +127,8 @@ pub enum OverlapProvenance {
 ///
 /// The concept half of [`Overlap`]: keyed on one id rather than an edge's three.
 /// As there, both intervals are reported, because neither alone identifies the
-/// conflict. Unlike there, where the second interval came from is an
-/// [`OverlapProvenance`] and not a bool (D-295).
+/// conflict, and as there since 0.21.0 (D-305) the second interval's origin is
+/// an [`OverlapProvenance`] — the shape D-295 introduced here first.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ConceptOverlap {
@@ -117,8 +137,10 @@ pub struct ConceptOverlap {
     pub valid_to: String,
     pub existing_from: String,
     pub existing_to: String,
-    /// Which of the three collisions this is (D-295), where
-    /// [`Overlap::within_batch`] is a bool for edges.
+    /// Which of the three collisions this is (D-295) — the edge side joined it
+    /// at 0.21.0 ([D-305]).
+    ///
+    /// [D-305]: ../../docs/architecture/s13-decision-register.md#d-305
     pub provenance: OverlapProvenance,
 }
 
@@ -146,10 +168,7 @@ impl ConceptOverlap {
     /// How the message names the first interval: the caller's assertion, or a
     /// row the ledger already holds.
     pub fn subject(&self) -> &'static str {
-        match self.provenance {
-            OverlapProvenance::AlreadyRecorded | OverlapProvenance::SameBatch => "the asserted",
-            OverlapProvenance::BothRecorded => "the recorded",
-        }
+        subject_of(self.provenance)
     }
 
     /// The message's closing clause: where the second interval came from.
@@ -157,11 +176,7 @@ impl ConceptOverlap {
     /// The two write clauses are word-for-word what 0.19.2 and 0.19.3 printed,
     /// so only a read's wording changes (D-295).
     pub fn clause(&self) -> &'static str {
-        match self.provenance {
-            OverlapProvenance::AlreadyRecorded => "is already recorded",
-            OverlapProvenance::SameBatch => "this same batch also asserts",
-            OverlapProvenance::BothRecorded => "is also already recorded",
-        }
+        clause_of(self.provenance)
     }
 
     /// What became of the later open interval: a write refuses it, and a read
@@ -174,16 +189,37 @@ impl ConceptOverlap {
     }
 }
 
-/// The closing clause for an **edge** collision: an interval already recorded,
-/// or one this same call asserts (D-180).
+/// How a collision's message names its first interval, for **both** halves
+/// (0.21.0, [D-305]): the write cases say "the asserted", the read D-292 added
+/// says "the recorded".
 ///
-/// Concepts went to [`ConceptOverlap::clause`] in 0.19.4 (D-295), which has a
-/// third case. This keeps the two, because [`Overlap`] keeps its bool.
-fn provenance_of(within_batch: bool) -> &'static str {
-    if within_batch {
-        "this same batch also asserts"
-    } else {
-        "is already recorded"
+/// [`Overlap::subject`] and [`ConceptOverlap::subject`] share this; the two
+/// structs carry the same [`OverlapProvenance`] and print the same words at the
+/// same states, which is the point of one free function: a wording that drifts
+/// between the edge and concept surfaces is a message that teaches the two
+/// shapes differently.
+///
+/// [D-305]: ../../docs/architecture/s13-decision-register.md#d-305
+fn subject_of(provenance: OverlapProvenance) -> &'static str {
+    match provenance {
+        OverlapProvenance::AlreadyRecorded | OverlapProvenance::SameBatch => "the asserted",
+        OverlapProvenance::BothRecorded => "the recorded",
+    }
+}
+
+/// The closing clause for a collision: where the second interval came from.
+///
+/// The edge cases came from D-180 (0.13.7) and are word-for-word what it
+/// printed; the read case came from D-295 (0.19.4) with the concepts, and the
+/// edge side joineed it at 0.21.0 ([D-305]). [`ConceptOverlap::clause`] and
+/// [`Overlap::clause`] share this.
+///
+/// [D-305]: ../../docs/architecture/s13-decision-register.md#d-305
+fn clause_of(provenance: OverlapProvenance) -> &'static str {
+    match provenance {
+        OverlapProvenance::AlreadyRecorded => "is already recorded",
+        OverlapProvenance::SameBatch => "this same batch also asserts",
+        OverlapProvenance::BothRecorded => "is also already recorded",
     }
 }
 
@@ -833,11 +869,12 @@ pub enum DbError {
     /// what a caller is told; `matches!(err, OverlappingInterval { .. })` is
     /// unaffected, which is how every call site uses it.
     #[error(
-        "edge {} -> {} ({}): the asserted [{}, {}) overlaps [{}, {}), which {}",
+        "edge {} -> {} ({}): {} [{}, {}) overlaps [{}, {}), which {}",
         .overlap.source_id, .overlap.target_id, .overlap.edge_type,
+        .overlap.subject(),
         .overlap.valid_from, .overlap.valid_to,
         .overlap.existing_from, .overlap.existing_to,
-        .overlap.provenance()
+        .overlap.clause()
     )]
     OverlappingInterval { overlap: Box<Overlap> },
 
@@ -1523,7 +1560,7 @@ mod tests {
         );
     }
 
-    fn sample_overlap(within_batch: bool) -> DbError {
+    fn sample_overlap(provenance: OverlapProvenance) -> DbError {
         DbError::OverlappingInterval {
             overlap: Box::new(Overlap {
                 source_id: "a".into(),
@@ -1533,7 +1570,7 @@ mod tests {
                 valid_to: "2026-09-01T00:00:00.000000Z".into(),
                 existing_from: "2026-01-01T00:00:00.000000Z".into(),
                 existing_to: "2026-06-01T00:00:00.000000Z".into(),
-                within_batch,
+                provenance,
             }),
         }
     }
@@ -1541,7 +1578,7 @@ mod tests {
     /// The boxed variant still reports both intervals.
     #[test]
     fn an_overlap_names_the_asserted_interval_and_the_other_one() {
-        let msg = sample_overlap(false).to_string();
+        let msg = sample_overlap(OverlapProvenance::AlreadyRecorded).to_string();
         assert!(msg.contains("a -> b (KNOWS)"), "{msg}");
         assert!(msg.contains("asserted [2026-03-01"), "{msg}");
         assert!(msg.contains("[2026-01-01"), "{msg}");
@@ -1556,11 +1593,11 @@ mod tests {
     /// row that was never written.
     #[test]
     fn an_overlap_says_which_side_of_the_write_the_other_interval_is_on() {
-        let stored = sample_overlap(false).to_string();
+        let stored = sample_overlap(OverlapProvenance::AlreadyRecorded).to_string();
         assert!(stored.contains("is already recorded"), "{stored}");
         assert!(!stored.contains("batch"), "{stored}");
 
-        let in_batch = sample_overlap(true).to_string();
+        let in_batch = sample_overlap(OverlapProvenance::SameBatch).to_string();
         assert!(
             in_batch.contains("this same batch also asserts"),
             "{in_batch}"

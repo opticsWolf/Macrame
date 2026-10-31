@@ -211,12 +211,17 @@ create_exception!(
     "Two valid-time intervals for one relationship claim the same instant.\n\n\
      Attributes: `source_id`, `target_id`, `edge_type`, the asserted `valid_from` \
      / `valid_to`, the `existing_from` / `existing_to` it collides with, and \
-     `within_batch`. Both intervals are reported because neither alone \
+     `provenance`. Both intervals are reported because neither alone \
      identifies the conflict.\n\n\
-     `within_batch` says which guard raised this. False means the other \
-     interval is a committed row and can be queried. True means it is another \
-     edge in the same `write_bulk_atomic` call, refused before the transaction \
-     opened — nothing named is in the database, and nothing named will be."
+     `provenance` says where the second interval came from (0.21.0, D-305: it \
+     was `within_batch`, a bool, until 0.21.0 — see D-295 for the concept \
+     classes that grew this shape first). \"already_recorded\" means the other \
+     interval is a committed row and can be queried; \"same_batch\" means it is \
+     another edge in the same `write_bulk_atomic` call, refused before the \
+     transaction opened — nothing named is in the database, and nothing named \
+     will be; \"both_recorded\" means this is a **read**, the ledger holds both \
+     intervals, and the caller asserted neither — operate on the data, not the \
+     call."
 );
 create_exception!(
     macrame,
@@ -982,7 +987,7 @@ fn build(py: Python<'_>, err: DbError) -> PyErr {
                 e.setattr("valid_to", overlap.valid_to)?;
                 e.setattr("existing_from", overlap.existing_from)?;
                 e.setattr("existing_to", overlap.existing_to)?;
-                e.setattr("within_batch", overlap.within_batch)
+                e.setattr("provenance", provenance_name(overlap.provenance))
             })
         }
         DbError::OverlappingConcept { overlap } => {
@@ -995,16 +1000,14 @@ fn build(py: Python<'_>, err: DbError) -> PyErr {
                 e.setattr("provenance", provenance_name(overlap.provenance))
             })
         }
-        DbError::ConceptSingleOpen { overlap } => {
-            raise::<ConceptSingleOpenError, _>(py, m, |e| {
-                e.setattr("concept_id", overlap.id)?;
-                e.setattr("valid_from", overlap.valid_from)?;
-                e.setattr("valid_to", overlap.valid_to)?;
-                e.setattr("existing_from", overlap.existing_from)?;
-                e.setattr("existing_to", overlap.existing_to)?;
-                e.setattr("provenance", provenance_name(overlap.provenance))
-            })
-        }
+        DbError::ConceptSingleOpen { overlap } => raise::<ConceptSingleOpenError, _>(py, m, |e| {
+            e.setattr("concept_id", overlap.id)?;
+            e.setattr("valid_from", overlap.valid_from)?;
+            e.setattr("valid_to", overlap.valid_to)?;
+            e.setattr("existing_from", overlap.existing_from)?;
+            e.setattr("existing_to", overlap.existing_to)?;
+            e.setattr("provenance", provenance_name(overlap.provenance))
+        }),
 
         DbError::CurrentDrift { n } => raise::<CurrentDriftError, _>(py, m, |e| e.setattr("n", n)),
 

@@ -290,9 +290,20 @@ async fn two_link_intervals_claiming_one_instant_are_refused() {
         .reconstruct_as_of(AsOf::valid_at(APR))
         .await
         .expect_err("the same edge is claimed twice for April");
+    let DbError::OverlappingInterval { ref overlap } = err else {
+        panic!("expected OverlappingInterval, got {err:?}");
+    };
+    // The read's own state (D-305 widening the bool D-295 could not fix on
+    // the edge side): the caller asserted neither interval, so the message
+    // must name the ledger, not an assertion nobody made.
+    assert_eq!(
+        overlap.provenance,
+        OverlapProvenance::BothRecorded,
+        "a read finds the collision in the ledger, asserted by nobody"
+    );
     assert!(
-        matches!(err, DbError::OverlappingInterval { .. }),
-        "got {err:?}"
+        err.to_string().contains("the recorded"),
+        "the edge arm words a read as a read: {err}"
     );
 
     db.close().await.unwrap();
@@ -362,10 +373,7 @@ async fn a_superseded_start_archived_away_still_answers_its_valid_read() {
     assert_eq!(titles(&in_march)["a"], "jan-corrected");
 
     let in_july = db.reconstruct_as_of(AsOf::valid_at(JUL)).await.unwrap();
-    assert_eq!(
-        titles(&in_july).get("a").map(String::as_str),
-        Some("jun")
-    );
+    assert_eq!(titles(&in_july).get("a").map(String::as_str), Some("jun"));
 
     db.close().await.unwrap();
 }
@@ -399,7 +407,8 @@ async fn the_backfilled_ledger_answers_each_axis_its_own_way() {
 
     let recorded = db.reconstruct_as_of(AsOf::recorded_at(FAR)).await.unwrap();
     assert_eq!(
-        titles(&recorded)["src/a.rs"], "C2",
+        titles(&recorded)["src/a.rs"],
+        "C2",
         "the rule answers the recorded read as it does every recorded read"
     );
     assert_eq!(
@@ -503,9 +512,12 @@ async fn a_valid_axis_state_cannot_be_saved_as_a_snapshot() {
 
     let state = db.reconstruct_as_of(AsOf::valid_at(MAR)).await.unwrap();
     let dir = harness.db_path.with_extension("valid-snapshots");
-    let err = macrame::temporal::save_snapshot(&dir, &state)
-        .expect_err("a valid-axis state is refused");
-    assert!(matches!(err, DbError::SnapshotWriteFailed { .. }), "got {err:?}");
+    let err =
+        macrame::temporal::save_snapshot(&dir, &state).expect_err("a valid-axis state is refused");
+    assert!(
+        matches!(err, DbError::SnapshotWriteFailed { .. }),
+        "got {err:?}"
+    );
 
     db.close().await.unwrap();
 }
@@ -542,7 +554,11 @@ async fn concurrent_valid_reads_on_an_archived_database_do_not_collide() {
         t.await.unwrap();
     }
 
-    std::sync::Arc::into_inner(db).unwrap().close().await.unwrap();
+    std::sync::Arc::into_inner(db)
+        .unwrap()
+        .close()
+        .await
+        .unwrap();
 }
 
 /// The valid-axis mark survives a serde round trip, so a state decoded from a
@@ -559,7 +575,10 @@ async fn a_valid_axis_state_round_tripped_through_serde_is_still_refused() {
     let dir = harness.db_path.with_extension("valid-snapshots");
     let err = macrame::temporal::save_snapshot(&dir, &decoded)
         .expect_err("the decoded state is still at a valid instant");
-    assert!(matches!(err, DbError::SnapshotWriteFailed { .. }), "got {err:?}");
+    assert!(
+        matches!(err, DbError::SnapshotWriteFailed { .. }),
+        "got {err:?}"
+    );
 
     db.close().await.unwrap();
 }

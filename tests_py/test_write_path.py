@@ -223,7 +223,7 @@ def test_an_overlapping_interval_raises_with_both_intervals(db):
     assert e.valid_from == "2026-03-01T00:00:00.000000Z"  # what was asserted
     assert e.existing_from == T0  # what it hit
     # It hit a committed row, and the row is still there to be queried.
-    assert e.within_batch is False
+    assert e.provenance == "already_recorded"
 
 
 def test_a_batch_that_contradicts_itself_says_so(db):
@@ -242,7 +242,7 @@ def test_a_batch_that_contradicts_itself_says_so(db):
             ]
         )
     e = caught.value
-    assert e.within_batch is True
+    assert e.provenance == "same_batch"
     assert "this same batch" in str(e)
     assert count(db, "links") == 0, "nothing may land from a batch that is refused"
 

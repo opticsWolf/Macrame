@@ -249,7 +249,7 @@ fn sample(name: &str) -> Option<DbError> {
                 "LINKS",
                 ("2026-03-01T00:00:00.000000Z", "2026-09-01T00:00:00.000000Z"),
                 ("2026-01-01T00:00:00.000000Z", "2026-06-01T00:00:00.000000Z"),
-                false,
+                macrame::OverlapProvenance::AlreadyRecorded,
             )),
         },
         "OverlappingConcept" => DbError::OverlappingConcept {

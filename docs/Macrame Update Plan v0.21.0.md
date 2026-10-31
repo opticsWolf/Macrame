@@ -520,6 +520,14 @@ keeps a bool, so the valid fold's link arm words a refused *read* as a refused *
 the public field breaks callers. 0.21.0 is a pre-1.0 minor and may break, but whether to spend
 the break here is the user's call. **Default: carried, not built.**
 
+**Built (2026-11-01) — the user spent the break.** [`D-305`](architecture/s13-decision-register.md#d-305):
+`Overlap::within_batch` → `Overlap::provenance: OverlapProvenance`, `subject()`/`clause()` shared with the
+concept half so one wording lives one place; the edge arm of the valid fold passes `BothRecorded` and its
+message reads `the recorded` (the two write messages byte-identical, tests pin both); the Python attribute
+`within_batch` is renamed to `provenance` with the shared string values; `.pyi`, the exception docstring, the
+sampling tests and both suites move with it. Public surface 1,972 → **1,979 items** (blessed, gate-5's four
+unblessed additions ride the same bless); the stability contract carries the figure.
+
 ---
 
 ## 6. Acceptance gates

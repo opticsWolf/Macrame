@@ -972,7 +972,7 @@ fn the_overlap_constructor_does_not_swap_the_two_intervals() {
         "relates",
         ("2026-02-01T00:00:00.000000Z", "2026-02-02T00:00:00.000000Z"),
         ("2026-03-01T00:00:00.000000Z", "2026-03-02T00:00:00.000000Z"),
-        false,
+        macrame::OverlapProvenance::AlreadyRecorded,
     );
 
     assert_eq!(
@@ -991,7 +991,7 @@ fn the_overlap_constructor_does_not_swap_the_two_intervals() {
     assert_eq!(o.source_id, "a");
     assert_eq!(o.target_id, "b");
     assert_eq!(o.edge_type, "relates");
-    assert!(!o.within_batch);
+    assert_eq!(o.provenance, macrame::OverlapProvenance::AlreadyRecorded);
 }
 
 /// **`ConceptOverlap::new` puts each interval where the message says it is.**

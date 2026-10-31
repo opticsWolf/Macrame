@@ -2026,14 +2026,17 @@ class ConceptSingleOpenError(IntegrityError):
 class OverlappingIntervalError(IntegrityError):
     """The fields are flattened onto the exception rather than nested behind an
     `.overlap` object: `valid_*` is what the caller asserted, `existing_*` is
-    what it collided with, and `within_batch` says where that one lives.
+    what it collided with, and `provenance` says where that one lives.
 
-    `within_batch` is False for the ordinary case — the other interval is a
-    committed row, and `query_as_of_edges` will show it. It is True when
-    `write_bulk_atomic` was handed a batch that contradicts itself, which is
-    caught before the transaction opens: the interval named is another edge in
-    the same call, the batch is refused whole, and querying for it finds
-    nothing (0.13.7)."""
+    `provenance` is `"already_recorded"` for the ordinary case — the other
+    interval is a committed row, and `query_as_of_edges` will show it; it is
+    `"same_batch"` when `write_bulk_atomic` was handed a batch that contradicts
+    itself, which is caught before the transaction opens (`write_bulk_atomic`
+    refuses whole: the interval named is another edge in the same call, and
+    querying for it finds nothing); it is `"both_recorded"` when a read found
+    both intervals in the ledger and the caller asserted neither. 0.21.0
+    (D-305) widens this from the `within_batch` bool 0.13.7 shipped; the
+    concept classes have carried `provenance` since 0.19.4 (D-295)."""
 
     source_id: str
     target_id: str
@@ -2042,7 +2045,7 @@ class OverlappingIntervalError(IntegrityError):
     valid_to: str
     existing_from: str
     existing_to: str
-    within_batch: bool
+    provenance: str
 
 class NegativeEdgeWeightError(IntegrityError):
     source_id: str
