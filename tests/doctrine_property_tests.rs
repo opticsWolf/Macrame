@@ -33,7 +33,7 @@ mod harness;
 use std::collections::BTreeSet;
 use std::future::Future;
 
-use harness::TestHarness;
+use harness::{ensure_marks_table, mark_disordered, TestHarness};
 use macrame::prelude::*;
 use macrame::temporal::save_snapshot;
 use proptest::prelude::*;
@@ -120,6 +120,18 @@ enum Op {
         id: usize,
         title: bool,
     },
+    /// A concept write whose start is the generator's choice, not always
+    /// TS[0]. Its step reads the projection first: when the held start is
+    /// later, the write is a **backfill** — admitted because it closes where
+    /// the open row begins — and the pair it disorders is marked, exactly the
+    /// write the §3.2 skip path classifies. When the held start is equal the
+    /// write supersedes it (the heal, recorded later, mark intact); later
+    /// starts against an open row are refused by the guard and ignored, as
+    /// every recovery here is.
+    ConceptStart {
+        id: usize,
+        start: usize,
+    },
     /// Soft-delete, and the only op that produces a *tombstone* in a fold: the
     /// winning log row for the concept says `retired = 1`, so a reconstruction
     /// must show it gone. Added with D-049 — before snapshot composition,
@@ -147,6 +159,7 @@ fn op_strategy() -> impl Strategy<Value = Op> {
                 src, tgt, etype, valid_from, valid_to
             }),
         1 => (0..NODES.len(), any::<bool>()).prop_map(|(id, title)| Op::Upsert { id, title }),
+        2 => (0..NODES.len(), 0..TS.len()).prop_map(|(id, start)| Op::ConceptStart { id, start }),
         1 => (0..NODES.len()).prop_map(|id| Op::RetireConcept { id }),
         1 => (0..NODES.len(), 0..NODES.len(), 0..TYPES.len(), 0..3usize)
             .prop_map(|(src, tgt, etype, valid_from)| Op::Bulk { src, tgt, etype, valid_from }),
@@ -197,6 +210,49 @@ async fn step(db: &Database, op: Op) {
                     TS[valid_from],
                     TS[valid_to],
                 )
+                .await;
+        }
+        Op::ConceptStart { id, start } => {
+            let entity = NODES[id];
+            let open_from: Option<String> = db
+                .read_conn()
+                .query(
+                    "SELECT valid_from FROM concepts WHERE id = ?1",
+                    libsql::params![entity],
+                )
+                .await
+                .unwrap()
+                .next()
+                .await
+                .unwrap()
+                .and_then(|r| r.get::<Option<String>>(0).ok())
+                .flatten();
+            let held = open_from
+                .as_deref()
+                .and_then(|f| TS.iter().position(|t| *t == f));
+            if let Some(held) = held {
+                if start < held {
+                    // The backfill: earlier than what the projection holds,
+                    // closed at that row's start so the single-open guard
+                    // admits it. §3.2's skip path classifies this write; the
+                    // mark is the same insert the skip handler makes (the
+                    // table arrives with the v24 rung, so the fixture makes
+                    // the write for it).
+                    let _ = db
+                        .upsert_concept(
+                            ConceptUpsert::new(entity, "N")
+                                .valid_from(TS[start])
+                                .valid_to(open_from.as_deref().unwrap()),
+                        )
+                        .await;
+                    mark_disordered(&db, entity, "main").await;
+                    return;
+                }
+            }
+            // The same start is a supersede (the heal, mark intact); any
+            // later start against an open row draws the overlap refusal.
+            let _ = db
+                .upsert_concept(ConceptUpsert::new(entity, "N").valid_from(TS[start]))
                 .await;
         }
         Op::Upsert { id, title } => {
@@ -441,6 +497,10 @@ proptest! {
         block_on(async {
             let harness = TestHarness::new();
             let db = open_db(&harness).await;
+            // The marks table arrives with the v24 rung; the concept arm's
+            // fixture provisions it here so the generator's backfill op can
+            // leave the marks the read side answers through.
+            ensure_marks_table(&db).await;
             for op in &history {
                 step(&db, *op).await;
             }
@@ -452,6 +512,66 @@ proptest! {
                 .await.unwrap().next().await.unwrap().unwrap().get(0).unwrap();
 
             let state = reconstruct(db.read_conn(), &now, None, None).await.unwrap();
+
+            // **Gate 3 (0.21.0, D-303): the fold's concepts equal the
+            // projection, field by field.** The marks are provisioned by the
+            // fixture and applied by the generator's backfill op, which is
+            // the shape the write side and the rung leave; with them, the
+            // rule is the projection's answer, so the equality below is the
+            // §2.2 property under generated histories with out-of-order
+            // starts — not only on the fixed fixture the write-side tests
+            // keep. A retired concept's projection row is the state, and the
+            // fold answers absence for it.
+            let mut proj = db
+                .read_conn()
+                .query(
+                    "SELECT c.id, c.title, c.content, c.extra, c.retired, \
+                     COALESCE(f.title, '') \
+                     FROM concepts c LEFT JOIN concepts_fts f ON f.rowid = c.rowid \
+                     ORDER BY c.id",
+                    (),
+                )
+                .await
+                .unwrap();
+            while let Some(row) = proj.next().await.unwrap() {
+                let id: String = row.get(0).unwrap();
+                let title: String = row.get(1).unwrap();
+                let content: String = row.get(2).unwrap();
+                let extra_raw: String = row.get(3).unwrap();
+                let retired: i64 = row.get(4).unwrap();
+                let fts_title: String = row.get(5).unwrap();
+                prop_assert_eq!(
+                    retired != 0,
+                    !state.concepts.contains_key(&id),
+                    "retirement mismatches the fold for {}",
+                    id
+                );
+                if retired != 0 {
+                    continue;
+                }
+                let gate = state
+                    .concepts
+                    .get(&id)
+                    .unwrap_or_else(|| panic!("the fold dropped {}: {:#?}", id, state));
+                prop_assert_eq!(
+                    title + "|" + &content,
+                    gate.title.clone() + "|" + &gate.content,
+                    "the fold's {} disagrees with the projection",
+                    id
+                );
+                prop_assert_eq!(
+                    fts_title,
+                    gate.title.clone(),
+                    "the FTS and fold titles disagree for {}",
+                    id
+                );
+                prop_assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&extra_raw).unwrap(),
+                    serde_json::from_str::<serde_json::Value>(&gate.extra).unwrap(),
+                    "the extra object disagrees with the fold for {}",
+                    id
+                );
+            }
 
             for t in TS {
                 let materialized: BTreeSet<_> = query_as_of_edges(db.read_conn(), t)
