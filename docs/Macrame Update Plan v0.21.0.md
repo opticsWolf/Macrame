@@ -582,12 +582,18 @@ unblessed additions ride the same bless); the stability contract carries the fig
    `concepts/70` chunk within 10% of 3.30 ms. **Write side signed (2026-10-31, machine at
    4%, criterion vs `main-0.20.0`):** `upsert_concept` 407–418 µs, median **−4.5%**
    (p = 0.01); `chunk_scaling/concepts/70` 3.18–3.38 ms, median **+5.1%** (p = 0.15).
-   **Read side signed at the tag bench (2026-11-01, machine at 2%):** the same criterion
-   harness, with the replay stations' `main-0.20.0` baseline recorded on a worktree at
-   `v0.20.0` (full fold 16.59 ms, composed 2.98 ms) and re-measured on `dev/0.21.0`.
-   `reconstruct_full_fold` **+0.20%** (16.540 ms, p = 0.52 — none detected);
-   `reconstruct_composed` **+1.34%** (2.997 ms, p < 0.05 ≈ 40 µs — the owed-probe and
-   statement-prep visible only because the fold itself is unchanged). The probe's
+   **Read side signed at the tag bench (2026-11-01, machine at 2–3%):** the same
+   criterion harness, with the replay stations' `main-0.20.0` baseline recorded on a
+   worktree at `v0.20.0` (full fold 16.59 ms, composed 2.98 ms) and re-measured on
+   `dev/0.21.0`. **The figure of record is the re-run on a clean target** (the first
+   pass ran in a target dir that had served the baseline worktree's build and may
+   have carried crossed artifacts; the clean rebuild restored every affected suite
+   exactly as P5's sessions left it — migration_tests 51, lib 178 — and its bench
+   figures confirm the same story at slightly kinder decimals):
+   `reconstruct_full_fold` **+1.14%** (16.667 vs 16.589 ms; the first pass read
+   +0.20% p = 0.52), `reconstruct_composed` **+2.16%** (3.046 vs 2.980 ms; first pass
+   +1.34%) — the two-statement pair's probe plus statement prep on the small-delta
+   arm, tens of µs against a 16.6 ms read; well inside the ±10% gate. The probe's
    stations, re-measured on the final code: healthy folds indistinguishable
    (`bench_healthy` +0.6%, `mixed_log` −0.3%, `mixed_starts` clean −0.6%); the probe
    alone 0.5 µs per 1,000 calls at bench size; at 5% incidence the disordered fold
@@ -599,8 +605,11 @@ unblessed additions ride the same bless); the stability contract carries the fig
    order of magnitude, station-relative.
 10. **Suites and doc gates** green on both feature sets, with figures recorded against a
     baseline taken **before** P1 starts. 0.20.0 could not compare because it took none.
-    (Run 2026-10-31 through the CI runner: default suite 901 passed across 67 targets,
-    `--features metrics` 901/67, `--features property-tests` 925/71 on its first attempt.
+    (Runs through the CI runner: 2026-10-31 — default suite 901 passed across 67 targets,
+    `--features metrics` 901/67, `--features property-tests` 925/71 on its first attempt;
+    **re-run at the tag on a clean target, 2026-11-01** — default **PASSED 901/67** on
+    attempt 3, property named targets all clean standalone, doctrine 9/9, per the
+    release draft's Suite section.)
     The sweep's one named failure was real and was the bump's bookkeeping — Appendix D still
     said `**v23** today` — fixed with the bump it documents; a `reconstruct_as_of_tests`
     batch failure disappeared on rerun, and one default attempt died mid-run in R15's shape
