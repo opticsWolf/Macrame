@@ -537,6 +537,13 @@ the break here is the user's call. **Default: carried, not built.**
    re-measures fold, correction and writer in one harness against the same baseline.
 10. **Suites and doc gates** green on both feature sets, with figures recorded against a
     baseline taken **before** P1 starts. 0.20.0 could not compare because it took none.
+    (Run 2026-10-31 through the CI runner: default suite 901 passed across 67 targets,
+    `--features metrics` 901/67, `--features property-tests` 925/71 on its first attempt.
+    The sweep's one named failure was real and was the bump's bookkeeping — Appendix D still
+    said `**v23** today` — fixed with the bump it documents; a `reconstruct_as_of_tests`
+    batch failure disappeared on rerun, and one default attempt died mid-run in R15's shape
+    with zero named failures, its three named binaries then clean standalone, per the
+    runner's own protocol.)
 11. **Past reads never change.** `reconstruct_as_of(ts)` at a fixed ts returns identical
     winners run twice around a later write — the named case: a backfill at t1, a read,
     a healing write at t2, and the same read again, mutant-equal between them. The shape-5
