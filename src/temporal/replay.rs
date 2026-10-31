@@ -857,18 +857,29 @@ const DISORDER_CORRECTION_COLD_PREFIX: &str = r#"
       ON t.entity_id = cd.entity_id AND t.branch_id = cd.branch_id
     WHERE t.table_name = 'concepts'
       AND t.seq_id = (
-            SELECT t2.seq_id FROM (
-                SELECT seq_id, table_name, entity_id, operation, payload, recorded_at, branch_id
-                FROM main.transaction_log
-                UNION ALL
-                SELECT seq_id, table_name, entity_id, operation, payload, recorded_at, {cold}
-                FROM cold.transaction_log
-            ) t2
-            WHERE t2.table_name = 'concepts'
-              AND t2.entity_id = t.entity_id AND t2.branch_id = t.branch_id
-              AND t2.recorded_at <= ?1
-            ORDER BY json_extract(t2.payload, '$.valid_from') DESC, t2.seq_id DESC
+            SELECT seq_id FROM (
+            SELECT seq_id, v2 FROM (
+                SELECT t2.seq_id AS seq_id, json_extract(t2.payload, '$.valid_from') AS v2
+                FROM transaction_log t2
+                WHERE t2.table_name = 'concepts'
+                  AND t2.entity_id = t.entity_id AND t2.branch_id = t.branch_id
+                  AND t2.recorded_at <= ?1
+                ORDER BY v2 DESC, t2.seq_id DESC
+                LIMIT 1
+            )
+            UNION ALL
+            SELECT seq_id, v2 FROM (
+                SELECT t2.seq_id AS seq_id, json_extract(t2.payload, '$.valid_from') AS v2
+                FROM cold.transaction_log t2
+                WHERE t2.table_name = 'concepts'
+                  AND t2.entity_id = t.entity_id AND t2.branch_id = t.branch_id
+                  AND t2.recorded_at <= ?1
+                ORDER BY v2 DESC, t2.seq_id DESC
+                LIMIT 1
+            )
+            ORDER BY v2 DESC, seq_id DESC
             LIMIT 1
+            )
           )
 "#;
 
@@ -927,20 +938,35 @@ fn disorder_correction_lineage_cold(
       ON t.entity_id = cd.entity_id AND t.branch_id = cd.branch_id
     WHERE t.table_name = 'concepts'
       AND t.seq_id = (
-            SELECT t2.seq_id FROM (
-                SELECT seq_id, table_name, entity_id, operation, payload, recorded_at, branch_id
-                FROM main.transaction_log
-                UNION ALL
-                SELECT seq_id, table_name, entity_id, operation, payload, recorded_at, {cold}
-                FROM cold.transaction_log
-            ) t2
-            JOIN lineage g2 ON g2.branch_id = t2.branch_id
-            WHERE t2.table_name = 'concepts'
-              AND t2.entity_id = t.entity_id AND t2.branch_id = t.branch_id
-              AND t2.recorded_at <= ?1
-              AND (g2.cutoff IS NULL OR t2.recorded_at <= g2.cutoff)
-            ORDER BY json_extract(t2.payload, '$.valid_from') DESC, t2.seq_id DESC
+            SELECT seq_id FROM (
+            SELECT seq_id, v2 FROM (
+                SELECT t2.seq_id AS seq_id, json_extract(t2.payload, '$.valid_from') AS v2
+                FROM transaction_log t2
+                WHERE t2.table_name = 'concepts'
+                  AND t2.entity_id = t.entity_id AND t2.branch_id = t.branch_id
+                  AND t2.recorded_at <= ?1
+                  AND t2.recorded_at <=
+                      (SELECT COALESCE(g2.cutoff, t2.recorded_at)
+                       FROM lineage g2 WHERE g2.branch_id = t2.branch_id)
+                ORDER BY v2 DESC, t2.seq_id DESC
+                LIMIT 1
+            )
+            UNION ALL
+            SELECT seq_id, v2 FROM (
+                SELECT t2.seq_id AS seq_id, json_extract(t2.payload, '$.valid_from') AS v2
+                FROM cold.transaction_log t2
+                WHERE t2.table_name = 'concepts'
+                  AND t2.entity_id = t.entity_id AND t2.branch_id = t.branch_id
+                  AND t2.recorded_at <= ?1
+                  AND t2.recorded_at <=
+                      (SELECT COALESCE(g2.cutoff, t2.recorded_at)
+                       FROM lineage g2 WHERE g2.branch_id = t2.branch_id)
+                ORDER BY v2 DESC, t2.seq_id DESC
+                LIMIT 1
+            )
+            ORDER BY v2 DESC, seq_id DESC
             LIMIT 1
+            )
           )
 "#,
         lineage = crate::graph::lineage::ancestry_values(rows, first_slot, ""),
@@ -2885,7 +2911,7 @@ mod valid_fold_plan {
     /// pin names its bound: `EARLY` keeps about one row in twenty, `RECORDED` about
     /// one in two. `recorded_at` climbs one second a row, which the monotonic trigger
     /// requires.
-    async fn hot_log() -> libsql::Connection {
+    pub(super) async fn hot_log() -> libsql::Connection {
         let db = libsql::Builder::new_local(":memory:").build().await.unwrap();
         let conn = db.connect().unwrap();
         crate::schema::run_migrations(&conn).await.unwrap();
@@ -3079,5 +3105,379 @@ mod valid_fold_plan {
             bounded.contains("SEARCH main.transaction_log USING INDEX idx_txlog_time (recorded_at<?)"),
             "{bounded}"
         );
+    }
+}
+
+#[cfg(test)]
+mod shape5_plan {
+    //! Gate 4 (0.21.0, D-303): the shape-5 probe and the bounded correction,
+    //! pinned by plan text and VDBE triples, in the company the fold pins keep.
+    //!
+    //! Statement A (the fold itself) inherits the pins of
+    //! [`super::valid_fold_plan`] — its text is byte-identical to what they
+    //! pinned, and the healthy-ledger path never compiles the correction at
+    //! all. The probe and the correction are new text, so they are pinned here.
+    //!
+    //! The correction's pin is taken **twice**, per the probe's lesson: once on
+    //! a ledger where the pair is merely marked, and once on a
+    //! healed-and-`ANALYZE`d one — rows the reader keeps out of the bound are
+    //! in `sqlite_stat1` when the planner chooses, and the probe round caught
+    //! a redundant join predicate costing ~17× under exactly that condition. A
+    //! plan that only holds on unhealed data is not a pin.
+
+    use super::valid_fold_plan::hot_log;
+    use super::*;
+    use crate::temporal::archive::{COLD_LINEAGE_INDICES, COLD_SCHEMA};
+
+    /// The pair the marks name, the way the write side (§3.2) and, once the
+    /// v24 rung lands, the rung's history fill leave them: an open winner at
+    /// the greater start, a later backfill at day 1, an optional heal at day 1
+    /// later still. The stamps leave the backfill and the heal beyond
+    /// [`BOUND`], reproducing the healed epoch the probe priced.
+    ///
+    /// `concept_disorder` arrives with the v24 rung (§3.3); until it lands the
+    /// fixture provisions the table with the rung's shape, as
+    /// `tests/common/harness.rs` does for the integration side.
+    async fn marked_log(heal: bool) -> libsql::Connection {
+        let conn = hot_log().await;
+        conn.execute(
+            "CREATE TABLE concept_disorder (entity_id TEXT NOT NULL, \
+             branch_id TEXT NOT NULL, PRIMARY KEY (entity_id, branch_id))",
+            (),
+        )
+        .await
+        .unwrap();
+        // c000 carries no disorder in the generated rows (its 50 starts all
+        // fall on day 1, `i % 20 == 0` for every row of the fixture), so the
+        // pair below is the ledger's only marked one — the correction's plan
+        // is measured on the case it exists for.
+        conn.execute(
+            "INSERT INTO concept_disorder (entity_id, branch_id) VALUES ('c000', 'main')",
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO transaction_log (table_name, entity_id, operation, payload, recorded_at, branch_id) \
+             VALUES ('concepts', 'c000', 'upsert', \
+                     json_object('valid_from', strftime('%Y-%m-%dT00:00:00.000000Z', 86400 * 20, 'unixepoch')), \
+                     strftime('%Y-%m-%dT%H:%M:%S', 20000, 'unixepoch') || '.000000Z', 'main')",
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO transaction_log (table_name, entity_id, operation, payload, recorded_at, branch_id) \
+             VALUES ('concepts', 'c000', 'upsert', \
+                     json_object('valid_from', strftime('%Y-%m-%dT00:00:00.000000Z', 86400, 'unixepoch'), \
+                                 'valid_to', strftime('%Y-%m-%dT00:00:00.000000Z', 86400 * 20, 'unixepoch')), \
+                     strftime('%Y-%m-%dT%H:%M:%S', 20060, 'unixepoch') || '.000000Z', 'main')",
+            (),
+        )
+        .await
+        .unwrap();
+        if heal {
+            conn.execute(
+                "INSERT INTO transaction_log (table_name, entity_id, operation, payload, recorded_at, branch_id) \
+                 VALUES ('concepts', 'c000', 'upsert', \
+                         json_object('valid_from', strftime('%Y-%m-%dT00:00:00.000000Z', 86400, 'unixepoch')), \
+                         strftime('%Y-%m-%dT%H:%M:%S', 20120, 'unixepoch') || '.000000Z', 'main')",
+                (),
+            )
+            .await
+            .unwrap();
+        }
+        conn.execute("ANALYZE", ()).await.unwrap();
+        conn
+    }
+
+    /// The pin's bound: between the open winner (recorded at `t`=20000) and
+    /// the backfill (`t`=20060). Whatever the heal epoch adds, it is beyond
+    /// this, which is the condition the redundant-join-predicate lesson was
+    /// priced under.
+    const BOUND: &str = "1970-01-01T05:33:50.000000Z";
+
+    fn at_bound() -> Vec<libsql::Value> {
+        vec![libsql::Value::Text(BOUND.to_string())]
+    }
+
+    async fn plan(conn: &libsql::Connection, sql: &str, params: Vec<libsql::Value>) -> String {
+        let mut rows = conn
+            .query(&format!("EXPLAIN QUERY PLAN {sql}"), params)
+            .await
+            .unwrap();
+        let mut lines = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            lines.push(row.get::<String>(3).unwrap());
+        }
+        lines.join(" | ")
+    }
+
+    /// The three integers, read out of `EXPLAIN`, with the contract
+    /// `plan_fixture::counts_of` keeps in the integration tree: VDBE opcodes
+    /// are a function of the chosen plan and nothing else. The definition is
+    /// restated here because that file lives in the test tree by design and a
+    /// `#[cfg(test)]` module of the crate body cannot reach it — the copy is
+    /// the cost of the boundary, held to the same contract by name in both.
+    async fn counts_of(conn: &libsql::Connection, sql: &str) -> (usize, usize, usize) {
+        let mut rows = conn.query(&format!("EXPLAIN {sql}"), ()).await.unwrap();
+        let (mut opens, mut seeks, mut rewinds) = (0usize, 0usize, 0usize);
+        while let Some(row) = rows.next().await.unwrap() {
+            let op: String = row.get(1).unwrap();
+            if op == "OpenRead" {
+                opens += 1;
+            } else if op.starts_with("Seek") || op == "NotExists" || op == "NotFound" {
+                seeks += 1;
+            } else if op == "Rewind" || op == "Last" {
+                rewinds += 1;
+            }
+        }
+        (opens, seeks, rewinds)
+    }
+
+    /// **The probe's plan is its program, and its program is one scan.**
+    ///
+    /// The shape's whole healthy-ledger price is one `EXISTS` over the marks
+    /// table, so that price has to be true of the plan: a single full scan of
+    /// the table, short-circuiting at the first row, with no index and no
+    /// seek — and the same program whether the answer is going to be yes or
+    /// no, because the short-circuit is runtime, not a second plan.
+    #[tokio::test]
+    async fn the_probe_scans_the_marks_table_once_either_way() {
+        let conn = hot_log().await;
+        conn.execute(
+            "CREATE TABLE concept_disorder (entity_id TEXT NOT NULL, \
+             branch_id TEXT NOT NULL, PRIMARY KEY (entity_id, branch_id))",
+            (),
+        )
+        .await
+        .unwrap();
+
+        let p = plan(&conn, DISORDER_PROBE, Vec::new()).await;
+        assert!(p.contains("SCAN concept_disorder"), "{p}");
+        let empty = counts_of(&conn, DISORDER_PROBE).await;
+
+        let conn = marked_log(false).await;
+        let p = plan(&conn, DISORDER_PROBE, Vec::new()).await;
+        assert!(p.contains("SCAN concept_disorder"), "{p}");
+        let marked = counts_of(&conn, DISORDER_PROBE).await;
+        assert_eq!(
+            empty, marked,
+            "the probe's program moved with its data: it is one EXISTS either way"
+        );
+    }
+
+    /// **The correction seeks the rule row through the starts index.**
+    ///
+    /// One scan of the marks table drives the whole statement; every other
+    /// touch of the log is a per-pair seek on
+    /// `idx_txlog_concept_starts (entity_id, branch_id, …)`, the same index
+    /// D-300's skip-scan pins hold. The recorded bound is proven *not* to
+    /// seek the time index — the join predicate of the probe round's lesson
+    /// reads `recorded_at` off the row the seek already won, and the pin
+    /// would catch it reaching for `idx_txlog_time` again — while the outer
+    /// join seeks the same districts the fold window reads
+    /// (`idx_txlog_fold_partition` on its three columns). The winner's
+    /// `ORDER BY` rides the range the seek reached, sorting only the tail:
+    /// the small right-part sort the shipped index leaves, whose removal
+    /// belongs to the v24 rung's `valid_from DESC` recreation, which re-pins
+    /// this.
+    ///
+    /// The plan prints under the statement's aliases: `cd`, `t`, `t2`. The
+    /// VDBE triple is the measured program of the shipped statement — five
+    /// cursors (marks table, then log-table-plus-starts-index twice, outer
+    /// seek and winner seek), two seeks, two rewinds.
+    #[tokio::test]
+    async fn the_hot_correction_seeks_the_starts_index_and_no_time_index() {
+        let conn = marked_log(false).await;
+        let p = plan(&conn, DISORDER_CORRECTION, at_bound()).await;
+        assert!(p.contains("SCAN cd"), "{p}");
+        assert!(
+            p.contains(
+                "SEARCH t USING INDEX idx_txlog_fold_partition (table_name=? AND entity_id=? AND branch_id=?)"
+            ),
+            "{p}"
+        );
+        assert!(
+            p.contains("SEARCH t2 USING INDEX idx_txlog_concept_starts"),
+            "{p}"
+        );
+        assert!(
+            !p.contains("SCAN transaction_log"),
+            "a whole-log arm in the correction: {p}"
+        );
+        assert!(
+            !p.contains("idx_txlog_time"),
+            "the bound rides the subquery's own index range, not the time index: {p}"
+        );
+        assert!(
+            p.contains("USE TEMP B-TREE FOR RIGHT PART OF ORDER BY"),
+            "the index range supplies the leading order, the tail is the pair's own rows: {p}"
+        );
+        let c = counts_of(&conn, DISORDER_CORRECTION).await;
+        assert_eq!(c, (5, 2, 2), "the marked ledger's VDBE triple moved");
+    }
+
+    /// **The same plan on the healed-and-`ANALYZE`d ledger.**
+    ///
+    /// The heal row sits beyond [BOUND] and in `sqlite_stat1` by the time the
+    /// plan is chosen. That is the condition under which the probe round's
+    /// redundant join predicate sent the statement from ~0.5 ms to ~9 ms, and
+    /// the pin's reason for being: on healed data the plan must be the plan.
+
+    #[tokio::test]
+    async fn the_correction_plan_holds_on_the_healed_and_analysed_ledger() {
+        let conn = marked_log(true).await;
+        let p = plan(&conn, DISORDER_CORRECTION, at_bound()).await;
+        assert!(p.contains("SCAN cd"), "{p}");
+        assert!(
+            p.contains("SEARCH t USING INDEX idx_txlog_fold_partition"),
+            "{p}"
+        );
+        assert!(
+            p.contains("SEARCH t2 USING INDEX idx_txlog_concept_starts"),
+            "{p}"
+        );
+        assert!(!p.contains("SCAN transaction_log"), "{p}");
+        assert!(!p.contains("idx_txlog_time"), "{p}");
+        assert!(
+            p.contains("USE TEMP B-TREE FOR RIGHT PART OF ORDER BY"),
+            "{p}"
+        );
+        // The healed epoch measured the same VDBE program as the marked one —
+        // (5, 2, 2) on both — which is the point: growing `sqlite_stat1` with
+        // rows beyond the bound moved the plan not at all.
+        let c = counts_of(&conn, DISORDER_CORRECTION).await;
+        assert_eq!(c, (5, 2, 2), "the healed ledger's VDBE triple moved");
+    }
+
+    /// **The archive-attached correction seeks both files, and neither is
+    /// scanned.**
+    ///
+    /// The first formulation of this statement joined the two logs in a
+    /// UNION-ALL co-routine and let the planner build an automatic index over
+    /// it: the plan came back with an inner `SCAN main.transaction_log` that
+    /// existed only to feed the automatic index, the same deformation the
+    /// single-statement lesson priced once already. The shipped statement
+    /// computes the winner per file instead — one seek on the hot start index,
+    /// one on the cold fold partition, the pair's two candidates through a
+    /// two-row merge, no automatic index, no scan of either log.
+    ///
+    /// The VDBE triple is the measured program of the shipped statement
+    /// against an attached-but-empty cold file; the numbers that matter are
+    /// the seeks and the abstence of a whole-log rewind, which the plan text
+    /// asserts beside them.
+    #[tokio::test]
+    async fn the_cold_correction_computes_its_winner_per_file_and_scans_neither() {
+        let conn = marked_log(false).await;
+        conn.execute("ATTACH DATABASE ':memory:' AS cold", ())
+            .await
+            .unwrap();
+        for ddl in COLD_SCHEMA.iter().chain(COLD_LINEAGE_INDICES.iter()) {
+            conn.execute(ddl, ()).await.unwrap();
+        }
+        conn.execute("ANALYZE cold", ()).await.unwrap();
+        let sql = disorder_correction_cold(ColdLineage::Stamped);
+
+        let p = plan(&conn, &sql, at_bound()).await;
+        assert!(
+            p.contains("SEARCH main.transaction_log USING INDEX idx_txlog_fold_partition (table_name=? AND entity_id=? AND branch_id=?)"),
+            "{p}"
+        );
+        assert!(
+            p.contains("SEARCH cold.transaction_log USING INDEX idx_cold_txlog_fold_partition (table_name=? AND entity_id=? AND branch_id=?)"),
+            "{p}"
+        );
+        assert!(
+            p.contains("SEARCH t2 USING INDEX idx_txlog_concept_starts"),
+            "{p}"
+        );
+        assert!(
+            p.contains("SEARCH t2 USING INDEX idx_cold_txlog_fold_partition (table_name=? AND entity_id=? AND branch_id=?)"),
+            "{p}"
+        );
+        // The lesson the first formulation paid for.
+        assert!(
+            !p.contains("SCAN main.transaction_log"),
+            "the hot arm of either join scanning the whole log: {p}"
+        );
+        assert!(
+            !p.contains("SCAN cold.transaction_log"),
+            "the cold arm of either join scanning the whole archive: {p}"
+        );
+        assert!(!p.contains("idx_txlog_time"), "{p}");
+        assert!(!p.contains("idx_cold_txlog_time"), "{p}");
+
+        let c = counts_of(&conn, &sql).await;
+        assert_eq!(c, (14, 6, 10), "the cold correction's VDBE triple moved");
+    }
+
+    /// **The lineage corrections seek the same way, with the cutoff as a
+    /// scalar probe.** The hot statement's winner seeks the start index and
+    /// probes the materialized ancestry through the pair's own seek; the
+    /// archive statement seeks index on both files. Joining `lineage` into the
+    /// winner's compound arms directly was measured to drag in an automatic
+    /// partial covering index over the hot log — the scalar is what keeps the
+    /// planner on the start index.
+    #[tokio::test]
+    async fn the_lineage_corrections_seek_the_log_and_probe_the_cutoff() {
+        let conn = marked_log(false).await;
+        let lineage_params = || {
+            vec![
+                libsql::Value::Text(BOUND.to_string()),
+                libsql::Value::Text("main".to_string()),
+                libsql::Value::Integer(0),
+                libsql::Value::Null,
+                libsql::Value::Text("alt".to_string()),
+                libsql::Value::Integer(1),
+                libsql::Value::Null,
+            ]
+        };
+
+        let hot = plan(&conn, &disorder_correction_lineage(2, 2), lineage_params()).await;
+        assert!(
+            hot.contains("SEARCH t USING INDEX idx_txlog_fold_partition (table_name=? AND entity_id=? AND branch_id=?)"),
+            "{hot}"
+        );
+        assert!(
+            hot.contains(
+                "SEARCH t2 USING INDEX idx_txlog_concept_starts (entity_id=? AND branch_id=?)"
+            ),
+            "{hot}"
+        );
+        assert!(!hot.contains("SCAN transaction_log"), "{hot}");
+        assert!(!hot.contains("idx_txlog_time"), "{hot}");
+
+        conn.execute("ATTACH DATABASE ':memory:' AS cold", ())
+            .await
+            .unwrap();
+        for ddl in COLD_SCHEMA.iter().chain(COLD_LINEAGE_INDICES.iter()) {
+            conn.execute(ddl, ()).await.unwrap();
+        }
+        conn.execute("ANALYZE cold", ()).await.unwrap();
+        let cold = plan(
+            &conn,
+            &disorder_correction_lineage_cold(ColdLineage::Stamped, 2, 2),
+            lineage_params(),
+        )
+        .await;
+        assert!(
+            cold.contains("SEARCH t2 USING INDEX idx_txlog_concept_starts"),
+            "{cold}"
+        );
+        assert!(
+            cold.contains("SEARCH t2 USING INDEX idx_cold_txlog_fold_partition (table_name=? AND entity_id=? AND branch_id=?)"),
+            "{cold}"
+        );
+        assert!(
+            cold.contains("MATERIALIZE lineage | SCAN 2 CONSTANT ROWS"),
+            "{cold}"
+        );
+        assert!(
+            !cold.contains("AUTOMATIC PARTIAL COVERING INDEX"),
+            "the automatic-index deformation again: {cold}"
+        );
+        assert!(!cold.contains("SCAN main.transaction_log"), "{cold}");
+        assert!(!cold.contains("SCAN cold.transaction_log"), "{cold}");
     }
 }
