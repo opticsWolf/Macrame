@@ -375,6 +375,33 @@ pub async fn wind_back_to_v22(conn: &libsql::Connection) {
         .unwrap();
     conn.execute(TXLOG_ENTITY_V22, ()).await.unwrap();
 }
+/// Take a database back to v23's *shape* (0.21.0, D-303) — schema only; the
+/// stamp is the caller's to pair, like every wind-back before it.
+///
+/// Two pieces of what v24 added, in reverse: the marks table goes, and
+/// `idx_txlog_concept_starts` goes back to the v23 order — the start column
+/// ascending, `seq_id` descending — which is what a 0.20.0-created file
+/// actually holds. Nothing else about the current baseline drifts from v23:
+/// the payload versions were untouched there, and every v23-era trigger body
+/// is byte-stable by D-056.
+///
+/// Deliberately NOT calling [`wind_back_to_v22`]: that restores
+/// `idx_txlog_entity`, which a v23 file did not have (the v23 rung dropped
+/// it).
+pub async fn wind_back_to_v23(conn: &libsql::Connection) {
+    conn.execute("DROP TABLE IF EXISTS concept_disorder", ())
+        .await
+        .unwrap();
+    conn.execute("DROP INDEX IF EXISTS idx_txlog_concept_starts", ())
+        .await
+        .unwrap();
+    conn.execute(
+        "CREATE INDEX idx_txlog_concept_starts ON transaction_log          (entity_id, branch_id, json_extract(payload, '$.valid_from'), seq_id DESC)          WHERE table_name = 'concepts'",
+        (),
+    )
+    .await
+    .unwrap();
+}
 
 /// Undo v22 on a database built from today's baseline (0.19.0, D-288).
 ///

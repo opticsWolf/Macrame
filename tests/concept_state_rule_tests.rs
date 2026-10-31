@@ -553,12 +553,15 @@ async fn a_retired_backfill_does_not_drop_the_concept_from_a_recorded_walk() {
     db.close().await.unwrap();
 }
 
-/// The jump the rung has to make is shown in one test rather than its
-/// results in three: unmarked history folds last-writer-wins (the §1
-/// defect, `bounded now to the two rows the fixture wrote`), the projection
-/// answers the rule, and the mark is what makes the two agree. When the rung
-/// lands and fills marks from history, the first assertion inverts on its
-/// own fixture (marked) and the middle one keeps standing.
+/// The jump the rung made is shown in one test rather than three: under
+/// this build the write path marks every skipped backfill itself, so the
+/// unmarked pair is not a state a v24 ledger reaches by writing — the
+/// divergence has to be made by hand, and where the v23 fixture made it by
+/// *not* marking a marked write, this one makes it by clearing the mark the
+/// skip path left. What the clear shows is the identity the mark exists for:
+/// the fold drops to the seq winner (the 0.20.0 shape, the fold-equals-
+/// projection property broken), the projection does not move, and the
+/// identity returns the next time the write path skips for the pair.
 #[tokio::test]
 async fn the_projection_and_the_fold_agree_only_when_the_mark_holds() {
     let harness = TestHarness::new();
@@ -567,24 +570,41 @@ async fn the_projection_and_the_fold_agree_only_when_the_mark_holds() {
     upsert(&db, concept("src/a.rs", "C2", JUN, None)).await;
     upsert(&db, concept("src/a.rs", "C1", JAN, Some(JUN))).await;
 
-    // No mark: the divergence, named on purpose.
-    let state = reconstruct(&db.read_conn(), FAR, None, None).await.unwrap();
-    assert_eq!(state.concepts["src/a.rs"].title, "C1");
+    // The write path's own mark: the fold and the projection agree, and the
+    // projection is the one the rule answers.
+    let marked = reconstruct(&db.read_conn(), FAR, None, None).await.unwrap();
+    assert_eq!(marked.concepts["src/a.rs"].title, "C2");
     let (title, from, to, fts_title) = projection(&db, "src/a.rs").await;
     assert_eq!(title, "C2");
     assert_eq!(from, JUN);
     assert_eq!(to, OPEN);
     assert_eq!(fts_title, "C2");
 
-    // The mark lands and the fold agrees with the projection.
-    mark_disordered(&db, "src/a.rs", "main").await;
-    let marked = reconstruct(&db.read_conn(), FAR, None, None).await.unwrap();
-    assert_eq!(marked.concepts["src/a.rs"].title, "C2");
+    // The mark leaves (the re-establishing clause the mutants clear). With
+    // the table emptied, the probe answers "nothing owed", and the fold
+    // returns to 0.20.0's seq-winner read — the divergence, held without a
+    // hand-marks helper because the write path is what restored the mark.
+    drop_marks_table(&db).await;
+    ensure_marks_table(&db).await;
+    let unmarked = reconstruct(&db.read_conn(), FAR, None, None).await.unwrap();
+    assert_eq!(
+        unmarked.concepts["src/a.rs"].title, "C1",
+        "without the mark the fold is yesterday's answer"
+    );
     let (title2, from2, to2, fts2) = projection(&db, "src/a.rs").await;
     assert_eq!(
         (title2, from2, to2, fts2),
         (title, from, to, fts_title),
-        "the mark is what makes the fold equal the projection"
+        "the projection never moved when the mark did"
+    );
+
+    // One more skipped write: the mark returns by the same signal that
+    // writes the log row, and the identity is back.
+    upsert(&db, concept("src/a.rs", "C1c", JAN, Some(JUN))).await;
+    let remarked = reconstruct(&db.read_conn(), FAR, None, None).await.unwrap();
+    assert_eq!(
+        remarked.concepts["src/a.rs"].title, "C2",
+        "the write path re-marks the pair on its next skip"
     );
 
     db.close().await.unwrap();
@@ -815,6 +835,53 @@ async fn a_bounded_read_never_moves_around_the_archive_pass() {
         vec![("src/a.rs".to_string(), "main".to_string())],
         "the mark survives the heal even as the archive moves the row out"
     );
+
+    db.close().await.unwrap();
+}
+
+/// **The write side's mark arrives from the skip path itself (v24).**
+///
+/// No fixture call marks anything here: the skipped projection update is the
+/// classification, and the v24 write path inserts the pair into
+/// `concept_disorder` on the same signal that writes the log row. The
+/// assertion is therefore about what a plain two-write sequence leaves
+/// behind: one mark, no matter how many skips the pair carries, and a
+/// recorded read that answers the rule with no help.
+#[tokio::test]
+async fn the_skipped_upsert_marks_the_pair_itself() {
+    let harness = TestHarness::new();
+    let db = open_db(&harness).await;
+
+    upsert(&db, concept("src/a.rs", "C2", JUN, None)).await;
+    upsert(&db, concept("src/a.rs", "C1", JAN, Some(JUN))).await;
+
+    assert_eq!(
+        mark_list(&db).await,
+        vec![("src/a.rs".to_string(), "main".to_string())],
+        "the write path left its own mark"
+    );
+
+    // Re-asserting the backfill skips again and adds nothing: the mark is one
+    // row for the pair, not one per skip.
+    upsert(&db, concept("src/a.rs", "C1b", JAN, Some(JUN))).await;
+    assert_eq!(
+        mark_list(&db).await,
+        vec![("src/a.rs".to_string(), "main".to_string())],
+        "the mark is one row no matter how many backfills the pair carries"
+    );
+
+    // And the recorded read answers the rule with no fixture help at all:
+    // the late backfill and its re-assertion are both in the bound, and the
+    // open belief still wins.
+    let result = db.reconstruct_as_of(AsOf::recorded_at(FAR)).await.unwrap();
+    assert_eq!(result.concepts["src/a.rs"].title, "C2");
+
+    // The projection never moved: the skips left it where the June write put
+    // it, which is the state the fold must now be equal to.
+    let (title, from, to, _fts_title) = projection(&db, "src/a.rs").await;
+    assert_eq!(title, "C2");
+    assert_eq!(from, JUN);
+    assert_eq!(to, OPEN);
 
     db.close().await.unwrap();
 }

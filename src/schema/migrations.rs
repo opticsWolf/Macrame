@@ -13,7 +13,13 @@ use crate::schema::ddl::*;
 /// guarantee D-029 buys would be void on it while `user_version` insisted all
 /// was well. Reserving 1 as a value this build refuses by name is what makes
 /// "no legacy support" an enforced property instead of a README sentence.
-pub const SCHEMA_VERSION: u32 = 23;
+// 23 → 24 for the D-303 rung (0.21.0, plan §3.3). The payload versions are
+// untouched — this rung re-derives the projection from log rows already on
+// disk rather than introducing a payload shape — so what bumped is the
+// schema's own truth: the marks table the state rule answers through, the
+// start index the correction seeks, and the repair of projections 0.20.0
+// left wrong.
+pub const SCHEMA_VERSION: u32 = 24;
 
 type StepFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
 
@@ -246,6 +252,19 @@ const STEPS: &[Step] = &[
         apply: |conn| Box::pin(add_blob_store(conn)),
     },
     Step {
+        from: 23,
+        to: 24,
+        name: "concept-state-rule",
+        // One table created, one index recreated, rows re-derived and marks
+        // filled — everything on tables that reference no others. The repair
+        // **does** update `concepts`, whose foreign keys point outward only
+        // (`branch_id` onto `branches`, asserted not touched), and it moves
+        // `recorded_at` backwards with the monotonic trigger dropped, which
+        // no foreign key consults.
+        suspends_foreign_keys: false,
+        apply: |conn| Box::pin(repair_backfilled_ledger(conn)),
+    },
+    Step {
         from: 22,
         to: 23,
         name: "concept-starts-index",
@@ -368,6 +387,13 @@ pub async fn run(conn: &libsql::Connection) -> Result<MigrationOutcome> {
         refuse_if_occupied(conn).await?;
     }
 
+    // The v23 -> v24 rung's fill reads the archive with the log: the archive
+    // has to be attached before any rung opens its transaction (SQLite
+    // refuses `ATTACH` inside one), so this attach happens here, once, and is
+    // paired with the detach after the loop. Only the rung that leaves v24 can
+    // ever consult `cold`; every other rung ignores it.
+    let archive_attached = attach_archive_for_run(conn, found).await?;
+
     let mut current = found;
     while current != SCHEMA_VERSION {
         let step = STEPS
@@ -376,6 +402,13 @@ pub async fn run(conn: &libsql::Connection) -> Result<MigrationOutcome> {
             .ok_or_else(|| no_path_from(current))?;
         apply_step(conn, step).await?;
         current = step.to;
+    }
+
+    // The detach pairs the attach: whether the ladder climbed or not, a
+    // connection that came with `cold` leaves without it, best-effort in the
+    // fold's own D-044 shape.
+    if archive_attached {
+        detach_archive_for_run(conn).await;
     }
 
     verify(conn).await?;
@@ -544,6 +577,13 @@ async fn baseline(conn: &libsql::Connection) -> Result<()> {
     // v22 (0.19.0, D-288). Before the index and trigger loops, which both name
     // it; references nothing and is referenced by nothing.
     conn.execute(CREATE_BLOBS_TABLE, ()).await?;
+    // v24 (0.21.0, D-303). The marks ledger the state rule reads side reads
+    // and the write path fills. A sidecar like the two above it: no foreign
+    // key in either direction, no trigger, its one index is its WITHOUT-ROWID
+    // key itself. Fresh ledgers start empty — "nothing owed" is the honest
+    // answer for a ledger with no written backfill anywhere in it — and the
+    // v23 → v24 rung fills it from written history on files it upgrades.
+    conn.execute(CREATE_CONCEPT_DISORDER_TABLE, ()).await?;
     // Before the triggers, not after: `trg_concepts_fts_*` name this table, and
     // SQLite resolves a trigger body's tables at CREATE TRIGGER time.
     conn.execute(CREATE_CONCEPTS_FTS, ()).await?;
@@ -1904,6 +1944,221 @@ async fn add_traversal_cover(conn: &libsql::Connection) -> Result<()> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// v23 → v24: the state rule rung (0.21.0, D-303, plan §3.3)
+// ---------------------------------------------------------------------------
+
+/// Re-derive the projection row of every concept the 0.20.0 rule left wrong.
+///
+/// 0.20.0 picked by `seq_id` (`§2.1` of the plan), so a backfilled ledger holds
+/// a projection whose `valid_from` is not the concept's greatest start. This
+/// statement applies one rule (D-303): **the open belief wins; otherwise the
+/// latest-starting log row** — `ORDER BY valid_from DESC, seq_id DESC` per
+/// `(entity_id, branch_id)` partition, which is precisely the rule row the
+/// read side computes. Every field it needs is in the chosen row's payload;
+/// `recorded_at` therefore moves **backwards**, which is why the rung drops
+/// `trg_concepts_monotonic_ra` around this statement, and why the update arm
+/// fires no `trg_concepts_log_update` — a color change nobody asserted, so a
+/// log row for it would be a belief change nobody made.
+///
+/// The joining `WHERE` does not need the projection's `valid_from` to be
+/// wrong-below: any concept whose projection disagrees with its rule row is
+/// repaired, because the rung's brief is the state the rule answers, not the
+/// direction of the drift that got there.
+const REPAIR_CONCEPT_PROJECTIONS: &str = "UPDATE concepts SET\n     title           = json_extract(w.payload, '$.title'),\n     content         = COALESCE(json_extract(w.payload, '$.content'), ''),\n     embedding_model = json_extract(w.payload, '$.embedding_model'),\n     valid_from      = json_extract(w.payload, '$.valid_from'),\n     valid_to        = COALESCE(json_extract(w.payload, '$.valid_to'), '9999-12-31T23:59:59.999999Z'),\n     retired         = COALESCE(json_extract(w.payload, '$.retired'), 0),\n     recorded_at     = w.recorded_at,\n     extra           = COALESCE(json(w.payload -> '$.extra'), '{}')\n   FROM (\n     SELECT entity_id, branch_id, payload, recorded_at,\n            row_number() OVER (PARTITION BY entity_id, branch_id\n                               ORDER BY json_extract(payload, '$.valid_from') DESC,\n                                        seq_id DESC) AS rn\n     FROM transaction_log\n     WHERE table_name = 'concepts'\n   ) AS w\n   WHERE w.rn = 1\n     AND w.entity_id = concepts.id\n     AND w.branch_id = concepts.branch_id\n     AND concepts.valid_from <> json_extract(w.payload, '$.valid_from')";
+
+/// Mark the pairs whose written history ever held a backfill, hot log only.
+///
+/// The mark set is defined **over history, not over the projection** (plan
+/// §3.3): a pair whose backfill was later healed is still marked, so its past
+/// reads never change shape later. The inversion condition — one row following
+/// another *in recording order* with a smaller start — is the pass the plan
+/// calls the same partition pass the repair runs: the chronology is
+/// `recorded_at`, ties split by `seq_id`, and one inversion anywhere marks the
+/// pair once.
+const FILL_CONCEPT_DISORDER_HOT: &str = "INSERT OR IGNORE INTO concept_disorder (entity_id, branch_id)\n     SELECT DISTINCT entity_id, branch_id\n     FROM (\n       SELECT entity_id, branch_id, valid_from,\n              LAG(valid_from) OVER (PARTITION BY entity_id, branch_id\n                                    ORDER BY recorded_at, seq_id) AS prev_vf\n       FROM (\n         SELECT entity_id, branch_id, json_extract(payload, '$.valid_from') AS valid_from,\n                recorded_at, seq_id\n         FROM main.transaction_log\n         WHERE table_name = 'concepts'\n       )\n     )\n     WHERE prev_vf > valid_from";
+
+/// The same pass with the archive read with it.
+///
+/// A past backfill episode may already be in the archive: a log row the fill
+/// cannot see is an inversion it misses, and missing it breaks the only
+/// property the mark set exists for — past reads that were wrong stay right
+/// after this rung. One window over the **union** of the two files: writing
+/// the window inside each arm would miss pairs whose chronology straddles the
+/// cutoff (earliest rows cold, later ones hot — `LAG` would see `NULL` at the
+/// hot arm's first row and forget the up-then-down that preceded it).
+const FILL_CONCEPT_DISORDER_HOT_AND_COLD: &str = "INSERT OR IGNORE INTO concept_disorder (entity_id, branch_id)\n     SELECT DISTINCT entity_id, branch_id\n     FROM (\n       SELECT entity_id, branch_id, valid_from,\n              LAG(valid_from) OVER (PARTITION BY entity_id, branch_id\n                                    ORDER BY recorded_at, seq_id) AS prev_vf\n       FROM (\n         SELECT entity_id, branch_id, json_extract(payload, '$.valid_from') AS valid_from,\n                recorded_at, seq_id\n         FROM main.transaction_log\n         WHERE table_name = 'concepts'\n         UNION ALL\n         SELECT entity_id, branch_id, json_extract(payload, '$.valid_from') AS valid_from,\n                recorded_at, seq_id\n         FROM cold.transaction_log\n         WHERE table_name = 'concepts'\n       )\n     )\n     WHERE prev_vf > valid_from";
+
+/// v23 → v24: the state rule itself arrives on files that already hold a
+/// backfill (0.21.0, [D-303], plan §3.3).
+///
+/// Four things, all in the ladder's one transaction:
+///
+/// 1. **`concept_disorder`** — the shape-5 sidecar the read pair probes and
+///    the write path fills (fresh ledgers get it from the baseline; this rung
+///    is why an upgraded file has it too).
+/// 2. **`idx_txlog_concept_starts` rebuilt with `valid_from DESC`** — the
+///    correction's winner and D-300's skip-scan share the index, and the
+///    descent is now the rule's direction. Drop and recreate, because
+///    `CREATE INDEX IF NOT EXISTS` on the existing name keeps the old order
+///    forever.
+/// 3. **The projection repair** through [`REPAIR_CONCEPT_PROJECTIONS`], with
+///    `trg_concepts_log_update` and `trg_concepts_monotonic_ra` dropped
+///    around it. Both are re-issued from [`ddl::CREATE_CONCEPTS_LOG_UPDATE`]
+///    and [`ddl::CREATE_CONCEPTS_MONOTONIC_RA`], the bodies the baseline
+///    itself installs — a rung with its own copy of a trigger is a copy that
+///    drifts ([ddl::CREATE_LINKS_CURRENT_SYNC] made that a rule).
+/// 4. **The mark fill** through [`FILL_CONCEPT_DISORDER_HOT`] or
+///    [`FILL_CONCEPT_DISORDER_HOT_AND_COLD`] — the archive arm only when
+///    [`run`] could attach the ledger's archive, which it does before the
+///    ladder starts (inside a transaction `ATTACH` is refused by the engine).
+///
+/// The repair count goes to `tracing::info!` rather than into
+/// [`MigrationOutcome`] — nobody asked for a struct field the only way to
+/// observe is a log line anyway, and the ladder's shape stays what v8 → v9
+/// left it.
+///
+/// [D-303]: ../../docs/architecture/s13-decision-register.md#d-303
+async fn repair_backfilled_ledger(conn: &libsql::Connection) -> Result<()> {
+    // 1. The sidecar, before anything marks it.
+    conn.execute(CREATE_CONCEPT_DISORDER_TABLE, ()).await?;
+
+    // 2. The start index, rebuilt in the rule's direction.
+    conn.execute("DROP INDEX IF EXISTS idx_txlog_concept_starts", ())
+        .await?;
+    create_indices(conn, &["idx_txlog_concept_starts"]).await?;
+
+    // 3. The projection repair, with the two triggers out of the way. The
+    //    FTS triggers stay: the repair is a genuine change to title/content
+    //    and the index must follow the row it now describes.
+    conn.execute("DROP TRIGGER IF EXISTS trg_concepts_log_update", ())
+        .await?;
+    conn.execute("DROP TRIGGER IF EXISTS trg_concepts_monotonic_ra", ())
+        .await?;
+    let repaired = conn.execute(REPAIR_CONCEPT_PROJECTIONS, ()).await?;
+    conn.execute(CREATE_CONCEPTS_LOG_UPDATE, ()).await?;
+    conn.execute(CREATE_CONCEPTS_MONOTONIC_RA, ()).await?;
+
+    // 4. The marks, over whatever history this file can see. A pair already
+    //    marked (a this-build file re-run through the ladder is not a shape
+    //    the ladder can meet, but `OR IGNORE` costs nothing to be sure).
+    let cold = main_cold_attached(conn).await?;
+    let marked = match cold {
+        true => conn.execute(FILL_CONCEPT_DISORDER_HOT_AND_COLD, ()).await?,
+        false => conn.execute(FILL_CONCEPT_DISORDER_HOT, ()).await?,
+    };
+    match cold {
+        true => {
+            tracing::info!(
+                repaired,
+                marked,
+                "migration v23->v24 repaired concept projections and filled \
+                 disorder marks from the log and the archive"
+            );
+        }
+        false => {
+            tracing::info!(
+                repaired,
+                marked,
+                "migration v23->v24 repaired concept projections and filled \
+                 disorder marks from the log (no archive attached)"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Whether `cold` is attached to this connection.
+///
+/// `main_cold_attached` reads the engine's view, not the caller's memory: the
+/// attach happened in [`run`], one function up the chain, and the ladder may
+/// yet grow to a second rung that cares. The pragma is the honest question.
+async fn main_cold_attached(conn: &libsql::Connection) -> Result<bool> {
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*) FROM pragma_database_list WHERE name = 'cold'",
+            (),
+        )
+        .await?;
+    Ok(rows
+        .next()
+        .await?
+        .map(|row| row.get::<i64>(0).unwrap_or(0) > 0)
+        .unwrap_or(false))
+}
+
+/// Attach the ledger's archive for the fill, if there is one to read.
+///
+/// Called from [`run`] **before** the ladder starts: `ATTACH` inside an open
+/// transaction is refused by the engine, and every rung is one transaction.
+/// The archive's path is the one [`derive_archive_path`] computes for the main
+/// file (the write actor computes the same from the path it opened), and the
+/// file must exist — `ATTACH` of a missing path *creates* whatever it is given,
+/// which would leave a fake empty archive on disk next to a real ledger.
+///
+/// No archive file at all is the common case (an archive appears the first
+/// time `Database::archive` or `archive_branch` ran): the fill then reads the
+/// log only, which is complete by definition — an archive that never existed
+/// holds none of the pair's history.
+///
+/// **Failing the attach fails the open.** A warn-and-continue here would ship
+/// a v24 ledger whose marks quietly miss every archived inversion, and a
+/// missing mark is not a loud failure: it is yesterday's seq-winner read,
+/// silently. A refused open is the honest refusal the D-032 property has
+/// always preferred.
+async fn attach_archive_for_run(conn: &libsql::Connection, found: u32) -> Result<bool> {
+    if found != 23 {
+        return Ok(false);
+    }
+    let main_file = main_database_file(conn).await?;
+    let Some(main_file) = main_file else {
+        return Ok(false);
+    };
+    let archive = crate::connection::derive_archive_path(&main_file);
+    if !archive.exists() {
+        return Ok(false);
+    }
+    conn.execute(
+        "ATTACH DATABASE ?1 AS cold",
+        libsql::params![archive.to_string_lossy()],
+    )
+    .await?;
+    Ok(true)
+}
+
+/// The file `main` is, from the engine's own view of the handle.
+///
+/// `:memory:` and the empty path (some non-schema users) return `None`: there
+/// is no file, so there is no archive beside it.
+async fn main_database_file(conn: &libsql::Connection) -> Result<Option<std::path::PathBuf>> {
+    let mut rows = conn.query("PRAGMA database_list", ()).await?;
+    while let Some(row) = rows.next().await? {
+        let name: String = row.get(1)?;
+        if name == "main" {
+            let file: String = row.get(2)?;
+            return Ok(if file.is_empty() || file == ":memory:" {
+                None
+            } else {
+                Some(std::path::PathBuf::from(file))
+            });
+        }
+    }
+    Ok(None)
+}
+
+/// Detach the archive after the ladder, paired with [`attach_archive_for_run`].
+///
+/// Best-effort like the fold's own release ([D-044] [`release_cold`]): the
+/// statement fails harmlessly when nothing is attached, and the connection
+/// this leaves — the writer's, back to the actor that owns it — must not carry
+/// per-connection attachment state it never asked for.
+///
+/// [D-044]: ../../docs/architecture/s13-decision-register.md#d-044
+async fn detach_archive_for_run(conn: &libsql::Connection) {
+    // Error ignored on purpose; see the function's note.
+    let _ = conn.execute("DETACH DATABASE cold", ()).await;
+}
+
 /// The tables the baseline declares, by name, for [`verify`].
 pub(crate) const BASELINE_TABLES: &[&str] = &[
     "branches",
@@ -1922,6 +2177,9 @@ pub(crate) const BASELINE_TABLES: &[&str] = &[
     "kv_store",
     // v22 (0.19.0, D-288).
     "blobs",
+    // v24 (0.21.0, D-303). The shape-5 sidecar the read pair probes and the
+    // write path fills; required by name like the rest.
+    "concept_disorder",
 ];
 
 /// Confirm the database actually holds what the DDL claims to create.

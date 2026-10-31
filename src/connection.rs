@@ -4932,7 +4932,12 @@ fn derive_snapshots_dir(path: &Path) -> PathBuf {
 }
 
 /// Helper to derive archive database path by convention: foo.db -> foo_archive.db
-fn derive_archive_path(path: &Path) -> PathBuf {
+/// The archive file beside a ledger path, and **the one path both writers
+/// share**: `Database::open` computes it from the path the caller gave, and the
+/// migration ladder derives it from the file the engine reports
+/// (`PRAGMA database_list`), so the v24 fill reads the same archive the write
+/// actor fills.
+pub(crate) fn derive_archive_path(path: &Path) -> PathBuf {
     let mut archive = path.to_path_buf();
     if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("db");
@@ -5408,8 +5413,27 @@ async fn record_skipped_backfill(
         "a skipped backfill's log insert wrote {changed}"
     );
     let _ = changed;
+    // The mark (v24, D-303): the pair whose fold winner the next read will
+    // correct. `OR IGNORE` because the fill the rung runs is the same
+    // definition over history — no path should get two rows for one pair —
+    // and because a mark is never cleared, so re-marking on a second skip is
+    // the no-op that honesty allows. The table exists on every ledger this
+    // build opens (baseline for fresh files, the rung for upgraded ones).
+    conn.execute(
+        MARK_CONCEPT_DISORDER,
+        libsql::params![concept.id.as_str(), concept.branch_name()],
+    )
+    .await
+    .map_err(DbError::Engine)?;
     Ok(())
 }
+
+/// The mark insert of a skipped backfill (v24, [D-303], plan §3.2's extra
+/// write). The pair, as the fold partitions and the v24 index seeks it.
+///
+/// [D-303]: ../docs/architecture/s13-decision-register.md#d-303
+const MARK_CONCEPT_DISORDER: &str =
+    "INSERT OR IGNORE INTO concept_disorder (entity_id, branch_id)      VALUES (?1, ?2)";
 
 /// The `CREATE INDEX` for one validated JSON path.
 ///

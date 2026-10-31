@@ -450,7 +450,7 @@ async fn plan_string(conn: &libsql::Connection, sql: &str) -> String {
 #[test]
 fn a_version_bump_must_bring_its_own_rung_test() {
     assert_eq!(
-        SCHEMA_VERSION, 23,
+        SCHEMA_VERSION, 24,
         "SCHEMA_VERSION moved. Add a test for the new rung — one that starts \
          from a database at the previous version and asserts what the rung is \
          *for*, not merely that `run` reached the top."
@@ -3219,4 +3219,312 @@ async fn an_ungated_blob_delete_guard_is_refused_at_open() {
         reason.contains("trg_blobs_guard_delete"),
         "the refusal must name the guard whose body is ungated: {reason}"
     );
+}
+
+// -- The state-rule rung (v23 → v24, 0.21.0, D-303, gate 5) ----------------
+
+/// Undo today's build back to the v23 shape and stamp it 23, so the fixture is
+/// the file 0.20.0 leaves and the rung under test is the first thing to touch
+/// it. Hand-writes the projection and the log because the write path this
+/// build ships already follows the rule: a `Database` open here would repair
+/// nothing and mark nothing, and the fixture would have nothing to find.
+async fn v23_ledger_with_backfill(harness: &TestHarness) -> libsql::Connection {
+    let conn = connect(&harness).await;
+    macrame::schema::run_migrations(&conn).await.unwrap();
+    v11_schema::wind_back_to_v23(&conn).await;
+
+    // The log rows, oldest first: the June open belief, then the backfill
+    // recorded (much) later — operation codes and payload v3 exactly as
+    // `trg_concepts_log_insert`/`update` compose them. For the healed concept
+    // the third row is the August write: 0.20.0's later-start supersedes, so
+    // that pair's projection was never wrong.
+    let stamps = [
+        "2026-01-01T00:00:00.000000Z",
+        "2026-01-02T00:00:00.000000Z",
+        "2026-01-03T00:00:00.000000Z",
+    ];
+    conn.execute(
+        "INSERT INTO transaction_log (table_name, entity_id, operation, payload, recorded_at, branch_id) VALUES \
+         ('concepts', 'c1', 'I', json_object('v', 3, 'title', 'C2', 'content', 'b2', \
+           'valid_from', '2026-06-01T00:00:00.000000Z', \
+           'valid_to', '9999-12-31T23:59:59.999999Z', 'retired', 0, \
+           'embedding_model', NULL, 'extra', json('{\"layer\":\"one\"}')), ?1, 'main'), \
+         ('concepts', 'c1', 'U', json_object('v', 3, 'title', 'C1', 'content', 'b1', \
+           'valid_from', '2026-01-01T00:00:00.000000Z', \
+           'valid_to', '2026-06-01T00:00:00.000000Z', 'retired', 0, \
+           'embedding_model', NULL, 'extra', json('{}')), ?2, 'main'), \
+         ('concepts', 'c2', 'I', json_object('v', 3, 'title', 'C2', 'content', 'b2', \
+           'valid_from', '2026-06-01T00:00:00.000000Z', \
+           'valid_to', '9999-12-31T23:59:59.999999Z', 'retired', 0, \
+           'embedding_model', NULL, 'extra', json('{}')), ?1, 'main'), \
+         ('concepts', 'c2', 'U', json_object('v', 3, 'title', 'C1', 'content', 'b1', \
+           'valid_from', '2026-01-01T00:00:00.000000Z', \
+           'valid_to', '2026-06-01T00:00:00.000000Z', 'retired', 0, \
+           'embedding_model', NULL, 'extra', json('{}')), ?2, 'main'), \
+         ('concepts', 'c2', 'U', json_object('v', 3, 'title', 'C5', 'content', 'b5', \
+           'valid_from', '2026-08-01T00:00:00.000000Z', \
+           'valid_to', '9999-12-31T23:59:59.999999Z', 'retired', 0, \
+           'embedding_model', NULL, 'extra', json('{}')), ?3, 'main')",
+        libsql::params![
+            stamps[0],
+            stamps[1],
+            stamps[2],
+        ],
+    )
+    .await
+    .unwrap();
+
+    // The projection rows 0.20.0 left behind: the seq winner of each partition,
+    // which for `c1` is the backfill and for `c2` the heal. The insert's log
+    // trigger is raised for the write — the projection rows are the fixture's,
+    // not new beliefs — but the FTS triggers stay exactly as installed, because
+    // the rung's repair is asserted to carry the FTS row with it.
+    conn.execute("DROP TRIGGER trg_concepts_log_insert", ())
+        .await
+        .unwrap();
+    conn.execute(
+        "INSERT INTO concepts (id, title, content, valid_from, valid_to, recorded_at, retired, branch_id, extra) VALUES \
+         ('c1', 'C1', 'b1', '2026-01-01T00:00:00.000000Z', '2026-06-01T00:00:00.000000Z', ?1, 0, 'main', '{}'), \
+         ('c2', 'C5', 'b5', '2026-08-01T00:00:00.000000Z', '9999-12-31T23:59:59.999999Z', ?2, 0, 'main', '{}')",
+        libsql::params![stamps[1], stamps[2]],
+    )
+    .await
+    .unwrap();
+    // Back exactly as installed: the rung must not inherit a fixture hole.
+    conn.execute(ddl::CREATE_CONCEPTS_LOG_INSERT, ())
+        .await
+        .unwrap();
+
+    conn.execute("PRAGMA user_version = 23", ()).await.unwrap();
+    conn
+}
+
+const REPAIR_TS: &str = "2026-01-01T00:00:00.000000Z";
+
+/// **Gate 5: the v23 file with a backfill opens repaired.**
+///
+/// The projection row becomes the rule row, the FTS row follows it, the log is
+/// not touched (the repair is a correction of a). derivative view, not a new
+/// belief — and `recorded_at` moves backwards, which is why the monotonic
+/// trigger is dropped for the statement), and the marks arrive. The healed
+/// pair's projection is left exactly as it was and is marked **anyway**: the
+/// mark set is defined over history, not over what was wrong, which is the
+/// property that keeps the rung's past reads the rung's responsibility.
+#[tokio::test]
+async fn a_v23_ledger_with_a_backfill_opens_repaired() {
+    let harness = TestHarness::new();
+    let conn = v23_ledger_with_backfill(&harness).await;
+    let before = scalar(&conn, "SELECT COUNT(*) FROM transaction_log").await;
+
+    macrame::schema::run_migrations(&conn).await.unwrap();
+    assert_eq!(user_version(&conn).await, 24, "the rung lands v24");
+
+    // The log: unchanged in count. Removing the repair's two triggers is what
+    // guarantees this; re-asserting it here means a later rung that forgets
+    // the drop fails *this* test, not a guard.
+    assert_eq!(
+        scalar(&conn, "SELECT COUNT(*) FROM transaction_log").await,
+        before
+    );
+    assert_eq!(before, 5, "the fixture's five hand-written rows");
+
+    // `c1`: the rule row from the log. Title, content, the interval, the
+    // `recorded_at` of the row the state answers (the June stamp — the
+    // projection now agrees with the ledger's own chronology), the retired
+    // bit, and the payload's extra object as written.
+    let mut rows = conn
+        .query(
+            "SELECT title, content, valid_from, valid_to, recorded_at, retired, extra \
+             FROM concepts WHERE id = 'c1'",
+            (),
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    assert_eq!(row.get::<String>(0).unwrap(), "C2");
+    assert_eq!(row.get::<String>(1).unwrap(), "b2");
+    assert_eq!(row.get::<String>(2).unwrap(), "2026-06-01T00:00:00.000000Z");
+    assert_eq!(row.get::<String>(3).unwrap(), "9999-12-31T23:59:59.999999Z");
+    assert_eq!(row.get::<String>(4).unwrap(), REPAIR_TS);
+    assert_eq!(row.get::<i64>(5).unwrap(), 0);
+    assert_eq!(
+        row.get::<String>(6).unwrap(),
+        "{\"layer\":\"one\"}",
+        "the rung does not heal the row in the log the rule row belongss to"
+    );
+
+    // `c2`: the projection was already the rule row; the repair leaves it
+    // alone (the `<>` clause is what spares it, not the removal of every row).
+    assert_eq!(
+        scalar(
+            &conn,
+            "SELECT COUNT(*) FROM concepts WHERE id = 'c2' \
+             AND title = 'C5' AND valid_from = '2026-08-01T00:00:00.000000Z'"
+        )
+        .await,
+        1
+    );
+
+    // The FTS row follows the repaired title — the same term, so the match is
+    // the index's own answer, and the same rowid, so nothing else changed.
+    assert_eq!(
+        scalar(
+            &conn,
+            "SELECT COUNT(*) FROM concepts_fts WHERE concepts_fts MATCH 'C2'"
+        )
+        .await,
+        1
+    );
+    assert_eq!(
+        scalar(
+            &conn,
+            "SELECT COUNT(*) FROM concepts_fts WHERE rowid = (SELECT rowid_pk FROM concepts WHERE id = 'c1')"
+        )
+        .await,
+        1
+    );
+
+    // The marks: both pairs, over history — the rung does not consult the
+    // projection's wrongness to decide a pair is disordered, it consults the
+    // written starts. The healed pair stays marked like the open one.
+    assert_eq!(
+        scalar(&conn, "SELECT COUNT(*) FROM concept_disorder").await,
+        2,
+        "the healed pair is marked by history, not by the projection's drift"
+    );
+    assert_eq!(
+        scalar(
+            &conn,
+            "SELECT COUNT(*) FROM concept_disorder \
+             WHERE entity_id = 'c1' AND branch_id = 'main'"
+        )
+        .await,
+        1
+    );
+
+    // The index the v24 build creates is the one the rung recreates: the
+    // rule's descending direction, spelled in the file.
+    assert_eq!(
+        scalar(
+            &conn,
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' \
+             AND name = 'idx_txlog_concept_starts' \
+             AND sql LIKE '%valid_from%DESC%'"
+        )
+        .await,
+        1,
+        "the rebuilt index carries the rule's direction"
+    );
+}
+
+/// **Gate 5's archive half: the fill reads the archive with the log.**
+///
+/// A pair whose inversion evidence is entirely in the archive — the earlier
+/// rows moved there before this build ever opened the file — must end up
+/// marked: missing it would leave yesterday's fold-and-correct shape silently
+/// wrong for every pre-cutoff read. The archive here is a bare file holding
+/// only the rows the fixture needs; the fill reads `cold.transaction_log`, so
+/// that is all it needs.
+///
+/// The un-paired companion concept guards the union's shape: a pair with a
+/// single row is never marked, whatever window pass reads it.
+#[tokio::test]
+async fn the_fill_reads_the_archive_with_the_log() {
+    let harness = TestHarness::new();
+    let conn = connect(&harness).await;
+    macrame::schema::run_migrations(&conn).await.unwrap();
+    v11_schema::wind_back_to_v23(&conn).await;
+    conn.execute("PRAGMA user_version = 23", ()).await.unwrap();
+
+    // The archive beside the ledger, by the same derivation
+    // `Database::open` and the rung share.
+    let db_path = harness.db_path.to_string_lossy().to_string();
+    let stem = db_path.trim_end_matches(".db").to_string();
+    let archive_path = format!("{stem}_archive.db");
+
+    let cold_ledger = libsql::Builder::new_local(&archive_path)
+        .build()
+        .await
+        .unwrap();
+    let cold = cold_ledger.connect().unwrap();
+    cold.execute(
+        "CREATE TABLE transaction_log (seq_id INTEGER PRIMARY KEY AUTOINCREMENT, \
+             table_name TEXT NOT NULL, entity_id TEXT NOT NULL, operation TEXT NOT NULL, \
+             payload TEXT NOT NULL, recorded_at TEXT NOT NULL, branch_id TEXT NOT NULL)",
+        (),
+    )
+    .await
+    .unwrap();
+    cold.execute(
+        "INSERT INTO transaction_log (table_name, entity_id, operation, payload, recorded_at, branch_id) VALUES \
+         ('concepts', 'c9', 'I', json_object('v', 3, 'title', 'C2', 'content', 'b2', \
+           'valid_from', '2026-06-01T00:00:00.000000Z', \
+           'valid_to', '9999-12-31T23:59:59.999999Z', 'retired', 0, \
+           'embedding_model', NULL, 'extra', json('{}')), \
+          '2026-01-01T00:00:00.000000Z', 'main'), \
+         ('concepts', 'c9', 'U', json_object('v', 3, 'title', 'C1', 'content', 'b1', \
+           'valid_from', '2026-01-01T00:00:00.000000Z', \
+           'valid_to', '2026-06-01T00:00:00.000000Z', 'retired', 0, \
+           'embedding_model', NULL, 'extra', json('{}')), \
+          '2026-01-02T00:00:00.000000Z', 'main'), \
+         ('concepts', 'alone', 'I', json_object('v', 3, 'title', 'A', 'content', 'ba', \
+           'valid_from', '2026-02-01T00:00:00.000000Z', \
+           'valid_to', '9999-12-31T23:59:59.999999Z', 'retired', 0, \
+           'embedding_model', NULL, 'extra', json('{}')), \
+          '2026-01-03T00:00:00.000000Z', 'main')",
+        (),
+    )
+    .await
+    .unwrap();
+    drop(cold);
+    drop(cold_ledger);
+
+    // The hot log: the pair's one live row (the heal), and nothing inverted.
+    // The ballot of the fix is the row the rung cannot see without the
+    // attachment.
+    conn.execute(
+        "INSERT INTO transaction_log (table_name, entity_id, operation, payload, recorded_at, branch_id) VALUES \
+         ('concepts', 'c9', 'U', json_object('v', 3, 'title', 'C5', 'content', 'b5', \
+           'valid_from', '2026-08-01T00:00:00.000000Z', \
+           'valid_to', '9999-12-31T23:59:59.999999Z', 'retired', 0, \
+           'embedding_model', NULL, 'extra', json('{}')), \
+          '2026-01-04T00:00:00.000000Z', 'main')",
+        (),
+    )
+    .await
+    .unwrap();
+    let hot_before = scalar(&conn, "SELECT COUNT(*) FROM transaction_log").await;
+    assert_eq!(hot_before, 1, "only the c9 heal is hot");
+
+    macrame::schema::run_migrations(&conn).await.unwrap();
+    assert_eq!(user_version(&conn).await, 24);
+
+    // The inversion lives in the archive; the mark must too.
+    assert_eq!(
+        scalar(
+            &conn,
+            "SELECT COUNT(*) FROM concept_disorder WHERE entity_id = 'c9'"
+        )
+        .await,
+        1,
+        "the archive-borne inversion was marked"
+    );
+    // And the single-row entity, cold or not, is nobody's inversion.
+    assert_eq!(
+        scalar(
+            &conn,
+            "SELECT COUNT(*) FROM concept_disorder WHERE entity_id = 'alone'"
+        )
+        .await,
+        0,
+        "a pair with one row is not marked, whatever window reads it"
+    );
+    // This fixture wrote no `concepts` row for c9 — it carries only the
+    // history the fill reads — so the repair's brief here is the marks, and
+    // there is exactly one.
+    assert_eq!(
+        scalar(&conn, "SELECT COUNT(*) FROM concept_disorder").await,
+        1
+    );
+    assert_eq!(user_version(&conn).await, 24);
 }

@@ -3141,7 +3141,7 @@ mod shape5_plan {
     async fn marked_log(heal: bool) -> libsql::Connection {
         let conn = hot_log().await;
         conn.execute(
-            "CREATE TABLE concept_disorder (entity_id TEXT NOT NULL, \
+            "CREATE TABLE IF NOT EXISTS concept_disorder (entity_id TEXT NOT NULL, \
              branch_id TEXT NOT NULL, PRIMARY KEY (entity_id, branch_id))",
             (),
         )
@@ -3246,7 +3246,7 @@ mod shape5_plan {
     async fn the_probe_scans_the_marks_table_once_either_way() {
         let conn = hot_log().await;
         conn.execute(
-            "CREATE TABLE concept_disorder (entity_id TEXT NOT NULL, \
+            "CREATE TABLE IF NOT EXISTS concept_disorder (entity_id TEXT NOT NULL, \
              branch_id TEXT NOT NULL, PRIMARY KEY (entity_id, branch_id))",
             (),
         )
@@ -3278,15 +3278,15 @@ mod shape5_plan {
     /// would catch it reaching for `idx_txlog_time` again — while the outer
     /// join seeks the same districts the fold window reads
     /// (`idx_txlog_fold_partition` on its three columns). The winner's
-    /// `ORDER BY` rides the range the seek reached, sorting only the tail:
-    /// the small right-part sort the shipped index leaves, whose removal
-    /// belongs to the v24 rung's `valid_from DESC` recreation, which re-pins
-    /// this.
+    /// The `ORDER BY` rides the index range the seek reached; since the v24
+    /// rung rebuilt the index with `valid_from DESC` (§3.3), it rides the
+    /// whole way — the right-part sort the v23 pin carried is gone, and its
+    /// one rewind with it.
     ///
     /// The plan prints under the statement's aliases: `cd`, `t`, `t2`. The
     /// VDBE triple is the measured program of the shipped statement — five
     /// cursors (marks table, then log-table-plus-starts-index twice, outer
-    /// seek and winner seek), two seeks, two rewinds.
+    /// seek and winner seek), two seeks, one rewind.
     #[tokio::test]
     async fn the_hot_correction_seeks_the_starts_index_and_no_time_index() {
         let conn = marked_log(false).await;
@@ -3310,12 +3310,22 @@ mod shape5_plan {
             !p.contains("idx_txlog_time"),
             "the bound rides the subquery's own index range, not the time index: {p}"
         );
+        // The v24 rung rebuilt the starts index with `valid_from DESC`
+        // (§3.3): the rule's direction is now the index's direction, and the
+        // right-part sort the v23 pin carried is gone with it — this absence
+        // is the rung's plan-level payoff, asserted beside the counts.
         assert!(
-            p.contains("USE TEMP B-TREE FOR RIGHT PART OF ORDER BY"),
-            "the index range supplies the leading order, the tail is the pair's own rows: {p}"
+            !p.contains("USE TEMP B-TREE FOR ORDER BY"),
+            "the v24 index should have removed the sort: {p}"
+        );
+        assert!(
+            p.contains(
+                "SEARCH t2 USING INDEX idx_txlog_concept_starts (entity_id=? AND branch_id=?)"
+            ),
+            "the winner seek binds only the pair: {p}"
         );
         let c = counts_of(&conn, DISORDER_CORRECTION).await;
-        assert_eq!(c, (5, 2, 2), "the marked ledger's VDBE triple moved");
+        assert_eq!(c, (5, 2, 1), "the marked ledger's VDBE triple moved");
     }
 
     /// **The same plan on the healed-and-`ANALYZE`d ledger.**
@@ -3340,15 +3350,18 @@ mod shape5_plan {
         );
         assert!(!p.contains("SCAN transaction_log"), "{p}");
         assert!(!p.contains("idx_txlog_time"), "{p}");
+        // v24: the DESC start index removed the right-part sort here too, on
+        // healed-and-`ANALYZE`d data — the condition the redundant join
+        // predicate lesson priced.
         assert!(
-            p.contains("USE TEMP B-TREE FOR RIGHT PART OF ORDER BY"),
-            "{p}"
+            !p.contains("USE TEMP B-TREE FOR ORDER BY"),
+            "the v24 index should have removed the sort: {p}"
         );
-        // The healed epoch measured the same VDBE program as the marked one —
-        // (5, 2, 2) on both — which is the point: growing `sqlite_stat1` with
+        // The healed epoch measures the same VDBE program as the marked one —
+        // (5, 2, 1) on both — which is the point: growing `sqlite_stat1` with
         // rows beyond the bound moved the plan not at all.
         let c = counts_of(&conn, DISORDER_CORRECTION).await;
-        assert_eq!(c, (5, 2, 2), "the healed ledger's VDBE triple moved");
+        assert_eq!(c, (5, 2, 1), "the healed ledger's VDBE triple moved");
     }
 
     /// **The archive-attached correction seeks both files, and neither is
@@ -3409,7 +3422,9 @@ mod shape5_plan {
         assert!(!p.contains("idx_cold_txlog_time"), "{p}");
 
         let c = counts_of(&conn, &sql).await;
-        assert_eq!(c, (14, 6, 10), "the cold correction's VDBE triple moved");
+        // v24: the DESC start index dropped the right-part sort, two
+        // rewinds with it: (14, 6, 10) on the v23 index, (14, 6, 8) after.
+        assert_eq!(c, (14, 6, 8), "the cold correction's VDBE triple moved");
     }
 
     /// **The lineage corrections seek the same way, with the cutoff as a

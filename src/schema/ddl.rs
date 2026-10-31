@@ -1360,6 +1360,24 @@ pub(crate) const LINKS_CURRENT_TRIGGERS: &[(&str, &str)] = &[
     ("trg_links_single_open", CREATE_LINKS_SINGLE_OPEN),
 ];
 
+// The mark table the state rule answers through (0.21.0, D-303, plan §3.3).
+//
+// `(entity_id, branch_id)` is the fill partition of the log fold and the
+// correction's own seek shape — one row pair, no rowid indirection, the same
+// reading `kv_store` held (D-280) and for the same reason. The table is
+// **derived from written history and never cleared**: the v24 rung fills it
+// from the log and the archive at once, and the write path inserts into it on
+// a skipped projection update (a backfill). Nothing else touches it; reads
+// answer `EXISTS` of it because a present table with zero rows must read the
+// same as an absent one.
+pub const CREATE_CONCEPT_DISORDER_TABLE: &str = r#"
+    CREATE TABLE IF NOT EXISTS concept_disorder (
+        entity_id  TEXT NOT NULL,
+        branch_id  TEXT NOT NULL,
+        PRIMARY KEY (entity_id, branch_id)
+    )
+"#;
+
 pub const CREATE_INDICES: &[&str] = &[
     // Covering index for the traversal CTE (§5.2, D-042).
     //
@@ -1557,8 +1575,17 @@ pub const CREATE_INDICES: &[&str] = &[
     //
     // [D-291]: ../../docs/architecture/s13-decision-register.md#d-291
     // [D-300]: ../../docs/architecture/s13-decision-register.md#d-300
+    //
+    // `valid_from` descends since v24 (0.21.0, D-303, plan §3.3): the shape-5
+    // correction's winner arrives as `ORDER BY valid_from DESC, seq_id DESC
+    // LIMIT 1` over this index, and the descent makes the direction of the
+    // rule the direction of the index instead of a per-seek right-part sort.
+    // The v23 → v24 rung recreates the index with this text for ledgers that
+    // already hold one; a fresh ledger builds it here. D-300's skip-scan reads
+    // `> starts.valid_from ORDER BY … LIMIT 1`, which a reversed scan still
+    // serves — its plan pin is re-run, not assumed.
     "CREATE INDEX IF NOT EXISTS idx_txlog_concept_starts ON transaction_log \
-     (entity_id, branch_id, json_extract(payload, '$.valid_from'), seq_id DESC) \
+     (entity_id, branch_id, json_extract(payload, '$.valid_from') DESC, seq_id DESC) \
      WHERE table_name = 'concepts';",
     // The archive cutoff's seek column on the ledger table (0.12.6, W3.1,
     // D-151, review §2.1, shipped v10 -> v11).
@@ -1955,6 +1982,33 @@ pub const CREATE_LINKS_LOG_INSERT: &str = concat!(
 "#
 );
 
+/// The monotonicity of the projection's stamp, named since v24 (0.21.0,
+/// [D-303]).
+///
+/// An anonymous entry in [`CREATE_TRIGGERS`] until a rung needed to put it
+/// back: the v23 → v24 rung moves `concepts.recorded_at` **backwards** — the
+/// repair re-derives the projection row from a log row whose stamp predates
+/// the one the projection — and this `BEFORE UPDATE` trigger aborts an update
+/// that does that. The rung drops it around the repair; this named body is
+/// the replacement. The rule twice now stated in this file — *a rung with its
+/// own copy of a trigger is a copy that drifts*, [`CREATE_LINKS_CURRENT_SYNC`]
+/// — which is why the rung re-issues this constant, not its own text.
+///
+/// The body is byte-identical to what 0.20.0 installed: it is a compat
+/// surface like its log siblings.
+pub const CREATE_CONCEPTS_MONOTONIC_RA: &str = concat!(
+    r#"
+    CREATE TRIGGER IF NOT EXISTS trg_concepts_monotonic_ra
+    BEFORE UPDATE ON concepts
+    WHEN NEW.recorded_at <= OLD.recorded_at
+    BEGIN
+        SELECT RAISE(ABORT, '"#,
+    abort_monotonic_ra!(),
+    r#"');
+    END;
+    "#
+);
+
 /// The ledger's delete guard, named since v15 (0.14.15, [D-232]).
 ///
 /// An anonymous entry in [`CREATE_TRIGGERS`] until a rung needed to put it
@@ -1988,18 +2042,11 @@ pub const CREATE_LINKS_GUARD_DELETE: &str = concat!(
 pub const CREATE_TRIGGERS: &[&str] = &[
     CREATE_LINKS_CURRENT_SYNC,
     CREATE_LINKS_SINGLE_OPEN,
-    concat!(
-        r#"
-    CREATE TRIGGER IF NOT EXISTS trg_concepts_monotonic_ra
-    BEFORE UPDATE ON concepts
-    WHEN NEW.recorded_at <= OLD.recorded_at
-    BEGIN
-        SELECT RAISE(ABORT, '"#,
-        abort_monotonic_ra!(),
-        r#"');
-    END;
-    "#
-    ),
+    // v24 (0.21.0, D-303): everyone keeps a name and one body each — the v23
+    // → v24 rung drops this trigger and drops `trg_concepts_log_update`
+    // around the projection repair, then re-issues both from the named
+    // constants they already are.
+    CREATE_CONCEPTS_MONOTONIC_RA,
     // Payload v2 adds `embedding_model` (defect V). Before it, the field was
     // written by nobody and read by two — `replay::fold_delta` and
     // `as_of::hydrate_attributes` both asked the payload for it and both always
