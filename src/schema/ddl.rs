@@ -31,8 +31,8 @@ macro_rules! canonical_ts_check {
 /// The concepts log payload shape, as the trigger literals spell it (0.18.0,
 /// [D-285]).
 ///
-/// A macro for [`ts_glob`]'s reason — `concat!` splices it into a trigger body
-/// and takes only literals — and paired with [`PAYLOAD_VERSION_CONCEPTS`],
+/// A macro for `ts_glob!`'s reason — `concat!` splices it into a trigger body
+/// and takes only literals — and paired with `PAYLOAD_VERSION_CONCEPTS`,
 /// which is the same number as a value. The unit test at the bottom of this
 /// file holds the two together, because nothing else would notice them
 /// drifting: the trigger would write one version and the fold would accept a
@@ -44,8 +44,9 @@ macro_rules! canonical_ts_check {
 ///
 /// [D-278]: ../../docs/architecture/s13-decision-register.md#d-278
 /// [D-285]: ../../docs/architecture/s13-decision-register.md#d-285
+///
 /// Exported at the crate root because a caller outside this module — the
-/// write-side's self-inserted log row, [`concepts_log_payload!`] — composes
+/// write-side's self-inserted log row, [`crate::concepts_log_payload!`] — composes
 /// with it, and a macro a distant site expands must resolve its own
 /// dependencies there too.
 #[macro_export]
