@@ -50,19 +50,13 @@
 //! This registry covers **claims about the current cost** — the figures
 //! `quickref`, §9 and the rustdoc publish as *what this operation costs*.
 //!
-//! It does **not** inventory every printed digit. `README`'s performance table
-//! is a *per-release measurement series*: each column is a release-stamped
-//! observation, and the older ones are history by construction. Registering
-//! every cell would make each new column collide with the current-cost entry
-//! for the same key on the first run, because two honest measurements of the
-//! same thing never agree to three digits — which is the false-positive the
-//! three-part key was chosen to avoid.
-//!
-//! So a series cell earns an entry in exactly one case: **it contradicts a
-//! current-cost claim by more than measurement noise.** That is the finding the
-//! registry exists to surface, and [`Status::Contested`] is how it is recorded.
-//! 0.10.0 has one — the 90-row edge chunk, published at 2.39 ms in four places
-//! and re-measured at 2.71 ms with a 1.1% spread and a normal control.
+//! It does **not** inventory every printed digit. Through 0.19.x `README`'s
+//! performance table was a *per-release measurement series*, and a series
+//! cell earned an entry only when it contradicted a current-cost claim by more
+//! than measurement noise — 0.10.0's 2.71 ms edge chunk against 2.39 ms was the
+//! one case, closed by D-145. Since 0.20.0 the README publishes the current
+//! cost and nothing else, so its figures are registered like the quickref's,
+//! under the D-302 fixture keys their bench now measures.
 
 /// A published performance claim, and what substantiates it.
 struct Claim {
@@ -159,6 +153,15 @@ mod fx {
     pub const PER_ITER: &str =
         "database rebuilt per iteration, Shape::StarOfStars at 0 / 2,000 / 8,000 edges";
     pub const EMPTY: &str = "empty database (chunk_budget, concepts seeded, no links)";
+    /// The same three fixtures as the bench has timed them since 0.20.0, with
+    /// the fixture's teardown outside the timed region (D-302). A separate key,
+    /// because a reading with and without the teardown are two measurements.
+    pub const WARM_D302: &str =
+        "warm handle, 2,000 concepts, no links (write_path/assert_edge), teardown untimed";
+    pub const PER_ITER_D302: &str = "database rebuilt per iteration, Shape::StarOfStars \
+         at 0 / 2,000 / 8,000 edges, teardown untimed";
+    pub const EMPTY_D302: &str =
+        "empty database (chunk_budget, concepts seeded, no links), teardown untimed";
     pub const SEEDED: &str = "8,000-edge table (chunk_budget's seeded arm, W4.13)";
     /// All four D-088 shapes at one population — the fixture *is* the plural.
     pub const MATRIX: &str = "all four D-088 shapes, each populated to 8,000 edges (chunk_matrix)";
@@ -200,31 +203,62 @@ const TYPICAL_STALL: &str = "mean hold, adaptive against fixed ceiling-sized chu
 const TYPICAL_STALL_VALUE: &str = "3.4-3.7 ms against 7.1-8.3 ms (2.1-2.4x shorter)";
 
 const REGISTRY: &[Claim] = &[
-    // ---- single edge assertion, warm handle -------------------------------
+    // ---- single edge assertion, warm handle, teardown untimed (0.20.0) ----
+    //
+    // Its own fixture key, because D-302 changed what the bench times: the
+    // 224 µs these documents carried until 0.20.0 included the fixture's drop,
+    // and putting 181 µs under the same key would make two honest readings of
+    // different measurements look like a contradiction.
     Claim {
         operation: "single edge assertion",
-        fixture: fx::WARM,
+        fixture: fx::WARM_D302,
         metric: LATENCY,
-        value: "224 µs",
-        text: "224 µs, and the caveat is **retired on measurement** (D-134)",
+        value: "181 µs",
+        text: "| Single edge assertion | ≤ 5 ms | 181 µs | Met |",
         doc_name: "README.md",
         doc: README,
         bench_group: "write_path",
-        decision: "d-134",
+        decision: "d-302",
         status: Live,
     },
     Claim {
         operation: "single edge assertion",
-        fixture: fx::WARM,
+        fixture: fx::WARM_D302,
         metric: LATENCY,
-        value: "224 µs",
-        text: "| Single assertion | ≤ 5 ms | 224 µs |",
+        value: "181 µs",
+        text: "| Single assertion | ≤ 5 ms | 181 µs |",
         doc_name: "docs/quickref.md",
         doc: QUICKREF,
         bench_group: "write_path",
-        decision: "d-134",
+        decision: "d-302",
         status: Live,
     },
+    Claim {
+        operation: "single edge assertion",
+        fixture: fx::WARM_D302,
+        metric: LATENCY,
+        value: "181 µs",
+        text: "Single edge assertion **181 µs**",
+        doc_name: "docs/architecture/s6-s10-flows-to-dependencies.md",
+        doc: S9,
+        bench_group: "write_path",
+        decision: "d-302",
+        status: Live,
+    },
+    Claim {
+        operation: "single edge assertion",
+        fixture: fx::PER_ITER_D302,
+        metric: LATENCY,
+        value: "306 / 242 / 279 µs — sub-millisecond and flat in out-degree",
+        text: "| Single edge assertion into 0 / 2,000 / 8,000-edge tables | ≤ 5 ms | \
+               306 / 242 / 279 µs | Met; flat in out-degree |",
+        doc_name: "README.md",
+        doc: README,
+        bench_group: "overlap_guard",
+        decision: "d-302",
+        status: Live,
+    },
+    // ---- single edge assertion, warm handle, through 0.19.x ---------------
     Claim {
         operation: "single edge assertion",
         fixture: fx::WARM,
@@ -239,20 +273,9 @@ const REGISTRY: &[Claim] = &[
     },
     // ---- single edge assertion, the flatness measurement ------------------
     //
-    // Four documents, one measurement, three wordings. This is the group the
-    // `value` field exists for.
-    Claim {
-        operation: "single edge assertion",
-        fixture: fx::PER_ITER,
-        metric: LATENCY,
-        value: "983 / 920 / 882 µs — sub-millisecond and flat in out-degree",
-        text: "at 983 / 920 / 882 µs, median of three sessions against a 1.52 µs control",
-        doc_name: "README.md",
-        doc: README,
-        bench_group: "overlap_guard",
-        decision: "d-134",
-        status: Live,
-    },
+    // Three documents, one measurement, three wordings. This is the group the
+    // `value` field exists for. (README carried a fourth until 0.20.0 moved it
+    // to the D-302 reading above.)
     Claim {
         operation: "single edge assertion",
         fixture: fx::PER_ITER,
@@ -292,43 +315,63 @@ const REGISTRY: &[Claim] = &[
         decision: "d-134",
         status: Live,
     },
-    // ---- chunk commit, edges, 90 rows, empty ------------------------------
+    // ---- chunk commit, edges, 90 rows, empty, teardown untimed (0.20.0) ---
+    //
+    // Over the 3 ms bound, and published as over it. The bound is held by the
+    // adaptive loop, which starts from 90 (D-143, D-146); D-301 prices what the
+    // 90-row chunk still pays.
     Claim {
         operation: "chunk commit, edges, 90 rows",
-        fixture: fx::EMPTY,
+        fixture: fx::EMPTY_D302,
         metric: LATENCY,
-        value: "2.39 ms",
-        text: "| Chunk commit (edges, 90 rows) | ≤ 3 ms | 2.39 ms |",
+        value: "3.99 ms — over the 3 ms bound",
+        text: "| Chunk commit, edges, 90 rows | ≤ 3 ms | 3.99 ms | **Missed**; see below |",
         doc_name: "README.md",
         doc: README,
         bench_group: "chunk_budget",
-        decision: "d-058",
+        decision: "d-302",
         status: Live,
     },
     Claim {
         operation: "chunk commit, edges, 90 rows",
-        fixture: fx::EMPTY,
+        fixture: fx::EMPTY_D302,
         metric: LATENCY,
-        value: "2.39 ms",
-        text: "| Chunk commit, edges 90 rows | ≤ 3 ms | ~2.39 ms |",
+        value: "3.99 ms — over the 3 ms bound",
+        text: "| Chunk commit, edges 90 rows | ≤ 3 ms | 3.99 ms | **Missed.**",
         doc_name: "docs/quickref.md",
         doc: QUICKREF,
         bench_group: "chunk_budget",
-        decision: "d-058",
+        decision: "d-302",
         status: Live,
     },
     Claim {
         operation: "chunk commit, edges, 90 rows",
-        fixture: fx::EMPTY,
+        fixture: fx::EMPTY_D302,
         metric: LATENCY,
-        value: "2.39 ms",
-        text: "| Edges (`bulk_import`) | 90 | ~2.39 ms |",
+        value: "3.99 ms — over the 3 ms bound",
+        text: "| Edges (`bulk_import`) | 90 | 3.99 ms — over the bound; the loop sizes down |",
         doc_name: "docs/quickref.md",
         doc: QUICKREF,
         bench_group: "chunk_budget",
-        decision: "d-058",
+        decision: "d-302",
         status: Live,
     },
+    Claim {
+        operation: "chunk commit, edges, 90 rows",
+        fixture: fx::EMPTY_D302,
+        metric: LATENCY,
+        value: "3.99 ms — over the 3 ms bound",
+        text: "**edges/90 3.99 ms, which misses its ≤ 3 ms budget**",
+        doc_name: "docs/architecture/s6-s10-flows-to-dependencies.md",
+        doc: S9,
+        bench_group: "chunk_budget",
+        decision: "d-302",
+        status: Live,
+    },
+    // ---- chunk commit, edges, 90 rows, empty, through 0.19.x --------------
+    //
+    // The figure `chunk_rows::EDGES` was solved from (D-058), kept where the
+    // documents reason from it.
     Claim {
         operation: "chunk commit, edges, 90 rows",
         fixture: fx::EMPTY,
@@ -352,31 +395,6 @@ const REGISTRY: &[Claim] = &[
         bench_group: "chunk_budget",
         decision: "d-058",
         status: Live,
-    },
-    // The 0.10.0 re-measurement of the same arm, in README's per-release table.
-    //
-    // `Contested` for two releases, and **closed in 0.12.0** (D-145): six
-    // sessions showed the arm tracking `control/select_1` monotonically, and
-    // conditioned on a normal control it reads 2.36 ms at a 0.4% spread. The
-    // 2.71 figure is the elevated-control state. So this is history now, not a
-    // conflict — `Superseded` rather than deleted, because README's column is a
-    // per-release series and 2.71 is genuinely what was measured then.
-    //
-    // Worth keeping as an example of what the category is for: the entry that
-    // opened the contest (D-141) was wrong about *why* the figures differed,
-    // and the registry still did its job — it kept the disagreement addressable
-    // for two releases instead of letting one number quietly overwrite another.
-    Claim {
-        operation: "chunk commit, edges, 90 rows",
-        fixture: fx::EMPTY,
-        metric: LATENCY,
-        value: "2.71 ms — the 0.10.0 column's figure, since explained as an elevated-control session",
-        text: "**2.71 ms — see below**",
-        doc_name: "README.md",
-        doc: README,
-        bench_group: "chunk_budget",
-        decision: "d-145",
-        status: Superseded { by: "d-145" },
     },
     // ---- chunk commit, edges, 90 rows, into a populated table -------------
     //

@@ -38,7 +38,9 @@ async fn one(dir: &std::path::Path, n: usize, drop: Option<&str>) -> Duration {
     if let Some(names) = drop {
         let conn = db.raw().connect().unwrap();
         for name in names.split(',') {
-            conn.execute(&format!("DROP INDEX {name}"), ()).await.unwrap();
+            conn.execute(&format!("DROP INDEX {name}"), ())
+                .await
+                .unwrap();
         }
     }
     for i in 0..=ROWS {
@@ -68,7 +70,9 @@ async fn main() {
     // The indexes on the three tables an edge write touches, as the schema
     // declares them today.
     let names: Vec<String> = {
-        let db = Database::open_with_cadence(&dir.join("list.db"), None).await.unwrap();
+        let db = Database::open_with_cadence(&dir.join("list.db"), None)
+            .await
+            .unwrap();
         let conn = db.raw().connect().unwrap();
         let mut rows = conn
             .query(

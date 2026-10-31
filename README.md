@@ -186,9 +186,17 @@ constant, `Optimize`'s is rare and therefore the informative one
 | v14 | `idx_lc_lineage_cut` on `links_current`, the index the branched read seeks and the trunk walk does not ([D-231](docs/architecture/s13-decision-register.md#d-231)) |
 | v15 | `links`' primary key gains `branch_id`, last, and `cold.links` takes the same key ([D-232](docs/architecture/s13-decision-register.md#d-232)) |
 | v16 | `log_integrity` — one row, one bit: *has anything ever been deleted from `transaction_log`?* — seeded from the log it describes and maintained by `trg_txlog_mark_gap`, so the reach guard reads a bit instead of scanning the log on every recorded-time read ([D-249](docs/architecture/s13-decision-register.md#d-249)) |
-| v17 | `idx_txlog_fold_partition`, the index the fold's own partition asks for and **not** the one the review asked for ([D-254](docs/architecture/s13-decision-register.md#d-254)) — **current** |
+| v17 | `idx_txlog_fold_partition`, the index the fold's own partition asks for and **not** the one the review asked for ([D-254](docs/architecture/s13-decision-register.md#d-254)) |
+| v18 | `idx_links_branch` and `idx_txlog_branch`, **partial** over `branch_id <> 'main'`, so the indexes `archive_branch` scans hold only what branches wrote and the trunk's write path pays nothing ([D-273](docs/architecture/s13-decision-register.md#d-273)) |
+| v19 | `trg_links_single_open`'s branch predicate carries a unary `+`, so on a database without statistics the probe seeks `idx_lc_open_interval` instead of scanning a lineage. Trigger-only ([D-274](docs/architecture/s13-decision-register.md#d-274)) |
+| v20 | `kv_store`: operational state with no log trigger, no archive membership and no `branch_id` ([D-280](docs/architecture/s13-decision-register.md#d-280)) |
+| v21 | `concepts.extra`, a JSON object logged like every other column; concepts payload v3 ([D-278](docs/architecture/s13-decision-register.md#d-278)) |
+| v22 | `blobs` and `idx_blobs_put_at`, with an update guard and an archive-gated delete guard; `cold.blobs` arrives with the first archive session ([D-281](docs/architecture/s13-decision-register.md#d-281), [D-288](docs/architecture/s13-decision-register.md#d-288)) |
+| v23 | `idx_txlog_concept_starts`, partial over the log's concept rows, so the concept interval guard seeks one row per valid start; `idx_txlog_entity` dropped. Index-only ([D-300](docs/architecture/s13-decision-register.md#d-300), [D-301](docs/architecture/s13-decision-register.md#d-301)) — **current** |
 
-**v15 is the last rung that changed a *primary key* before the 1.0 freeze, and v8 was the one before it** — v16 adds a table and v17 an index, and neither touches a key. D-036 forbids a primary-key diff after 1.0, and D-032 is what reserves the pre-1.0 window for exactly this: v15 widens `links` because two lineages are *allowed* to believe different things about one edge, and the old key refused that pair with a bare `UNIQUE` error naming a storage key the caller has never seen. `branch_id` goes **last**, so the five-column covering seek the archive sweep runs per candidate row survives the change. On v8: `rowid_pk INTEGER PRIMARY KEY` costs `id` the primary key, and D-036 forbids a primary-key change after 1.0 (D-119). It also drops `idx_annotations_label` and `idx_lc_tgt_active`, which shipped in the v7 baseline with no query that seeks on them — measured at −7.9% off `assert_edge` (D-089, D-118).
+`open()` climbs the ladder one rung at a time, each in its own `BEGIN IMMEDIATE` transaction. A database stamped newer than the build is refused, never downgraded.
+
+**v15 is the last rung that changed a *primary key* before the 1.0 freeze, and v8 was the one before it.** Since then, v16, v20 and v22 add tables, v21 adds a column, v19 redefines a trigger, and v17, v18 and v23 change indexes. None of them touches a key. D-036 forbids a primary-key diff after 1.0, and D-032 is what reserves the pre-1.0 window for exactly this: v15 widens `links` because two lineages are *allowed* to believe different things about one edge, and the old key refused that pair with a bare `UNIQUE` error naming a storage key the caller has never seen. `branch_id` goes **last**, so the five-column covering seek the archive sweep runs per candidate row survives the change. On v8: `rowid_pk INTEGER PRIMARY KEY` costs `id` the primary key, and D-036 forbids a primary-key change after 1.0 (D-119). It also drops `idx_annotations_label` and `idx_lc_tgt_active`, which shipped in the v7 baseline with no query that seeks on them — measured at −7.9% off `assert_edge` (D-089, D-118).
 
 ---
 
@@ -247,138 +255,73 @@ constant, `Optimize`'s is rare and therefore the informative one
 
 ## Performance (measured, not gated)
 
-Re-measured at 0.8.0, because [B2](docs/architecture/s13-decision-register.md#d-115) changed how a
-`Subgraph` is represented, [B3](docs/architecture/s13-decision-register.md#d-116) changed what a
-load carries, and [B4](docs/architecture/s13-decision-register.md#d-118) dropped an index — three
-reasons a table of 0.7.0 numbers would have been describing a different crate.
+Measured at **0.20.0** on the reference machine (Windows 11, NVMe SSD, 32 GB RAM, release build):
+the median of three criterion sessions of `benches/budgets.rs`, with the `control/select_1` row
+reading 1.42–1.57 µs in every group. Each figure is the operation alone; fixture setup and
+teardown sit outside the timed region
+([D-302](docs/architecture/s13-decision-register.md#d-302)). The bench fixtures are smaller than
+the populations some budgets name (2,000 concepts, a few thousand edges and log rows), so a met row
+is met at bench scale.
 
-| Operation | Budget | 0.7.0 | 0.8.0 | 0.9.0 | 0.10.0 | 0.20.0 (D-302: teardown untimed) |
-|---|---|---|---|---|---|---|
-| Single assertion | ≤ 5 ms | — | 258 µs, published with an **O(out-degree)** caveat (D-059) | 224 µs, and the caveat is **retired on measurement** (D-134) | 220 µs | 181 µs |
-| Single concept upsert | ≤ 3 ms | — | — | 198 µs | 193 µs | 363 µs — the interval guard (D-291, D-300) |
-| Chunk commit (edges, 90 rows) | ≤ 3 ms | 2.39 ms | 2.40 ms | 2.38 ms | **2.71 ms — see below** | **3.99 ms — over budget, see below** |
-| Three-hop traversal | ≤ 10 ms | 2.1 ms | **1.66 ms** | 1.61 ms | 1.72 ms | 1.53 ms |
-| Vector top-10 | ≤ 20 ms | 294 µs | **246 µs** | 248 µs | 264 µs | 248 µs |
-| Hybrid top-10 | ≤ 50 ms | 2.0 ms | **1.77 ms** | 1.77 ms | 1.79 ms | 1.71 ms |
-| Full fold (reconstruct) | ≤ 100 ms | 21 ms | **16.9 ms** | 17.1 ms | 16.5 ms | 16.1 ms |
-| Composition (snapshot + delta) | ≤ 100 ms | 3.4 ms | **2.18 ms** | 2.22 ms | 2.06 ms | 3.04 ms — unattributed |
-| Rehydrate, 1 concept | ≤ 5 ms | — | n/a | 3.71 ms | 3.41 ms | 2.64 ms |
-| Rehydrate, per concept after the 1st | ≤ 300 µs | — | n/a | ~74 µs to n=1,000; **114 µs at n=10,000** | ~71 µs to n=1,000; **105 µs at n=10,000** | ~68 µs to n=1,000; **107 µs at n=10,000** |
+| Operation | Budget | Measured | |
+|---|---|---|---|
+| Single edge assertion | ≤ 5 ms | 181 µs | Met |
+| Single edge assertion into 0 / 2,000 / 8,000-edge tables | ≤ 5 ms | 306 / 242 / 279 µs | Met; flat in out-degree |
+| Single concept upsert | ≤ 3 ms | 363 µs | Met; flat in the concept's history |
+| Chunk commit, edges, 90 rows | ≤ 3 ms | 3.99 ms | **Missed**; see below |
+| Chunk commit, edges, 90 rows into an 8,000-edge table | ≤ 3 ms | 11.8 ms | **Missed**; see below |
+| Chunk commit, concepts, 70 rows | ≤ 3 ms | 2.56 ms | Met |
+| Chunk commit, annotations, 600 rows | ≤ 3 ms | 1.33 ms | Met |
+| Chunk commit, embeddings, 30 rows | ≤ 3 ms | 1.33 ms | Met |
+| Three-hop traversal, warm | ≤ 10 ms | 1.53 ms | Met |
+| `as_of_valid` traversal | ≤ 15 ms | 742 µs | Met |
+| Vector top-10 | ≤ 20 ms | 248 µs | Met |
+| Hybrid top-10 (vector + FTS5 + RRF) | ≤ 50 ms | 1.71 ms | Met |
+| Full fold (`reconstruct`) | ≤ 100 ms | 16.1 ms | Met |
+| Snapshot + delta composition | ≤ 100 ms | 3.04 ms | Met |
+| `audit_current` | ≤ 200 ms | 11.9 ms | Met |
+| `rebuild_current` | ≤ 500 ms | 28.8 ms | Met |
+| Snapshot write | ≤ 2 s | 1.97 ms | Met |
+| Rehydrate, 1 concept | ≤ 5 ms | 2.64 ms | Met |
+| Rehydrate, per concept after the first | ≤ 300 µs | ~68 µs to n=1,000; 107 µs at n=10,000 | Met |
 
-**0.20.0's column is median of three sessions, and it is measured on a different bench.**
-[D-302](docs/architecture/s13-decision-register.md#d-302) moved fixture teardown — closing the
-database, which checkpoints the WAL, and deleting its directory — out of the timed region, so
-batched rows read the operation alone and are not directly comparable with the columns to their
-left. `control/select_1` reads **1.42–1.57 µs**, so the machine is where 0.10.0 left it.
-**The edge chunk is over its budget.** It read 6.31 ms on the old bench before
-[D-301](docs/architecture/s13-decision-register.md#d-301) dropped `idx_txlog_entity`; the
-rest is indexes added since 0.12.6, each with a registered reader. `bulk_import` holds the bound
-anyway, because 90 is the ceiling its time-based loop starts from and not the size it commits
+**The 90-row edge chunk is over its budget, and bulk import holds the bound anyway.** 90 is the
+ceiling `bulk_import`'s chunk loop starts from, not the size it commits: the actor times each
+transaction and sizes the next from it, settling near 35 rows on a populated table
 ([D-143](docs/architecture/s13-decision-register.md#d-143),
-[D-146](docs/architecture/s13-decision-register.md#d-146)). The concept upsert row is the interval
-guard 0.19.2 added, after [D-300](docs/architecture/s13-decision-register.md#d-300) made it flat
-in a concept's history (it read 6.96 ms before). Composition rose from 2.06 to 3.04 ms, inside
-its 100 ms budget; with no column between 0.10.0 and 0.20.0 the rise is not bisected, so it is
-reported and not attributed to any release.
+[D-146](docs/architecture/s13-decision-register.md#d-146)). The first chunk of an import can run
+over; the ones after it are sized to the bound. What a 90-row chunk costs is index maintenance on
+`links`, `links_current` and `transaction_log`, and each of those indexes serves a read that
+needs it. The per-index prices, and the one index that was dropped for costing the most while
+serving the least, are in [D-301](docs/architecture/s13-decision-register.md#d-301).
 
-**There is no 0.11.0 or 0.12.0 column, and the second absence needs a word.** 0.11.0 changed no
-code that runs, so a column would have been a second measurement of the same crate. 0.12.0 does
-change one of these rows — **`bulk_import` no longer commits 90-row chunks.** 90 is now the
-ceiling it starts from and it settles at 35 within a chunk or two
-([D-146](docs/architecture/s13-decision-register.md#d-146)), so *"chunk commit, edges, 90 rows"*
-still names a real measurement of a real transaction and no longer names what that method does.
-A 0.12.0 column is not published rather than half-published: this table is a per-release series
-measured as a whole under one control, and adding one row measured in a different session is the
-practice [D-070](docs/architecture/s13-decision-register.md#d-070) and
-[D-145](docs/architecture/s13-decision-register.md#d-145) exist to prevent. What 0.12.0 measured
-instead is in [§5.1.5](docs/architecture/s5-modules.md#515-cooperative-chunking--the-golden-rule),
-against the fixed size rather than against previous releases.
+**Three costs are shapes rather than points, and those are what to rely on.** A single edge
+assertion does not grow with out-degree: the rows above span hub out-degrees of 0, 666 and 2,666.
+Its real cost is the number of versions per edge key, which archival caps
+([D-134](docs/architecture/s13-decision-register.md#d-134)). A concept upsert does not grow with the
+concept's history: `examples/concept_guard_cost_probe.rs` measures 0.27 ms for a concept with
+10,000 versions ([D-300](docs/architecture/s13-decision-register.md#d-300)). Rehydration is linear
+to about 1,000 concepts per call and dearer per concept beyond that, because FTS5's merge cost is
+per transaction.
 
-**0.10.0's column is a full re-measurement, median of three sessions, controls published below.**
-Every row is inside its budget. Eight of the ten are within ±8% of 0.9.0 — below the ~11%
-single-arm variance [D-134](docs/architecture/s13-decision-register.md#d-134) measured and far
-below [D-070](docs/architecture/s13-decision-register.md#d-070)'s ~29% session spread — which is
-the expected answer, because 0.10.0 changed no traversal, no search, no fold and no write path.
-`control/select_1` reads **1.55–1.69 µs** per group against
-[D-090](docs/architecture/s13-decision-register.md#d-090)'s recorded **1.589–1.639 µs**, so the
-machine is where it was.
+**How to read the numbers.** Session-to-session spread on this machine reaches ~29%
+([D-070](docs/architecture/s13-decision-register.md#d-070)), so read shapes and orders of
+magnitude, and treat a smaller move between two runs as noise. The budgets are deliberately not
+CI gates ([D-055](docs/architecture/s13-decision-register.md#d-055)): an absolute `≤ 5 ms` on a
+shared runner is a claim about whichever machine picked up the job. Regressions are found by
+comparing a machine with itself:
 
-**One row read high, and 0.12.0 explained it: the machine, not the chunk**
-([D-145](docs/architecture/s13-decision-register.md#d-145)). Chunk commit has published
-2.39 / 2.40 / 2.38 ms for three releases and this column reads **2.71 ms** — five measurements at a
-1.1% spread, which was taken at the time as evidence that a 14% rise could not be session variance.
-It was not evidence about that at all: a tight spread *within* a session says nothing about the
-spread *between* sessions, which [D-070](docs/architecture/s13-decision-register.md#d-070) had
-already measured at ~29%. Re-run over six sessions, the arm tracks `control/select_1`
-monotonically — with the control at or below D-090's recorded band it reads **2.356 / 2.358 /
-2.365 ms**, a 0.4% spread agreeing with 2.39; with an elevated control it reads 2.54-2.73.
-**The cell is left at 2.71 because that is what was measured here**, and this table is a
-per-release series rather than a statement of current cost. The current cost is 2.39 ms.
+```bash
+cargo bench --bench budgets -- --save-baseline before
+```
 
-**It never overturned `chunk_rows::EDGES`, and by 0.11.0 it could not have.**
-[D-058](docs/architecture/s13-decision-register.md#d-058) solved the 90-row constant against the
-3 ms bound *from* the 2.39 ms figure, which is why a 14% move in that figure looked consequential.
-It is not any more: [D-143](docs/architecture/s13-decision-register.md#d-143) re-derived all four
-constants against the fixture matrix, on grounds that never mention this number. The constant stays
-at 90 for those reasons, and would have whichever way this row resolved.
+then `--baseline before` after the change. Hardware-independent properties, such as plan shape,
+operation counts and growth ratios, are gated in `tests/`. The full budget table, with each row's
+mechanism and the figures earlier releases measured, is
+[§9 of the architecture docs](docs/architecture/s6-s10-flows-to-dependencies.md#9-performance-budgets).
+Figures before 0.20.0 include fixture teardown and do not compare directly with these.
 
-**Two controls, or the read-path numbers would mean nothing.** A uniform improvement across
-unrelated paths is what a faster *machine* looks like, so: the fixed `control/select_1` row reads
-**1.51–1.62 µs** against the **1.589–1.639 µs**
-[D-090](docs/architecture/s13-decision-register.md#d-090) recorded, and the chunk-commit path —
-which 0.8.0 did not touch — is **2.39 → 2.40 ms**. The machine has not moved and an untouched path
-has not moved, so the 12–36% on the read paths is the code.
-
-**0.9.0 re-measured the same rows and the answer is "nothing moved", which is the result rather
-than the absence of one.** 0.9.0 changed the archive path and two triggers; it touched no traversal,
-no search and no fold, so a table that showed a change would be evidence of a problem. Every
-carried-over row but one is within **3.2%** of its 0.8.0 figure — the largest being three-hop
-traversal at −3.1% — with `control/select_1` at **1.51–1.54 µs** across every group.
-
-**The new row is the one 0.9.0 could plausibly have cost something.** The `v9 → v10` rung puts a
-`WHEN NOT EXISTS (SELECT 1 FROM sqlite_master …)` clause on the concepts insert log trigger, and it
-is evaluated on **every concept write**, not only during an archive. At **198 µs** against a 3 ms
-budget the gating is not measurable on this fixture — worth stating, because "we added a subquery to
-the hot write path" is the kind of change that is usually paid for somewhere.
-
-**The single-assertion row reads 13% lower and that is not claimed as an improvement.** Nothing in
-0.9.0 touches the `links` write path, and no mechanism explains it. It is reported as measured and
-attributed to nothing. The 0.9.0 text added a second reason to distrust the figure — that the row is
-complexity-bound rather than a stable constant, "since it remains linear in out-degree" — and that
-half is now withdrawn: it was never measured, and
-[D-134](docs/architecture/s13-decision-register.md#d-134) measured it. What remains is an
-unexplained 13%, which is the smaller and more honest claim.
-
-**Figures are the median of three runs, and the reason is a 21% excursion that the control did not
-catch.** The first pass read the full fold at **20.4 ms** — with `control/select_1` sitting normal at
-1.59 µs — and two repeats returned 16.96 and 17.09 ms. A `SELECT 1` round trip bounds machine,
-scheduler and engine-overhead noise; it does not bound page-cache state or fsync variance, so an
-I/O-bound row needs repetition *as well as* a control. [D-070](docs/architecture/s13-decision-register.md#d-070)
-put this project's session-to-session noise at ~29%, which is exactly the size of the thing that
-almost got written down here as a regression.
-
-**The single-assertion row's caveat is retired, and it was wrong for four minor versions.** This
-paragraph used to say the row "remains linear in out-degree, so a high-degree hub still exceeds it".
-`overlap_guard` now measures the assertion into tables of 0, 2,000 and 8,000 edges — hub out-degree
-0, 666 and 2,666 — at 983 / 920 / 882 µs, median of three sessions against a 1.52 µs control, so
-out-degree rises by thousands and latency does not move
-([D-134](docs/architecture/s13-decision-register.md#d-134)). The claim described the access
-path as it stood in 0.5.5 and has been false since the `v5 → v6` rung shipped `idx_lc_open_interval`
-([D-059](docs/architecture/s13-decision-register.md#d-059)) — it outlived the defect by four
-releases because nothing measured it. The real cost is O(version count per edge key), which
-archival caps. Dropping `idx_lc_tgt_active` bought −7.9% on that path
-([D-118](docs/architecture/s13-decision-register.md#d-118)); the complexity claim it was said not to
-change was not there to change.
-
-Those figures are a shape, not a decimal: session-to-session spread on this path is ~11%, and
-normalising by the control does not remove it ([D-070](docs/architecture/s13-decision-register.md#d-070)).
-
-All budgets measured on named reference hardware, and deliberately **not** CI gates
-([D-055](docs/architecture/s13-decision-register.md#d-055)) — an absolute `≤ 5 ms` on a shared
-runner is an assertion about whichever machine picked up the job. Regression detection uses
-criterion baselines, machine against itself. See [§9 of the architecture docs](docs/architecture/s6-s10-flows-to-dependencies.md#9-performance-budgets) for full table.
-
-**A second harness answers a different question.** The budgets above are about operations this crate bounds; [`benchmarks/`](benchmarks/README.md) runs a **TPC-BiH-style workload taxonomy** (TPCTC'13 T/K/R classes) over a generated bitemporal history, on the trunk and on a divergent lineage, in Python and in Rust — 13 correctness assertions gate every run, because a benchmark that can time a wrong answer is worse than none. It is a separate package: nothing there is built by an ordinary `cargo test` here, and none of it ships in the crate. Its headline shapes are that fork latency is flat across 3× the data (empirical O(1)), that transaction-dimension work is an order pricier than valid-dimension work, that branch cost is **ancestry rather than divergence** — a fork with no writes costs what a diverged one costs — and that chain reads stay flat from depth 1 to 10. A third instrument lives beside them: `benchmarks/diagnostics/` is the spike ladder that attributed and fixed the fresh-file bulk-import defect ([D-274](docs/architecture/s13-decision-register.md#d-274), [D-275](docs/architecture/s13-decision-register.md#d-275)), and it is where the WAL recipe on the bulk path was measured; the vector-build dissection that produced `bulk_embeddings` ([D-276](docs/architecture/s13-decision-register.md#d-276)) ran as `examples/vector_build_probe.rs`. The materialization-skipping bulk ([D-277](docs/architecture/s13-decision-register.md#d-277)) was scoped by `examples/bulk_skip_probe.rs` — the mirror trigger is 2.2× of the random-pair bulk, and the chunked rebuild re-derives the projection for 191 ms per 16k.
+**A second harness answers a different question.** The budgets above are about operations this crate bounds; [`benchmarks/`](benchmarks/README.md) runs a **TPC-BiH-style workload taxonomy** (TPCTC'13 T/K/R classes) over a generated bitemporal history, on the trunk and on a divergent lineage, in Python and in Rust — 13 correctness assertions gate every run, because a benchmark that can time a wrong answer is worse than none. It is a separate package: nothing there is built by an ordinary `cargo test` here, and none of it ships in the crate. Its headline shapes are that fork latency is flat across 3× the data (empirical O(1)), that transaction-dimension work is an order pricier than valid-dimension work, that branch cost is **ancestry rather than divergence** — a fork with no writes costs what a diverged one costs — and that chain reads stay flat from depth 1 to 5 and cost 15% more at depth 10. A third instrument lives beside them: `benchmarks/diagnostics/` is the spike ladder that attributed and fixed the fresh-file bulk-import defect ([D-274](docs/architecture/s13-decision-register.md#d-274), [D-275](docs/architecture/s13-decision-register.md#d-275)), and it is where the WAL recipe on the bulk path was measured; the vector-build dissection that produced `bulk_embeddings` ([D-276](docs/architecture/s13-decision-register.md#d-276)) ran as `examples/vector_build_probe.rs`. The materialization-skipping bulk ([D-277](docs/architecture/s13-decision-register.md#d-277)) was scoped by `examples/bulk_skip_probe.rs` — the mirror trigger is 2.2× of the random-pair bulk, and the chunked rebuild re-derives the projection for 191 ms per 16k.
 
 ---
 
@@ -386,12 +329,13 @@ criterion baselines, machine against itself. See [§9 of the architecture docs](
 
 | Risk | Mitigation |
 |---|---|
-| **R15: cumulative `connect()` → access violation** (libSQL 0.9.30) | One open per database; R15 reproduces transparently through Python. **`--features property-tests` is run as its own step**, not folded into the suite: `integrity_property_tests` needs a database per case, and inside the full run it faults often enough that the classifier's three retries are routinely exhausted. Alone it crashes on **93 of 100 attempts** and is green when it completes — measured 2026-08-08 under sustained load, and it is the engine rather than the tests. This row said *"~50/50"* until then, on no measurement of this quantity; `.cargo/config.toml` is where the rate lives and what to read before quoting it ([D-147](docs/architecture/s13-decision-register.md#d-147)) |
-| **Property test binaries fault mid-suite** | `property-tests` feature gate; serialised runs; CI classifies each run rather than counting failures, and retries only a crash. A property case opens a database per generated case, which is the highest cumulative-`connect()` shape in the repo and so the worst-exposed by construction ([D-148](docs/architecture/s13-decision-register.md#d-148)) |
-| **Covering index wins over selective** | `EXPLAIN QUERY PLAN` assertions on every index-sensitive query |
+| **R15: cumulative `connect()` → access violation** (libSQL 0.9.30) | An intermittent `STATUS_ACCESS_VIOLATION` in the engine after many opens in one process; it is the engine, not the tests, and it reproduces through Python. Keep one open per database. The test runners classify each run and retry only a crash; a binary that fails when run alone is a real failure ([D-147](docs/architecture/s13-decision-register.md#d-147)). In the 0.20.0 suite runs it took out one or two test binaries per attempt and never failed an assertion. `.cargo/config.toml` documents the R15 measurements and the harness settings they led to |
+| **Property tests fault mid-suite** | Each generated case opens a database, the most R15-exposed shape in the repository, so `--features property-tests` runs as its own CI step behind the feature gate ([D-148](docs/architecture/s13-decision-register.md#d-148)) |
+| **A backfill overwrites the live `concepts` projection** | The interval guard admits a non-overlapping past interval, but the projection keeps one row per id, so after a backfill current-mode reads show the backfilled version. `reconstruct_as_of` answers correctly. Re-assert the current interval after a backfill. The fix moves the log write off the trigger, which is a schema change |
+| **Overlaps already in a ledger are reported, not repaired** | A ledger written before the interval guard, or by raw SQL, keeps its overlaps. `verify_concept_intervals()` names them, and a read refuses only the instants both beliefs claim |
+| **The 90-row edge chunk exceeds 3 ms** | 3.99 ms on the bench. `bulk_import` sizes chunks on elapsed time from that ceiling, so only an import's first chunk runs over ([D-143](docs/architecture/s13-decision-register.md#d-143), [D-301](docs/architecture/s13-decision-register.md#d-301)) |
+| **Covering index wins over selective** | `EXPLAIN QUERY PLAN` assertions on every index-sensitive query, plus pins on the plans `ANALYZE` statistics have moved |
 | **Snapshot chain divergence** | `verify_snapshot_chain()` reports but does not repair (snapshots are disposable) |
-| **Retired concepts reachable through vector search** (0.13.1, **closed 0.13.18**) | `search_vector` joined only the embeddings table, so it had no `retired` column in scope and returned soft-deleted concepts; `hybrid_search` inherited it through its vector arm. Closed by one `concepts` join and a single spliced visibility predicate, applied at all three readers of an embedding table rather than at the one the finding named (W9.3, [D-191](docs/architecture/s13-decision-register.md#d-191)) |
-| **Search reads today's corpus whatever `as_of` says** (0.13.1, **closed 0.13.19**) | No search surface bounded a concept's valid interval, so `as_of` could not reach retrieval and `search_filtered` mixed a past topology with the present corpus. `search_vector`, `keyword_search` and `HybridSearch` now take an optional `as_of_valid`, and a filtered search reads the traversal's (W9.4, [D-192](docs/architecture/s13-decision-register.md#d-192)) |
 
 **`--all-features` is not a configuration this project supports or gates**, and 0.10.0 stopped publishing a test count for it. `--all-features` is `metrics` + `property-tests` together, which puts the R15-prone binaries back inside the main run — the exact arrangement the step above exists to avoid. Measured 2026-08-07: **4 of 4 runs crashed at one attempt, and 4 of 5 still went red at the six-attempt retry budget** the quarantined step uses. A required job that fails four times in five is not a gate, it is noise that teaches people to re-run CI without reading it. Run `--features metrics` and `--features property-tests` as the two separate steps CI does ([D-140](docs/architecture/s13-decision-register.md#d-140)).
 
