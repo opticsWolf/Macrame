@@ -188,13 +188,15 @@ is the only write and is atomic on its own. The chunked path is already inside o
 
 **The skip carries one more write: the mark.** On the same 0-changed-rows signal the write
 path inserts `(entity_id, branch_id)` into `concept_disorder` (v24, §3.3) — the pair whose
-fold winner is no longer its rule winner. **The mark is never cleared**: a later healing
-write must not unmark it, because a cleared mark would let a later write change what a
-past read returned (decided 2026-10-31, §3.6; gate 11 is the named test). Marking costs
-nothing when the projection update runs; the greatest-start decision that classifies the
-write rides the D-291 guard's already-read interval list when the asserted interval is
-open (the common path), and pays one `LIMIT 1` seek otherwise (probe-priced: 21–24 µs
-worst case; §6 gate 9).
+fold winner the next read will correct. The projection's `WHERE excluded.valid_from >=
+concepts.valid_from` *is* the classification: a skipped update is a backfill, and nothing
+else needs deciding — **the write side's only shape-5 cost is one extra insert on a
+backfill write and nothing on the normal path**. (The greatest-start check the first probe
+round priced — 21–24 µs worst case, plus the 70-id batch decision — was the heal-
+classification machinery: it existed only to know which marks to clear, and the
+never-clear decision deleted the reason it existed.) **The mark is never cleared**: a
+later healing write must not unmark it, because a cleared mark would let a later write
+change what a past read returned (decided 2026-10-31, §3.6; gate 11 is the named test).
 
 **Spike before building:** confirm on libSQL 0.9.30 that a `DO UPDATE … WHERE` false reports
 0 changes through both `Connection::execute` and a prepared `Statement::execute`, and fires
@@ -231,10 +233,12 @@ The same rung **recreates `idx_txlog_concept_starts` with `valid_from DESC`** (s
 correction seeks on it; D-300's skip-scan reads `> starts.valid_from ORDER BY … LIMIT 1`,
 which a reversed scan still serves, but its plan pin is re-run, not assumed), and **adds
 and fills `concept_disorder (entity_id, branch_id, PK)` from existing history**: the same
-partition pass that finds wrong projection rows marks every pair whose written history
-ever held a row starting before a start it followed. The mark set is defined over history
-(now-or-then disorder), not over the current projection: a pair whose backfill was later
-healed is still marked, which is exactly what keeps past reads stable (§3.6).
+partition pass that finds wrong projection rows marks every pair whose written history —
+the transaction log **and its archive**, since a past backfill episode may already be in
+the archive — ever held a row starting before a start it followed. The mark set is defined
+over history (now-or-then disorder), not over the current projection: a pair whose
+backfill was later healed is still marked, which is exactly what keeps past reads stable
+(§3.6).
 
 
 ### 3.4 Snapshots
@@ -333,11 +337,12 @@ Winner cross-checks hold on every station and both forms: s5 equals the rule win
 disorder exists, equals s0's winners where none exists, and on `bench_disordered` exactly
 250 winners moved — one per backfilled pair.
 
-Write-side prices (gate 9's check): the per-write greatest-start decision ≈ 21–24 µs
-(0.42 ms upsert ⇒ +5–6% worst case — and derivable from the D-291 guard's already-read
-interval list when the asserted interval is open, the common path); the 70-id batch
-decision statement ≈ 0.11–0.15 ms (against the 3.30 ms session chunk baseline ⇒ +3–5%
-worst case).
+Write-side prices (gate 9's check): with marks fed by the skipped projection upsert
+itself, the write side costs **one extra insert on a backfill write and nothing on the
+normal path** — the greatest-start decision the first probe round priced (per write
+21–24 µs; the 70-id batch statement 0.11–0.15 ms) existed only to classify which marks to
+clear, and the never-clear decision deleted it. The figures stand in the record as the
+cost the shape no longer pays.
 
 **Decision inside the shape (2026-10-31, taken on the user's agenda): the rule is one rule
 for every recorded read.** D-291's bound and D-303's rule are orthogonal: the bound decides
@@ -361,6 +366,15 @@ flips; a flip can only come from mutating the mark set. Hence:
   each write in its history starts at or ahead of the partition's then-greatest start,
   every new row is both the seq winner and the rule winner, bounded or not. That is the
   shape's correctness argument, and the healthy-epoch equality is its empirical statement.
+- **The correction seeks the same districts the fold window reads.** For a read at the
+  present this is the hot log: the archive only ever takes rows a later recording
+  superseded, and the rule winner of every start is the row of greatest start — never
+  a superseded one — so the hot-only correction suffices there. A bounded read at a
+  past ts can need a same-start row that was later superseded *and archived*: for those
+  reads the correction's seek rides the fold's archive arm as well. The probe's
+  statement is the hot-arm sketch (its fixtures archive nothing yet; the correct
+  production statement is the backup routine's plan, pinned by gate 4 with the archive
+  attached). Gate 6 now covers a bounded read on an archived, backfilled concept.
 
 What the rung now carries (§3.3): the v24 recreates `idx_txlog_concept_starts` with
 `valid_from DESC` (D-300's skip-scan pins re-run), adds `concept_disorder (entity_id,
@@ -381,9 +395,20 @@ entity-id spelling *with its prefix* (the first version bound the digits only, w
 foreign partitions, and healed nobody — caught the next run by an exact-drop assertion);
 libsql local keeps per-connection state, so the heal epoch drops both handles before any
 post-heal read (a reader predating the writes missed them). The heal-epoch fold timings
-were bimodal in every run (plain-fold best 10.2 / med 18 ms within one handler), so the
-steady-state never-clear economy is **not** priced here; the clean disordered-epoch figures
-above stay the pricing basis, and one more rerun prices the healed steady state.
+The heal-epoch medians in the earlier passes were bimodal within themselves — three of
+them carried a ~9 ms addend on the paired fold+correction path that neither arm alone
+showed (the arithmetic did not close), at the same magnitude the redundant join predicate
+had added before it was removed — so those passes priced nothing. The final same-day pass
+(prun 8, machine at ~52% background load, station unimodal) is the one where the arithmetic
+closes, and it is the steady-state figure of record: on `bench_disordered`'s heal epoch —
+250 pairs, every one healed, marks intact — the two-statement read costs 11.73 ms med at
+the stability bound and 11.94 ms med at NOW against the plain fold's 11.05 ms med in the
+same epoch: **the never-clear steady state is ≈ +8% at 5% incidence**, the correction alone
+0.92 ms, of which ≈ 0.4 ms is the share of rows already beyond the recorded bound. The
+deep-history pathology keeps its order of magnitude (correction alone 8.3–15.3 ms at
+100% incidence; that station is noisy under any load). Both figures are provisional until
+the release bench re-measures them through criterion at implementation — that is where
+gate 9 signs.
 
 Gate 8 grows named mutations: *mark left behind* (a skipped upsert that forgets the mark,
 caught by the rule-identity test), *correction run for an absent pair* (caught by
@@ -480,7 +505,11 @@ the break here is the user's call. **Default: carried, not built.**
    backfilled pairs — filled from written history, so a pair whose backfill was later
    healed is still marked.
 6. **The archive is unchanged.** A backfilled concept archived past its cutoff still
-   reconstructs the open belief, both before and after the archive pass.
+   reconstructs the open belief, both before and after the archive pass — *and* a bounded
+   read at a ts that predates the archiving row's successor answers the rule there: the
+   correction reaches into the archive for the same-start row the hot log no longer
+   holds. (Named case: backfill, read at ts, archive pass, read at ts again; plus the
+   rule-window comparison on the archived ledger.)
 7. **Snapshots.** A 0.20.0 snapshot is skipped with a warning and the result equals the
    genesis fold. A snapshot taken at v24 composes to the same state as the genesis fold on a
    backfilled ledger.
@@ -493,11 +522,13 @@ the break here is the user's call. **Default: carried, not built.**
      test — the fold then keeps a winner the rule window would replace;
    - a correction run for an absent pair, caught by fold-vs-s0 equality on healthy ledgers;
    - a heal clearing a mark, caught by gate 11 (*a later write changed a past read*).
-9. **Release bench.** `write_path/upsert_concept` stays within 10% of the session baseline
-   (criterion baseline `main-0.20.0`, 2026-10-31: 0.42 ms) — the projection `WHERE` adds a
-   comparison and the backfill branch adds one insert; the probe priced the extra decision
-   at 21–24 µs worst case. The `concepts/70` chunk stays within 10% of the same baseline
-   (3.30 ms; batch decision ≈ 0.11–0.15 ms priced).
+9. **Release bench.** The write side's only shape-5 costs are the projection `WHERE`'s
+   comparison on every write and one insert on a backfill: `write_path/upsert_concept`
+   stays within 10% of the session baseline (`main-0.20.0`, 2026-10-31: 0.42 ms) and the
+   `concepts/70` chunk within 10% of 3.30 ms. The read side's steady state carries the
+   probe's preview (§3.6: ≈ +8% at 5% incidence, fully healed, and +44% at 100%
+   incidence) — **gate 9 signs on the criterion rerun at implementation**, which
+   re-measures fold, correction and writer in one harness against the same baseline.
 10. **Suites and doc gates** green on both feature sets, with figures recorded against a
     baseline taken **before** P1 starts. 0.20.0 could not compare because it took none.
 11. **Past reads never change.** `reconstruct_as_of(ts)` at a fixed ts returns identical
@@ -505,11 +536,6 @@ the break here is the user's call. **Default: carried, not built.**
     a healing write at t2, and the same read again, mutant-equal between them. The shape-5
     probe's heal epochs assert it live (Δ0 with real heal rows on disk), and the compound
     mutants (mark cleared; bounded correction unbound) both must fail it.
-9. **Release bench.** `write_path/upsert_concept` stays within 10% of 0.20.0's 0.36 ms, because
-   the projection `WHERE` adds a comparison and the backfill branch adds one insert. The
-   `concepts/70` chunk stays within 10% of 2.56 ms.
-10. **Suites and doc gates** green on both feature sets, with figures recorded against a
-    baseline taken **before** P1 starts. 0.20.0 could not compare because it took none.
 
 ---
 
@@ -536,7 +562,7 @@ As in 0.20.0 §9, documentation moves with the code rather than at the end:
 
 The probe decision is taken: P1 ships on two-statement shape 5 (write side §3.2, read pair
 §3.6's record, rung §3.3). The fallback below is now about gates, not analysis: if any
-acceptance gate fails to oil in — the §2.2 coherence (gate 3), the healed-ledger plan pin
+acceptance gate fails to hold — the §2.2 coherence (gate 3), the healed-ledger plan pin
 (gate 4), the past-read stability (gate 11), or the release bench (gate 9) — the same
 conclusion from §3.5 stands: **ship nothing of P1's read side**, keep the README workaround,
 and publish the figures as the reason. The write side alone cannot ship: it diverges the

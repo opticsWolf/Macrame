@@ -30,11 +30,11 @@
 //!   backfill write (the projection's skip) and **never cleared**: the table
 //!   lists every pair that was *ever* disordered. Clearing on a healing write
 //!   would let a later write change what a past read returned — the ledger
-//!   promises that never happens. The mark is applied the moment the write
-//!   happens (the write path answers whether its start is behind the
-//!   partition's greatest from data the D-291 guard already holds when the
-//!   asserted interval is open, and with one `LIMIT 1` seek otherwise) and
-//!   stays forever;
+//!   promises that never happens. The skipped upsert is the mark's only
+//!   trigger: a false `DO UPDATE … WHERE` is the backfill event itself, so
+//!   the write side needs no classification of its own (the greatest-start
+//!   check an earlier round priced existed only to know which marks to
+//!   clear, and this turn retired it). Marks stay forever;
 //! - the fold keeps today's window untouched, filters its winners through
 //!   `NOT EXISTS (… concept_disorder …)` — link rows always pass — and
 //!   appends, per ever-disordered partition, the rule row off
@@ -348,9 +348,12 @@ const EVER_DISORDER: &str = r#"
     ) WHERE maxvf_before IS NOT NULL AND vf < maxvf_before
 "#;
 
-/// The write-side decision the rung's paths need per pair: the greatest
-/// start, one seek, which marks a write as a backfill. A healing write does
-/// not unmark: the marks are permanent, that is what makes past reads stable.
+/// Historical pricing only: the greatest-start decision the FIRST design
+/// round measured — it existed to classify which writes heal (and to unmark
+/// their pairs), and the never-clear turn deleted that reason; the shipped
+/// design marks from the skipped projection upsert's own changed-row signal
+/// and needs no such seek. The rows below stand as the cost the shape no
+/// longer pays.
 const MAINTAIN_SEEK_ONE: &str = "
     SELECT json_extract(payload, '$.valid_from')
     FROM transaction_log
