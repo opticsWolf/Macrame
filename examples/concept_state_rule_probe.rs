@@ -281,7 +281,7 @@ async fn plan_of(conn: &libsql::Connection, sql: &str, ts: Option<&str>) -> Stri
             let params: Vec<libsql::Value> = vec![libsql::Value::Text(ts.to_string())];
             conn.query(
                 &format!("EXPLAIN QUERY PLAN {sql}"),
-                libsql::params_from_iter(params.into_iter()),
+                libsql::params_from_iter(params),
             )
             .await
             .unwrap_or_else(|e| panic!("plan failed: {e}: {sql}"))
@@ -373,7 +373,7 @@ async fn consume(conn: &libsql::Connection, sql: &str, ts: Option<&str>, winners
     let mut rows = match ts {
         Some(ts) => {
             let params: Vec<libsql::Value> = vec![libsql::Value::Text(ts.to_string())];
-            conn.query(sql, libsql::params_from_iter(params.into_iter()))
+            conn.query(sql, libsql::params_from_iter(params))
                 .await
                 .unwrap_or_else(|e| panic!("{sql} run failed: {e}"))
         }
