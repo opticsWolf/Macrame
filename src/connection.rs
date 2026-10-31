@@ -5492,6 +5492,12 @@ fn validate_extra_path(path: &str) -> Result<()> {
 ///
 /// [D-278]: ../docs/architecture/s13-decision-register.md#d-278
 /// [D-281]: ../docs/architecture/s13-decision-register.md#d-281
+///
+/// Measured against real frontmatter (0.21.0, C1, plan §5): fourteen
+/// frontmatter-carrying documents in the curated okfgraph bundle measure
+/// 7 … 562 bytes — median 33, three orders of magnitude under the cap. The
+/// headroom is the point: a cap this document's own bundle never approaches
+/// is a guard against bulk bytes, not against real metadata.
 pub const MAX_EXTRA_BYTES: usize = 64 * 1024;
 
 /// Check an `extra` value against the column's rule: a JSON object, under

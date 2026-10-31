@@ -493,9 +493,25 @@ which addition did it, only that the rate moved. Road to 1.0 W1 owns the fix.
   `reconstruct_as_of` with a recorded bound, on a ledger of the size the release bench builds,
   including the archive-attached arm. An earlier probe's output was not kept, so this is a
   measurement, not a re-statement.
+  **Run (2026-11-01, release build, machine at 4%, 21 calls per arm, median):**
+  `examples/bounded_fold_scale_probe.rs` keeps the probe on disk. On the release bench's own
+  graph fixture (1,001 concepts with body text, 1,000 StarOfStars edges, 2,001 log rows) the
+  **hot bounded valid fold reads ≈ 12.5–12.8 ms** against a 10 µs `SELECT 1` control, and the
+  **archive-attached arm reads ≈ 1.9–2.1 ms**: each concept healed in one bulk call makes its
+  original archivable (D-298's rule — the first pass that moved nothing was the fixture saying
+  so), `archive()` then takes 1,001 rows to the sibling `_archive.db`, and the read bound sits
+  before every remaining hot stamp, which is what puts `hot_log_reach` into its NeedsArchive
+  arm. The attached arm is *cheaper* than the hot one because it folds 1,001 hot rows against
+  2,001 — the archive file is not overhead, it is less history. The figures are station-
+  relative; the release bench's own reruns sign the tag-time numbers.
 - **C1 — `MAX_EXTRA_BYTES` against real frontmatter**, carried since 0.19.0. A local okfgraph
   bundle is available, so a sample of real frontmatter sizes can be taken (not from `docs/`,
   which carries none). The result is a sentence in the `extra` rustdoc either way.
+  **Run (2026-11-01):** of the bundle tree's 79 documents under `docs/`, `skills/`, `examples/`
+  and `tests/`, fourteen carry frontmatter, measuring **7 … 562 bytes** (median 33; the
+  two large ones at 428 and 529). Against the 64 KiB cap the largest real frontmatter sits
+  ≈ 117× under, and the sentence the result puts in `extra`'s rustdoc is the headroom —
+  the cap guards against bulk bytes, not against anything the bundle's own metadata carries.
 
 ### P5 — `Overlap::within_batch` becomes a provenance (optional, breaking)
 
