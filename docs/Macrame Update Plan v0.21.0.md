@@ -475,6 +475,18 @@ times on `v0.20.0`, both from clean release builds, and records the binaries tha
 often. It does not attempt a fix: Road to 1.0 W1 owns R15. The point is to stop the next
 release note from having to say "not confirmed".
 
+**Run (2026-11-01, worktrees at the tags, fresh release targets, `--release --attempts 1`,
+station at 4%):** `v0.19.1` — 4 of 5 runs completed (827 passed / 64 targets), 1 crash run
+(`replay_snapshot_tests`, no summary); `v0.20.0` — 2 of 5 runs completed (873 passed /
+66 targets), **3 crash runs** (`branch_read_tests`, `concurrency_tests`,
+`wave1_regression_tests`, `blob_tests`, `reconstruct_as_of_tests` across them). Every crashed
+binary then passed standalone, which is the runner's protocol for calling a crash R15-shaped.
+**Confirmed, not confirmed-friendly: 0.20.0's suite crashes 3× as often as 0.19.1's**
+(0.6 crash-runs per suite vs 0.2) on the same machine at the same load, same runner, one
+release apart. The 0.21.0 candidates are D-303's own additions (the read side pairs two
+queries where 0.20.0 folded one) — and the honest note is that P3 was not designed to prove
+which addition did it, only that the rate moved. Road to 1.0 W1 owns the fix.
+
 ### P4 — two measurements
 
 - **The bounded valid fold at production size** (0.20.0, not closed): wall-clock for
