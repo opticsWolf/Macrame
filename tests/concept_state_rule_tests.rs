@@ -51,6 +51,44 @@ async fn upsert(db: &Database, concept: ConceptUpsert) {
     db.upsert_concept(concept).await.unwrap();
 }
 
+/// A scalar count, as `reconstruct_as_of_tests`'s fixture spells it.
+async fn count(db: &Database, sql: &str) -> i64 {
+    let mut rows = db.read_conn().query(sql, ()).await.unwrap();
+    let v: i64 = rows.next().await.unwrap().unwrap().get(0).unwrap();
+    v
+}
+
+/// The newest stamp a row named `title` wrote with (monojantically written by
+/// the crate, so the fixture always gets a real one).
+async fn stamped(db: &Database, title: &str) -> String {
+    let mut rows = db
+        .read_conn()
+        .query(
+            "SELECT MAX(recorded_at) FROM transaction_log              WHERE json_extract(payload, '$.title') = ?1",
+            libsql::params![title],
+        )
+        .await
+        .unwrap();
+    rows.next()
+        .await
+        .unwrap()
+        .unwrap()
+        .get::<String>(0)
+        .unwrap()
+}
+
+/// One microsecond forward, the smallest step the fixture's 2 ms writes leave
+/// room for. `…:00.000999Z` is a magnitudes-safe ceiling… never needed: the
+/// writes sleep two millis, so the last six digits never carry.
+fn bump_us(stamp: &str) -> String {
+    let micro: u32 = stamp[stamp.len() - 7..stamp.len() - 1].parse().unwrap();
+    assert!(
+        micro < 999_998,
+        "the 2 ms fixture tick should have left room; got {stamp}"
+    );
+    format!("{}{:06}Z", &stamp[..stamp.len() - 7], micro + 2)
+}
+
 /// The projection row of `id`, as `(title, valid_from, valid_to)` + FTS title.
 ///
 /// The second column the query reads is what the walk's `retired` filter and
@@ -673,6 +711,109 @@ async fn the_rule_row_retires_the_concept_from_the_fold() {
     assert!(
         !state.concepts.contains_key("src/a.rs"),
         "a retired row from the correction removes the concept like a fold row would"
+    );
+
+    db.close().await.unwrap();
+}
+
+/// **Gate 6's named case (§6): a bounded read answers the rule even when the
+/// rule row lives in the archive.**
+///
+/// C2 at June (open) is written; a backfill at January closes at June and the
+/// mark lands; a bounded read at one tick past C2's stamp answers C2 — the
+/// rule row is the greatest start among the rows the bound keeps. Then a
+/// later write at the *same June start* (the heal) is what makes C2's row a
+/// superseded one, which is the only thing `LOG_ARCHIVABLE` can move: the
+/// archive pass takes it, the backfill stays hot (no newer row on its own
+/// start), and the *same bounded read* runs again. Its answer must not have
+/// moved: the correction the fold pairs with computes the rule row over both
+/// files, so the hot-only mutant that would overwrite the fold's own correct
+/// winner with the January backfill dies here. The mark survives the heal,
+/// and the present answers the heal.
+#[tokio::test]
+async fn a_bounded_read_never_moves_around_the_archive_pass() {
+    let harness = TestHarness::new();
+    let db = open_db(&harness).await;
+
+    upsert(&db, concept("src/a.rs", "C2", JUN, None)).await;
+    let s2 = stamped(&db, "C2").await;
+    upsert(&db, concept("src/a.rs", "C1", JAN, Some(JUN))).await;
+    let s3 = stamped(&db, "C1").await;
+    assert!(
+        s3 > s2,
+        "the write tick did not order the stamps: {s2} then {s3}"
+    );
+    mark_disordered(&db, "src/a.rs", "main").await;
+
+    // The bounded read, before anything has left: C2 is the rule row inside
+    // the bound, and the backfill (its stamp is beyond it) is kept out.
+    let ts_b = bump_us(&s2);
+    let before = db
+        .reconstruct_as_of(AsOf::recorded_at(&ts_b))
+        .await
+        .unwrap();
+    assert_eq!(
+        before.concepts["src/a.rs"].title, "C2",
+        "the rule row is the greatest start the bound keeps"
+    );
+
+    // The heal at the same start is what makes C2 superseded, which is what
+    // lets the archive move it: the cutoff rides the heal's own stamp, so
+    // C2's row goes cold, the backfill (no newer January row) stays hot, and
+    // the heal stays hot (it is not superseded on its start).
+    upsert(&db, concept("src/a.rs", "C2-heal", JUN, None)).await;
+    let s4 = stamped(&db, "C2-heal").await;
+    assert!(
+        s4 > s3,
+        "the heal's stamp must order after the backfill: {s4}"
+    );
+    let report = db.archive(&s4).await.unwrap();
+    assert!(
+        report.log_entries_archived >= 1,
+        "the fixture needs C2's row archived: {report:?}"
+    );
+    assert_eq!(
+        count(
+            &db,
+            "SELECT COUNT(*) FROM transaction_log WHERE json_extract(payload, '$.title') = 'C2'"
+        )
+        .await,
+        0,
+        "the rule row has left the hot log"
+    );
+    assert_eq!(
+        count(
+            &db,
+            "SELECT COUNT(*) FROM transaction_log WHERE json_extract(payload, '$.title') = 'C1'"
+        )
+        .await,
+        1,
+        "the backfill stays hot: no newer row exists on its own start"
+    );
+
+    // The same bounded read, now that its rule row lives only in the archive.
+    let after = db
+        .reconstruct_as_of(AsOf::recorded_at(&ts_b))
+        .await
+        .unwrap();
+    assert_eq!(
+        after.concepts["src/a.rs"].title, "C2",
+        "a hot-only correction would overwrite this with the backfill"
+    );
+
+    // And the present answers the heal, the fold and the projection thing as
+    // one, with the mark still standing.
+    let now_state = reconstruct(&db.read_conn(), FAR, None, None).await.unwrap();
+    assert_eq!(now_state.concepts["src/a.rs"].title, "C2-heal");
+    let (title, from, to, fts_title) = projection(&db, "src/a.rs").await;
+    assert_eq!(
+        format!("{title}|{from}|{to}|{fts_title}"),
+        format!("C2-heal|{JUN}|{OPEN}|C2-heal")
+    );
+    assert_eq!(
+        mark_list(&db).await,
+        vec![("src/a.rs".to_string(), "main".to_string())],
+        "the mark survives the heal even as the archive moves the row out"
     );
 
     db.close().await.unwrap();
