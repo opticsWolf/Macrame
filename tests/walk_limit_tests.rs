@@ -157,7 +157,7 @@ async fn an_unlimited_walk_emits_the_statement_it_always_did() {
         "an unlimited traversal must not carry a ceiling or its reporting: {sql}"
     );
     assert!(
-        sql.contains("SELECT DISTINCT w.node_id\nFROM walk w JOIN concepts c"),
+        sql.contains("SELECT DISTINCT w.node_id\nFROM walk w CROSS JOIN concepts c"),
         "the unlimited projection must be the one every plan pin asserts: {sql}"
     );
 

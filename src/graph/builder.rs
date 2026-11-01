@@ -608,12 +608,16 @@ impl TraversalBuilder {
                 Self::LIMITED_PROJECTION
             );
         }
+        // `CROSS JOIN` pins the walk as the outer loop, so each reached node is
+        // one primary-key seek into `concepts`. SQLite 3.47 (libsql 0.10.0)
+        // otherwise prefers scanning every concept against an automatic index
+        // on the walk: same rows, a cost that grows with the table.
         format!(
             "{}{}",
             self.walk_cte(shape, ancestry),
             r#"
 SELECT DISTINCT w.node_id
-FROM walk w JOIN concepts c ON c.id = w.node_id
+FROM walk w CROSS JOIN concepts c ON c.id = w.node_id
 WHERE c.retired = 0
 ORDER BY w.node_id;
             "#
@@ -810,13 +814,14 @@ ORDER BY w.node_id;
     /// in the all-retired case where the scalar-column form returned zero rows.
     ///
     /// The unlimited form is untouched and stays byte-identical, which is why
-    /// this is a separate string rather than a parameter of the other one.
+    /// this is a separate string rather than a parameter of the other one. Its
+    /// `CROSS JOIN` is the unlimited form's, for the unlimited form's reason.
     const LIMITED_PROJECTION: &'static str = r#"
 SELECT r.n, w.node_id
 FROM (SELECT COUNT(*) AS n FROM walk) r
 LEFT JOIN (
     SELECT DISTINCT w.node_id AS node_id
-    FROM walk w JOIN concepts c ON c.id = w.node_id
+    FROM walk w CROSS JOIN concepts c ON c.id = w.node_id
     WHERE c.retired = 0
 ) w ON 1 = 1
 ORDER BY w.node_id;

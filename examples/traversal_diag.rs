@@ -64,7 +64,7 @@ WITH RECURSIVE walk(node_id, depth) AS (
 
 const PROJECT_IDS: &str = r#"
 SELECT DISTINCT w.node_id
-FROM walk w JOIN concepts c ON c.id = w.node_id
+FROM walk w CROSS JOIN concepts c ON c.id = w.node_id
 WHERE c.retired = 0
 ORDER BY w.node_id;
 "#;

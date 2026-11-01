@@ -3005,6 +3005,10 @@ mod valid_fold_plan {
 
     /// The open valid fold reads every row, so it scans the partition and sorts the
     /// right-hand part of its window. With no recorded bound there is no seek.
+    ///
+    /// SQLite 3.47 (libsql 0.10.0) names the partial sort by its term count,
+    /// `LAST 2 TERMS OF ORDER BY`, where 3.45 said `RIGHT PART OF ORDER BY`. The
+    /// plan is the same; the pin follows the engine's wording.
     #[tokio::test]
     async fn the_open_valid_fold_scans_the_fold_partition() {
         let conn = hot_log().await;
@@ -3014,7 +3018,7 @@ mod valid_fold_plan {
             "{p}"
         );
         assert!(
-            p.contains("USE TEMP B-TREE FOR RIGHT PART OF ORDER BY"),
+            p.contains("USE TEMP B-TREE FOR LAST 2 TERMS OF ORDER BY"),
             "{p}"
         );
         assert!(!p.contains("idx_txlog_time"), "{p}");
