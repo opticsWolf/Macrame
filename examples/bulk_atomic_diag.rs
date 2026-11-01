@@ -103,7 +103,7 @@ async fn hold_ms(shape: Shape, n: usize) -> f64 {
 
 #[tokio::main]
 async fn main() {
-    println!("libSQL 0.9.30, best of 3. `hold` is the actor turn (T1.4).");
+    println!("libSQL 0.10.0, writer_temp_store = Memory (D-306), best of 3. `hold` is the actor turn (T1.4).");
     println!("`predicted` is macrame::connection::estimated_bulk_hold.\n");
     println!(
         "{:>8} {:>10} {:>11} {:>11} {:>11} {:>11}",

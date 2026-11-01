@@ -20,7 +20,7 @@ pub use blob::{BlobLocation, BlobStat, DEFAULT_MAX_BLOB_BYTES};
 pub use branch::{Branch, BranchId, BranchView, Divergence, MAX_BRANCH_ID};
 pub use connection::{
     Annotation, BulkControl, BulkProgress, CadencePolicy, CancelToken, CheckpointReport,
-    ConceptUpsert, Database, Tuning, WalCheckpointPolicy, CHUNK_BUDGET,
+    ConceptUpsert, Database, TempStorePolicy, Tuning, WalCheckpointPolicy, CHUNK_BUDGET,
 };
 pub use error::{
     BulkInterrupted, BulkResult, ConceptOverlap, DbError, ErrorKind, Overlap, OverlapProvenance,
@@ -39,8 +39,8 @@ pub mod prelude {
     pub use crate::branch::{Branch, BranchId, MAX_BRANCH_ID};
     pub use crate::connection::{
         estimated_bulk_hold, Annotation, BulkControl, BulkProgress, CadencePolicy, CancelToken,
-        CheckpointReport, ConceptUpsert, Database, Tuning, WalCheckpointPolicy, BLOB_WARN_HOLD,
-        BULK_ATOMIC_WARN_HOLD, CHUNK_BUDGET, MAX_ARCHIVE_SESSIONS,
+        CheckpointReport, ConceptUpsert, Database, TempStorePolicy, Tuning, WalCheckpointPolicy,
+        BLOB_WARN_HOLD, BULK_ATOMIC_WARN_HOLD, CHUNK_BUDGET, MAX_ARCHIVE_SESSIONS,
     };
     pub use crate::error::{
         BulkInterrupted, BulkResult, ConceptOverlap, DbError, ErrorKind, Overlap, OverlapProvenance,

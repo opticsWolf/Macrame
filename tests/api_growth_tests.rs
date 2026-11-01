@@ -776,7 +776,8 @@ fn every_setter_assigns_the_field_it_is_named_after() {
         .wal_autocheckpoint(WalCheckpointPolicy::EveryPages(4_242))
         .writer_cache_size(-64_000)
         .reader_cache_size(-8_000)
-        .future_stamps(FutureStampPolicy::Allow);
+        .future_stamps(FutureStampPolicy::Allow)
+        .writer_temp_store(TempStorePolicy::File);
     assert_eq!(t.cadence, CadencePolicy::Disabled, "Tuning::cadence");
     assert!(t.clock.is_some(), "Tuning::clock");
     assert_eq!(
@@ -802,6 +803,13 @@ fn every_setter_assigns_the_field_it_is_named_after() {
         t.future_stamps,
         FutureStampPolicy::Allow,
         "Tuning::future_stamps"
+    );
+    // `File`, because `Memory` is the default and a setter assigning nothing
+    // would read back the default.
+    assert_eq!(
+        t.writer_temp_store,
+        TempStorePolicy::File,
+        "Tuning::writer_temp_store"
     );
 
     // --- SnapshotCadence ---------------------------------------------------

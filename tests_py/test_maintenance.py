@@ -250,6 +250,28 @@ def test_an_unknown_wal_policy_string_names_what_is_accepted(db_path):
         macrame.Database.open(db_path, wal_autocheckpoint="off")
 
 
+def test_either_writer_temp_store_writes_and_reads_the_same(db_path):
+    """D-306: the knob moves where the writer journals, not what it writes.
+
+    The writer's pragma is not reachable from here; what is, is that both
+    spellings open a working ledger, and that the reader keeps SQLite's own
+    setting under either.
+    """
+    for policy in ("memory", "file"):
+        path = db_path.with_name(f"{policy}.db")
+        with macrame.Database.open(
+            path, snapshot_every_entries=None, writer_temp_store=policy
+        ) as handle:
+            handle.upsert_concept(macrame.ConceptUpsert("a", "Alpha", valid_from=T0))
+            assert handle.diagnostic_query("PRAGMA temp_store")[0][0] == 0
+            assert handle.diagnostic_query("SELECT COUNT(*) FROM concepts")[0][0] == 1
+
+
+def test_an_unknown_writer_temp_store_names_what_is_accepted(db_path):
+    with pytest.raises(ValueError, match="memory"):
+        macrame.Database.open(db_path, writer_temp_store="disk")
+
+
 def test_the_two_cache_sizes_are_separate_knobs(db_path):
     """Split because the writer is one connection and the readers are several.
 

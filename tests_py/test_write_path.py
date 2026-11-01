@@ -303,9 +303,10 @@ def test_the_hold_estimate_is_available_before_the_write():
     edges = [macrame.EdgeAssertion(f"s{i}", "t", "LINKS", valid_from=T0) for i in range(500)]
     held = macrame.estimate_bulk_hold(edges)
     assert isinstance(held, dt.timedelta)
-    # Measured on libSQL 0.9.30: 500 rows is ~33 ms. The band is wide because
-    # the estimate is a shape, not a promise.
-    assert dt.timedelta(milliseconds=10) < held < dt.timedelta(milliseconds=200)
+    # Measured on libSQL 0.10.0 (0.21.0, D-306): 500 rows is ~11 ms; it was
+    # ~33 ms on 0.9.30. The band is wide because the estimate is a shape, not a
+    # promise.
+    assert dt.timedelta(milliseconds=3) < held < dt.timedelta(milliseconds=200)
 
 
 def test_the_estimate_no_longer_depends_on_the_batchs_shape():

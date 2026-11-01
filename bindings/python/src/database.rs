@@ -481,6 +481,13 @@ impl PyDatabase {
     ///   D-281). `None` is the 8 MiB default, `DEFAULT_MAX_BLOB_BYTES`; a
     ///   blob is held in memory whole on both sides of the call, so this is a
     ///   memory bound as much as a size one.
+    /// - `writer_temp_store`: where the write connection keeps temporary
+    ///   storage (0.21.0,
+    ///   [D-306](../../../docs/architecture/s13-decision-register.md)). `None`
+    ///   and `"memory"` keep it in RAM, which is what takes the 90-edge chunk
+    ///   from ~4 ms to ~2.2 ms; `"file"` gives the writer's large sorts back
+    ///   to disk, for a file whose whole-table rebuilds would not fit in
+    ///   memory.
     #[staticmethod]
     #[pyo3(signature = (
         path,
@@ -492,6 +499,7 @@ impl PyDatabase {
         reader_cache_size = None,
         future_stamps = None,
         max_blob_bytes = None,
+        writer_temp_store = None,
     ))]
     // Keyword-only tuning knobs, one per thing that can be tuned: the same
     // reason the other signatures in this file carry this allow.
@@ -506,6 +514,7 @@ impl PyDatabase {
         reader_cache_size: Option<i32>,
         future_stamps: Option<&Bound<'_, PyAny>>,
         max_blob_bytes: Option<usize>,
+        writer_temp_store: Option<&str>,
     ) -> PyResult<Self> {
         let cadence = to_cadence(snapshot_every_entries, snapshot_poll_seconds)?;
         // The two cache sizes arrive from Python as `Option<i32>` where the
@@ -518,7 +527,8 @@ impl PyDatabase {
                 None => macrame::CadencePolicy::Disabled,
             })
             .wal_autocheckpoint(to_wal_policy(wal_autocheckpoint)?)
-            .future_stamps(to_future_stamp_policy(future_stamps)?);
+            .future_stamps(to_future_stamp_policy(future_stamps)?)
+            .writer_temp_store(to_temp_store_policy(writer_temp_store)?);
         if let Some(size) = writer_cache_size {
             tuning = tuning.writer_cache_size(size);
         }
@@ -2756,6 +2766,20 @@ fn to_cadence(
             .every_entries(n)
             .poll_interval(std::time::Duration::from_secs_f64(snapshot_poll_seconds)),
     ))
+}
+
+/// `None` / `"memory"` / `"file"` → a [`macrame::TempStorePolicy`] (D-306).
+///
+/// `None` is the crate's default, `Memory`, so omitting the keyword means what
+/// omitting the Rust setter means.
+fn to_temp_store_policy(s: Option<&str>) -> PyResult<macrame::TempStorePolicy> {
+    match s {
+        None | Some("memory") => Ok(macrame::TempStorePolicy::Memory),
+        Some("file") => Ok(macrame::TempStorePolicy::File),
+        Some(other) => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "writer_temp_store accepts None, \"memory\", or \"file\"; got {other:?}"
+        ))),
+    }
 }
 
 /// `None` / `"disabled"` / a positive page count → a [`WalCheckpointPolicy`].

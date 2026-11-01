@@ -94,6 +94,13 @@ invisible at the call site.
 sentinel integer is the Python spelling of the tri-state enum: it cannot be produced by
 arithmetic, which is the failure mode being refused.
 
+**`writer_temp_store` takes `None`, `"memory"` or `"file"`** (0.21.0,
+[D-306](s13-decision-register.md#d-306)), and `None` is `"memory"` — the Rust default,
+so omitting the keyword means what omitting the setter means. Like the two writer knobs
+below it is applied to a connection Python cannot reach; the test asserts the half it can
+see (both spellings write a working ledger, and the reader keeps SQLite's setting) and
+leaves the positive half to `tests/temp_store_tests.rs`.
+
 **Two of the three knobs are not observable through this binding, and the tests say so
 rather than pretending otherwise.** `wal_autocheckpoint` and `writer_cache_size` are
 applied to the write connection, which no Python caller can reach; `diagnostic_conn` opens

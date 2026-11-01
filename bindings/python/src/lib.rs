@@ -76,17 +76,18 @@ fn engine_linked() -> bool {
 /// The batch is one act under one stamp and cannot be chunked, so this duration
 /// is time every other writer in the process spends waiting.
 ///
-/// **It is a shape, not a promise.** Calibrated on libSQL 0.9.30, one machine,
-/// 100–20,000 rows, within 15% from 500 rows up; below that it under-predicts
-/// by up to 3×, which is harmless since nothing that small approaches the
-/// warning threshold. It says nothing about disk, and should not be read closer
+/// **It is a shape, not a promise.** Calibrated on libSQL 0.10.0 with the
+/// default `writer_temp_store` (0.21.0, D-306), one machine, 100–20,000 rows,
+/// within 16% at every size; with `writer_temp_store="file"` it under-predicts
+/// by roughly 3.5×. It says nothing about disk, and should not be read closer
 /// than an order of magnitude.
 ///
 /// **It reads `len(edges)` and nothing else, as of 0.13.6 (D-179).** Until then
 /// the batch's *shape* was the dominant term — 20,000 corrections to one
 /// relationship's history cost 18.1 s against 2.6 s for 20,000 unrelated edges,
 /// because the within-batch overlap guard compared every pair. That guard sorts
-/// and sweeps now, the two shapes hold for 2.2 s and 1.9 s, and a model still
+/// and sweeps now, the two shapes hold within 2% of each other (0.59 s at
+/// 20,000 rows on 0.10.0), and a model still
 /// predicting the spread would warn about a batch that is fine.
 #[pyfunction]
 fn estimate_bulk_hold(edges: Vec<types::PyEdgeAssertion>) -> std::time::Duration {

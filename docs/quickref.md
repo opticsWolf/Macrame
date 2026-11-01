@@ -756,7 +756,7 @@ pub const BULK_ATOMIC_WARN_HOLD: Duration = Duration::from_millis(250)
 pub const SAMPLE_LIMIT: usize = 32
 pub const MAX_ARCHIVE_SESSIONS: usize = 4_096
 
-pub fn estimated_bulk_hold(edges: &[EdgeAssertion]) -> Duration  // ~33 ms / 500 rows
+pub fn estimated_bulk_hold(edges: &[EdgeAssertion]) -> Duration  // ~12 ms / 500 rows
 ```
 
 **`Clock` trait**: Injectable clock for deterministic testing. `SystemClock` enforces monotonicity by flooring to `MAX(recorded_at)`. `FakeClock` advances explicitly.
@@ -796,10 +796,10 @@ pub const BLOB_WARN_HOLD: Duration = Duration::from_millis(100);
 
 | Path | Ceiling (the size, before 0.12.0) | Measured at that size (0.21.0) | Per-row cost (marginal, 50 → 100 rows) |
 |---|---|---|---|
-| Edges (`bulk_import`) | 90 | 4.08 ms — over the bound; the loop sizes down | ~68 µs (empty db); 9.36 ms per 90 rows into an 8K-edge table |
-| Concepts (`write_concepts`) | 70 | 2.65 ms | ~42 µs |
-| Annotations (`write_analytics_annotations`) | 600 | 1.35 ms | ~2.5 µs |
-| Embeddings (`upsert_embeddings`) | 30 | 1.33 ms | ~118 µs (DiskANN insertion) |
+| Edges (`bulk_import`) | 90 | 2.22 ms | ~22 µs (empty db); 3.01 ms per 90 rows into an 8K-edge table |
+| Concepts (`write_concepts`) | 70 | 2.64 ms | ~42 µs |
+| Annotations (`write_analytics_annotations`) | 600 | 1.31 ms | ~2.5 µs |
+| Embeddings (`upsert_embeddings`) | 30 | 1.28 ms | ~118 µs (DiskANN insertion) |
 
 **Bound**: 3 ms (`CHUNK_BUDGET`). Per-transaction overhead: ~0.8 ms (BEGIN, COMMIT, fsync). The four sizes are derived from measurement ([D-058](s13-decision-register.md#d-058)), not one shared constant. Two paths are superlinear in *table size* (edges via `trg_links_single_open`'s wrong index — fixed in v6 by `idx_lc_open_interval`; embeddings via DiskANN graph growth) — chunking costs throughput on every path.
 
@@ -813,24 +813,24 @@ pub const BLOB_WARN_HOLD: Duration = Duration::from_millis(100);
 
 | Operation | Budget | Measured | Notes |
 |---|---|---|---|
-| Single assertion | ≤ 5 ms | 196 µs | **Flat in out-degree** (D-134): measured into tables of 0 / 2,000 / 8,000 edges — hub out-degree 0 / 666 / 2,666 — with no rise. The old "not met at high out-degree" caveat described the pre-v6 access path (D-059). Real cost is O(version count per edge key), capped by archival |
-| Single concept upsert | ≤ 3 ms | 375 µs | Flat in the concept's history (D-300) |
-| Chunk commit, edges 90 rows | ≤ 3 ms | 4.08 ms | **Missed.** Fully amplified (triggers included). `bulk_import` starts at 90 and sizes down on elapsed time (D-143, D-146); per-index costs in D-301 |
-| Chunk commit, concepts 70 rows | ≤ 3 ms | 2.65 ms | |
-| Chunk commit, annotations 600 rows | ≤ 3 ms | 1.35 ms | |
-| Chunk commit, embeddings 30 rows | ≤ 3 ms | 1.33 ms | |
-| Three-hop traversal | ≤ 10 ms | 1.60 ms | On `star_of_stars` fixture |
-| `audit_current` | ≤ 200 ms | 12.2 ms | |
-| Vector top-10 | ≤ 20 ms | 262 µs | |
-| Hybrid top-10 | ≤ 50 ms | 1.83 ms | |
-| Full fold (reconstruct) | ≤ 100 ms | 17.0 ms | |
+| Single assertion | ≤ 5 ms | 186 µs | **Flat in out-degree** (D-134): measured into tables of 0 / 2,000 / 8,000 edges — hub out-degree 0 / 666 / 2,666 — with no rise. The old "not met at high out-degree" caveat described the pre-v6 access path (D-059). Real cost is O(version count per edge key), capped by archival |
+| Single concept upsert | ≤ 3 ms | 360 µs | Flat in the concept's history (D-300) |
+| Chunk commit, edges 90 rows | ≤ 3 ms | 2.22 ms | Met. Fully amplified (triggers included); the writer's statement journal stays in memory (D-306). 3.01 ms into an 8,000-edge table — at the bound. `bulk_import` starts at 90 and sizes on elapsed time (D-143, D-146) |
+| Chunk commit, concepts 70 rows | ≤ 3 ms | 2.64 ms | |
+| Chunk commit, annotations 600 rows | ≤ 3 ms | 1.31 ms | |
+| Chunk commit, embeddings 30 rows | ≤ 3 ms | 1.28 ms | |
+| Three-hop traversal | ≤ 10 ms | 1.61 ms | On `star_of_stars` fixture |
+| `audit_current` | ≤ 200 ms | 12.1 ms | |
+| Vector top-10 | ≤ 20 ms | 267 µs | |
+| Hybrid top-10 | ≤ 50 ms | 1.80 ms | |
+| Full fold (reconstruct) | ≤ 100 ms | 16.8 ms | |
 | Composition | ≤ 100 ms | 3.00 ms | Snapshot + delta fold |
 | Archive (100K closed intervals) | ≤ 30 s | ~26.8 ms for 2K (0.9.0) | One session; windowed trades total for latency |
-| Rehydrate, 1 concept | ≤ 5 ms | 2.73 ms | ATTACH + one `BEGIN IMMEDIATE` + commit (D-132) |
-| Rehydrate, per concept after the first | ≤ 300 µs | ~68 µs | The rate the archive row above implies, applied in reverse. **Linear to n=1,000 only** — 101 µs at n=10,000, and FTS5 index maintenance is why |
+| Rehydrate, 1 concept | ≤ 5 ms | 2.87 ms | ATTACH + one `BEGIN IMMEDIATE` + commit (D-132) |
+| Rehydrate, per concept after the first | ≤ 300 µs | ~68 µs | The rate the archive row above implies, applied in reverse. **Linear to n=1,000 only** — 108 µs at n=10,000, and FTS5 index maintenance is why |
 | Rebuild (10M edges) | ~50 s | — | Chunked: 7.6× less hold, 2.3× cheaper total |
 
-**Measured at 0.21.0**, median of three criterion sessions, `control/select_1` at 1.43–1.74 µs. Each figure is the operation alone: fixture teardown is outside the timed region since D-302, so figures from earlier releases do not compare directly.
+**Measured at 0.21.0**, median of three criterion sessions, `control/select_1` at 1.45–1.78 µs. Each figure is the operation alone: fixture teardown is outside the timed region since D-302, so figures from earlier releases do not compare directly.
 
 **Measurement caveat**: Absolute timings are hardware-dependent. All budgets measured on named reference hardware. Criterion baselines detect regression; machine against itself. **Budgets are measured, not CI gates** (D-055): absolute durations on arbitrary hardware are the wrong shape for a CI check — regression detection compares a machine against itself.
 

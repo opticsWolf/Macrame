@@ -527,20 +527,26 @@ pub const BLOB_WARN_HOLD: std::time::Duration = std::time::Duration::from_millis
 /// from 100 to 20,000 rows, which is inside the noise this model claims.
 ///
 /// What is left is not flat either, and the second term is why. Per-row cost
-/// rises from ~36 µs at 100 rows to ~111 µs at 20,000, because each insert
-/// maintains indexes and two triggers against a table the batch is itself
+/// rises from ~22 µs at 100 rows to ~30 µs at 20,000, because each insert
+/// maintains indexes and three triggers against a table the batch is itself
 /// growing:
 ///
 /// ```text
-/// hold ≈ rows · (7.4 µs + 7.24 µs · ⌊log₂ rows⌋)
+/// hold ≈ rows · (15 µs + 1.0 µs · ⌊log₂ rows⌋)
 /// ```
 ///
 /// # What this is calibrated against, and where it will be wrong
 ///
-/// libSQL 0.9.30, one machine, best of three, 100–20,000 rows in both shapes;
-/// within 15% from 500 rows up. Below that it under-predicts by up to 3×, which
-/// is harmless in the same way the old 3× over-prediction was — nothing that
-/// small approaches [`BULK_ATOMIC_WARN_HOLD`].
+/// libSQL 0.10.0 with the writer's temporary storage in memory (the default
+/// [`TempStorePolicy::Memory`], D-306), one machine, best of three, 100–20,000
+/// rows in both shapes; within 16% at every size, over-predicting around 2,000
+/// rows and under-predicting by at most 7% at 100. The fit it replaces
+/// (`7.4 µs + 7.24 µs · ⌊log₂ rows⌋`, libSQL 0.9.30) predicted 2.2 s for the
+/// 20,000-row batches that now hold for 0.59 s. Under
+/// [`TempStorePolicy::File`] every insert's statement journal goes to a
+/// temporary file again, and this under-predicts by roughly 3.5× — the ratio
+/// `chunk_scaling/edges/1000` showed between the two policies — which this
+/// function cannot correct because it never sees the [`Tuning`].
 ///
 /// **The log term reads the batch because the batch is all it has.** It stands
 /// for the depth of a structure the batch is loading, and this signature never
@@ -562,7 +568,7 @@ pub fn estimated_bulk_hold(edges: &[EdgeAssertion]) -> std::time::Duration {
     // Nanoseconds throughout, saturating: a caller who passes a batch large
     // enough to overflow this has a problem the arithmetic cannot express, and
     // saturating to ~584 years still crosses every threshold above.
-    let per_row = 7_400u64.saturating_add((rows.ilog2() as u64).saturating_mul(7_240));
+    let per_row = 15_000u64.saturating_add((rows.ilog2() as u64).saturating_mul(1_000));
     std::time::Duration::from_nanos(rows.saturating_mul(per_row))
 }
 
@@ -1465,6 +1471,65 @@ impl WalCheckpointPolicy {
     }
 }
 
+/// Where the **write connection** keeps SQLite's temporary storage (0.21.0,
+/// [D-306]).
+///
+/// Every edge insert fires three triggers, so one `INSERT INTO links` writes
+/// three tables and about fifteen b-trees. Inside a transaction that makes it
+/// a statement SQLite must be able to undo on its own, so SQLite copies each
+/// page the statement touches into a *statement journal* first. That journal
+/// lives in memory up to 64 KiB and then spills to a temporary file — and once
+/// the tables are past a few dozen rows, one edge's pages are more than
+/// 64 KiB. Every row then creates, writes and deletes a file, which on Windows
+/// cost a 90-edge chunk most of its time:
+///
+/// | 90-edge chunk | [`Self::File`] | [`Self::Memory`] |
+/// |---|---|---|
+/// | empty table | 4.08–4.11 ms | 2.23–2.24 ms |
+/// | into an 8,000-edge table | 9.15–11.7 ms | 2.91–2.97 ms |
+/// | 1,000-edge chunk | 85.3–85.5 ms | 24.5–24.6 ms |
+///
+/// **Consistency and durability do not move.** The statement journal only
+/// undoes one failed statement inside a transaction that is still open; crash
+/// recovery is the WAL's and the transaction's, and neither depends on where
+/// that journal lives.
+///
+/// # Why `Memory` is the default and `File` exists
+///
+/// The pragma moves *all* of the writer's temporary storage into RAM, not only
+/// the statement journal: sorts, `DISTINCT` and `IN (SELECT …)` sets, and the
+/// index builds a migration runs. On a large file the writer's whole-table
+/// operations — [`Database::rebuild_current`], a migration's `CREATE INDEX` —
+/// then sort in memory, which at tens of millions of edges is hundreds of MB.
+/// [`Self::File`] gives those back to disk, at the per-row cost above.
+///
+/// Read connections are not touched: they never write, so they never journal,
+/// and their temporary sorts stay where SQLite puts them.
+///
+/// [D-306]: ../docs/architecture/s13-decision-register.md#d-306
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum TempStorePolicy {
+    /// `PRAGMA temp_store = MEMORY`: statement journals, sorts and temporary
+    /// b-trees stay in RAM.
+    #[default]
+    Memory,
+    /// `PRAGMA temp_store = FILE`: SQLite's own behaviour, stated rather than
+    /// left implicit — temporary storage spills to files.
+    File,
+}
+
+impl TempStorePolicy {
+    /// The pragma to run. Both arms run one, so the writer's setting never
+    /// depends on how the engine was compiled.
+    fn pragma(self) -> &'static str {
+        match self {
+            Self::Memory => "PRAGMA temp_store = MEMORY",
+            Self::File => "PRAGMA temp_store = FILE",
+        }
+    }
+}
+
 /// Everything [`Database::open_tuned`] can be told, in one growable struct
 /// (0.12.12, W5.1, D-155).
 ///
@@ -1615,6 +1680,16 @@ pub struct Tuning {
     ///
     /// [D-281]: ../../docs/architecture/s13-decision-register.md#d-281
     pub max_blob_bytes: Option<usize>,
+    /// Where the **write connection** keeps temporary storage (0.21.0,
+    /// [D-306]). Defaults to [`TempStorePolicy::Memory`]; see the enum for the
+    /// measurement and for what [`TempStorePolicy::File`] buys back.
+    ///
+    /// A policy enum rather than an `Option`, because this crate's default is
+    /// not SQLite's: absence here means *memory*, and an `Option` whose `None`
+    /// meant a value SQLite does not default to would read the wrong way.
+    ///
+    /// [D-306]: ../../docs/architecture/s13-decision-register.md#d-306
+    pub writer_temp_store: TempStorePolicy,
 }
 
 impl Tuning {
@@ -1682,6 +1757,13 @@ impl Tuning {
         self
     }
 
+    /// Where the write connection keeps temporary storage — the
+    /// [`writer_temp_store`](Self::writer_temp_store) field.
+    pub fn writer_temp_store(mut self, policy: TempStorePolicy) -> Self {
+        self.writer_temp_store = policy;
+        self
+    }
+
     /// The `Option<SnapshotCadence>` the three older constructors take, mapped
     /// onto the tri-state. `None` there means *disabled*, which is why
     /// [`CadencePolicy`] exists — see its docs.
@@ -1697,6 +1779,7 @@ impl Tuning {
             reader_cache_size: None,
             future_stamps: FutureStampPolicy::default(),
             max_blob_bytes: None,
+            writer_temp_store: TempStorePolicy::default(),
         }
     }
 }
@@ -1714,6 +1797,7 @@ impl std::fmt::Debug for Tuning {
             .field("writer_cache_size", &self.writer_cache_size)
             .field("reader_cache_size", &self.reader_cache_size)
             .field("max_blob_bytes", &self.max_blob_bytes)
+            .field("writer_temp_store", &self.writer_temp_store)
             .finish()
     }
 }
@@ -1794,11 +1878,14 @@ impl Database {
             reader_cache_size,
             future_stamps,
             max_blob_bytes,
+            writer_temp_store,
         } = tuning;
         let max_blob_bytes = max_blob_bytes.unwrap_or(crate::blob::DEFAULT_MAX_BLOB_BYTES);
         let cadence = cadence.resolve();
         let db = libsql::Builder::new_local(path).build().await?;
         let write_conn = configure(db.connect()?, writer_cache_size).await?;
+        // The writer only: it is the one connection that journals (D-306).
+        write_conn.execute(writer_temp_store.pragma(), ()).await?;
         // The writer is the only connection that commits, so it is the only one
         // whose `wal_autocheckpoint` can ever fire. Setting it on the readers
         // would be a pragma with no path to running (0.12.14, W5.3, D-157).
@@ -3129,14 +3216,16 @@ impl Database {
     /// [`CHUNK_BUDGET`]'s table. A caller who stalls every other writer for
     /// eight seconds should have been able to predict it from the signature.
     ///
-    /// Measured on libSQL 0.9.30 (T1.3, D-081), holding the actor for:
+    /// Measured on libSQL 0.10.0 with the default [`Tuning::writer_temp_store`]
+    /// (`examples/bulk_atomic_diag.rs`; T1.3 and D-081 first measured it, on
+    /// 0.9.30, at ~4× these), holding the actor for:
     ///
     /// | rows | hold |
     /// |---|---|
-    /// | 500 | ~34 ms |
-    /// | 2,000 | ~155 ms |
-    /// | 10,000 | ~1.0 s |
-    /// | 20,000 | ~2.6 s |
+    /// | 500 | ~11 ms |
+    /// | 2,000 | ~44 ms |
+    /// | 10,000 | ~0.29 s |
+    /// | 20,000 | ~0.59 s |
     ///
     /// [`estimated_bulk_hold`] is that curve as a function, and this method
     /// emits a `tracing::warn!` when it predicts more than
@@ -7268,6 +7357,25 @@ mod lineage_cache {
 mod tests {
     use super::*;
 
+    /// **Both arms state their pragma** (D-306). `File` is SQLite's usual
+    /// behaviour, but only when the engine was compiled with
+    /// `SQLITE_TEMP_STORE=1`; running the pragma is what makes it the writer's
+    /// setting rather than the build's.
+    #[test]
+    fn each_temp_store_policy_runs_its_own_pragma() {
+        assert_eq!(TempStorePolicy::default(), TempStorePolicy::Memory);
+        assert_eq!(
+            TempStorePolicy::Memory.pragma(),
+            "PRAGMA temp_store = MEMORY"
+        );
+        assert_eq!(TempStorePolicy::File.pragma(), "PRAGMA temp_store = FILE");
+        assert_eq!(
+            Tuning::default().writer_temp_store,
+            TempStorePolicy::Memory,
+            "a default Tuning must carry the measured default"
+        );
+    }
+
     fn edge(target: &str, micros: usize) -> EdgeAssertion {
         EdgeAssertion::new("src", target, "LINKS")
             .valid_from(format!("2026-01-01T00:00:00.{micros:06}Z"))
@@ -7295,9 +7403,11 @@ mod tests {
         );
     }
 
-    /// Measured on libSQL 0.9.30 after W7.5: 1.94 s and 2.22 s for those two
-    /// batches, against 2.6 s and 18.1 s before it. This pins that the model
-    /// still tracks them — a coefficient edited without re-measuring fails here.
+    /// Measured on libSQL 0.10.0 under the default `TempStorePolicy::Memory`
+    /// (0.21.0, D-306): 587 ms and 595 ms for those two batches, against 1.94 s
+    /// and 2.22 s on 0.9.30 after W7.5 and 2.6 s and 18.1 s before it. This
+    /// pins that the model still tracks them — a coefficient edited without
+    /// re-measuring fails here.
     #[test]
     fn the_estimate_matches_what_was_measured() {
         const N: usize = 20_000;
@@ -7305,7 +7415,7 @@ mod tests {
         let history: Vec<_> = (0..N).map(|i| edge("t0", i)).collect();
 
         for (batch, measured_ms, label) in
-            [(fanout, 1_936u128, "fanout"), (history, 2_220, "history")]
+            [(fanout, 587u128, "fanout"), (history, 595, "history")]
         {
             let predicted = estimated_bulk_hold(&batch).as_millis();
             let ratio = predicted as f64 / measured_ms as f64;
@@ -7326,7 +7436,7 @@ mod tests {
         let one = [edge("t0", 0)];
         assert_eq!(
             estimated_bulk_hold(&one),
-            std::time::Duration::from_nanos(7_400)
+            std::time::Duration::from_nanos(15_000)
         );
     }
 

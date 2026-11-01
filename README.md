@@ -152,6 +152,7 @@ disables a mechanism reaches every caller who never heard of the knob.
 | `checkpoint()` | Moves WAL frames back into the main file and **reports what it moved**. Runs `FULL` then `TRUNCATE`, because a truncating checkpoint reports zeros on success and cannot describe its own work. Check `busy` before treating the file as self-contained ([D-156](docs/architecture/s13-decision-register.md#d-156)) |
 | `wal_autocheckpoint` | `Default` / `Disabled` / `EveryPages(n)`. Disabling it is only correct paired with an explicit `checkpoint()`, and the cost is deferred rather than removed: ~8,400–9,100 frames in 41–45 ms at the end, against ~860 in 5.5–6.2 ms along the way ([D-157](docs/architecture/s13-decision-register.md#d-157)). **On a bulk import the threshold is the dial** (measured, [D-275](docs/architecture/s13-decision-register.md#d-275)): a 16,000-edge random-order import runs 5.0 s at the default, 3.7 s at `EveryPages(10_000)` with a ~43 MB WAL, 3.6 s disabled with a ~554 MB WAL — the recipe, numbers and shape caveat live in `Database::bulk_import`'s docs |
 | `writer_cache_size` / `reader_cache_size` | Split, because the writer is one connection and the readers are several — one number would mean starving the writer or multiplying the readers' footprint ([D-158](docs/architecture/s13-decision-register.md#d-158)) |
+| `writer_temp_store` | `Memory` (default) / `File`. Where the write connection keeps SQLite's temporary storage. In memory, an edge insert's statement journal never spills to a temporary file, which takes the 90-edge chunk from ~4 ms to ~2.2 ms; `File` gives the writer's whole-table sorts (`rebuild_current`, a migration's index builds) back to disk for a file too large to sort in RAM. Consistency is the same either way ([D-306](docs/architecture/s13-decision-register.md#d-306)). |
 | `analyze()` / `optimize()` | Planner statistics. Before 0.12.4 nothing here ever ran `ANALYZE`, so every query was costed against SQLite's built-in guesses. `optimize()` is a no-op when nothing has moved, which is why `close()` calls it ([D-149](docs/architecture/s13-decision-register.md#d-149)) |
 
 **`analyze()` misses the ~3 ms chunk budget by ~6× on a populated ledger, and that is
@@ -257,7 +258,7 @@ constant, `Optimize`'s is rare and therefore the informative one
 
 Measured at **0.21.0** on the reference machine (Windows 11, NVMe SSD, 32 GB RAM, release build):
 the median of three criterion sessions of `benches/budgets.rs`, with the `control/select_1` row
-reading 1.43–1.74 µs in every group. Each figure is the operation alone; fixture setup and
+reading 1.45–1.78 µs in every group. Each figure is the operation alone; fixture setup and
 teardown sit outside the timed region
 ([D-302](docs/architecture/s13-decision-register.md#d-302)). The bench fixtures are smaller than
 the populations some budgets name (2,000 concepts, a few thousand edges and log rows), so a met row
@@ -265,35 +266,35 @@ is met at bench scale.
 
 | Operation | Budget | Measured | |
 |---|---|---|---|
-| Single edge assertion | ≤ 5 ms | 196 µs | Met |
-| Single edge assertion into 0 / 2,000 / 8,000-edge tables | ≤ 5 ms | 343 / 296 / 316 µs | Met; flat in out-degree |
-| Single concept upsert | ≤ 3 ms | 375 µs | Met; flat in the concept's history |
-| Chunk commit, edges, 90 rows | ≤ 3 ms | 4.08 ms | **Missed**; see below |
-| Chunk commit, edges, 90 rows into an 8,000-edge table | ≤ 3 ms | 9.36 ms | **Missed**; see below |
-| Chunk commit, concepts, 70 rows | ≤ 3 ms | 2.65 ms | Met |
-| Chunk commit, annotations, 600 rows | ≤ 3 ms | 1.35 ms | Met |
-| Chunk commit, embeddings, 30 rows | ≤ 3 ms | 1.33 ms | Met |
-| Three-hop traversal, warm | ≤ 10 ms | 1.60 ms | Met |
-| `as_of_valid` traversal | ≤ 15 ms | 762 µs | Met |
-| Vector top-10 | ≤ 20 ms | 262 µs | Met |
-| Hybrid top-10 (vector + FTS5 + RRF) | ≤ 50 ms | 1.83 ms | Met |
-| Full fold (`reconstruct`) | ≤ 100 ms | 17.0 ms | Met |
+| Single edge assertion | ≤ 5 ms | 186 µs | Met |
+| Single edge assertion into 0 / 2,000 / 8,000-edge tables | ≤ 5 ms | 327 / 251 / 290 µs | Met; flat in out-degree |
+| Single concept upsert | ≤ 3 ms | 360 µs | Met; flat in the concept's history |
+| Chunk commit, edges, 90 rows | ≤ 3 ms | 2.22 ms | Met |
+| Chunk commit, edges, 90 rows into an 8,000-edge table | ≤ 3 ms | 3.01 ms | **At the bound**; see below |
+| Chunk commit, concepts, 70 rows | ≤ 3 ms | 2.64 ms | Met |
+| Chunk commit, annotations, 600 rows | ≤ 3 ms | 1.31 ms | Met |
+| Chunk commit, embeddings, 30 rows | ≤ 3 ms | 1.28 ms | Met |
+| Three-hop traversal, warm | ≤ 10 ms | 1.61 ms | Met |
+| `as_of_valid` traversal | ≤ 15 ms | 753 µs | Met |
+| Vector top-10 | ≤ 20 ms | 267 µs | Met |
+| Hybrid top-10 (vector + FTS5 + RRF) | ≤ 50 ms | 1.80 ms | Met |
+| Full fold (`reconstruct`) | ≤ 100 ms | 16.8 ms | Met |
 | Snapshot + delta composition | ≤ 100 ms | 3.00 ms | Met |
-| `audit_current` | ≤ 200 ms | 12.2 ms | Met |
-| `rebuild_current` | ≤ 500 ms | 30.1 ms | Met |
-| Snapshot write | ≤ 2 s | 2.01 ms | Met |
-| Rehydrate, 1 concept | ≤ 5 ms | 2.73 ms | Met |
-| Rehydrate, per concept after the first | ≤ 300 µs | ~68 µs to n=1,000; 101 µs at n=10,000 | Met |
+| `audit_current` | ≤ 200 ms | 12.1 ms | Met |
+| `rebuild_current` | ≤ 500 ms | 26.5 ms | Met |
+| Snapshot write | ≤ 2 s | 1.83 ms | Met |
+| Rehydrate, 1 concept | ≤ 5 ms | 2.87 ms | Met |
+| Rehydrate, per concept after the first | ≤ 300 µs | ~68 µs to n=1,000; 108 µs at n=10,000 | Met |
 
-**The 90-row edge chunk is over its budget, and bulk import holds the bound anyway.** 90 is the
-ceiling `bulk_import`'s chunk loop starts from, not the size it commits: the actor times each
-transaction and sizes the next from it, settling near 35 rows on a populated table
-([D-143](docs/architecture/s13-decision-register.md#d-143),
-[D-146](docs/architecture/s13-decision-register.md#d-146)). The first chunk of an import can run
-over; the ones after it are sized to the bound. What a 90-row chunk costs is index maintenance on
-`links`, `links_current` and `transaction_log`, and each of those indexes serves a read that
-needs it. The per-index prices, and the one index that was dropped for costing the most while
-serving the least, are in [D-301](docs/architecture/s13-decision-register.md#d-301).
+**The 90-row edge chunk meets its budget on an empty table and sits at it on a populated one.**
+Until 0.21.0 it took ~4 ms, and 9–12 ms into 8,000 edges: every edge insert fires three triggers,
+and the undo journal SQLite keeps for that one statement spilled to a temporary file on every
+row. The writer now keeps its temporary storage in memory (`Tuning::writer_temp_store`, default
+`Memory`, [D-306](docs/architecture/s13-decision-register.md#d-306)), which takes the two rows to 2.22 ms and 3.01 ms (2.88–3.12 ms
+across the three sessions) with consistency and durability unchanged. 90 is still the ceiling
+`bulk_import`'s chunk loop starts from, not the size it commits: the actor times each transaction
+and sizes the next from it ([D-143](docs/architecture/s13-decision-register.md#d-143), [D-146](docs/architecture/s13-decision-register.md#d-146)), so a chunk that runs over shrinks
+the one after it.
 
 **Three costs are shapes rather than points, and those are what to rely on.** A single edge
 assertion does not grow with out-degree: the rows above span hub out-degrees of 0, 666 and 2,666.
@@ -333,7 +334,7 @@ Figures before 0.20.0 include fixture teardown and do not compare directly with 
 | **Property tests fault mid-suite** | Each generated case opens a database, the most R15-exposed shape in the repository, so `--features property-tests` runs as its own CI step behind the feature gate ([D-148](docs/architecture/s13-decision-register.md#d-148)) |
 
 | **Overlaps already in a ledger are reported, not repaired** | A ledger written before the interval guard, or by raw SQL, keeps its overlaps. `verify_concept_intervals()` names them, and a read refuses only the instants both beliefs claim |
-| **The 90-row edge chunk exceeds 3 ms** | 4.08 ms on the bench. `bulk_import` sizes chunks on elapsed time from that ceiling, so only an import's first chunk runs over ([D-143](docs/architecture/s13-decision-register.md#d-143), [D-301](docs/architecture/s13-decision-register.md#d-301)). Re-priced index by index in 0.21.0 ([D-304](docs/architecture/s13-decision-register.md#d-304)): the three `transaction_log` indexes are load-bearing on the write itself (dropping one costs up to 2.5 ms), and the cheapest real candidate saves 0.84 ms against a read whose cheaper alternative was once 68 s — none of it worth trading |
+| **The 90-row edge chunk sits at 3 ms on a populated table** | 2.22 ms on an empty table and 3.01 ms into 8,000 edges (2.88–3.12 ms across sessions) since the writer's statement journal stopped spilling to disk ([D-306](docs/architecture/s13-decision-register.md#d-306)); with `TempStorePolicy::File` the earlier ~4 ms and 9–12 ms apply. `bulk_import` sizes chunks on elapsed time from that ceiling, so a chunk over the bound shrinks the next ([D-143](docs/architecture/s13-decision-register.md#d-143), [D-301](docs/architecture/s13-decision-register.md#d-301)). Re-priced index by index in 0.21.0 ([D-304](docs/architecture/s13-decision-register.md#d-304)): the three `transaction_log` indexes are load-bearing on the write itself (dropping one costs up to 2.5 ms), and the cheapest real candidate saves 0.84 ms against a read whose cheaper alternative was once 68 s — none of it worth trading |
 | **Covering index wins over selective** | `EXPLAIN QUERY PLAN` assertions on every index-sensitive query, plus pins on the plans `ANALYZE` statistics have moved |
 | **Snapshot chain divergence** | `verify_snapshot_chain()` reports but does not repair (snapshots are disposable) |
 
@@ -352,7 +353,7 @@ Figures before 0.20.0 include fixture teardown and do not compare directly with 
 - [Architecture specification](docs/architecture/README.md) — normative surfaces: §4 (schema) and Appendix A (API)
 - [Architecture Quick Reference](docs/quickref.md) — API, schema, decisions, performance. Current to **v0.21.0**: the header and footer name the release, the schema ladder §4 reads **v24** against `SCHEMA_VERSION` in `src/schema/migrations.rs`, and §5's API prose carries the surface through the state rule and the provenance widening ([D-289](docs/architecture/s13-decision-register.md#d-289)…[D-305](docs/architecture/s13-decision-register.md#d-305)). `tests/doc_currency_tests.rs` gates those four claims — header, footer, ladder rung, and how far the newest decision cited may trail the register — and `tests/doc_sync_tests.rs` and `tests/perf_claim_tests.rs` pin the analytics types, the `Subgraph` accessors and the performance numbers. None of them can check that a passage is *true*, so where this disagrees with the architecture set, the architecture set wins — it is the normative one.
 - [Python bindings](docs/architecture/s14-python-bindings.md) — §14: async→sync boundary, error tree, stubs
-- [Decision register](docs/architecture/s13-decision-register.md) — D-001…D-305 with rationale
+- [Decision register](docs/architecture/s13-decision-register.md) — D-001…D-306 with rationale
 - [Release notes](docs/releases) — one document per minor, most recently [v0.21.0](docs/releases/v0.21.0.md) (one state rule for concepts: [D-303](docs/architecture/s13-decision-register.md#d-303)…[D-305](docs/architecture/s13-decision-register.md#d-305), `concept_disorder` and the rung that repairs 0.20.0's projections, old snapshots skipped, one breaking change the user spent), [v0.20.0](docs/releases/v0.20.0.md) (the valid axis for state: [D-291](docs/architecture/s13-decision-register.md#d-291)…[D-302](docs/architecture/s13-decision-register.md#d-302), `reconstruct_as_of`, the concept interval guard and `verify_concept_intervals`, one runtime refusal that is new), [v0.19.0](docs/releases/v0.19.0.md) (the blob store: [D-281](docs/architecture/s13-decision-register.md#d-281), [D-287](docs/architecture/s13-decision-register.md#d-287) and [D-288](docs/architecture/s13-decision-register.md#d-288), content-addressed bytes reclaimed by the archive rather than a refcount) and [v0.18.0](docs/releases/v0.18.0.md) (the flexible ledger: [D-278](docs/architecture/s13-decision-register.md#d-278)…[D-286](docs/architecture/s13-decision-register.md#d-286), `concepts.extra`, the KV sidecar, the relaxed edge-kind charset and opt-in attributes on the subgraph loader)
 
 ---

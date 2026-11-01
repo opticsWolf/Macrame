@@ -82,6 +82,9 @@ pub const macrame::connection::chunk_rows::EMBEDDINGS: usize
 pub macrame::connection::CadencePolicy::Default
 pub macrame::connection::CadencePolicy::Disabled
 pub macrame::connection::CadencePolicy::Every(macrame::temporal::SnapshotCadence)
+#[non_exhaustive] pub enum macrame::connection::TempStorePolicy
+pub macrame::connection::TempStorePolicy::File
+pub macrame::connection::TempStorePolicy::Memory
 #[non_exhaustive] pub enum macrame::connection::WalCheckpointPolicy
 pub macrame::connection::WalCheckpointPolicy::Default
 pub macrame::connection::WalCheckpointPolicy::Disabled
@@ -213,6 +216,7 @@ pub macrame::connection::Tuning::max_blob_bytes: core::option::Option<usize>
 pub macrame::connection::Tuning::reader_cache_size: core::option::Option<i32>
 pub macrame::connection::Tuning::wal_autocheckpoint: macrame::connection::WalCheckpointPolicy
 pub macrame::connection::Tuning::writer_cache_size: core::option::Option<i32>
+pub macrame::connection::Tuning::writer_temp_store: macrame::connection::TempStorePolicy
 impl macrame::connection::Tuning
 pub fn macrame::connection::Tuning::cadence(self, macrame::connection::CadencePolicy) -> Self
 pub fn macrame::connection::Tuning::clock(self, alloc::rcs::arc::Arc<dyn macrame::util::Clock>) -> Self
@@ -221,6 +225,7 @@ pub fn macrame::connection::Tuning::max_blob_bytes(self, usize) -> Self
 pub fn macrame::connection::Tuning::reader_cache_size(self, i32) -> Self
 pub fn macrame::connection::Tuning::wal_autocheckpoint(self, macrame::connection::WalCheckpointPolicy) -> Self
 pub fn macrame::connection::Tuning::writer_cache_size(self, i32) -> Self
+pub fn macrame::connection::Tuning::writer_temp_store(self, macrame::connection::TempStorePolicy) -> Self
 impl core::fmt::Debug for macrame::connection::Tuning
 pub fn macrame::connection::Tuning::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub const macrame::connection::BLOB_WARN_HOLD: core::time::Duration
@@ -899,6 +904,9 @@ pub fn macrame::error::StatedInstants::recorded(&self) -> core::option::Option<&
 pub fn macrame::error::StatedInstants::valid(&self) -> core::option::Option<&str>
 impl core::fmt::Display for macrame::error::StatedInstants
 pub fn macrame::error::StatedInstants::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+#[non_exhaustive] pub enum macrame::prelude::TempStorePolicy
+pub macrame::prelude::TempStorePolicy::File
+pub macrame::prelude::TempStorePolicy::Memory
 #[non_exhaustive] pub enum macrame::prelude::VectorFilterStrategy
 pub macrame::prelude::VectorFilterStrategy::PostFilter
 pub macrame::prelude::VectorFilterStrategy::PreFilterCTE
@@ -1293,6 +1301,7 @@ pub macrame::prelude::Tuning::max_blob_bytes: core::option::Option<usize>
 pub macrame::prelude::Tuning::reader_cache_size: core::option::Option<i32>
 pub macrame::prelude::Tuning::wal_autocheckpoint: macrame::connection::WalCheckpointPolicy
 pub macrame::prelude::Tuning::writer_cache_size: core::option::Option<i32>
+pub macrame::prelude::Tuning::writer_temp_store: macrame::connection::TempStorePolicy
 impl macrame::connection::Tuning
 pub fn macrame::connection::Tuning::cadence(self, macrame::connection::CadencePolicy) -> Self
 pub fn macrame::connection::Tuning::clock(self, alloc::rcs::arc::Arc<dyn macrame::util::Clock>) -> Self
@@ -1301,6 +1310,7 @@ pub fn macrame::connection::Tuning::max_blob_bytes(self, usize) -> Self
 pub fn macrame::connection::Tuning::reader_cache_size(self, i32) -> Self
 pub fn macrame::connection::Tuning::wal_autocheckpoint(self, macrame::connection::WalCheckpointPolicy) -> Self
 pub fn macrame::connection::Tuning::writer_cache_size(self, i32) -> Self
+pub fn macrame::connection::Tuning::writer_temp_store(self, macrame::connection::TempStorePolicy) -> Self
 impl core::fmt::Debug for macrame::connection::Tuning
 pub fn macrame::connection::Tuning::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 #[non_exhaustive] pub struct macrame::prelude::VectorSearchResult
@@ -1745,6 +1755,9 @@ pub fn macrame::error::StatedInstants::recorded(&self) -> core::option::Option<&
 pub fn macrame::error::StatedInstants::valid(&self) -> core::option::Option<&str>
 impl core::fmt::Display for macrame::error::StatedInstants
 pub fn macrame::error::StatedInstants::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+#[non_exhaustive] pub enum macrame::TempStorePolicy
+pub macrame::TempStorePolicy::File
+pub macrame::TempStorePolicy::Memory
 #[non_exhaustive] pub enum macrame::WalCheckpointPolicy
 pub macrame::WalCheckpointPolicy::Default
 pub macrame::WalCheckpointPolicy::Disabled
@@ -1970,6 +1983,7 @@ pub macrame::Tuning::max_blob_bytes: core::option::Option<usize>
 pub macrame::Tuning::reader_cache_size: core::option::Option<i32>
 pub macrame::Tuning::wal_autocheckpoint: macrame::connection::WalCheckpointPolicy
 pub macrame::Tuning::writer_cache_size: core::option::Option<i32>
+pub macrame::Tuning::writer_temp_store: macrame::connection::TempStorePolicy
 impl macrame::connection::Tuning
 pub fn macrame::connection::Tuning::cadence(self, macrame::connection::CadencePolicy) -> Self
 pub fn macrame::connection::Tuning::clock(self, alloc::rcs::arc::Arc<dyn macrame::util::Clock>) -> Self
@@ -1978,6 +1992,7 @@ pub fn macrame::connection::Tuning::max_blob_bytes(self, usize) -> Self
 pub fn macrame::connection::Tuning::reader_cache_size(self, i32) -> Self
 pub fn macrame::connection::Tuning::wal_autocheckpoint(self, macrame::connection::WalCheckpointPolicy) -> Self
 pub fn macrame::connection::Tuning::writer_cache_size(self, i32) -> Self
+pub fn macrame::connection::Tuning::writer_temp_store(self, macrame::connection::TempStorePolicy) -> Self
 impl core::fmt::Debug for macrame::connection::Tuning
 pub fn macrame::connection::Tuning::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub const macrame::CHUNK_BUDGET: core::time::Duration

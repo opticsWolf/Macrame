@@ -950,6 +950,7 @@ class Database:
         reader_cache_size: int | None = None,
         future_stamps: float | str | None = None,
         max_blob_bytes: int | None = None,
+        writer_temp_store: str | None = None,
     ) -> Database:
         """Open a ledger, running migrations and starting the write actor.
 
@@ -976,6 +977,12 @@ class Database:
         `max_blob_bytes` is the largest blob `blob_put` accepts; `None` is
         `DEFAULT_MAX_BLOB_BYTES` (8 MiB). A blob is held whole in memory on
         both sides of the call, so this bounds memory as much as size.
+
+        `writer_temp_store` is where the write connection keeps temporary
+        storage. `None` and `"memory"` keep it in RAM, which roughly halves an
+        edge chunk's write time; `"file"` gives the writer's large sorts back
+        to disk, for a file whose whole-table rebuilds would not fit in memory.
+        Consistency is the same either way.
         """
 
     def close(self, timeout: float | None = None) -> None:
