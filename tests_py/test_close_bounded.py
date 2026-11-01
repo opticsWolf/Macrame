@@ -40,8 +40,11 @@ from macrame import ConceptUpsert, EdgeAssertion
 TS = "2026-01-01T00:00:00.000000Z"
 
 # Enough work to still be running when close() is called, and enough that the
-# timeout below expires well inside it rather than at its edge.
-IMPORT_EDGES = 4_000
+# timeout below expires well inside it rather than at its edge. 4,000 was ~1 s
+# until 0.21.0's D-306 cut the edge path's per-row cost about fourfold; at
+# 4,000 the import then finished inside the timeout on Linux and macOS. 16,000
+# is ~1 s again on the reference machine.
+IMPORT_EDGES = 16_000
 
 # Short relative to the import, long relative to a scheduling hiccup.
 TIMEOUT_S = 0.2
