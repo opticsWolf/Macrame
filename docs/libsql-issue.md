@@ -1,7 +1,9 @@
 # STATUS_ACCESS_VIOLATION opening many local databases in one process (Windows)
 
 Upstream report for [tursodatabase/libsql](https://github.com/tursodatabase/libsql).
-Reproduced against **0.9.30** and **0.10.0-pre.4**.
+Reproduced against **0.9.30** and **0.10.0-pre.4**. **Not reproduced on 0.10.0
+final** (2026-11-01, 0 faults across three arms and ~600,000 connects) — posted
+upstream as [libsql-issue-comment-0.10.0.md](libsql-issue-comment-0.10.0.md).
 
 This supersedes the earlier report from 2026-07-31, which described the trigger
 as *concurrent* open. **That was wrong**, and the correction is the reason this
