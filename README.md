@@ -255,9 +255,9 @@ constant, `Optimize`'s is rare and therefore the informative one
 
 ## Performance (measured, not gated)
 
-Measured at **0.20.0** on the reference machine (Windows 11, NVMe SSD, 32 GB RAM, release build):
+Measured at **0.21.0** on the reference machine (Windows 11, NVMe SSD, 32 GB RAM, release build):
 the median of three criterion sessions of `benches/budgets.rs`, with the `control/select_1` row
-reading 1.42–1.57 µs in every group. Each figure is the operation alone; fixture setup and
+reading 1.43–1.74 µs in every group. Each figure is the operation alone; fixture setup and
 teardown sit outside the timed region
 ([D-302](docs/architecture/s13-decision-register.md#d-302)). The bench fixtures are smaller than
 the populations some budgets name (2,000 concepts, a few thousand edges and log rows), so a met row
@@ -265,25 +265,25 @@ is met at bench scale.
 
 | Operation | Budget | Measured | |
 |---|---|---|---|
-| Single edge assertion | ≤ 5 ms | 181 µs | Met |
-| Single edge assertion into 0 / 2,000 / 8,000-edge tables | ≤ 5 ms | 306 / 242 / 279 µs | Met; flat in out-degree |
-| Single concept upsert | ≤ 3 ms | 363 µs | Met; flat in the concept's history |
-| Chunk commit, edges, 90 rows | ≤ 3 ms | 3.99 ms | **Missed**; see below |
-| Chunk commit, edges, 90 rows into an 8,000-edge table | ≤ 3 ms | 11.8 ms | **Missed**; see below |
-| Chunk commit, concepts, 70 rows | ≤ 3 ms | 2.56 ms | Met |
-| Chunk commit, annotations, 600 rows | ≤ 3 ms | 1.33 ms | Met |
+| Single edge assertion | ≤ 5 ms | 196 µs | Met |
+| Single edge assertion into 0 / 2,000 / 8,000-edge tables | ≤ 5 ms | 343 / 296 / 316 µs | Met; flat in out-degree |
+| Single concept upsert | ≤ 3 ms | 375 µs | Met; flat in the concept's history |
+| Chunk commit, edges, 90 rows | ≤ 3 ms | 4.08 ms | **Missed**; see below |
+| Chunk commit, edges, 90 rows into an 8,000-edge table | ≤ 3 ms | 9.36 ms | **Missed**; see below |
+| Chunk commit, concepts, 70 rows | ≤ 3 ms | 2.65 ms | Met |
+| Chunk commit, annotations, 600 rows | ≤ 3 ms | 1.35 ms | Met |
 | Chunk commit, embeddings, 30 rows | ≤ 3 ms | 1.33 ms | Met |
-| Three-hop traversal, warm | ≤ 10 ms | 1.53 ms | Met |
-| `as_of_valid` traversal | ≤ 15 ms | 742 µs | Met |
-| Vector top-10 | ≤ 20 ms | 248 µs | Met |
-| Hybrid top-10 (vector + FTS5 + RRF) | ≤ 50 ms | 1.71 ms | Met |
-| Full fold (`reconstruct`) | ≤ 100 ms | 16.1 ms | Met |
-| Snapshot + delta composition | ≤ 100 ms | 3.04 ms | Met |
-| `audit_current` | ≤ 200 ms | 11.9 ms | Met |
-| `rebuild_current` | ≤ 500 ms | 28.8 ms | Met |
-| Snapshot write | ≤ 2 s | 1.97 ms | Met |
-| Rehydrate, 1 concept | ≤ 5 ms | 2.64 ms | Met |
-| Rehydrate, per concept after the first | ≤ 300 µs | ~68 µs to n=1,000; 107 µs at n=10,000 | Met |
+| Three-hop traversal, warm | ≤ 10 ms | 1.60 ms | Met |
+| `as_of_valid` traversal | ≤ 15 ms | 762 µs | Met |
+| Vector top-10 | ≤ 20 ms | 262 µs | Met |
+| Hybrid top-10 (vector + FTS5 + RRF) | ≤ 50 ms | 1.83 ms | Met |
+| Full fold (`reconstruct`) | ≤ 100 ms | 17.0 ms | Met |
+| Snapshot + delta composition | ≤ 100 ms | 3.00 ms | Met |
+| `audit_current` | ≤ 200 ms | 12.2 ms | Met |
+| `rebuild_current` | ≤ 500 ms | 30.1 ms | Met |
+| Snapshot write | ≤ 2 s | 2.01 ms | Met |
+| Rehydrate, 1 concept | ≤ 5 ms | 2.73 ms | Met |
+| Rehydrate, per concept after the first | ≤ 300 µs | ~68 µs to n=1,000; 101 µs at n=10,000 | Met |
 
 **The 90-row edge chunk is over its budget, and bulk import holds the bound anyway.** 90 is the
 ceiling `bulk_import`'s chunk loop starts from, not the size it commits: the actor times each
@@ -333,7 +333,7 @@ Figures before 0.20.0 include fixture teardown and do not compare directly with 
 | **Property tests fault mid-suite** | Each generated case opens a database, the most R15-exposed shape in the repository, so `--features property-tests` runs as its own CI step behind the feature gate ([D-148](docs/architecture/s13-decision-register.md#d-148)) |
 
 | **Overlaps already in a ledger are reported, not repaired** | A ledger written before the interval guard, or by raw SQL, keeps its overlaps. `verify_concept_intervals()` names them, and a read refuses only the instants both beliefs claim |
-| **The 90-row edge chunk exceeds 3 ms** | 3.99 ms on the bench. `bulk_import` sizes chunks on elapsed time from that ceiling, so only an import's first chunk runs over ([D-143](docs/architecture/s13-decision-register.md#d-143), [D-301](docs/architecture/s13-decision-register.md#d-301)). Re-priced index by index in 0.21.0 ([D-304](docs/architecture/s13-decision-register.md#d-304)): the three `transaction_log` indexes are load-bearing on the write itself (dropping one costs up to 2.5 ms), and the cheapest real candidate saves 0.84 ms against a read whose cheaper alternative was once 68 s — none of it worth trading |
+| **The 90-row edge chunk exceeds 3 ms** | 4.08 ms on the bench. `bulk_import` sizes chunks on elapsed time from that ceiling, so only an import's first chunk runs over ([D-143](docs/architecture/s13-decision-register.md#d-143), [D-301](docs/architecture/s13-decision-register.md#d-301)). Re-priced index by index in 0.21.0 ([D-304](docs/architecture/s13-decision-register.md#d-304)): the three `transaction_log` indexes are load-bearing on the write itself (dropping one costs up to 2.5 ms), and the cheapest real candidate saves 0.84 ms against a read whose cheaper alternative was once 68 s — none of it worth trading |
 | **Covering index wins over selective** | `EXPLAIN QUERY PLAN` assertions on every index-sensitive query, plus pins on the plans `ANALYZE` statistics have moved |
 | **Snapshot chain divergence** | `verify_snapshot_chain()` reports but does not repair (snapshots are disposable) |
 
