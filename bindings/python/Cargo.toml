@@ -70,7 +70,7 @@ macrame-db = { path = "../..", features = ["metrics"] }
 # one binary would be two different `Error` types, and the `#[from]` conversion
 # would stop compiling — loudly, which is the good case, but worth not
 # discovering by accident.
-libsql = "0.9.30"
+libsql = "0.10.0"
 
 # `abi3-py310`: one wheel per platform instead of one per Python minor version
 # (D-094). libsql-ffi rebuilds the SQLite amalgamation from source for every
