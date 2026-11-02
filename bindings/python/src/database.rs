@@ -1810,13 +1810,16 @@ impl PyDatabase {
     /// seen = db.walk("socrates", branch=alt.id)
     /// ```
     ///
-    /// # What this lineage can and cannot do yet
+    /// # What this lineage can and cannot do
     ///
-    /// It can be **read**: every traversal entry point takes `branch=`. It
-    /// cannot yet be **written** — no write takes a lineage, so `assert_edge`
-    /// after a `fork` lands on the trunk and says nothing about it. A fork is
-    /// currently a *view* of its parent's history as of an instant. Said here
-    /// because the gap is invisible from the signatures.
+    /// It can be **read**: every traversal entry point takes `branch=`. Since
+    /// 0.14.8 it can also be **written**. `macrame.BranchView(db, alt.id)`
+    /// fills in the lineage on every write, and `EdgeAssertion(..., branch=)` /
+    /// `ConceptUpsert(..., branch=)` name it per row. `retire_edge(...,
+    /// branch=)` shadows an inherited edge and leaves the parent's row
+    /// untouched. A plain `assert_edge` with no branch still lands on the
+    /// trunk. What a branch may not do is restate an inherited concept, which
+    /// is refused as `CrossLineageError` (D-225).
     ///
     /// # Raises
     ///

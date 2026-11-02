@@ -1424,8 +1424,14 @@ class Database:
         instant and nothing the parent records after it, which is what `branch=`
         on the traversal entry points reads.
 
-        The lineage is readable and **not yet writable**: no write takes a
-        branch, so `assert_edge` after a `fork` lands on the trunk.
+        The lineage is readable and, since 0.14.8, **writable**. Write to it
+        through `macrame.BranchView(db, branch.id)`, which fills in the lineage
+        on every write, or name it per row with `EdgeAssertion(..., branch=)`
+        and `ConceptUpsert(..., branch=)`. `retire_edge(..., branch=)` shadows
+        an inherited edge: the branch stops seeing it, and the parent's row is
+        left untouched. A plain `assert_edge` with no branch still lands on the
+        trunk. A branch may not restate a concept it inherited, and that is
+        refused with `CrossLineageError`.
 
         Raises `UnknownBranchError` for an unregistered parent,
         `BranchExistsError` for a taken name (including `"main"`),
