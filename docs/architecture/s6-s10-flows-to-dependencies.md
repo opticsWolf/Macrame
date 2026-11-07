@@ -198,6 +198,17 @@ pub enum DbError {
     #[error("change feed gap: {removed} log row(s) after seq {after_seq} have been archived; resynchronise from current state")]
     ChangeFeedGap { after_seq: i64, removed: i64 },
 
+    #[error(
+        "pointer conflict on {source_id}: {edge_type} expected {expected:?}, \
+         found {current:?}; nothing wrote"
+    )]
+    PointerConflict {
+        source_id: String,
+        edge_type: String,
+        expected: Option<String>,
+        current: Option<String>,
+    },
+
     #[error("subgraph exceeds budget ({n} > {budget})")]
     SubgraphTooLarge { n: usize, budget: usize },
 

@@ -637,6 +637,32 @@ pub enum DbError {
     )]
     ChangeFeedGap { after_seq: i64, removed: i64 },
 
+    /// A conditional pointer move found a different open target than the
+    /// claim adjudicated on (0.22.0, M3, [D-313]).
+    ///
+    /// [`Database::set_pointer`]'s `expect` is the ledger's claim-if-free:
+    /// the check and the move run in one transaction, against the open state
+    /// that transaction reads — the same read
+    /// [`link_previous`](crate::batch::PointerSet::link_previous) starts its
+    /// edge from, so no stale read can sit between the claim and the write
+    /// it guards. `expected: None` is the claim-if-free spelling (the move
+    /// wanted no open target and found one); `current: None` is its mirror
+    /// (the move expected a target and found the pointer young). Either way
+    /// nothing wrote.
+    ///
+    /// [`Database::set_pointer`]: crate::Database::set_pointer
+    /// [D-313]: ../../docs/architecture/s13-decision-register.md#d-313
+    #[error(
+        "pointer conflict on {source_id}: {edge_type} expected {expected:?}, \
+         found {current:?}; nothing wrote"
+    )]
+    PointerConflict {
+        source_id: String,
+        edge_type: String,
+        expected: Option<String>,
+        current: Option<String>,
+    },
+
     #[error("subgraph exceeds budget ({n} > {budget})")]
     SubgraphTooLarge { n: usize, budget: usize },
 
@@ -1204,7 +1230,8 @@ impl DbError {
             | Self::RebuildInterrupted { .. }
             | Self::RecordedAtRegression { .. }
             | Self::SingleOpenViolation { .. }
-            | Self::FunctionalEdgeConflict { .. } => ErrorKind::Integrity,
+            | Self::FunctionalEdgeConflict { .. }
+            | Self::PointerConflict { .. } => ErrorKind::Integrity,
 
             Self::AttributeModeUnstated { .. }
             | Self::HalfLifeWithoutInstant

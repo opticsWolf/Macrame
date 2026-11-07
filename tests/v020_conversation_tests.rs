@@ -1174,6 +1174,173 @@ mod m2_pointer_valid {
         assert_eq!(at6.as_deref(), Some("t5"));
     }
 }
+// ── M3 additions · conditional pointer moves (plan 4.2, D-313) ──
+
+mod m3_pointer_expect {
+    use super::*;
+
+    /// Two claim-if-free moves in a row: the first is new, the second is the
+    /// loser of the race and sees the winner in `current`. A claim that loses
+    /// writes nothing, so the pointer is where the winner left it.
+    #[tokio::test]
+    async fn two_writers_racing_a_claim_admit_one_and_refuse_the_other() {
+        let h = harness();
+        let db = h.db_with_fake_clock().await;
+        trunk_turns(&db, 2).await;
+        append(&db, None, "t2", "turn 2", 2).await;
+        // The open target is t2 (the last append). The second writer's claim
+        // on the same pointer refuses with the winner in its hand.
+        let err = db
+            .set_pointer(
+                PointerSet::new("session", "HEAD", "t1")
+                    .valid_from(LATER_VF)
+                    .expect(Some(None)),
+            )
+            .await
+            .unwrap_err();
+        match &err {
+            DbError::PointerConflict {
+                source_id,
+                expected,
+                current,
+                ..
+            } => {
+                assert_eq!(source_id, "session");
+                assert_eq!(expected, &None);
+                assert_eq!(current.as_deref(), Some("t2"));
+            }
+            other => panic!("expected PointerConflict, got {other:?}"),
+        }
+        assert_eq!(
+            db.pointer("session", "HEAD", ReadPlan::new())
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("t2"),
+            "the refused claim wrote nothing"
+        );
+    }
+
+    /// A claim that names the open target passes and the move runs; a claim
+    /// naming a target the pointer never held is the stale one and refuses.
+    #[tokio::test]
+    async fn a_claim_that_names_the_open_target_moves_and_a_stale_one_refuses() {
+        let h = harness();
+        let db = h.db_with_fake_clock().await;
+        trunk_turns(&db, 10).await;
+        // This move is the trivial no-op: the target is already the open one.
+        let change = db
+            .set_pointer(
+                PointerSet::new("session", "HEAD", "t9")
+                    .valid_from(LATER_VF)
+                    .expect(Some(Some("t9".into()))),
+            )
+            .await
+            .unwrap();
+        assert!(!change.changed, "the claim was honest and the move a no-op");
+        let err = db
+            .set_pointer(
+                PointerSet::new("session", "HEAD", "t9")
+                    .valid_from(LATER_VF)
+                    .expect(Some(Some("t8".into()))),
+            )
+            .await
+            .unwrap_err();
+        match &err {
+            DbError::PointerConflict {
+                expected, current, ..
+            } => {
+                assert_eq!(expected.as_deref(), Some("t8"));
+                assert_eq!(current.as_deref(), Some("t9"));
+            }
+            other => panic!("expected PointerConflict, got {other:?}"),
+        }
+    }
+
+    /// The claim is adjudicated against the plan's lineage: on a branch, an
+    /// inherited open target is a belief the branch can name, and a target the
+    /// branch cannot see never matches its own view.
+    #[tokio::test]
+    async fn a_claim_on_a_branch_reads_the_branchs_own_view() {
+        let h = harness();
+        let db = h.db_with_fake_clock().await;
+        trunk_turns(&db, 10).await;
+        db.fork_after(b("alt"), BranchId::main(), "t5")
+            .await
+            .unwrap();
+        append(&db, Some("alt"), "a8", "alt 8", 20).await;
+        // The branch's open target is a8 now: the claim naming it holds, and
+        // the move lands on the branch alone.
+        let change = db
+            .set_pointer(
+                PointerSet::new("session", "HEAD", "a8")
+                    .valid_from(LATER_VF)
+                    .expect(Some(Some("a8".into())))
+                    .on_branch(b("alt")),
+            )
+            .await
+            .unwrap();
+        assert!(!change.changed);
+        // The trunk never heard about the branch's claim at all.
+        let err = db
+            .set_pointer(
+                PointerSet::new("session", "HEAD", "t9")
+                    .valid_from(LATER_VF)
+                    .expect(Some(Some("a8".into())))
+                    .on_branch(BranchId::main()),
+            )
+            .await
+            .unwrap_err();
+        match &err {
+            DbError::PointerConflict { current, .. } => {
+                assert_eq!(current.as_deref(), Some("t9"));
+            }
+            other => panic!("expected PointerConflict, got {other:?}"),
+        }
+    }
+
+    /// A batch pointer row that carries a claim refuses with its whole batch:
+    /// the rows are one transaction, so the claim's firings land together.
+    #[tokio::test]
+    async fn a_batch_pointer_row_that_loses_its_claim_rolls_the_batch_back() {
+        let h = harness();
+        let db = h.db_with_fake_clock().await;
+        trunk_turns(&db, 2).await;
+        let before = db.head_seq().await.unwrap();
+        let err = db
+            .write_batch(
+                WriteBatch::new()
+                    .concept(ConceptUpsert::new("x", "x").valid_from(VF))
+                    .pointer(
+                        PointerSet::new("session", "HEAD", "x")
+                            .valid_from(LATER_VF)
+                            .expect(Some(None)),
+                    ),
+            )
+            .await
+            .unwrap_err();
+        match &err {
+            DbError::PointerConflict { current, .. } => {
+                assert_eq!(current.as_deref(), Some("t1"));
+            }
+            other => panic!("expected PointerConflict, got {other:?}"),
+        }
+        assert_eq!(db.head_seq().await.unwrap(), before, "nothing wrote");
+        assert_eq!(
+            db.pointer("session", "HEAD", ReadPlan::new())
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("t1"),
+        );
+    }
+
+    /// The claim's spellings, for the reader of this file: `expect(None)`
+    /// checks nothing; `expect(Some(None))` is the claim-if-free spelling,
+    /// and `expect(Some(Some("t9".into())))` names the target it requires.
+    const LATER_VF: &str = "2026-02-01T00:00:00.000000Z";
+}
+
 // ── M7 · change feed ────────────────────────────────────────────────────────
 
 mod m7_changes {

@@ -235,6 +235,20 @@ create_exception!(
 );
 create_exception!(
     macrame,
+    PointerConflictError,
+    IntegrityError,
+    "A conditional pointer move lost its claim: the open target was not the \
+     one the claim expected (0.22.0, M3, D-313). Attributes: `source_id`, \
+     `edge_type`, `expected`, `current`.\n\n\
+     `expected` repeats the claim: `None` meant claim-if-free (nothing ought to \
+     be open), a string names the target the move required. `current` is what \
+     the move's own read held: the winner of a race on the other side of a lost \
+     claim, or `None` when the pointer had no open target. Claims are \
+     adjudicated set_pointer-side, inside the move's transaction, so the loser \
+     of a race writes nothing."
+);
+create_exception!(
+    macrame,
     SingleOpenViolationError,
     IntegrityError,
     "The relationship already has an open interval; retire it first. \
@@ -920,6 +934,18 @@ fn build(py: Python<'_>, err: DbError) -> PyErr {
             e.setattr("attempted", attempted)
         }),
 
+        DbError::PointerConflict {
+            source_id,
+            edge_type,
+            expected,
+            current,
+        } => raise::<PointerConflictError, _>(py, m, |e| {
+            e.setattr("source_id", source_id)?;
+            e.setattr("edge_type", edge_type)?;
+            e.setattr("expected", expected)?;
+            e.setattr("current", current)
+        }),
+
         DbError::BatchTooLarge { rows, max } => raise::<BatchTooLargeError, _>(py, m, |e| {
             e.setattr("rows", rows)?;
             e.setattr("max", max)
@@ -1220,6 +1246,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
         OverlappingConceptError,
         ConceptSingleOpenError,
         FunctionalEdgeConflictError,
+        PointerConflictError,
         NegativeEdgeWeightError,
         CurrentDriftError,
         RebuildFailedError,

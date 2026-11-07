@@ -70,6 +70,25 @@ CHAIN_CHECK_SAMPLE_LIMIT: Final[int]
 #: this many sessions is a caller who meant a wider window.
 MAX_ARCHIVE_SESSIONS: Final[int]
 MAX_BATCH_ROWS: Final[int]
+UNSET: Final[Unset]
+"""The no-check value for `set_pointer(..., expect=..)` (0.22.0, M3, D-313).
+
+Left out or passed by name, it asks nothing: the move is unconditional, as
+every pre-0.22.0 move was. `None` is the draft's claim-if-free instead, and a
+string names the target the claim requires.
+"""
+
+class Unset:
+    """The class of `macrame.UNSET`.
+
+    The value is an instance of a one-member class so a caller cannot spell
+    "checks nothing" with anything a real claim could be confused with:
+    `None` and a string are claims.
+    """
+
+    def __init__(self) -> None: ...  # prisoners: constructed in Rust only
+
+    def __repr__(self) -> str: ...
 """The most rows one `write_batch` may carry (0.22.0, D-308)."""
 #: The largest chunk each bulk path will ever ask for.
 #:
@@ -1664,11 +1683,20 @@ class Database:
         weight: float = 1.0,
         branch: str | None = None,
         link_previous: str | None = None,
+        expect: str | None | Unset = UNSET,
     ) -> PointerChange:
         """Close the open target on the lineage and open `target`, one stamp.
 
         `link_previous` also asserts an edge of that kind from the closed
         target (or `source`) to the new one, inside the same transaction.
+
+        `expect` adjudicates the move before it writes (0.22.0, M3, D-313):
+        the default `UNSET` checks nothing, `None` claims the pointer holds
+        no open target (claim-if-free), a string names the target the claim
+        requires. The claim and the move run in one transaction — the same
+        read `link_previous` starts from — so a lost claim raises
+        `PointerConflictError` with the winner in `current` and writes
+        nothing.
         """
     def pointer(
         self,
@@ -2191,6 +2219,22 @@ class FunctionalEdgeConflictError(IntegrityError):
     edge_type: str
     open_target: str
     attempted: str
+
+class PointerConflictError(IntegrityError):
+    """A conditional pointer move lost its claim (0.22.0, M3, D-313).
+
+    `expected` repeats the claim: `None` is the draft's claim-if-free, a
+    string names the required target. `current` is what the move's own read
+    of the open state held — the winner of a race the claim lost, or `None`
+    when the pointer had no open target. The check and the move run in one
+    transaction (`database.set_pointer`, the batch pointer row alike), so a
+    losing claim writes nothing.
+    """
+
+    source_id: str
+    edge_type: str
+    expected: str | None
+    current: str | None
 
 class SingleOpenViolationError(IntegrityError):
     source_id: str

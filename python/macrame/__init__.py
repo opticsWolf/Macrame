@@ -125,6 +125,8 @@ from ._macrame import (
     Change,
     ConceptVersion,
     PointerChange,
+    UNSET,
+    Unset,
     MAX_BATCH_ROWS,
     BatchTooLargeError,
     ChangeFeedGapError,
@@ -164,6 +166,7 @@ from ._macrame import (
     MigrationError,
     ModelNotRegisteredError,
     NegativeEdgeWeightError,
+    PointerConflictError,
     NodeAttributes,
     NodeData,
     NotFoundError,
@@ -228,6 +231,9 @@ __all__ = [
     "ConceptVersion",
     "PointerChange",
     "MAX_BATCH_ROWS",
+    # claims (0.22.0, M3, D-313): expect=UNSET asks nothing, None is claim-if-free
+    "UNSET",
+    "Unset",
     # blobs (0.19.0, D-281)
     "BlobStat",
     "DEFAULT_MAX_BLOB_BYTES",
@@ -279,6 +285,7 @@ __all__ = [
     "BulkCancelledError",
     "SingleOpenViolationError",
     "FunctionalEdgeConflictError",
+    "PointerConflictError",
     "NegativeEdgeWeightError",
     "CurrentDriftError",
     "RebuildFailedError",
@@ -539,8 +546,17 @@ class BranchView:
         valid_from: Timestamp,
         weight: float = 1.0,
         link_previous: str | None = None,
+        expect: str | None = UNSET,
     ) -> PointerChange:
-        """`Database.set_pointer` on this lineage."""
+        """`Database.set_pointer` on this lineage.
+
+        `expect` adjudicates the move against the open state this lineage's
+        own read holds (0.22.0, M3, D-313): `UNSET` — the default — checks
+        nothing, `None` claims nothing is open (claim-if-free), a string
+        names the target the move requires. A lost claim raises
+        `PointerConflictError` with the winner in `current` and writes
+        nothing.
+        """
         return self._db.set_pointer(
             source,
             edge_type,
@@ -549,6 +565,7 @@ class BranchView:
             weight=weight,
             branch=self._id,
             link_previous=link_previous,
+            expect=expect,
         )
 
     def pointer(

@@ -7982,6 +7982,29 @@ async fn move_pointer(
         None,
     )
     .await?;
+    // The claim, adjudicated inside the same transaction that already read
+    // the open state — the claim and every write below see one snapshot, so
+    // no read can go stale between the claim and the move it guards, exactly
+    // the window `link_previous` closed for appends (0.22.0, M3, [D-313]). A
+    // lost claim writes nothing: no retirement, no link, no insert.
+    if let Some(want) = &ptr.expect {
+        let current = open.first().map(|o| o.target.clone());
+        let holds = match want {
+            Some(theirs) => match (&current, theirs) {
+                (Some(now), theirs) => now == theirs,
+                (None, _) => false,
+            },
+            None => current.is_none(),
+        };
+        if !holds {
+            return Err(DbError::PointerConflict {
+                source_id: ptr.source.clone(),
+                edge_type: ptr.edge_type.clone(),
+                expected: want.clone(),
+                current,
+            });
+        }
+    }
     let old = open.first().map(|o| o.target.clone());
     let already = open.iter().any(|o| o.target == ptr.target);
     // One overlap guard for both inserts this move may make: same lineage,

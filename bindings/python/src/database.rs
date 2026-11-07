@@ -1913,7 +1913,15 @@ impl PyDatabase {
     /// `valid_from` is required: the old target's interval closes there and
     /// the new one's opens. Moving to the current target writes nothing and
     /// returns `changed=False`.
-    #[pyo3(signature = (source, edge_type, target, *, valid_from, weight = 1.0, branch = None, link_previous = None))]
+    ///
+    /// `expect` makes the move conditional (0.22.0, M3, D-313):
+    /// `macrame.UNSET` — the default, spelled by leaving the keyword out or
+    /// passing the instance — checks nothing; `None` claims there is **no**
+    /// open target (claim-if-free; the race loser gets
+    /// `PointerConflictError` with the winner in its `current`); a string
+    /// requires that target to be open. The claim and the move run in one
+    /// transaction, so the loser of a race writes nothing.
+    #[pyo3(signature = (source, edge_type, target, *, valid_from, weight = 1.0, branch = None, link_previous = None, expect = crate::conversation::Expect::Unset))]
     #[allow(clippy::too_many_arguments)]
     fn set_pointer(
         &self,
@@ -1925,12 +1933,22 @@ impl PyDatabase {
         weight: f64,
         branch: Option<&str>,
         link_previous: Option<&str>,
+        expect: crate::conversation::Expect,
     ) -> PyResult<crate::conversation::PyPointerChange> {
         let mut ptr = macrame::PointerSet::new(source, edge_type, target)
             .valid_from(to_canonical(Some(valid_from))?)
             .weight(weight);
         if let Some(kind) = link_previous {
             ptr = ptr.link_previous(kind);
+        }
+        match expect {
+            crate::conversation::Expect::Unset => {}
+            crate::conversation::Expect::ClaimFree => {
+                ptr = ptr.expect(Some(None));
+            }
+            crate::conversation::Expect::Target(t) => {
+                ptr = ptr.expect(Some(Some(t)));
+            }
         }
         if let Some(b) = branch {
             ptr = ptr.on_branch(branch::branch_id(b)?);
@@ -2037,9 +2055,9 @@ impl PyDatabase {
             ));
         }
         for p in pointers {
-            if !(4..=6).contains(&p.len()) {
+            if !(4..=7).contains(&p.len()) {
                 return Err(pyo3::exceptions::PyValueError::new_err(
-                    "pointer rows are (source, edge_type, target, valid_from[, weight[, link_previous]])",
+                    "pointer rows are (source, edge_type, target, valid_from[, weight[, link_previous[, expect]]])",
                 ));
             }
             let mut ptr = macrame::PointerSet::new(
@@ -2051,9 +2069,24 @@ impl PyDatabase {
             if p.len() >= 5 {
                 ptr = ptr.weight(p.get_item(4)?.extract::<f64>()?);
             }
-            if p.len() == 6 {
+            if p.len() >= 6 {
                 if let Some(kind) = p.get_item(5)?.extract::<Option<String>>()? {
                     ptr = ptr.link_previous(kind);
+                }
+            }
+            if p.len() == 7 {
+                // Slot 7 is the claim (0.22.0, M3, D-313): None is
+                // claim-if-free, `macrame.UNSET` asks nothing, a string names
+                // the required target. The row's adjudication runs inside the
+                // batch's own transaction, so a lost claim rolls the batch.
+                match p.get_item(6)?.extract::<crate::conversation::Expect>()? {
+                    crate::conversation::Expect::Unset => {}
+                    crate::conversation::Expect::ClaimFree => {
+                        ptr = ptr.expect(Some(None));
+                    }
+                    crate::conversation::Expect::Target(t) => {
+                        ptr = ptr.expect(Some(Some(t)));
+                    }
                 }
             }
             batch = batch.pointer(ptr);

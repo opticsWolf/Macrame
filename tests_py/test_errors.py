@@ -278,6 +278,11 @@ EXPECTED: dict[str, tuple[str, str, dict]] = {
             "attempted": "turn-3",
         },
     ),
+    "PointerConflict": (
+        "PointerConflictError",
+        "IntegrityError",
+        {"source_id": "session-1", "edge_type": "HEAD", "expected": "turn-9", "current": "turn-8"},
+    ),
     "BatchTooLarge": ("BatchTooLargeError", "BudgetError", {"rows": 4242, "max": 2000}),
     "ChangeFeedGap": ("ChangeFeedGapError", "TemporalError", {"after_seq": 4242, "removed": 7}),
 }

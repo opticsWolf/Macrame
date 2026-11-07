@@ -89,6 +89,7 @@ pub(crate) const DB_ERROR_VARIANTS: &[&str] = &[
     "ForkInFuture",
     "ConceptNotVisible",
     "FunctionalEdgeConflict",
+    "PointerConflict",
     "BatchTooLarge",
     "ChangeFeedGap",
 ];
@@ -138,6 +139,12 @@ fn sample(name: &str) -> Option<DbError> {
         "ConceptNotVisible" => DbError::ConceptNotVisible {
             id: "turn-7".into(),
             branch: "alt".into(),
+        },
+        "PointerConflict" => DbError::PointerConflict {
+            source_id: "session-1".into(),
+            edge_type: "HEAD".into(),
+            expected: Some("turn-9".into()),
+            current: Some("turn-8".into()),
         },
         "FunctionalEdgeConflict" => DbError::FunctionalEdgeConflict {
             source_id: "session-1".into(),

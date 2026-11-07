@@ -24,12 +24,14 @@ pub macrame::batch::PointerChange::source: alloc::string::String
 #[non_exhaustive] pub struct macrame::batch::PointerSet
 pub macrame::batch::PointerSet::branch: core::option::Option<macrame::branch::BranchId>
 pub macrame::batch::PointerSet::edge_type: alloc::string::String
+pub macrame::batch::PointerSet::expect: core::option::Option<core::option::Option<alloc::string::String>>
 pub macrame::batch::PointerSet::link_previous: core::option::Option<alloc::string::String>
 pub macrame::batch::PointerSet::source: alloc::string::String
 pub macrame::batch::PointerSet::target: alloc::string::String
 pub macrame::batch::PointerSet::valid_from: alloc::string::String
 pub macrame::batch::PointerSet::weight: f64
 impl macrame::batch::PointerSet
+pub fn macrame::batch::PointerSet::expect(self, core::option::Option<core::option::Option<alloc::string::String>>) -> Self
 pub fn macrame::batch::PointerSet::link_previous(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn macrame::batch::PointerSet::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn macrame::batch::PointerSet::on_branch(self, macrame::branch::BranchId) -> Self
@@ -411,6 +413,11 @@ pub macrame::error::DbError::OverlappingInterval::overlap: alloc::boxed::Box<mac
 pub macrame::error::DbError::PayloadVersion
 pub macrame::error::DbError::PayloadVersion::got: u8
 pub macrame::error::DbError::PayloadVersion::max: u8
+pub macrame::error::DbError::PointerConflict
+pub macrame::error::DbError::PointerConflict::current: core::option::Option<alloc::string::String>
+pub macrame::error::DbError::PointerConflict::edge_type: alloc::string::String
+pub macrame::error::DbError::PointerConflict::expected: core::option::Option<alloc::string::String>
+pub macrame::error::DbError::PointerConflict::source_id: alloc::string::String
 pub macrame::error::DbError::RebuildFailed
 pub macrame::error::DbError::RebuildFailed::n: usize
 pub macrame::error::DbError::RebuildInterrupted
@@ -940,6 +947,11 @@ pub macrame::prelude::DbError::OverlappingInterval::overlap: alloc::boxed::Box<m
 pub macrame::prelude::DbError::PayloadVersion
 pub macrame::prelude::DbError::PayloadVersion::got: u8
 pub macrame::prelude::DbError::PayloadVersion::max: u8
+pub macrame::prelude::DbError::PointerConflict
+pub macrame::prelude::DbError::PointerConflict::current: core::option::Option<alloc::string::String>
+pub macrame::prelude::DbError::PointerConflict::edge_type: alloc::string::String
+pub macrame::prelude::DbError::PointerConflict::expected: core::option::Option<alloc::string::String>
+pub macrame::prelude::DbError::PointerConflict::source_id: alloc::string::String
 pub macrame::prelude::DbError::RebuildFailed
 pub macrame::prelude::DbError::RebuildFailed::n: usize
 pub macrame::prelude::DbError::RebuildInterrupted
@@ -1845,6 +1857,11 @@ pub macrame::DbError::OverlappingInterval::overlap: alloc::boxed::Box<macrame::e
 pub macrame::DbError::PayloadVersion
 pub macrame::DbError::PayloadVersion::got: u8
 pub macrame::DbError::PayloadVersion::max: u8
+pub macrame::DbError::PointerConflict
+pub macrame::DbError::PointerConflict::current: core::option::Option<alloc::string::String>
+pub macrame::DbError::PointerConflict::edge_type: alloc::string::String
+pub macrame::DbError::PointerConflict::expected: core::option::Option<alloc::string::String>
+pub macrame::DbError::PointerConflict::source_id: alloc::string::String
 pub macrame::DbError::RebuildFailed
 pub macrame::DbError::RebuildFailed::n: usize
 pub macrame::DbError::RebuildInterrupted
@@ -2156,12 +2173,14 @@ pub macrame::PointerChange::source: alloc::string::String
 #[non_exhaustive] pub struct macrame::PointerSet
 pub macrame::PointerSet::branch: core::option::Option<macrame::branch::BranchId>
 pub macrame::PointerSet::edge_type: alloc::string::String
+pub macrame::PointerSet::expect: core::option::Option<core::option::Option<alloc::string::String>>
 pub macrame::PointerSet::link_previous: core::option::Option<alloc::string::String>
 pub macrame::PointerSet::source: alloc::string::String
 pub macrame::PointerSet::target: alloc::string::String
 pub macrame::PointerSet::valid_from: alloc::string::String
 pub macrame::PointerSet::weight: f64
 impl macrame::batch::PointerSet
+pub fn macrame::batch::PointerSet::expect(self, core::option::Option<core::option::Option<alloc::string::String>>) -> Self
 pub fn macrame::batch::PointerSet::link_previous(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn macrame::batch::PointerSet::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn macrame::batch::PointerSet::on_branch(self, macrame::branch::BranchId) -> Self

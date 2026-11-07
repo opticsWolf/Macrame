@@ -7,6 +7,7 @@
 //! belief that changing it changes anything.
 
 use pyo3::prelude::*;
+use pyo3::FromPyObject;
 
 use crate::timestamps::from_canonical;
 
@@ -211,11 +212,68 @@ impl PyChange {
     }
 }
 
+/// The no-check value a conditional pointer move passes by omission
+/// (0.22.0, M3, D-313).
+///
+/// Python cannot distinguish "keyword omitted" from "keyword given as
+/// `None`" at the Rust layer, and the two must mean different things here:
+/// `expect=None` is claim-if-free and `expect=UNSET` checks nothing. The
+/// value is a one-member class instance so the two spellings stay distinct;
+/// the module publishes it as `macrame.UNSET`.
+#[pyclass(name = "Unset", module = "macrame", frozen, eq)]
+#[derive(Clone, PartialEq)]
+pub(crate) struct PyUnset;
+
+#[pymethods]
+impl PyUnset {
+    fn __repr__(&self) -> &str {
+        "macrame.UNSET"
+    }
+}
+
+/// The claim a `set_pointer(..., expect=..)` makes, as the binding parses
+/// it: `Unset` is "no claim at all" (the keyword left out or passed the
+/// `UNSET` instance), `ClaimFree` is the draft's `expect=None` — claim
+/// there is no open target — and `Target(t)` requires `t` to be open.
+/// Hand-parsed rather than derived because two of the arms are unit
+/// variants and the parser has to tell the UNSET instance apart from
+/// `None`, which no derive can do.
+#[derive(Clone, Debug, Default)]
+pub(crate) enum Expect {
+    /// `macrame.UNSET` — no check, the default.
+    #[default]
+    Unset,
+    /// The draft's `expect=None`: claim-if-free.
+    ClaimFree,
+    /// `expect="t9"`: require `t9` to be the open target.
+    Target(String),
+}
+
+impl FromPyObject<'_, '_> for Expect {
+    type Error = PyErr;
+
+    fn extract(ob: Borrowed<'_, '_, PyAny>) -> Result<Self, PyErr> {
+        if ob.is_none() {
+            // The draft's `expect=None`: claim-if-free.
+            return Ok(Expect::ClaimFree);
+        }
+        if ob.is_instance_of::<PyUnset>() {
+            // `macrame.UNSET` — the default's own instance: no check.
+            return Ok(Expect::Unset);
+        }
+        // Anything else must be a target the claim requires to be open.
+        let target: String = ob.extract()?;
+        Ok(Expect::Target(target))
+    }
+}
+
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_class::<PyUnset>()?;
     m.add_class::<PyPointerChange>()?;
     m.add_class::<PyBatchReport>()?;
     m.add_class::<PyConceptVersion>()?;
     m.add_class::<PyChange>()?;
     m.add("MAX_BATCH_ROWS", macrame::MAX_BATCH_ROWS)?;
+    m.add("UNSET", Py::new(m.py(), PyUnset {})?.into_any())?;
     Ok(())
 }

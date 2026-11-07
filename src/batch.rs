@@ -64,6 +64,14 @@ pub struct PointerSet {
     /// it closes — or from `source` when nothing was open — to the new one,
     /// at the same `valid_from`. See [`Self::link_previous`].
     pub link_previous: Option<String>,
+    /// The claim this move makes about the open target, if it makes one
+    /// (0.22.0, M3, [D-313]). `None` — the default, and every pre-0.22.0
+    /// caller's — checks nothing. `Some(want)` adjudicates inside the move's
+    /// transaction: `want` must be what the move's own read of the open state
+    /// holds, where `None` claims there is no open target (the plan's
+    /// claim-if-free) and `Some(theirs)` requires `theirs`. A failing claim is
+    /// `DbError::PointerConflict` and the move writes nothing.
+    pub expect: Option<Option<String>>,
 }
 
 impl PointerSet {
@@ -83,6 +91,7 @@ impl PointerSet {
             weight: 1.0,
             branch: None,
             link_previous: None,
+            expect: None,
         }
     }
 
@@ -110,6 +119,29 @@ impl PointerSet {
 
     pub fn weight(mut self, w: f64) -> Self {
         self.weight = w;
+        self
+    }
+
+    /// Make the move conditional on the open target it finds (0.22.0, M3,
+    /// [D-313]).
+    ///
+    /// `None` (the default) moves unconditionally, exactly as every
+    /// pre-0.22.0 move did. `Some(None)` is the plan's claim-if-free: the
+    /// move insists there is **no** open belief to close, and instead of a
+    /// second writer's target silently taking the blame, the loser of the
+    /// race gets [`DbError::PointerConflict`] with the winner in `current`.
+    /// `Some(Some(t))` requires `t` to be the open target — the
+    /// double-optional because "expects nothing open" and "does not check"
+    /// are different claims, and the field has to say which one was made.
+    /// The adjudication runs inside the move's transaction, against the same
+    /// read [`Self::link_previous`]"s edge starts from.
+    ///
+    /// On a batch, the row's claim adjudicates inside the batch's own
+    /// transaction — a claim and the move it implies fail together.
+    ///
+    /// [D-313]: ../docs/architecture/s13-decision-register.md#d-313
+    pub fn expect(mut self, want: Option<Option<String>>) -> Self {
+        self.expect = want;
         self
     }
 
