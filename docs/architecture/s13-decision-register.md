@@ -6379,7 +6379,30 @@ out of it).
 [D-011]: s13-decision-register.md#d-011
 [D-306]: s13-decision-register.md#d-306
 [D-311]: s13-decision-register.md#d-311
-<a id="d-310"></a>D-310 — Concepts are read per lineage: cut at each ancestor's fork point, held versus named, and searched per lineage (0.22.0, M4 and M5). [D-214](s13-decision-register.md#d-214) (amends reads — see the "Amended by" line there), [D-220](s13-decision-register.md#d-220), [D-223](s13-decision-register.md#d-223) (amends — the concept half of the cutoff), [D-260](s13-decision-register.md#d-260), [D-282](s13-decision-register.md#d-282), [D-289](s13-decision-register.md#d-289), [D-290](s13-decision-register.md#d-290). Evidence: `src/graph/concept_lineage.rs`, `src/graph/builder.rs` (`NODES_ONLY`, the forked-database arm of `build_sql_with`, `execute_ids_explained`, `execute`), `src/temporal/as_of.rs` (`hydrate_attributes_on`, `ConceptVersion`), `src/graph/subgraph.rs` (the forked arm of `load_subgraph_with`), `src/connection.rs` (`concepts_by_id`), `src/vector/hybrid.rs` (`keyword_search_on`, `HybridSearch::on_branch`), `src/vector/search.rs` (`search_vector_on`), `tests/v020_conversation_tests.rs` (`m4_concepts`, `m5_search`), `tests/cross_branch_tests.rs` (unchanged and green).
+
+**Plan §3.4, re-measured 2026-11-03:** `examples/conversation_probe.rs` re-ran
+on the reference machine (idle, release build, libSQL 0.10.0 after [D-306])
+with 1,000 trunk turns, a fork after t500, and 200 turns on the fork — two
+consecutive runs agreed within 4%. **Pointer read: ~0.10 ms on the trunk,
+1.41–1.45 ms from the fork** — inside the draft's 1.3–1.9 ms window, so the
+two-step read's economic shape held through 0.21.0's writer changes and the
+0.10.0 bump. One-call append (`link_previous`) from the fork **~3.0 ms**
+against the draft's 4.1–6.5 ms; the two-call spelling ~6.0–6.1 ms (the
+read alone is the figure this column preserves; the draft's 4.3 ms was
+read+write on a shared 2-core sandbox). The plan pin shipped with the
+re-measurement: `graph::pointer::plan_pins::
+the_candidates_seek_the_prefix_key_and_the_resolution_seeks_the_whole_key`,
+asserting the candidates arm's one-column prefix seek (`idx_lc_open_interval
+(source_id=?)` — `target_id` sits between the two slots, so `edge_type`
+cannot ride the seek, which is the shape `CREATE_INDICES`' own comment
+records), the resolution arm's whole-key seek in one go, the named DISTINCT
+b-tree, and no ORDER BY the read itself introduces (the sort stays in
+Rust). The statements are now shared builders (`candidates_sql`,
+`keyed_sql`), so the pin runs on the bytes the read prepares rather than a
+hand-copied reproduction.
+
+
+<a id="d-310"></a><a id="d-310"></a>D-310 — Concepts are read per lineage: cut at each ancestor's fork point, held versus named, and searched per lineage (0.22.0, M4 and M5). [D-214](s13-decision-register.md#d-214) (amends reads — see the "Amended by" line there), [D-220](s13-decision-register.md#d-220), [D-223](s13-decision-register.md#d-223) (amends — the concept half of the cutoff), [D-260](s13-decision-register.md#d-260), [D-282](s13-decision-register.md#d-282), [D-289](s13-decision-register.md#d-289), [D-290](s13-decision-register.md#d-290). Evidence: `src/graph/concept_lineage.rs`, `src/graph/builder.rs` (`NODES_ONLY`, the forked-database arm of `build_sql_with`, `execute_ids_explained`, `execute`), `src/temporal/as_of.rs` (`hydrate_attributes_on`, `ConceptVersion`), `src/graph/subgraph.rs` (the forked arm of `load_subgraph_with`), `src/connection.rs` (`concepts_by_id`), `src/vector/hybrid.rs` (`keyword_search_on`, `HybridSearch::on_branch`), `src/vector/search.rs` (`search_vector_on`), `tests/v020_conversation_tests.rs` (`m4_concepts`, `m5_search`), `tests/cross_branch_tests.rs` (unchanged and green).
 
 Edges have been read per lineage since 0.14.4 and cut at fork points since 0.14.6. Concepts were not, and two defects followed, both reproduced on 0.19.1. **A branch saw its ancestor's post-fork edits**: `concepts` is updated in place, so once the trunk re-upserts a concept after a fork, the version the branch inherited is not in the table; a branched `traverse` under `CURRENT` — and under `AT_TIME` at now — returned the trunk's new title, and only `reconstruct_on` gave the branch's. That is D-223's finding about `links_current`, arriving a second time on the other table. **Every lineage saw every other's concepts**: a sibling's concept resolved by id from the trunk, and `keyword_search` found it from anywhere.
 

@@ -17,7 +17,7 @@
 //! [D-309]: ../../docs/architecture/s13-decision-register.md#d-309
 
 use crate::error::Result;
-use crate::graph::lineage::{ancestry_params, LineageShape, Lineages};
+use crate::graph::lineage::{ancestry_params, KeySlots, LineageShape, Lineages};
 use crate::graph::plan::{lower, Resolution};
 use crate::util::timestamp::OPEN_SENTINEL;
 
@@ -117,6 +117,58 @@ pub(crate) async fn open_edges(
     Ok(out)
 }
 
+/// `open_edges_resolved`' first statement: candidate targets with an open
+/// entitled row on any lineage of the ancestry. Two key slots — the design
+/// lives in `target` being unbound ([D-309]'s read) — and the Open
+/// sentinel filter for the candidates themselves.
+fn candidates_sql(ancestry: &[crate::graph::lineage::Ancestor]) -> String {
+    const BRANCH_SLOT: usize = 3;
+    let ancestry_slot = BRANCH_SLOT + 1;
+    let prefix = lower(&Resolution {
+        shape: LineageShape::Resolved,
+        branch_slot: BRANCH_SLOT,
+        recorded_slot: None,
+        tag: "",
+        key: Some(KeySlots {
+            source: 1,
+            target: None,
+            edge_type: 2,
+        }),
+        ancestry,
+        ancestry_slot,
+    });
+    format!(
+        "{}SELECT DISTINCT l.target_id FROM links_cut l WHERE l.valid_to = '{OPEN_SENTINEL}'",
+        prefix.with_clause()
+    )
+}
+
+/// `open_edges_resolved`' second statement: one candidate under its full key —
+/// the write path's whole-key resolution, whose seek the plan pin asserts.
+fn keyed_sql(ancestry: &[crate::graph::lineage::Ancestor], ancestry_slot: usize) -> String {
+    use crate::graph::lineage::KeySlots;
+    const BRANCH_SLOT: usize = 3;
+    let target_slot = ancestry_slot + 3 * ancestry.len();
+    let keyed = lower(&Resolution {
+        shape: LineageShape::Resolved,
+        branch_slot: BRANCH_SLOT,
+        recorded_slot: None,
+        tag: "",
+        key: Some(KeySlots {
+            source: 1,
+            target: Some(target_slot),
+            edge_type: 2,
+        }),
+        ancestry,
+        ancestry_slot,
+    });
+    format!(
+        "{}SELECT l.valid_from, l.branch_id FROM {} l WHERE l.valid_to = '{OPEN_SENTINEL}'",
+        keyed.with_clause(),
+        keyed.source
+    )
+}
+
 /// The branched single-source read, in two steps (0.22.0, M3, D-309).
 ///
 /// A pointer's `(source, kind)` accumulates one edge key per target it ever
@@ -141,7 +193,6 @@ async fn open_edges_resolved(
     source: &str,
     kind: &str,
 ) -> Result<Vec<OpenEdge>> {
-    use crate::graph::lineage::KeySlots;
     const BRANCH_SLOT: usize = 3;
     let ancestry_slot = BRANCH_SLOT + 1;
     let base_params = || -> Vec<libsql::Value> {
@@ -152,23 +203,7 @@ async fn open_edges_resolved(
 
     // Step one: candidate targets with an open entitled row anywhere on the
     // ancestry.
-    let prefix = lower(&Resolution {
-        shape: LineageShape::Resolved,
-        branch_slot: BRANCH_SLOT,
-        recorded_slot: None,
-        tag: "",
-        key: Some(KeySlots {
-            source: 1,
-            target: None,
-            edge_type: 2,
-        }),
-        ancestry,
-        ancestry_slot,
-    });
-    let sql = format!(
-        "{}SELECT DISTINCT l.target_id FROM links_cut l WHERE l.valid_to = '{OPEN_SENTINEL}'",
-        prefix.with_clause()
-    );
+    let sql = candidates_sql(ancestry);
     let mut rows = conn.query(&sql, base_params()).await?;
     let mut candidates: Vec<String> = Vec::new();
     while let Some(row) = rows.next().await? {
@@ -177,25 +212,7 @@ async fn open_edges_resolved(
     drop(rows);
 
     // Step two: each candidate under its full key.
-    let target_slot = ancestry_slot + 3 * ancestry.len();
-    let keyed = lower(&Resolution {
-        shape: LineageShape::Resolved,
-        branch_slot: BRANCH_SLOT,
-        recorded_slot: None,
-        tag: "",
-        key: Some(KeySlots {
-            source: 1,
-            target: Some(target_slot),
-            edge_type: 2,
-        }),
-        ancestry,
-        ancestry_slot,
-    });
-    let sql = format!(
-        "{}SELECT l.valid_from, l.branch_id FROM {} l WHERE l.valid_to = '{OPEN_SENTINEL}'",
-        keyed.with_clause(),
-        keyed.source
-    );
+    let sql = keyed_sql(ancestry, ancestry_slot);
     let mut out = Vec::new();
     for target in candidates {
         let mut params = base_params();
@@ -216,4 +233,101 @@ async fn open_edges_resolved(
             .then_with(|| a.target.cmp(&b.target))
     });
     Ok(out)
+}
+#[cfg(test)]
+mod plan_pins {
+    //! The two-step read's plan, pinned from the first commit it exists
+    //! (0.22.0, plan §3.4): the draft's figures (4.3 ms → 1.3–1.9 ms) were
+    //! taken on a shared sandbox against libSQL 0.9.30, and the join order
+    //! a measured plan rests on has a shelf life only while nobody touches
+    //! the statement — the 0.21.0 cross-join lesson the §3.2 plan pin
+    //! already applied to the concept folds.
+    //!
+    //! The builders themselves are the pin's inputs (`candidates_sql`,
+    //! `keyed_sql`), so a refactor cannot satisfy the test against a
+    //! hand-copied reproduction of the statements.
+    use super::*;
+
+    async fn fresh() -> libsql::Connection {
+        let db = libsql::Builder::new_local(":memory:")
+            .build()
+            .await
+            .unwrap();
+        let conn = db.connect().unwrap();
+        crate::schema::run_migrations(&conn).await.unwrap();
+        conn
+    }
+
+    async fn plan(conn: &libsql::Connection, sql: &str) -> String {
+        let mut rows = conn
+            .query(&format!("EXPLAIN QUERY PLAN {sql}"), ())
+            .await
+            .unwrap();
+        let mut plan = Vec::new();
+        while let Some(r) = rows.next().await.unwrap() {
+            plan.push(r.get::<String>(3).unwrap());
+        }
+        plan.join(" | ")
+    }
+
+    fn anc() -> Vec<crate::graph::lineage::Ancestor> {
+        vec![
+            crate::graph::lineage::Ancestor {
+                branch_id: "exp".into(),
+                dist: 0,
+                cutoff: None,
+            },
+            crate::graph::lineage::Ancestor {
+                branch_id: "main".into(),
+                dist: 1,
+                cutoff: Some("2026-01-06T00:00:00.000000Z".into()),
+            },
+        ]
+    }
+
+    /// Step one seeks on `source_id` **alone**: `idx_lc_open_interval` leads
+    /// with `(source_id, target_id, edge_type, …)`, and `target_id` sits
+    /// between the two slots the prefix key names, so `edge_type` cannot ride
+    /// the seek — the base scans read a source's own pointer history and
+    /// filter the kind, which is what `CREATE_INDICES`' own comment records
+    /// and what the 1.3–1.9 ms figure was measured against. A future edit
+    /// that "improves" the seek by reordering the index's columns
+    /// re-measures that figure first; this red is its reminder.
+    ///
+    /// Step two is the write path's whole-key resolution: three slots seek
+    /// `idx_lc_open_interval` in its own column order, one seek per
+    /// candidate. Both statements order nothing in SQL — the read sorts in
+    /// Rust — so a temp b-tree here is a plan nobody measured.
+    #[tokio::test]
+    async fn the_candidates_seek_the_prefix_key_and_the_resolution_seeks_the_whole_key() {
+        let conn = fresh().await;
+
+        let cand = plan(&conn, &candidates_sql(&anc())).await;
+        assert!(
+            cand.contains("SEARCH lc USING INDEX idx_lc_open_interval (source_id=?)"),
+            r"the candidates arm must seek the prefix key, one column, as the \
+              ddl's own note records: {cand}"
+        );
+        assert!(
+            !cand.contains("target_id=?"),
+            r"no candidate arm binds the target — that is the prefix key's \
+              whole point, and binding it here would read the old unkeyed read back: {cand}"
+        );
+        assert!(
+            cand.contains("USE TEMP B-TREE FOR DISTINCT"),
+            r"step one's dedupe is the DISTINCT b-tree, and it stays named —               the 1.3-1.9 ms measured claim includes it: {cand}"
+        );
+
+        let keyed = plan(&conn, &keyed_sql(&anc(), 4)).await;
+        assert!(
+            keyed
+                .contains("SEARCH lc USING INDEX idx_lc_open_interval (source_id=? AND target_id=? AND edge_type=?)"),
+            r"the resolution must seek the whole key in one go, the write path's \
+              own shape: {keyed}"
+        );
+        assert!(
+            keyed.contains("USE TEMP B-TREE FOR ORDER BY"),
+            r"the compound's own ORDER BY (links_cut's D-272 determinism) must               stay where it is, inside the projection rather than on the read: {keyed}"
+        );
+    }
 }
