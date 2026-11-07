@@ -172,6 +172,9 @@ order 0.21.0 pinned with `CROSS JOIN` (`src/graph/builder.rs`). Re-run
   touch.
 - **Single-lineage databases** are byte-identical on every read path in the draft (forked paths
   are reached only when `branches` holds more than one row, D-220's condition). Gate 9 holds it.
+- The two "correct the gaps doc" items are settled as
+  [Amendment 1](Macrame%20Update%20Plan%20v0.22.0%20-%20Amendment%201.md): the doc lives nowhere
+  on disk, the corrections are the amendment, and the Silk author applies them to their copy.
 
 ## 4. New work
 
@@ -327,5 +330,8 @@ is renamed. Its 21 ledger tests that stop at `edge_kinds` on 0.21.0 are an accep
   architecture for fork-at-an-instant, pointers and lineage concept reads.
 - Release notes `docs/releases/v0.22.0.md`, including the Silk-facing list of what each
   workaround in the gaps doc is replaced by.
-- okfgraph: the plan, Stage B's findings, and the release, as thoughts under
+- okfgraph: the plan, Stage B's findings; under
+  `macrame-0.22.0-conversation-port`, one thought records C1 and C2
+  ([Amendment 1](Macrame%20Update%20Plan%20v0.22.0%20-%20Amendment%201.md)) as superseded asks,
+  so a later reading of the gaps doc does not reopen them, and the release, as thoughts under
   `macrame-0.22.0-conversation-port`.
