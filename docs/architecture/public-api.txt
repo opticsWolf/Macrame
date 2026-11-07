@@ -178,6 +178,7 @@ pub macrame::connection::ConceptUpsert::embedding_model: core::option::Option<al
 pub macrame::connection::ConceptUpsert::extra: core::option::Option<alloc::string::String>
 pub macrame::connection::ConceptUpsert::id: alloc::string::String
 pub macrame::connection::ConceptUpsert::retired: bool
+pub macrame::connection::ConceptUpsert::supersede: bool
 pub macrame::connection::ConceptUpsert::title: alloc::string::String
 pub macrame::connection::ConceptUpsert::valid_from: alloc::string::String
 pub macrame::connection::ConceptUpsert::valid_to: alloc::string::String
@@ -189,6 +190,7 @@ pub fn macrame::connection::ConceptUpsert::new(impl core::convert::Into<alloc::s
 pub fn macrame::connection::ConceptUpsert::normalized(self) -> macrame::error::Result<Self>
 pub fn macrame::connection::ConceptUpsert::on_branch(self, macrame::branch::BranchId) -> Self
 pub fn macrame::connection::ConceptUpsert::retired(self, bool) -> Self
+pub fn macrame::connection::ConceptUpsert::supersede(self, bool) -> Self
 pub fn macrame::connection::ConceptUpsert::valid_from(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn macrame::connection::ConceptUpsert::valid_to(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub struct macrame::connection::Database
@@ -255,6 +257,7 @@ pub async fn macrame::connection::Database::set_pointer(&self, macrame::batch::P
 pub async fn macrame::connection::Database::shadow_step(&self, macrame::integrity::ShadowStep) -> macrame::error::Result<macrame::integrity::ShadowOutcome>
 pub fn macrame::connection::Database::snapshots_dir(&self) -> &std::path::Path
 pub async fn macrame::connection::Database::upsert_concept(&self, macrame::connection::ConceptUpsert) -> macrame::error::Result<()>
+pub async fn macrame::connection::Database::upsert_concept_superseding(&self, macrame::connection::ConceptUpsert) -> macrame::error::Result<()>
 pub async fn macrame::connection::Database::upsert_embeddings(&self, &macrame::vector::ModelName, alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<f32>)>) -> macrame::error::BulkResult<usize>
 pub async fn macrame::connection::Database::upsert_embeddings_with(&self, &macrame::vector::ModelName, alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<f32>)>, macrame::connection::BulkControl) -> macrame::error::BulkResult<usize>
 pub async fn macrame::connection::Database::verify_concept_intervals(&self) -> macrame::error::Result<alloc::vec::Vec<macrame::error::ConceptOverlap>>
@@ -1120,6 +1123,7 @@ pub macrame::prelude::ConceptUpsert::embedding_model: core::option::Option<alloc
 pub macrame::prelude::ConceptUpsert::extra: core::option::Option<alloc::string::String>
 pub macrame::prelude::ConceptUpsert::id: alloc::string::String
 pub macrame::prelude::ConceptUpsert::retired: bool
+pub macrame::prelude::ConceptUpsert::supersede: bool
 pub macrame::prelude::ConceptUpsert::title: alloc::string::String
 pub macrame::prelude::ConceptUpsert::valid_from: alloc::string::String
 pub macrame::prelude::ConceptUpsert::valid_to: alloc::string::String
@@ -1131,6 +1135,7 @@ pub fn macrame::connection::ConceptUpsert::new(impl core::convert::Into<alloc::s
 pub fn macrame::connection::ConceptUpsert::normalized(self) -> macrame::error::Result<Self>
 pub fn macrame::connection::ConceptUpsert::on_branch(self, macrame::branch::BranchId) -> Self
 pub fn macrame::connection::ConceptUpsert::retired(self, bool) -> Self
+pub fn macrame::connection::ConceptUpsert::supersede(self, bool) -> Self
 pub fn macrame::connection::ConceptUpsert::valid_from(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn macrame::connection::ConceptUpsert::valid_to(self, impl core::convert::Into<alloc::string::String>) -> Self
 #[non_exhaustive] pub struct macrame::prelude::CostEstimate
@@ -1211,6 +1216,7 @@ pub async fn macrame::connection::Database::set_pointer(&self, macrame::batch::P
 pub async fn macrame::connection::Database::shadow_step(&self, macrame::integrity::ShadowStep) -> macrame::error::Result<macrame::integrity::ShadowOutcome>
 pub fn macrame::connection::Database::snapshots_dir(&self) -> &std::path::Path
 pub async fn macrame::connection::Database::upsert_concept(&self, macrame::connection::ConceptUpsert) -> macrame::error::Result<()>
+pub async fn macrame::connection::Database::upsert_concept_superseding(&self, macrame::connection::ConceptUpsert) -> macrame::error::Result<()>
 pub async fn macrame::connection::Database::upsert_embeddings(&self, &macrame::vector::ModelName, alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<f32>)>) -> macrame::error::BulkResult<usize>
 pub async fn macrame::connection::Database::upsert_embeddings_with(&self, &macrame::vector::ModelName, alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<f32>)>, macrame::connection::BulkControl) -> macrame::error::BulkResult<usize>
 pub async fn macrame::connection::Database::verify_concept_intervals(&self) -> macrame::error::Result<alloc::vec::Vec<macrame::error::ConceptOverlap>>
@@ -2023,6 +2029,7 @@ pub macrame::ConceptUpsert::embedding_model: core::option::Option<alloc::string:
 pub macrame::ConceptUpsert::extra: core::option::Option<alloc::string::String>
 pub macrame::ConceptUpsert::id: alloc::string::String
 pub macrame::ConceptUpsert::retired: bool
+pub macrame::ConceptUpsert::supersede: bool
 pub macrame::ConceptUpsert::title: alloc::string::String
 pub macrame::ConceptUpsert::valid_from: alloc::string::String
 pub macrame::ConceptUpsert::valid_to: alloc::string::String
@@ -2034,6 +2041,7 @@ pub fn macrame::connection::ConceptUpsert::new(impl core::convert::Into<alloc::s
 pub fn macrame::connection::ConceptUpsert::normalized(self) -> macrame::error::Result<Self>
 pub fn macrame::connection::ConceptUpsert::on_branch(self, macrame::branch::BranchId) -> Self
 pub fn macrame::connection::ConceptUpsert::retired(self, bool) -> Self
+pub fn macrame::connection::ConceptUpsert::supersede(self, bool) -> Self
 pub fn macrame::connection::ConceptUpsert::valid_from(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn macrame::connection::ConceptUpsert::valid_to(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub struct macrame::Database
@@ -2100,6 +2108,7 @@ pub async fn macrame::connection::Database::set_pointer(&self, macrame::batch::P
 pub async fn macrame::connection::Database::shadow_step(&self, macrame::integrity::ShadowStep) -> macrame::error::Result<macrame::integrity::ShadowOutcome>
 pub fn macrame::connection::Database::snapshots_dir(&self) -> &std::path::Path
 pub async fn macrame::connection::Database::upsert_concept(&self, macrame::connection::ConceptUpsert) -> macrame::error::Result<()>
+pub async fn macrame::connection::Database::upsert_concept_superseding(&self, macrame::connection::ConceptUpsert) -> macrame::error::Result<()>
 pub async fn macrame::connection::Database::upsert_embeddings(&self, &macrame::vector::ModelName, alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<f32>)>) -> macrame::error::BulkResult<usize>
 pub async fn macrame::connection::Database::upsert_embeddings_with(&self, &macrame::vector::ModelName, alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<f32>)>, macrame::connection::BulkControl) -> macrame::error::BulkResult<usize>
 pub async fn macrame::connection::Database::verify_concept_intervals(&self) -> macrame::error::Result<alloc::vec::Vec<macrame::error::ConceptOverlap>>

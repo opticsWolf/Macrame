@@ -942,6 +942,9 @@ fn every_setter_assigns_the_field_it_is_named_after() {
         Some("alt"),
         "ConceptUpsert::branch"
     );
+    assert!(!u.supersede, "ConceptUpsert.supersede defaults to false");
+    let s = ConceptUpsert::new("c1", "T").supersede(true);
+    assert!(s.supersede, "ConceptUpsert::supersede");
 
     // --- EdgeAssertion -----------------------------------------------------
     let e = EdgeAssertion::new("a", "b", "relates")

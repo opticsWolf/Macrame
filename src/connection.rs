@@ -643,6 +643,27 @@ pub struct ConceptUpsert {
     /// [D-278]: ../docs/architecture/s13-decision-register.md#d-278
     /// [D-283]: ../docs/architecture/s13-decision-register.md#d-283
     pub extra: Option<String>,
+    /// Close the concept's open belief at this row's [`valid_from`](Self::valid_from)
+    /// and open this one, in one write (0.22.0, M1b, [D-312]).
+    ///
+    /// The guard of D-291 refuses a second open interval — the right rule for a
+    /// belief asserted in ignorance of the open one, and the wrong rule for a
+    /// caller who is * supposing exactly the one open belief they know is
+    /// there. With `supersede`, the one open interval starting before this
+    /// row's start is closed at this row's start, under the same stamp, so
+    /// Silk's task move is one call and a crash between the halves cannot
+    /// leave a task with no open belief. The closed belief keeps its title,
+    /// content, `extra` and embedding model; only `valid_to` changes, so
+    /// as-of reads before the cut return the old text.
+    ///
+    /// An open belief starting **at or after** this row's start is still
+    /// refused with [`DbError::ConceptSingleOpen`] — supersede only moves
+    /// forward in valid time. Nothing open: an ordinary upsert. Superseding an
+    /// **inherited** concept stays [`DbError::CrossLineage`] (M6 is not in
+    /// this release).
+    ///
+    /// [D-312]: ../docs/architecture/s13-decision-register.md#d-312
+    pub supersede: bool,
 }
 
 impl ConceptUpsert {
@@ -657,6 +678,7 @@ impl ConceptUpsert {
             retired: false,
             branch: None,
             extra: None,
+            supersede: false,
         }
     }
 
@@ -713,6 +735,18 @@ impl ConceptUpsert {
     /// [D-283]: ../docs/architecture/s13-decision-register.md#d-283
     pub fn extra(mut self, extra: impl Into<String>) -> Self {
         self.extra = Some(extra.into());
+        self
+    }
+
+    /// Set the supersede request on this upsert (0.22.0, M1b, [D-312]).
+    ///
+    /// See [`supersede`](Self::supersede) for the rule; on a write batch it is
+    /// per row, so one act can supersede one task's belief and assert the
+    /// tasks it implies.
+    ///
+    /// [D-312]: ../docs/architecture/s13-decision-register.md#d-312
+    pub fn supersede(mut self, supersede: bool) -> Self {
+        self.supersede = supersede;
         self
     }
 
@@ -2788,6 +2822,18 @@ impl Database {
         let concept = concept.normalized()?;
         self.high(|responder| HighPriCommand::UpsertConcept { concept, responder })
             .await
+    }
+
+    /// Supersede a concept's open belief in one write (0.22.0, M1b, [D-312]).
+    ///
+    /// The one-shot form of [`ConceptUpsert::supersede`]: the same command,
+    /// the flag forced on. Python callers spell
+    /// `db.upsert_concept(concept, supersede=True)`.
+    ///
+    /// [D-312]: ../docs/architecture/s13-decision-register.md#d-312
+    pub async fn upsert_concept_superseding(&self, mut concept: ConceptUpsert) -> Result<()> {
+        concept.supersede = true;
+        self.upsert_concept(concept).await
     }
 
     /// Write a key into `kv_store`, replacing whatever was there (0.18.0, [D-280]).
@@ -6889,6 +6935,36 @@ async fn upsert_concept(
     concept: &ConceptUpsert,
     stamp: &str,
 ) -> Result<()> {
+    if !concept.supersede {
+        return upsert_concept_plain(conn, concept, stamp).await;
+    }
+    // (M1b, [D-312]) The close and the open are one act, so they share one
+    // transaction as well as one stamp: a failure in either writes nothing,
+    // which is the crash window the flag exists to close. Inside the actor
+    // there is one writer (D-014), so the reads the guards make here see
+    // exactly what the inserts see.
+    let tx = conn
+        .transaction_with_behavior(libsql::TransactionBehavior::Immediate)
+        .await?;
+    let res = supersede_in_tx(&tx, concept, stamp).await;
+    match res {
+        Err(e) => {
+            let _ = tx.rollback().await;
+            Err(e)
+        }
+        Ok(()) => tx.commit().await.map_err(DbError::Engine),
+    }
+}
+
+/// The plain upsert: the D-291 guard, the prepared-statement upsert, the
+/// zero-changed-rows skip branch, `classify` naming a failure's row. Exactly
+/// the body [`super::upsert_concept`] ran before 0.22.0 was asked for
+/// supersede, and what runs when [`ConceptUpsert::supersede`] is unset.
+async fn upsert_concept_plain(
+    conn: &libsql::Connection,
+    concept: &ConceptUpsert,
+    stamp: &str,
+) -> Result<()> {
     reject_overlapping_concept(conn, concept).await?;
     let res = conn
         .execute(UPSERT_CONCEPT, concept_params(concept, stamp))
@@ -6911,6 +6987,152 @@ async fn upsert_concept(
         )
         .await),
     }
+}
+
+/// The superseding upsert's body: the close of the open belief, then the
+/// D-291 guard — which now sees the closed interval and passes — then the
+/// open, all inside the caller's transaction ([D-312]).
+///
+/// [D-312]: ../docs/architecture/s13-decision-register.md#d-312
+async fn supersede_in_tx(
+    conn: &libsql::Connection,
+    concept: &ConceptUpsert,
+    stamp: &str,
+) -> Result<()> {
+    suppress_open_belief(conn, concept, stamp).await?;
+    upsert_concept_plain(conn, concept, stamp).await
+}
+
+// ---------------------------------------------------------------------------
+// Supersede in one write (0.22.0, plan §4.1, M1b, D-312)
+// ---------------------------------------------------------------------------
+
+/// The concept's open belief, as the projection row spells it (M1b, [D-312]).
+///
+/// The projection holds one row per id — the image of the **latest** start's
+/// last-written row — and D-291 guarantees at most one open interval per
+/// concept, so a projection row whose `valid_to` is the open sentinel is the
+/// open belief, at the start the row itself names: O(1), where interval
+/// windows read one seek per distinct start (D-300). If the latest start is
+/// closed, no earlier start is open — the guard refuses a later start under an
+/// open one — so "the latest start is closed" and "nothing is open" are the
+/// same fact.
+///
+/// The lineage filter is what keeps a branch's supersede from finding its
+/// parent's belief: an *inherited* concept has no rows of its own, the query
+/// reads nothing, and the upsert reaches `trg_concepts_cross_lineage` as it
+/// always did — M6's shadowing is deliberately not here.
+///
+/// [D-312]: ../docs/architecture/s13-decision-register.md#d-312
+const OPEN_CONCEPT_BELIEF: &str = "SELECT valid_from FROM concepts \
+     WHERE id = ?1 AND branch_id = ?2 AND valid_to = ?3";
+
+/// The close of a superseded belief: **a log row, not a projection update**
+/// ([D-312], plan §4.1).
+///
+/// Two projection updates under one stamp would trip
+/// `trg_concepts_monotonic_ra` on the second. So the close is written the way
+/// D-303's skipped backfill is written — the row the log trigger would have
+/// composed, composed by the same [`concepts_log_payload!`] macro (D-056: one
+/// payload body for both writers) — read from the projection row itself,
+/// which is the open belief. The closed belief
+/// keeps its title, content, `extra` and embedding model; **only
+/// `valid_to` changes**, and the statement makes that change itself: the
+/// CTE copies the projection row's columns and binds ?4 - the
+/// superseding row's `valid_from` - as the new end, so the payload the
+/// fold reads is the same `json_object` body the trigger would have
+/// written for the closed belief, stamp of the act included. As-of
+/// reads before the cut return the old text.
+///
+/// Under D-303's fold the close wins its start — *within one start, the row
+/// written last* — and no `concept_disorder` mark is written: the close is
+/// not a backfill. The guard then sees the intervals it needs, `[old_start,
+/// new_start)` closed beside `[new_start, …)` open, and passes.
+const CLOSE_SUPERSEDED_CONCEPT: &str = concat!(
+    "WITH v0 (id, title, content, embedding_model, valid_from, valid_to, retired, extra, \
+               recorded_at) AS ( \
+         SELECT c.id, c.title, c.content, c.embedding_model, ?3, ?4, c.retired, c.extra, ?5 \
+         FROM concepts c WHERE c.id = ?1 AND c.branch_id = ?2) \
+     INSERT INTO transaction_log \
+     (table_name, entity_id, operation, payload, recorded_at, branch_id) \
+     SELECT 'concepts', v0.id, 'U', ",
+    crate::concepts_log_payload!("v0"),
+    "), v0.recorded_at, ?2 FROM v0"
+);
+
+/// The close's parameters, in the order [`CLOSE_SUPERSEDED_CONCEPT`] binds:
+/// the writing lineage's id and name, the open belief's own start, the cut
+/// (the superseding row's `valid_from`), and the act's stamp.
+fn supersede_close_params<'a>(
+    concept: &'a ConceptUpsert,
+    open_start: &'a str,
+    stamp: &'a str,
+) -> [libsql::Value; 5] {
+    [
+        concept.id.as_str().into(),
+        concept.branch_name().into(),
+        open_start.into(),
+        concept.valid_from.as_str().into(),
+        stamp.into(),
+    ]
+}
+
+/// Close the open belief starting before `concept.valid_from` at that
+/// instant, so the ordinary upsert of the new belief can follow ([D-312]).
+///
+/// Nothing open: an ordinary upsert is coming and there is nothing to do. An
+/// open belief at or after the superseding row's start is refused with
+/// [`DbError::ConceptSingleOpen`] — supersede only moves forward in valid
+/// time, the likeness of D-291's own refusal and reusable with it.
+///
+/// [D-312]: ../docs/architecture/s13-decision-register.md#d-312
+async fn suppress_open_belief(
+    conn: &libsql::Connection,
+    concept: &ConceptUpsert,
+    stamp: &str,
+) -> Result<()> {
+    let mut rows = conn
+        .query(
+            OPEN_CONCEPT_BELIEF,
+            libsql::params![
+                concept.id.as_str(),
+                concept.branch_name(),
+                timestamp::OPEN_SENTINEL
+            ],
+        )
+        .await?;
+    let open_start: Option<String> = rows.next().await?.map(|row| row.get::<String>(0).unwrap());
+    let Some(open_start) = open_start else {
+        return Ok(());
+    };
+    if open_start >= concept.valid_from {
+        return Err(DbError::ConceptSingleOpen {
+            overlap: Box::new(crate::error::ConceptOverlap::new(
+                &concept.id,
+                (concept.valid_from.as_str(), concept.valid_to.as_str()),
+                (open_start.as_str(), timestamp::OPEN_SENTINEL),
+                OverlapProvenance::AlreadyRecorded,
+            )),
+        });
+    }
+    let changed = conn
+        .execute(
+            CLOSE_SUPERSEDED_CONCEPT,
+            supersede_close_params(concept, open_start.as_str(), stamp),
+        )
+        .await
+        .map_err(DbError::Engine)?;
+    debug_assert_eq!(changed, 1, "the close wrote {changed} log rows");
+    let _ = changed;
+    eprintln!(
+        "SBX suppress: id={} open_start={open_start:?} changed={changed}",
+        concept.id
+    );
+    eprintln!(
+        "SBX close stmt: {}",
+        CLOSE_SUPERSEDED_CONCEPT.replace('\n', " ")
+    );
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -8139,8 +8361,22 @@ async fn upsert_concepts_checked(
 
     reject_concept_overlaps_within(concepts)?;
 
-    // Against the committed ledger, before the first insert, so the rows read
-    // here cannot include this batch's own writes (D-291, as the edge phase does).
+    // The supersede intercepts first (M1b, [D-312]): a superseding row is the
+    // second-open case *as written*, and the batch-vs-ledger guard below would
+    // refuse it on the belief it is superseding. The close rows land inside
+    // this transaction, so the ledger check — and every reader after the
+    // commit — sees the closed interval the guard needs. A refused batch
+    // (below, or in the loop) rolls the closes back with everything else in
+    // the act.
+    for concept in concepts {
+        if concept.supersede {
+            suppress_open_belief(conn, concept, stamp).await?;
+        }
+    }
+
+    // Against the committed ledger — now including this transaction's own
+    // closes — before the ordinary inserts, so the rows read here cannot
+    // include the batch's own upserts (D-291, as the edge phase does).
     check_batch_against_ledger(conn, concepts).await?;
 
     // Prepared once, like the edge chunk (D-056). This no longer routes through

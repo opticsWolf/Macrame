@@ -226,6 +226,7 @@ class ConceptUpsert:
         retired: bool = False,
         branch: str | None = None,
         extra: str | None = None,
+        supersede: bool = False,
     ) -> None: ...
     def on_branch(self, branch: str) -> ConceptUpsert:
         """This upsert on `branch`, as a **new** object (0.14.9).
@@ -267,6 +268,11 @@ class ConceptUpsert:
         """
     @property
     def retired(self) -> bool: ...
+    @property
+    def supersede(self) -> bool:
+        """Close the concept's open belief at `valid_from` and open this row
+        in one write (0.22.0, M1b, D-312).
+        """
     @property
     def valid_from(self) -> datetime: ...
     @property
@@ -1135,7 +1141,17 @@ class Database:
         splits this into `retire_edge` and `retire_edge_on` because it has no
         keyword defaults; here one method takes both.
         """
-    def upsert_concept(self, concept: ConceptUpsert) -> None: ...
+    def upsert_concept(self, concept: ConceptUpsert, *, supersede: bool = False) -> None:
+        """Insert or update a concept.
+
+        With `supersede=True` (0.22.0, M1b, D-312) the concept's open belief
+        starting before `concept.valid_from` is closed at that instant and this
+        row opens in its place, in one transaction under one stamp. An open
+        belief starting at or after `valid_from` is still refused
+        (`ConceptSingleOpenError`) -- supersede only moves forward in valid
+        time. Nothing open: an ordinary upsert. Concepts a branch inherited
+        cannot be superseded (`CrossLineageError`) -- that is M6, deferred.
+        """
     def write_bulk_atomic(self, edges: Sequence[EdgeAssertion]) -> int:
         """Assert many edges in **one transaction under one stamp** (D-014).
 

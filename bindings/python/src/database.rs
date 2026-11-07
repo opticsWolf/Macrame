@@ -836,8 +836,22 @@ impl PyDatabase {
     }
 
     /// Insert or update a concept.
-    fn upsert_concept(&self, py: Python<'_>, concept: PyConceptUpsert) -> PyResult<()> {
-        let concept = concept.inner;
+    ///
+    /// With `supersede=True` (0.22.0, M1b, D-312) the concept's open belief
+    /// starting before `concept.valid_from` is closed at that instant and this
+    /// row opens in its place, in one transaction under one stamp. An open
+    /// belief at or after `valid_from` is still refused
+    /// (`ConceptSingleOpenError`); nothing open makes it an ordinary upsert;
+    /// superseding a concept the branch inherited stays `CrossLineageError`.
+    #[pyo3(signature = (concept, *, supersede = false))]
+    fn upsert_concept(
+        &self,
+        py: Python<'_>,
+        concept: PyConceptUpsert,
+        supersede: bool,
+    ) -> PyResult<()> {
+        let mut concept = concept.inner;
+        concept.supersede = supersede;
         self.with_db(py, move |db| {
             runtime()
                 .block_on(db.upsert_concept(concept))

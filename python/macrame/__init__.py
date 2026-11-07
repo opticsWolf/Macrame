@@ -449,13 +449,18 @@ class BranchView:
             source, target, edge_type, valid_from, valid_to, branch=self._id
         )
 
-    def upsert_concept(self, concept: ConceptUpsert) -> None:
+    def upsert_concept(self, concept: ConceptUpsert, *, supersede: bool = False) -> None:
         """`Database.upsert_concept`, minting on this lineage.
 
         A branch **inherits** its parent's concepts and may not restate one;
         that raises `CrossLineageError`.
+
+        With `supersede=True` (0.22.0, M1b, D-312) the concept must be one this
+        lineage minted: its open belief starting before `concept.valid_from` is
+        closed at that instant in the same write. See
+        `Database.upsert_concept` for the full rule.
         """
-        self._db.upsert_concept(self._claim(concept))
+        self._db.upsert_concept(self._claim(concept), supersede=supersede)
 
     def write_bulk_atomic(self, edges: Sequence[EdgeAssertion]) -> int:
         """`Database.write_bulk_atomic` with every edge on this lineage."""

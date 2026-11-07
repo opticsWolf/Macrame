@@ -113,7 +113,7 @@ impl PyConceptUpsert {
     #[pyo3(signature = (
         id, title, *, valid_from, content = String::new(),
         embedding_model = None, valid_to = None, retired = false, branch = None,
-        extra = None
+        extra = None, supersede = false
     ))]
     fn new(
         id: String,
@@ -125,6 +125,7 @@ impl PyConceptUpsert {
         retired: bool,
         branch: Option<String>,
         extra: Option<String>,
+        supersede: bool,
     ) -> PyResult<Self> {
         let mut c = ConceptUpsert::new(id, title)
             .content(content)
@@ -144,6 +145,9 @@ impl PyConceptUpsert {
         // as a deliberate belief change.
         if let Some(extra) = extra {
             c = c.extra(extra);
+        }
+        if supersede {
+            c = c.supersede(true);
         }
         Ok(Self {
             inner: c.normalized().map_err(to_py)?,
@@ -204,6 +208,12 @@ impl PyConceptUpsert {
     fn retired(&self) -> bool {
         self.inner.retired
     }
+    /// Whether this upsert supersedes the concept's open belief at its own
+    /// `valid_from` (0.22.0, M1b, D-312).
+    #[getter]
+    fn supersede(&self) -> bool {
+        self.inner.supersede
+    }
     #[getter]
     fn valid_from<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         from_canonical(py, &self.inner.valid_from)
@@ -215,12 +225,13 @@ impl PyConceptUpsert {
 
     fn __repr__(&self) -> String {
         format!(
-            "ConceptUpsert(id={:?}, title={:?}, valid_from={:?}, valid_to={:?}, retired={})",
+            "ConceptUpsert(id={:?}, title={:?}, valid_from={:?}, valid_to={:?}, retired={}, supersede={})",
             self.inner.id,
             self.inner.title,
             self.inner.valid_from,
             self.inner.valid_to,
-            if self.inner.retired { "True" } else { "False" }
+            if self.inner.retired { "True" } else { "False" },
+            self.inner.supersede
         )
     }
 }
