@@ -822,6 +822,95 @@ mod m3_pointers {
         );
     }
 
+    /// The functional refusal costs the whole batch (0.22.0, M2+[D-309], plan
+    /// §3.3's first check): the batch's edge phase runs the functional check
+    /// inside its transaction, after the overlap guard and before the first
+    /// insert, so the turn's concept phase is not left behind half a turn.
+    #[tokio::test]
+    async fn a_functional_refusal_in_a_batch_rolls_the_whole_batch_back() {
+        let h = harness();
+        let db = h.db_with_fake_clock().await;
+        trunk_turns(&db, 2).await;
+
+        let err = db
+            .write_batch(
+                WriteBatch::new()
+                    .concept(ConceptUpsert::new("t9", "turn 9").valid_from(VF))
+                    .edge(
+                        EdgeAssertion::new("session", "t0", "HEAD")
+                            .valid_from("2026-03-01T00:00:00.000000Z"),
+                    )
+                    .pointer(
+                        PointerSet::new("session", "HEAD", "t9")
+                            .valid_from("2026-03-01T00:00:00.000000Z"),
+                    ),
+            )
+            .await
+            .expect_err("the batch carries a second open HEAD target");
+        assert!(
+            matches!(err, DbError::FunctionalEdgeConflict { .. }),
+            "{err:?}"
+        );
+
+        // All four phases are one transaction: the concept row, the walkthrough
+        // log row and the pointer none of them are.
+        let log_rows: i64 = db
+            .read_conn()
+            .query(
+                "SELECT COUNT(*) FROM transaction_log WHERE entity_id IN ('t9', 'session')",
+                (),
+            )
+            .await
+            .unwrap()
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get(0)
+            .unwrap();
+        assert_eq!(
+            log_rows, 1,
+            "session's concept alone; the batch contributed no log row"
+        );
+        let t9_rows: i64 = db
+            .read_conn()
+            .query("SELECT COUNT(*) FROM concepts WHERE id = 't9'", ())
+            .await
+            .unwrap()
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get(0)
+            .unwrap();
+        assert_eq!(t9_rows, 0, "the turn's concept phase rolled back with it");
+        let links: i64 = db
+            .read_conn()
+            .query("SELECT COUNT(*) FROM links WHERE edge_type = 'NEXT'", ())
+            .await
+            .unwrap()
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get(0)
+            .unwrap();
+        assert_eq!(
+            links, 2,
+            "trunk's two NEXTs only; the batch's panel pointer did not land"
+        );
+        assert_eq!(
+            db.pointer("session", "HEAD", ReadPlan::new())
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("t1"),
+            "the head is where `trunk_turns` left it"
+        );
+
+        db.close().await.unwrap();
+    }
+
     #[tokio::test]
     async fn moving_to_the_current_target_writes_nothing() {
         let h = harness();

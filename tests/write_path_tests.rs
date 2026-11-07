@@ -652,3 +652,68 @@ async fn a_check_failure_on_the_same_table_is_not_a_missing_concept() {
 
     db.close().await.unwrap();
 }
+
+/// The functional check is chunk shaped on the bulk path (0.22.0, M3+[D-309],
+/// plan §3.3's bulk clause): each chunk of `bulk_import` commits its own
+/// transaction ([D-011]), so a conflict fails the chunk that hit it — and
+/// only that chunk — while the chunks that finished first stay committed.
+///
+/// [`chunk_rows::EDGES`] is 90 (D-306's number), so 91 edges make two chunks
+/// with the conflict in the second. The conflicting rows name two different
+/// targets — a second open row for the *same* edge key would be
+/// `SingleOpenViolation`'s, the storage trigger's, ground — so `C` must exist
+/// for the foreign key before the import can reach the functional check.
+#[tokio::test]
+async fn a_functional_refusal_fails_its_own_chunk_only() {
+    let harness = TestHarness::new();
+    let db = db_with_nodes(&harness).await;
+    db.upsert_concept(ConceptUpsert::new("C", "Node C").valid_from(T1))
+        .await
+        .unwrap();
+    db.register_edge_kind("HEAD", true).await.unwrap();
+
+    // Chunk one: 90 edges, no functional kind among them, no conflicts.
+    let mut edges = Vec::new();
+    for k in 0..90usize {
+        edges.push(
+            EdgeAssertion::new("A", "B", format!("KIND-{k}"))
+                .valid_from(T1)
+                .weight(0.0),
+        );
+    }
+    // Chunk two opens (A -> B, HEAD) at T2 — legitimately — then tries to open
+    // (A -> C, HEAD) at T3: a different edge key, so the single-open trigger
+    // stays out of it, and the functional check is what refuses.
+    edges.push(EdgeAssertion::new("A", "B", "HEAD").valid_from(T2));
+    edges.push(EdgeAssertion::new("A", "C", "HEAD").valid_from(T3));
+
+    let out = db
+        .bulk_import(edges)
+        .await
+        .expect_err("the second chunk must clash with its own open target");
+    assert_eq!(out.written, 90, "chunk one committed whole");
+    assert!(
+        matches!(out.cause, DbError::FunctionalEdgeConflict { .. }),
+        "the cause is the functional refusal itself: {:?}",
+        out.cause
+    );
+
+    // Whatever reached the ledger is exactly chunk one's 90 rows.
+    let rows: i64 = db
+        .read_conn()
+        .query(
+            "SELECT COUNT(*) FROM transaction_log WHERE table_name = 'links'",
+            (),
+        )
+        .await
+        .unwrap()
+        .next()
+        .await
+        .unwrap()
+        .unwrap()
+        .get(0)
+        .unwrap();
+    assert_eq!(rows, 90, "chunk two is not partially present");
+
+    db.close().await.unwrap();
+}

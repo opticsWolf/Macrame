@@ -6351,7 +6351,34 @@ Rejected: *pointers in concepts* (D-214); *pointers in `kv_store`* (branch-globa
 
 **Ported to this register** (Stage A, 2026-11-02), `a65c29e` in hand: the text is the draft's own, renumbered for its canonical place here; not superseded — Stage B's reconciliations against what `main` shipped since the draft did are appended to this entry as they land.
 
+**Plan §3.3, checked 2026-11-03:** the wiring survived what `main` changed since
+the draft measured it — every edge write path runs `check_functional` after the
+overlap guard and before the first insert (`assert_edge` single-write actor at
+`HighPriCommand::AssertEdge`; the chunk write `write_edges_atomic`, which serves
+both `write_bulk_atomic` and **every** `bulk_import` chunk under D-011's
+per-chunk transaction; and the write batch's edge phase inside its own
+transaction, so a refusal rolls the whole batch). `FunctionalEdgeConflict` kept
+the four `String` fields, and the size tripwire holds: `size_of::<DbError>()`
+is **104** bytes at 54 variants, against the 128-byte bound and the draft's
+fifth-field measurement. An unregistered kind costs one indexed `edge_kinds`
+probe **per actor lifetime** — `functional_kinds` memoises the set and
+`check_functional` early-returns on the empty set — which is better than the
+batch-shape bound the plan allowed. Measured on the reference machine
+(2026-11-03, idle): 219 sequential 90-edge `write_bulk_atomic` chunks —
+the chunk-commit shape D-306's figures are for — steady p50 **2.73–2.79 ms**,
+p90 ~3.14 ms, first chunk (the uncached probe) 2.71–2.74 ms, indistinguishable
+from steady state; D-306's spread is 2.22–3.01 ms against the 3 ms bound, met.
+Named tests: `a_functional_refusal_in_a_batch_rolls_the_whole_batch_back`
+(`tests/v020_conversation_tests.rs`) and
+`a_functional_refusal_fails_its_own_chunk_only` (`tests/write_path_tests.rs`,
+91 edges against `chunk_rows::EDGES` = 90: chunk one's 90 stay committed,
+`BulkInterrupted.written` = 90, and the cause names the conflict — the
+conflicting pair crossing two edge keys so `trg_links_single_open` stays
+out of it).
 
+[D-011]: s13-decision-register.md#d-011
+[D-306]: s13-decision-register.md#d-306
+[D-311]: s13-decision-register.md#d-311
 <a id="d-310"></a>D-310 — Concepts are read per lineage: cut at each ancestor's fork point, held versus named, and searched per lineage (0.22.0, M4 and M5). [D-214](s13-decision-register.md#d-214) (amends reads — see the "Amended by" line there), [D-220](s13-decision-register.md#d-220), [D-223](s13-decision-register.md#d-223) (amends — the concept half of the cutoff), [D-260](s13-decision-register.md#d-260), [D-282](s13-decision-register.md#d-282), [D-289](s13-decision-register.md#d-289), [D-290](s13-decision-register.md#d-290). Evidence: `src/graph/concept_lineage.rs`, `src/graph/builder.rs` (`NODES_ONLY`, the forked-database arm of `build_sql_with`, `execute_ids_explained`, `execute`), `src/temporal/as_of.rs` (`hydrate_attributes_on`, `ConceptVersion`), `src/graph/subgraph.rs` (the forked arm of `load_subgraph_with`), `src/connection.rs` (`concepts_by_id`), `src/vector/hybrid.rs` (`keyword_search_on`, `HybridSearch::on_branch`), `src/vector/search.rs` (`search_vector_on`), `tests/v020_conversation_tests.rs` (`m4_concepts`, `m5_search`), `tests/cross_branch_tests.rs` (unchanged and green).
 
 Edges have been read per lineage since 0.14.4 and cut at fork points since 0.14.6. Concepts were not, and two defects followed, both reproduced on 0.19.1. **A branch saw its ancestor's post-fork edits**: `concepts` is updated in place, so once the trunk re-upserts a concept after a fork, the version the branch inherited is not in the table; a branched `traverse` under `CURRENT` — and under `AT_TIME` at now — returned the trunk's new title, and only `reconstruct_on` gave the branch's. That is D-223's finding about `links_current`, arriving a second time on the other table. **Every lineage saw every other's concepts**: a sibling's concept resolved by id from the trunk, and `keyword_search` found it from anywhere.
