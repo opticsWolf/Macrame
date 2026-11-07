@@ -6372,8 +6372,40 @@ Rejected: *making sibling concepts invisible to traversal as well* (breaks D-214
 
 **Ported to this register** (Stage A, 2026-11-02), `a65c29e` in hand: the text is the draft's own, renumbered for its canonical place here; not superseded — Stage B's reconciliations against what `main` shipped since the draft did are appended to this entry as they land.
 
+**Plan §3.2, reconciled 2026-11-03:** the draft's log arm picked a concept's
+version by `ORDER BY t.seq_id DESC LIMIT 1` — the state rule as it stood
+before 0.21.0. On a note whose ancestor ever skipped a backfill before the
+reader's cutoff, the lineage read handed the branch the backfill as its state:
+a trunk that superseded C2@JUN, took a C1@JAN backfill, and then wrote again
+past the fork point left every downstream branch believing C1, while
+`reconstruct_on` (whose correction pair the fold kept) believed C2. The arm now
+dispatches on the D-303 mark: an unmarked pair picks by seq — exact by
+induction, the same reasoning `state_rule_owed`'s missing-table branch
+documents — and a marked pair picks by `valid_from DESC, seq_id DESC` over the
+same recorded bound on the minting lineage (`src/graph/concept_lineage.rs`).
+That is [D-303]'s correction pair with one difference of architecture, recorded
+rather than glossed: `fold_concepts_at` and `builder.rs`'s marked window fold in
+one statement and correct in a second, merged in Rust, while `versions_cte` is
+a CTE consumed inside one statement, so the pair lives as a per-candidate
+dispatch in SQL — the probe is one covering-index lookup (`entity_id=?`, the
+bound `concepts_at_instant_sql_marked` documents) and the rule arm rides
+`idx_txlog_concept_starts` in its own `valid_from DESC` order ([D-303]'s v24
+rebuild paying D-310's debt directly; no temp b-tree anywhere). The same
+probe-then-yes terms as `as_of.rs` — one probe per call, not per chunk — hold;
+the plan pin for the new shape is in-session
+(`plan_pins::the_folds_seek_the_partition_and_the_rule_rides_the_starts_index`,
+the CROSS JOIN lesson applied from the first commit). Tests:
+`a_backfill_before_the_fork_point_is_read_by_the_rule_not_by_seq` (red on the
+bare port: the branch answered C1, the recorded fold C2),
+`an_ancestor_backfill_after_the_fork_does_not_change_the_branch_s_reading`,
+each in `tests/concept_state_rule_tests.rs`, both reconciled against
+`reconstruct_on` at the same bound.
 
-<a id="d-311"></a>D-311 — A change feed over the log's sequence, refusing rather than skipping a gap (0.22.0, M7). [D-049](s13-decision-register.md#d-049), [D-189](s13-decision-register.md#d-189), [D-249](s13-decision-register.md#d-249), [D-288](s13-decision-register.md#d-288). Evidence: `src/temporal/feed.rs`, `src/connection.rs` (`head_seq`, `changes`), `tests/v020_conversation_tests.rs` (`m7_changes`, including `an_archived_range_is_refused_as_a_gap`), `tests_py/test_conversation.py`.
+[D-303]: s13-decision-register.md#d-303
+
+
+
+<a id="d-311"></a><a id="d-311"></a>D-311 — A change feed over the log's sequence, refusing rather than skipping a gap (0.22.0, M7). [D-049](s13-decision-register.md#d-049), [D-189](s13-decision-register.md#d-189), [D-249](s13-decision-register.md#d-249), [D-288](s13-decision-register.md#d-288). Evidence: `src/temporal/feed.rs`, `src/connection.rs` (`head_seq`, `changes`), `tests/v020_conversation_tests.rs` (`m7_changes`, including `an_archived_range_is_refused_as_a_gap`), `tests_py/test_conversation.py`.
 
 Consumers that follow the ledger — a distillation hook, an OKFgraph producer, a timeline — rescanned runs to find what was new. The log already orders every write: `seq_id` is `AUTOINCREMENT`, strictly increasing in commit order, and a rolled-back transaction rolls the counter back (D-049), so a consumer holding the last `seq_id` it saw can ask for everything after it. `changes(after_seq, branch, tables, limit)` returns `(seq_id, branch_id, table, entity_id, operation, recorded_at)` rows, oldest first, with no payload — the feed says what changed, the ordinary reads say what it is now on whichever lineage the consumer cares about.
 

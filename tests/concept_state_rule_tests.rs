@@ -800,6 +800,122 @@ async fn the_lineage_fold_corrects_within_the_branches_its_reader_sees() {
     db.close().await.unwrap();
 }
 
+/// The lineage fold of an ancestor's history is read back with D-303's rule,
+/// not with the seq winner (0.22.0, M4, [D-310], plan §3.2). A reader on
+/// `alt`, cut between the trunk's correction state and the trunk's next
+/// accepted write, sees the trunk's projection through the fold — and among
+/// the rows that fold admits sits the backfill, whose seq is later than the
+/// current belief's but whose start is earlier. The seq winner of `≤ cutoff`
+/// is the backfill; the rule's winner is the open belief. `concepts_by_id`
+/// (the read the traversal's projection rides) must answer the rule's pick,
+/// the same answer the recorded lineage fold — with its correction — reaches.
+///
+/// Plan §3.2 red test: the bare port's log arm picked by
+/// `ORDER BY t.seq_id DESC LIMIT 1`, and this read answers C1, which is the
+/// state before 0.21.0 — the 0.21.0 rule does not survive a lineage read.
+#[tokio::test]
+async fn a_backfill_before_the_fork_point_is_read_by_the_rule_not_by_seq() {
+    use macrame::ReadPlan;
+
+    let harness = TestHarness::new();
+    let db = open_db(&harness).await;
+
+    upsert(&db, concept("src/a.rs", "C2", JUN, None)).await;
+    // The skip: the backfill lowers the start the projection holds; the log
+    // row lands, the projection does not, the pair is marked ([D-303]).
+    upsert(&db, concept("src/a.rs", "C1", JAN, Some(JUN))).await;
+    let cut = bump_us(stamped(&db, "C1").await.as_str());
+
+    let alt = BranchId::new("alt").unwrap();
+    db.fork_at(alt, BranchId::main(), &cut).await.unwrap();
+
+    // The trunk moves on, accepted: a supersede of the same start ([D-291]'s
+    // admitted shape), so the projection row is now newer than the fork point,
+    // which is what puts the branch's read on the log arm.
+    upsert(&db, concept("src/a.rs", "C3", JUN, None)).await;
+
+    let rows = db
+        .concepts_by_id(
+            &["src/a.rs".to_string()],
+            ReadPlan::new().on(BranchId::new("alt").unwrap()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.len(),
+        1,
+        "the branch sees the concept its ancestry can see"
+    );
+    let v = &rows[0];
+    assert_eq!(
+        v.title, "C2",
+        "the open belief the fork point saw, not the backfill written after it"
+    );
+    assert_eq!(
+        v.valid_from.as_deref(),
+        Some(JUN),
+        "the rule's winner carries the open belief's own start"
+    );
+
+    let state = db.reconstruct_on(&cut, "alt").await.unwrap();
+    assert_eq!(
+        state.concepts["src/a.rs"].title, "C2",
+        "the recorded lineage fold at the same bound agrees"
+    );
+
+    db.close().await.unwrap();
+}
+
+/// And the reverse condition (plan §3.2's first test): a backfill written
+/// *after* the fork point never reaches the branch, so the branch's reading is
+/// itself both before and after the ancestor's write. The bare port passes
+/// this with the seq pick by accident — the rows past the cutoff are excluded
+/// — this test keeps the arrangement honest when the corrected fold and the
+/// branch agree by construction, which is what makes the varying case above
+/// legible as the rule and not as new luck.
+#[tokio::test]
+async fn an_ancestor_backfill_after_the_fork_does_not_change_the_branch_s_reading() {
+    use macrame::ReadPlan;
+
+    let harness = TestHarness::new();
+    let db = open_db(&harness).await;
+
+    upsert(&db, concept("src/a.rs", "C2", JUN, None)).await;
+    let cut = bump_us(stamped(&db, "C2").await.as_str());
+
+    let alt = BranchId::new("alt").unwrap();
+    db.fork_at(alt, BranchId::main(), &cut).await.unwrap();
+
+    let rows = db
+        .concepts_by_id(
+            &["src/a.rs".to_string()],
+            ReadPlan::new().on(BranchId::new("alt").unwrap()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].title, "C2");
+
+    // The trunk backfills a start the branch's window does not reach: a later
+    // recorded instant than the fork point, whatever its valid time.
+    upsert(&db, concept("src/a.rs", "C1", JAN, Some(JUN))).await;
+
+    let rows = db
+        .concepts_by_id(
+            &["src/a.rs".to_string()],
+            ReadPlan::new().on(BranchId::new("alt").unwrap()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].title, "C2",
+        "a trunk write past the fork point is not branch history"
+    );
+
+    db.close().await.unwrap();
+}
+
 /// Gate 11: past reads never change. The read at the open row's stamp fixes
 /// the winners; the backfill is recorded *after* that stamp, so the read must
 /// not change; and a healing write (recorded later still) must not change it

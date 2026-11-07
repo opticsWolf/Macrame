@@ -39,10 +39,26 @@
 //! row decides the arm: `recorded_at <= cutoff` (or no cutoff) serves the live
 //! row; `recorded_at > cutoff` folds the log for the newest entry at or before
 //! the cutoff, and a concept with no such entry was minted after the cutoff
-//! and drops out. The fold is a correlated `ORDER BY seq_id DESC LIMIT 1`
-//! seek on `idx_txlog_fold_partition (table_name, entity_id, branch_id, …)`,
+//! and drops out. The fold is a correlated seek on `idx_txlog_fold_partition (table_name, entity_id, branch_id, …)`,
 //! paid only by concepts an ancestor touched after the fork — zero for Silk's
 //! immutable turns.
+//!
+//! **The log arm reads by D-303's rule, not by seq** (0.22.0, plan §3.2). The
+//! plain pick — `ORDER BY seq_id DESC LIMIT 1` — was the rule before 0.21.0,
+//! and it disagrees with the rule exactly when a write lands out of valid
+//! order: a backfill has the higher `seq_id` and the lower start. The one way
+//! a write lands out of order is the skip (the projection declines, the log
+//! row goes in anyway), and a skip marks its pair, so the fold dispatches on
+//! the mark: an unmarked pair picks by seq — right *by induction*, the same
+//! reasoning `state_rule_owed`'s missing-table branch documents — and a marked
+//! pair picks by `valid_from DESC, seq_id DESC` over the same recorded bound
+//! on the minting lineage. That is the D-303 correction pair for this reader,
+//! gated per candidate rather than per statement: the probe is one indexed
+//! lookup a candidate pays, and the rule seek only where it is owed. The
+//! single-statement shape is deliberate (the plan pin below carries the
+//! plan): a second, Rust-merged correction pass would have to reproduce
+//! `cut_cv`'s effective-cutoff arithmetic outside SQL, which is exactly the
+//! divergence this file exists to avoid.
 //!
 //! A recorded instant composes with the cutoff rather than replacing it: the
 //! effective cutoff per ancestor is `min(cutoff, ts)`, and the reader's own
@@ -106,6 +122,7 @@ pub(crate) fn versions_cte(
     first_slot: usize,
     recorded_slot: Option<usize>,
     tag: &str,
+    ruled: bool,
 ) -> String {
     let lineage = ancestry_values(ancestry_len, first_slot, &format!("_cv{tag}"));
     // The effective cutoff. The reader's own row has none, and a recorded
@@ -114,6 +131,39 @@ pub(crate) fn versions_cte(
     let effective = match recorded_slot {
         None => "cutoff".to_string(),
         Some(p) => format!("CASE WHEN cutoff IS NULL OR cutoff > ?{p} THEN ?{p} ELSE cutoff END"),
+    };
+    // The log arm's own pick. Unmarked pairs take the last row written before
+    // the cutoff; marked pairs take D-303's rule row — the latest start, and
+    // within one start the row written last — over the same bound. The two
+    // forms differ in their `ORDER BY` only; the `WHERE` is copied verbatim
+    // between them so neither can drift from the other's window. The shape 5
+    // lesson keeps the probe inside this expression rather than a join: as
+    // `concepts_at_instant_sql_marked` records, a bare name in a subquery
+    // binds to the innermost scope first, so the probe names `d` and both
+    // arms name their `t` fully.
+    let pick = if ruled {
+        r#"CASE WHEN EXISTS (
+                 SELECT 1 FROM concept_disorder d WHERE d.entity_id = c.id
+               )
+               THEN (SELECT json_set(t.payload, '$.__recorded_at', t.recorded_at)
+                       FROM transaction_log t
+                      WHERE t.table_name = 'concepts' AND t.entity_id = c.id
+                        AND t.branch_id = c.branch_id AND t.recorded_at <= k.cutoff
+                      ORDER BY json_extract(t.payload, '$.valid_from') DESC, t.seq_id DESC
+                      LIMIT 1)
+               ELSE (SELECT json_set(t.payload, '$.__recorded_at', t.recorded_at)
+                       FROM transaction_log t
+                      WHERE t.table_name = 'concepts' AND t.entity_id = c.id
+                        AND t.branch_id = c.branch_id AND t.recorded_at <= k.cutoff
+                      ORDER BY t.seq_id DESC
+                      LIMIT 1)
+           END"#
+    } else {
+        r#"(SELECT json_set(t.payload, '$.__recorded_at', t.recorded_at)
+              FROM transaction_log t
+             WHERE t.table_name = 'concepts' AND t.entity_id = c.id
+               AND t.branch_id = c.branch_id AND t.recorded_at <= k.cutoff
+             ORDER BY t.seq_id DESC LIMIT 1)"#
     };
     format!(
         r#"{lineage},
@@ -133,11 +183,7 @@ concept_versions{tag}(id, rowid_pk, title, content, embedding_model, extra, reti
         SELECT c.id, c.rowid_pk, c.title, c.content, c.embedding_model, c.extra, c.retired,
                c.valid_from, c.valid_to, c.branch_id, c.recorded_at, k.cutoff AS cut,
                CASE WHEN k.cutoff IS NULL OR c.recorded_at <= k.cutoff THEN NULL
-                    ELSE (SELECT json_set(t.payload, '$.__recorded_at', t.recorded_at)
-                            FROM transaction_log t
-                           WHERE t.table_name = 'concepts' AND t.entity_id = c.id
-                             AND t.branch_id = c.branch_id AND t.recorded_at <= k.cutoff
-                           ORDER BY t.seq_id DESC LIMIT 1)
+                    ELSE {pick}
                END AS fold
         FROM concepts c JOIN cut_cv{tag} k ON k.branch_id = c.branch_id
     )
@@ -199,6 +245,12 @@ pub(crate) async fn rows_on(
         // refuses, so it is caught here with a sentence instead.
         return Err(DbError::UnknownBranch(String::new()));
     }
+    // The state rule reaches this fold once per call (D-303; 0.22.0 plan
+    // §3.2 for the lineage read): one probe, and the fold dispatches on marks
+    // per candidate row. The probe is cheap and per *call* on purpose,
+    // exactly as `fold_concepts_at` reasons it — the chunking is an IO shape,
+    // and what is owed does not change inside one read.
+    let ruled = crate::temporal::replay::state_rule_owed(conn).await?;
     for chunk in ids.chunks(HYDRATE_CHUNK) {
         let n = chunk.len();
         let recorded_slot = recorded.map(|_| n + 1);
@@ -207,7 +259,7 @@ pub(crate) async fn rows_on(
             "WITH {} SELECT id, title, content, embedding_model, extra, retired, \
              valid_from, valid_to, branch_id, recorded_at FROM concept_versions \
              WHERE id IN ({})",
-            versions_cte(ancestry.len(), first, recorded_slot, ""),
+            versions_cte(ancestry.len(), first, recorded_slot, "", ruled),
             (1..=n)
                 .map(|i| format!("?{i}"))
                 .collect::<Vec<_>>()
@@ -334,4 +386,102 @@ async fn live_ids(
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod plan_pins {
+    use super::*;
+
+    async fn fresh() -> libsql::Connection {
+        let db = libsql::Builder::new_local(":memory:")
+            .build()
+            .await
+            .unwrap();
+        let conn = db.connect().unwrap();
+        crate::schema::run_migrations(&conn).await.unwrap();
+        conn
+    }
+
+    async fn plan(conn: &libsql::Connection, ruled: bool) -> String {
+        let sql = format!(
+            "WITH {with} SELECT id FROM concept_versions WHERE id = 'x'",
+            with = versions_cte(2, 1, None, "", ruled)
+        );
+        let mut rows = conn
+            .query(&format!("EXPLAIN QUERY PLAN {sql}"), ())
+            .await
+            .unwrap();
+        let mut plan = Vec::new();
+        while let Some(r) = rows.next().await.unwrap() {
+            plan.push(r.get::<String>(3).unwrap());
+        }
+        plan.join(" | ")
+    }
+
+    /// The log arm's plan, pinned from the first commit it exists (0.22.0,
+    /// plan §3.2). The plan §3.2 of the 0.22.0 plan says it plainly: a new
+    /// statement shape gets an `EXPLAIN QUERY PLAN` pin, because the
+    /// 0.21.0 cross-join lesson measured a plan that had a shelf life only
+    /// while nobody touched the statement.
+    ///
+    /// Four lines are load-bearing:
+    ///
+    /// 1. **the fold seek binds the whole key** —
+    ///    `idx_txlog_fold_partition (table_name=? AND entity_id=? AND
+    ///    branch_id=?)` — one concept's history per seek, wherever it runs
+    ///    (the projection join and the seq arm);
+    /// 2. **the mark probe is the covering PK probe, entity alone** —
+    ///    `concept_disorder_1 (entity_id=?)` — the bound `concepts_at_instant_sql_marked`
+    ///    documents; the branch adds nothing, because a concept's marks live
+    ///    only on its minting lineage anyway;
+    /// 3. **the rule arm rides `idx_txlog_concept_starts`** — the v24 rung
+    ///   ([D-303]) rebuilt that partial index with `valid_from DESC` exactly
+    ///    so the correction's winner could be read in index order; the plan
+    ///    confirms the two releases agree;
+    /// 4. **no temp b-tree anywhere** — the seek order serves the ORDER BY
+    ///    under LIMIT 1, so the rule's cost is a bounded walk that stops at
+    ///    the first row.
+    #[tokio::test]
+    async fn the_folds_seek_the_partition_and_the_rule_rides_the_starts_index() {
+        let conn = fresh().await;
+
+        let ruled = plan(&conn, true).await;
+        assert!(
+            ruled.contains(
+                "SEARCH t USING INDEX idx_txlog_fold_partition \
+                 (table_name=? AND entity_id=? AND branch_id=?)"
+            ),
+            "the seq arm (and the projection join) must seek the fold \
+             partition on the whole key: {ruled}"
+        );
+        assert!(
+            ruled.contains("concept_disorder_1 (entity_id=?)"),
+            "the mark probe binds entity alone, as \
+             `concepts_at_instant_sql_marked` documents: {ruled}"
+        );
+        assert!(
+            ruled.contains("idx_txlog_concept_starts"),
+            "the rule arm rides the v24 starts index in its own \
+             (valid_from DESC) order: {ruled}"
+        );
+        assert!(
+            !ruled.contains("USE TEMP B-TREE FOR ORDER BY"),
+            "the ORDER BY under LIMIT 1 must not sort: {ruled}"
+        );
+
+        // The unruled half is its own assertion, so the pair's asymmetry is
+        // pinned and not implied: no marks reference at all, one seek shape.
+        let plain = plan(&conn, false).await;
+        assert!(
+            !plain.contains("concept_disorder"),
+            "the plain fold must not touch the marks table at all: {plain}"
+        );
+        assert!(
+            plain.contains(
+                "SEARCH t USING INDEX idx_txlog_fold_partition \
+                 (table_name=? AND entity_id=? AND branch_id=?)"
+            ),
+            "the plain fold's seek is the same shape: {plain}"
+        );
+    }
 }

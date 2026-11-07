@@ -346,6 +346,11 @@ pub async fn search_vector_on(
                     4 + usize::from(as_of_valid.is_some()),
                     None,
                     "",
+                    // The same probe the concept folds run (D-303; 0.22.0
+                    // plan §3.2): a keyword search's lineage scope obeys the
+                    // state rule on the same terms the concept read does —
+                    // the two cannot agree on what is owed by disagreeing.
+                    crate::temporal::replay::state_rule_owed(conn).await?,
                 )
             ),
             "concept_versions",
