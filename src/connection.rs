@@ -7900,20 +7900,13 @@ async fn write_batch_atomic(
         .await?;
 
     let res: Result<Vec<crate::batch::PointerChange>> = async {
-        for c in &concepts {
-            if let Err(e) = tx.execute(UPSERT_CONCEPT, concept_params(c, stamp)).await {
-                return Err(classify(
-                    &tx,
-                    e,
-                    WriteOp::Concept {
-                        id: &c.id,
-                        recorded_at: stamp,
-                        branch: c.branch_name(),
-                    },
-                )
-                .await);
-            }
-        }
+        // The concept phase is [`upsert_concepts_checked`], the chunk write's
+        // own body (0.22.0, plan §3.1): the D-291 guards, and the
+        // zero-changed-rows skip branch with its log row and D-303 mark, all
+        // inside this transaction. The batch's own refusal of a concept id
+        // twice runs first, so every concept here arrives with one interval;
+        // the sweep inside the shared phase still costs nothing to hold.
+        upsert_concepts_checked(&tx, &concepts, stamp).await?;
         for r in &retirements {
             let name = r
                 .branch
@@ -8084,8 +8077,6 @@ async fn write_concepts_atomic(
         return Ok(0);
     }
 
-    reject_concept_overlaps_within(concepts)?;
-
     // Named lineages, before the write lock — `check_lineages`' reason, and the
     // shape it also returns is unused here because `concepts` is keyed by
     // identity and has no resolution to do (see `ConceptUpsert::branch`).
@@ -8102,29 +8093,73 @@ async fn write_concepts_atomic(
         .transaction_with_behavior(libsql::TransactionBehavior::Immediate)
         .await?;
 
-    // Against the committed ledger, before the first insert, so the rows read
-    // here cannot include this batch's own writes (D-291, as the edge batch does).
-    if let Err(e) = check_batch_against_ledger(&tx, concepts).await {
+    if let Err(e) = upsert_concepts_checked(&tx, concepts, stamp).await {
         let _ = tx.rollback().await;
         return Err(e);
     }
 
+    tx.commit().await?;
+    Ok(concepts.len())
+}
+
+/// The checked concept-upsert phase, over a transaction the caller owns (0.22.0,
+/// plan §3.1). The pair of interval guards on this path's write ([D-291]): a
+/// batch cannot contradict itself, and no batch opens a second interval the
+/// ledger already holds one belief for; then the prepared upsert with the
+/// zero-changed-rows skip branch and its D-303 mark, and `classify` naming a
+/// failure's row.
+///
+/// [`upsert_concept`] does the same four things for one row and
+/// [`write_concepts_atomic`] did them for a chunk; this function *is* that
+/// body so a third caller — the write batch's concept phase — cannot drift
+/// from either: the draft's own batch loop ran none of it, and a backfill
+/// inside a batch lost its log row and mark together.
+///
+/// The self-sweep runs again even where a caller has already refused a
+/// duplicated id (the batch's `InvalidId`), because the chunk write path may
+/// repeat a concept with a different start: after the last-write-wins
+/// reduction the starts are distinct, and the same ordering that makes this
+/// sweep one pass makes its extra cost nothing. Callers own the transaction
+/// and the rollback — on error the phase returns and the caller ends it.
+///
+/// Inside an Immediate transaction the ledger guard's reads see the committed
+/// state and nothing else: one writer by construction (D-014), the window
+/// nonexistent rather than small, as `check_batch_against_ledger`'s doc
+/// records.
+///
+/// [D-291]: ../docs/architecture/s13-decision-register.md#d-291
+async fn upsert_concepts_checked(
+    conn: &libsql::Connection,
+    concepts: &[ConceptUpsert],
+    stamp: &str,
+) -> Result<()> {
+    if concepts.is_empty() {
+        return Ok(());
+    }
+
+    reject_concept_overlaps_within(concepts)?;
+
+    // Against the committed ledger, before the first insert, so the rows read
+    // here cannot include this batch's own writes (D-291, as the edge phase does).
+    check_batch_against_ledger(conn, concepts).await?;
+
     // Prepared once, like the edge chunk (D-056). This no longer routes through
     // [`upsert_concept`] — that function prepares per call by construction — but
-    // it shares that function's statement text and parameter row, so the two
-    // cannot upsert different columns.
-    let stmt = tx.prepare(UPSERT_CONCEPT).await?;
+    // it shares that function's statement text and parameter row, so none of
+    // the three paths can upsert different columns.
+    let stmt = conn.prepare(UPSERT_CONCEPT).await?;
 
     for concept in concepts {
         stmt.reset();
         // Same branch as the single path: zero changed rows is the skipped
         // backfill, whose log row is written here inside the same
-        // transaction — the D-056 statement the trigger would have written.
+        // transaction — the D-056 statement the trigger would have written,
+        // and whose D-303 mark rides with it.
         let res = match stmt.execute(concept_params(concept, stamp)).await {
-            Ok(0) => record_skipped_backfill(&tx, concept, stamp).await,
+            Ok(0) => record_skipped_backfill(conn, concept, stamp).await,
             Ok(_) => Ok(()),
             Err(e) => Err(classify(
-                &tx,
+                conn,
                 e,
                 WriteOp::Concept {
                     id: &concept.id,
@@ -8137,14 +8172,12 @@ async fn write_concepts_atomic(
 
         if let Err(e) = res {
             drop(stmt);
-            let _ = tx.rollback().await;
             return Err(e);
         }
     }
 
     drop(stmt);
-    tx.commit().await?;
-    Ok(concepts.len())
+    Ok(())
 }
 
 #[cfg(test)]

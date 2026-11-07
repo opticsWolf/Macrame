@@ -23,7 +23,7 @@
 mod harness;
 
 use harness::TestHarness;
-use macrame::{ConceptUpsert, Database};
+use macrame::{ConceptUpsert, Database, WriteBatch};
 
 const JAN: &str = "2026-01-01T00:00:00.000000Z";
 const JUN: &str = "2026-06-01T00:00:00.000000Z";
@@ -295,6 +295,94 @@ async fn a_skipped_backfill_writes_its_own_log_row() {
     assert!(
         stamp > projection_recorded_after,
         "the log row carries the backfill's own stamp, not the projection row's"
+    );
+
+    db.close().await.unwrap();
+}
+
+/// The same rule inside a batch (0.22.0, M2, [D-308], plan §3.1): a backfill
+/// handed to [`Database::write_batch`] behaves exactly as the single write
+/// above does — the projection stays where it was, the log row is the
+/// backfill's own version under the batch's stamp, and the D-303 mark lands.
+/// The draft's batch treated `UPSERT_CONCEPT`'s zero-changed-rows as success,
+/// so a backfill inside a batch lost its log row and its mark together.
+///
+/// [D-308]: ../../docs/architecture/s13-decision-register.md#d-308
+#[tokio::test]
+async fn a_skipped_backfill_in_a_batch_writes_its_own_log_row() {
+    let harness = TestHarness::new();
+    let db = open_db(&harness).await;
+
+    upsert(&db, concept("src/a.rs", "C2", JUN, None)).await;
+    let projection_recorded: String = db
+        .read_conn()
+        .query("SELECT recorded_at FROM concepts WHERE id = 'src/a.rs'", ())
+        .await
+        .unwrap()
+        .next()
+        .await
+        .unwrap()
+        .unwrap()
+        .get(0)
+        .unwrap();
+
+    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    let report = db
+        .write_batch(WriteBatch::new().concept(concept("src/a.rs", "C1", JAN, Some(JUN))))
+        .await
+        .unwrap();
+    assert_eq!(report.concepts, 1, "the backfill counts as written");
+
+    let (title, from, _to, fts_title) = projection(&db, "src/a.rs").await;
+    assert_eq!(title, "C2", "the projection holds the current belief");
+    assert_eq!(from, JUN);
+    assert_eq!(fts_title, "C2");
+
+    let row = db
+        .read_conn()
+        .query(
+            "SELECT operation, json_extract(payload, '$.v'),                     json_extract(payload, '$.title'),                     json_extract(payload, '$.valid_from'), recorded_at
+             FROM transaction_log WHERE entity_id = 'src/a.rs'
+             ORDER BY seq_id DESC LIMIT 1",
+            (),
+        )
+        .await
+        .unwrap()
+        .next()
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        row.get::<String>(0).unwrap(),
+        "U",
+        "the self-inserted row is an update row"
+    );
+    assert_eq!(row.get::<i64>(1).unwrap(), 3, "payload v3");
+    assert_eq!(
+        row.get::<String>(2).unwrap(),
+        "C1",
+        "the log row is the backfill's own version"
+    );
+    assert_eq!(
+        row.get::<String>(3).unwrap(),
+        JAN,
+        "the backfill's own start, not the projection's"
+    );
+    let stamp: String = row.get(4).unwrap();
+    assert!(
+        stamp > projection_recorded,
+        "the log row carries the batch's stamp, not the projection row's"
+    );
+
+    assert_eq!(
+        count(
+            &db,
+            "SELECT COUNT(*) FROM concept_disorder
+             WHERE entity_id = 'src/a.rs' AND branch_id = 'main'"
+        )
+        .await,
+        1,
+        "the D-303 mark lands, exactly as the single write's does"
     );
 
     db.close().await.unwrap();

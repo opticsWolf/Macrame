@@ -10,7 +10,7 @@
 mod harness;
 
 use harness::TestHarness;
-use macrame::{BranchId, ConceptUpsert, Database, DbError, OverlapProvenance};
+use macrame::{BranchId, ConceptUpsert, Database, DbError, OverlapProvenance, WriteBatch};
 
 const JAN: &str = "2026-01-01T00:00:00.000000Z";
 const MAR: &str = "2026-03-01T00:00:00.000000Z";
@@ -149,6 +149,53 @@ async fn a_batch_that_contradicts_itself_is_refused_with_nothing_written() {
         .await,
         0,
         "no log row was written"
+    );
+
+    db.close().await.unwrap();
+}
+
+/// The batch's concept phase stands on the ledger the single writes stand on
+/// (0.22.0, M2, [D-308]): a batch that would open a second interval for a
+/// concept is refused by the batch-vs-ledger guard ([D-291], the chunk path's
+/// `check_batch_against_ledger`), and the refusal costs the whole batch — one
+/// act, all or nothing.
+///
+/// The draft's `write_batch` ran neither guard, and this committed a second
+/// open belief the single path refuses; this test is the plan §3.1 red test
+/// for the batch-vs-ledger half, and it fails until the concept phase runs the
+/// same pair of guards `write_concepts` runs.
+///
+/// [D-291]: ../../docs/architecture/s13-decision-register.md#d-291
+/// [D-308]: ../../docs/architecture/s13-decision-register.md#d-308
+#[tokio::test]
+async fn a_batch_that_opens_a_second_interval_is_refused_with_nothing_written() {
+    let harness = TestHarness::new();
+    let db = open_db(&harness).await;
+
+    upsert(&db, concept("c", JUN, None)).await.unwrap();
+
+    let err = db
+        .write_batch(WriteBatch::new().concept(concept("c", SEP, None)))
+        .await
+        .expect_err("a batch cannot open a second interval");
+    assert!(
+        matches!(err, DbError::ConceptSingleOpen { .. }),
+        "two open intervals are the single-open case: {err}"
+    );
+
+    assert_eq!(
+        count(&db, "SELECT COUNT(*) FROM concepts WHERE id = 'c'").await,
+        1,
+        "the batch's refusal left the concept row the single write wrote"
+    );
+    assert_eq!(
+        count(
+            &db,
+            "SELECT COUNT(*) FROM transaction_log WHERE entity_id = 'c'"
+        )
+        .await,
+        1,
+        "the refusal wrote no log row of its own"
     );
 
     db.close().await.unwrap();

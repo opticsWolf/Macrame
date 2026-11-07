@@ -6311,8 +6311,29 @@ Rejected: *widening `write_bulk_atomic` to take concepts* (its signature is a `V
 
 **Ported to this register** (Stage A, 2026-11-02), `a65c29e` in hand: the text is the draft's own, renumbered for its canonical place here; not superseded — Stage B's reconciliations against what `main` shipped since the draft did are appended to this entry as they land.
 
+**Plan §3.1, reconciled 2026-11-03:** the draft's batch concept phase was a bare
+`UPSERT_CONCEPT` loop, and on the tree it landed on it wrote around both things a concept
+write means. It ran no D-291 ledger guard, so a batch could open a second valid interval for
+a concept whose belief the single path would refuse — the defect P1 closed, reopened by the
+write this decision introduces; and it treated `UPSERT_CONCEPT`'s zero-changed-rows return as
+success, so a backfill inside a batch lost its transaction-log row and its [D-303]
+`concept_disorder` mark together. The concept phase is now `upsert_concepts_checked`
+(`src/connection.rs`) — `write_concepts_atomic`'s own body, shared rather than copied, with
+the twice-in-one-batch `InvalidId` refusal ahead of it (partners to the same rule: one batch
+is one stamp, so within-batch overlap cannot recur; the sweep still runs). Errors
+`ConceptSingleOpen` for the ledger clash, `OverlappingConcept` inside the batch; a backfill
+in a batch writes the same log row as one outside, and the mark with it. Tests:
+`a_batch_that_opens_a_second_interval_is_refused_with_nothing_written`
+(`tests/concept_interval_guard_tests.rs`) and
+`a_skipped_backfill_in_a_batch_writes_its_own_log_row`
+(`tests/concept_state_rule_tests.rs`). The §3.1 red tests ran these names against the bare
+Stage A port first and failed for exactly these two reasons — the port's batch committed its
+second interval (the guard test) and stayed silent on the skip (the state test) — before
+this text did anything.
 
-<a id="d-309"></a>D-309 — Pointers: functional edge kinds, resolved per lineage, moved under one stamp (0.22.0, M3, schema **v24 → v25**). [Doctrine II](s0-s3-foundations.md#doctrine-ii), [Doctrine III](s0-s3-foundations.md#doctrine-iii), [D-060](s13-decision-register.md#d-060), [D-214](s13-decision-register.md#d-214), [D-225](s13-decision-register.md#d-225), [D-250](s13-decision-register.md#d-250), [D-280](s13-decision-register.md#d-280), [D-308](s13-decision-register.md#d-308). Evidence: `src/schema/ddl.rs` (`CREATE_EDGE_KINDS_TABLE`), `src/schema/migrations.rs` (`add_edge_kinds`), `src/graph/pointer.rs` (`open_edges`, `open_edges_resolved`), `src/graph/lineage.rs` (`KeySlots::target` is `Option`), `src/batch.rs` (`PointerSet`, `link_previous`), `src/connection.rs` (`register_edge_kind`, `set_pointer`, `pointer`, `pointers`, `check_functional`, `move_pointer`), `tests/migration_tests.rs` (`a_v24_database_climbs_to_v25_and_gains_an_empty_edge_kind_register`), `tests/v020_conversation_tests.rs` (`m3_pointers`), `examples/conversation_probe.rs`.
+
+
+<a id="d-309"></a><a id="d-309"></a>D-309 — Pointers: functional edge kinds, resolved per lineage, moved under one stamp (0.22.0, M3, schema **v24 → v25**). [Doctrine II](s0-s3-foundations.md#doctrine-ii), [Doctrine III](s0-s3-foundations.md#doctrine-iii), [D-060](s13-decision-register.md#d-060), [D-214](s13-decision-register.md#d-214), [D-225](s13-decision-register.md#d-225), [D-250](s13-decision-register.md#d-250), [D-280](s13-decision-register.md#d-280), [D-308](s13-decision-register.md#d-308). Evidence: `src/schema/ddl.rs` (`CREATE_EDGE_KINDS_TABLE`), `src/schema/migrations.rs` (`add_edge_kinds`), `src/graph/pointer.rs` (`open_edges`, `open_edges_resolved`), `src/graph/lineage.rs` (`KeySlots::target` is `Option`), `src/batch.rs` (`PointerSet`, `link_previous`), `src/connection.rs` (`register_edge_kind`, `set_pointer`, `pointer`, `pointers`, `check_functional`, `move_pointer`), `tests/migration_tests.rs` (`a_v24_database_climbs_to_v25_and_gains_an_empty_edge_kind_register`), `tests/v020_conversation_tests.rs` (`m3_pointers`), `examples/conversation_probe.rs`.
 
 A branch cannot restate an inherited concept (D-214) — the overlay is deferred and stays deferred — so branch-scoped **mutable state** had nowhere to live: a session's head turn, a file's current version, a run's status. Callers kept it in concepts (refused on a branch with `CrossLineageError`) or in `kv_store` (branch-global by design, D-280). The state is a relationship that changes, and the ledger already has the right primitive for that: an edge, which branches, shadows, diffs and folds. What was missing was the rule *one open target at a time* and an operation that moves it.
 
