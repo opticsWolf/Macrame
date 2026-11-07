@@ -94,6 +94,21 @@ const REGISTRY: &[(&str, Justification)] = &[
         },
     ),
     (
+        "idx_lc_pointer_kind",
+        Query {
+            label: "the ready-set listing, one kind across every source",
+            // The plan 4.3 probe's read: the workspace view - where does
+            // every source of this kind stand - whose scan is what the probe
+            // found and whose seek is what the partial index buys (24.2 to
+            // 14.2 ms on the 10,000-source fixture, +0.067 ms on the 90-edge
+            // write). Bound as the reader binds it: the kind as the seek's
+            // leading column, every row open.
+            sql: "SELECT source_id, target_id, valid_from FROM links_current \
+                  WHERE edge_type = ?1 AND valid_to = '9999-12-31T23:59:59.999999Z'",
+            source: None,
+        },
+    ),
+    (
         "idx_lc_lineage_cut",
         Query {
             label: "the lineage read's two base scans over the projection",

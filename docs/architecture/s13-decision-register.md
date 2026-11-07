@@ -6333,7 +6333,7 @@ this text did anything.
 
 
 
-<a id="d-309"></a><a id="d-309"></a>D-309 — Pointers: functional edge kinds, resolved per lineage, moved under one stamp (0.22.0, M3, schema **v24 → v25**). [Doctrine II](s0-s3-foundations.md#doctrine-ii), [Doctrine III](s0-s3-foundations.md#doctrine-iii), [D-060](s13-decision-register.md#d-060), [D-214](s13-decision-register.md#d-214), [D-225](s13-decision-register.md#d-225), [D-250](s13-decision-register.md#d-250), [D-280](s13-decision-register.md#d-280), [D-308](s13-decision-register.md#d-308). Evidence: `src/schema/ddl.rs` (`CREATE_EDGE_KINDS_TABLE`), `src/schema/migrations.rs` (`add_edge_kinds`), `src/graph/pointer.rs` (`open_edges`, `open_edges_resolved`), `src/graph/lineage.rs` (`KeySlots::target` is `Option`), `src/batch.rs` (`PointerSet`, `link_previous`), `src/connection.rs` (`register_edge_kind`, `set_pointer`, `pointer`, `pointers`, `check_functional`, `move_pointer`), `tests/migration_tests.rs` (`a_v24_database_climbs_to_v25_and_gains_an_empty_edge_kind_register`), `tests/v020_conversation_tests.rs` (`m3_pointers`), `examples/conversation_probe.rs`.
+<a id="d-309"></a>D-309 — Pointers: functional edge kinds, resolved per lineage, moved under one stamp (0.22.0, M3, schema **v24 → v25**). [Doctrine II](s0-s3-foundations.md#doctrine-ii), [Doctrine III](s0-s3-foundations.md#doctrine-iii), [D-060](s13-decision-register.md#d-060), [D-214](s13-decision-register.md#d-214), [D-225](s13-decision-register.md#d-225), [D-250](s13-decision-register.md#d-250), [D-280](s13-decision-register.md#d-280), [D-308](s13-decision-register.md#d-308). Evidence: `src/schema/ddl.rs` (`CREATE_EDGE_KINDS_TABLE`), `src/schema/migrations.rs` (`add_edge_kinds`), `src/graph/pointer.rs` (`open_edges`, `open_edges_resolved`), `src/graph/lineage.rs` (`KeySlots::target` is `Option`), `src/batch.rs` (`PointerSet`, `link_previous`), `src/connection.rs` (`register_edge_kind`, `set_pointer`, `pointer`, `pointers`, `check_functional`, `move_pointer`), `tests/migration_tests.rs` (`a_v24_database_climbs_to_v25_and_gains_an_empty_edge_kind_register`), `tests/v020_conversation_tests.rs` (`m3_pointers`), `examples/conversation_probe.rs`.
 
 A branch cannot restate an inherited concept (D-214) — the overlay is deferred and stays deferred — so branch-scoped **mutable state** had nowhere to live: a session's head turn, a file's current version, a run's status. Callers kept it in concepts (refused on a branch with `CrossLineageError`) or in `kv_store` (branch-global by design, D-280). The state is a relationship that changes, and the ledger already has the right primitive for that: an edge, which branches, shadows, diffs and folds. What was missing was the rule *one open target at a time* and an operation that moves it.
 
@@ -6401,8 +6401,70 @@ Rust). The statements are now shared builders (`candidates_sql`,
 `keyed_sql`), so the pin runs on the bytes the read prepares rather than a
 hand-copied reproduction.
 
+**Plan §4.3, reconciled 2026-11-07:** the read gained the missing clock and
+the ready-set gained its index, both after the plan's red-first discipline.
+The red tests, taken on the bare port before anything changed:
+`a_pointer_read_at_a_valid_instant_answers_where_the_status_held` answered
+`Some("t9")` — the workspace of now — for an instant whose turn had moved
+ten batches ago; `a_pointer_read_before_the_first_move_names_nothing`
+answered `Some("t9")` where `None` was the truth;
+`a_pointer_valid_read_with_a_recorded_bound_answers_believed_then` answered
+`Some("a8")` and was then rewritten to the honest two-clock shape, because
+the fold at an earlier cut answers with the row whose interval was *open in
+that era*: the same valid instant reads `t4` at the turn-4 cut and `t5` at
+the turn-6 cut, which is the compose
+`the_two_clocks_compose_on_a_pointer_read` asserts; and the Python mirror
+asked the keyword and got `TypeError` until the binding knew it.
 
-<a id="d-310"></a><a id="d-310"></a>D-310 — Concepts are read per lineage: cut at each ancestor's fork point, held versus named, and searched per lineage (0.22.0, M4 and M5). [D-214](s13-decision-register.md#d-214) (amends reads — see the "Amended by" line there), [D-220](s13-decision-register.md#d-220), [D-223](s13-decision-register.md#d-223) (amends — the concept half of the cutoff), [D-260](s13-decision-register.md#d-260), [D-282](s13-decision-register.md#d-282), [D-289](s13-decision-register.md#d-289), [D-290](s13-decision-register.md#d-290). Evidence: `src/graph/concept_lineage.rs`, `src/graph/builder.rs` (`NODES_ONLY`, the forked-database arm of `build_sql_with`, `execute_ids_explained`, `execute`), `src/temporal/as_of.rs` (`hydrate_attributes_on`, `ConceptVersion`), `src/graph/subgraph.rs` (the forked arm of `load_subgraph_with`), `src/connection.rs` (`concepts_by_id`), `src/vector/hybrid.rs` (`keyword_search_on`, `HybridSearch::on_branch`), `src/vector/search.rs` (`search_vector_on`), `tests/v020_conversation_tests.rs` (`m4_concepts`, `m5_search`), `tests/cross_branch_tests.rs` (unchanged and green).
+**`plan.valid` is now read** — the qualifier 0.15.10 promised would never
+go unread, which this read documented away until now. The resolution is the
+`edges_at` containment: the reader's own WHERE gains `valid_from <= ?v AND
+?v < l.valid_to` in place of the open-sentinel filter (`src/graph/pointer.rs`;
+the statement and its slots now come from one `open_statement` builder the
+pin explains). A read with no valid instant asks what is open, exactly as
+the write path still asks; the two-step resolved fast path answers the open
+question only, and a valid read takes the one lowered statement. A
+whole-kind listing **at an instant** scans — the partial index below cannot
+serve containment, its WHERE demands the sentinel — and is left unindexed
+deliberately: the ready-set question the workspace asks is the open one,
+the scan is the arm the probe already measured, and the single-source valid
+read still rides the prefix key on `idx_lc_open_interval`.
+
+**`idx_lc_pointer_kind`** (`links_current (edge_type, source_id) WHERE
+valid_to = <open sentinel>`), added in the v25 rung after the probe the
+plan demanded: `examples/probe_pointers_kind.rs`, 10,000 sources × 3 moves,
+p50 of 31, release, idle — the ready-set read **24.190 → 14.229 ms
+(1.70x)**; the scan it replaced is `SCAN l USING INDEX
+idx_lc_open_interval`, whose 30,000 rows carry 20,000 closed ones the read
+discards and the partial index never holds. Write price from
+`edge_chunk_index_cost_probe`: **+0.067 ms of the 2.162 ms** 90-edge chunk
+(3.1%), met against the D-304 ceiling — gate 6 stands. The pin ships with
+the index: `graph::pointer::plan_pins::
+the_ready_set_seeks_the_kind_index_and_sorts_the_workspace_order` (the
+seek, one bound column, and the read's own workspace sort, which the p50
+was measured with; libsql's in-memory engine words the plan `USING INDEX`
+where the file engine words it `USING PARTIAL INDEX` — the index name is
+the load-bearing half either way).
+
+**The §3.4 pin re-pinned in the same commit:** with the partial index in
+the schema, the candidates arm's own WHERE qualifies it on the Resolved
+shape too, and the planner took its two-slot seek — the prefix key's two
+equality columns, still no `target_id`, the DISTINCT b-tree unchanged.
+`conversation_probe` re-ran idle: pointer read from a fork **1.41–1.45 →
+1.31 ms**, one-call append ~3.0 ms unchanged, trunk pointer read ~0.10 ms.
+
+**Registering an existing kind as functional stays a refusal at the next
+write, not a registration-time scan** — the draft's rejected-scan decision
+is kept and documented on both surfaces (the crate docs on
+`register_edge_kind`, the `.pyi` and the Python docstring): the next write
+of that `(source, kind)` is refused until a pointer move closes the extra
+open targets. Revisit only if Silk hits it.
+
+
+
+
+
+<a id="d-310"></a>D-310 — Concepts are read per lineage: cut at each ancestor's fork point, held versus named, and searched per lineage (0.22.0, M4 and M5). [D-214](s13-decision-register.md#d-214) (amends reads — see the "Amended by" line there), [D-220](s13-decision-register.md#d-220), [D-223](s13-decision-register.md#d-223) (amends — the concept half of the cutoff), [D-260](s13-decision-register.md#d-260), [D-282](s13-decision-register.md#d-282), [D-289](s13-decision-register.md#d-289), [D-290](s13-decision-register.md#d-290). Evidence: `src/graph/concept_lineage.rs`, `src/graph/builder.rs` (`NODES_ONLY`, the forked-database arm of `build_sql_with`, `execute_ids_explained`, `execute`), `src/temporal/as_of.rs` (`hydrate_attributes_on`, `ConceptVersion`), `src/graph/subgraph.rs` (the forked arm of `load_subgraph_with`), `src/connection.rs` (`concepts_by_id`), `src/vector/hybrid.rs` (`keyword_search_on`, `HybridSearch::on_branch`), `src/vector/search.rs` (`search_vector_on`), `tests/v020_conversation_tests.rs` (`m4_concepts`, `m5_search`), `tests/cross_branch_tests.rs` (unchanged and green).
 
 Edges have been read per lineage since 0.14.4 and cut at fork points since 0.14.6. Concepts were not, and two defects followed, both reproduced on 0.19.1. **A branch saw its ancestor's post-fork edits**: `concepts` is updated in place, so once the trunk re-upserts a concept after a fork, the version the branch inherited is not in the table; a branched `traverse` under `CURRENT` — and under `AT_TIME` at now — returned the trunk's new title, and only `reconstruct_on` gave the branch's. That is D-223's finding about `links_current`, arriving a second time on the other table. **Every lineage saw every other's concepts**: a sibling's concept resolved by id from the trunk, and `keyword_search` found it from anywhere.
 

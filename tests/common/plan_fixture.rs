@@ -36,6 +36,9 @@ use macrame::schema::ddl;
 
 pub const TS: &str = "2026-01-01T00:00:00.000000Z";
 pub const OPEN: &str = "9999-12-31T23:59:59.999999Z";
+/// Where the fixture's closed pointer rows end — the valid_to of every row
+/// the ready-set's partial index deliberately does not hold.
+const CLOSED: &str = "2025-12-31T23:00:00.000000Z";
 
 /// One hub with 150 edges, against 60 single-edge leaves.
 ///
@@ -131,6 +134,39 @@ pub async fn populated_without_statistics(db_path: &std::path::Path) -> libsql::
     // The leaves.
     for i in (HUB_EDGES + 1)..=(HUB_EDGES + LEAF_EDGES) {
         insert_edge(&conn, &format!("c{i:04}"), &format!("c{:04}", i + 1)).await;
+    }
+    // The pointer workspace's history pile (0.22.0, plan §4.3, D-309).
+    //
+    // `idx_lc_pointer_kind` is partial on the open sentinel, so its worth is
+    // the rows it does NOT hold: a kind whose closed rows the ready-set read
+    // would otherwise scan and discard. Six closed for every five open, one
+    // past the hub and leaf kinds, valid_from stepping a second a move so
+    // `(source, target, edge_type, valid_from)` stays a key. The other pins
+    // seek on columns the CUR rows do not touch and the shipped figures
+    // afterwards were unchanged within the sweep's own spread.
+    let cur_closed = 8;
+    let cur_open = 3;
+    for i in 0..(cur_closed + cur_open) {
+        let open = i >= cur_closed;
+        conn.execute(
+            "INSERT INTO links (source_id, target_id, edge_type, valid_from, \
+             valid_to, weight, properties, recorded_at) \
+             VALUES (?1, ?2, 'CUR', ?3, ?4, 1.0, '{}', ?3)",
+            libsql::params![
+                format!("c{:04}", i % 40),
+                format!("c{:04}", (i * 7 + 3) % 260),
+                format!(
+                    "2025-{:02}-{:02}T{:02}:{:02}:00.000000Z",
+                    1 + i % 12,
+                    1 + i % 28,
+                    i % 24,
+                    i % 60
+                ),
+                if open { OPEN } else { CLOSED },
+            ],
+        )
+        .await
+        .unwrap();
     }
     conn.execute("COMMIT", ()).await.unwrap();
     conn

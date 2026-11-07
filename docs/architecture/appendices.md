@@ -545,11 +545,16 @@ report.recorded_at;   // the one stamp; BatchTooLarge over MAX_BATCH_ROWS
 
 // Pointers: functional edge kinds (M3, D-309). At most one open target per
 // (source, kind) per lineage view, enforced on every edge write path.
-db.register_edge_kind("HEAD", true).await?;          // v23 `edge_kinds`, outside
+db.register_edge_kind("HEAD", true).await?;          // v25 `edge_kinds`, outside
 let kinds: Vec<(String, bool)> = db.edge_kinds().await?;   //   the ledger
 let ch: PointerChange = db.set_pointer(PointerSet::new("session", "HEAD", "turn:9")
     .valid_from(vf).on_branch(alt.id.clone())).await?;     // closes the old target
 let head: Option<String> = db.pointer("session", "HEAD", ReadPlan::new().on(alt.id.clone())).await?;
+// The valid instant makes the read ask where it *held then* (M2 additions,
+// plan §4.3); the ready-set listing (`pointers(kind)` across every source)
+// seeks `idx_lc_pointer_kind`, priced once rather than scanned.
+let then: Option<String> = db.pointer("session", "HEAD", ReadPlan::new()
+    .on(alt.id.clone()).valid_at("2026-01-01T00:07:00.000000Z")).await?;
 let all: Vec<(String, String)> = db.pointers("CURRENT", plan).await?;
 // A second open target is FunctionalEdgeConflict; set_pointer is the move.
 

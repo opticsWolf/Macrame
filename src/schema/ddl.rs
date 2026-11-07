@@ -1352,6 +1352,41 @@ pub(crate) const LC_LINEAGE_CUT: &str = "CREATE INDEX IF NOT EXISTS \
      (branch_id, recorded_at, source_id, target_id, edge_type, valid_from, \
       valid_to, weight);";
 
+/// The pointer kind's own partial index (0.22.0, plan §4.3, probed on [D-309]'s
+/// read).
+///
+/// The write path asks a pointer a single-source question — `(source, kind)`
+/// — and [`LC_OPEN_INTERVAL`] leads with `source_id`, so that read seeks. The
+/// workspace read asks the whole kind — `pointers("CURRENT", …)` across every
+/// source — and there the same index is only a
+/// `SCAN l USING INDEX idx_lc_open_interval`: it walked 30,000 pointer rows
+/// picked the 10,000 open ones out of row data. Measured
+/// (`examples/probe_pointers_kind.rs`, 10,000 sources × 3 moves, p50 of 31,
+/// the fixture's own EXPLAIN in the register):
+///
+///   pointering one kind across all sources  24.190 -> 14.229 ms   1.70x
+///
+/// A partial index holds no closed row — a pointer's history is closed rows
+/// and never returns — so the 1.70x is paid for without twice its size on
+/// disk, and the write price is the price of open rows only. Priced on the
+/// way in by `examples/edge_chunk_index_cost_probe.rs` on the 90-edge chunk
+/// (the D-304 swing), where the shipped figure is in `CREATE_INDICES`' entry
+/// below.
+///
+/// The lead column is `edge_type`, then `source_id`, because the ready-set
+/// query binds the kind and orders by source; the ORDER BY's valid_from and
+/// target tie-break are left to the read's own sort (["USE TEMP B-TREE"])
+/// — the probe measured the shipped shape *with* that sort priced in.
+///
+/// Partial on `valid_to = <open sentinel>` because open rows are the
+/// workspace's only access path and every non-open row is one the read
+/// discards; write prices are open-row-only for the same reason.
+///
+/// [D-309]: ../../docs/architecture/s13-decision-register.md#d-309
+pub(crate) const LC_POINTER_KIND: &str = "CREATE INDEX IF NOT EXISTS \
+     idx_lc_pointer_kind ON links_current \
+     (edge_type, source_id) WHERE valid_to = '9999-12-31T23:59:59.999999Z';";
+
 /// Every index declared `ON links_current`, for the shadow swap to put back
 /// (0.15.19, review C-12).
 ///
@@ -1374,8 +1409,12 @@ pub(crate) const LC_LINEAGE_CUT: &str = "CREATE INDEX IF NOT EXISTS \
 /// `every_links_current_index_is_in_the_swap_list` fails the build if
 /// `CREATE_INDICES` gains an entry on this table that is not here — which is
 /// the property the substring test was reaching for and could not state.
-pub(crate) const LINKS_CURRENT_INDICES: &[&str] =
-    &[LC_TRAVERSAL_COVER, LC_OPEN_INTERVAL, LC_LINEAGE_CUT];
+pub(crate) const LINKS_CURRENT_INDICES: &[&str] = &[
+    LC_TRAVERSAL_COVER,
+    LC_OPEN_INTERVAL,
+    LC_LINEAGE_CUT,
+    LC_POINTER_KIND,
+];
 
 /// Every trigger that names `links_current`, with the name to drop it by
 /// (0.15.19, review C-12).
@@ -1499,6 +1538,11 @@ pub const CREATE_INDICES: &[&str] = &[
     // The two shapes stopped sharing an access path when the reader stopped
     // walking `links_current` directly, so they can no longer share an index.
     LC_LINEAGE_CUT,
+    // The ready-set's private index (0.22.0, plan §4.3, `LC_POINTER_KIND`
+    // above). The read it serves is priced once in the entry above; the
+    // write price it shares the ledger's budget with is below, from the
+    // same probe — and is the figure the write gate had to stay inside.
+    LC_POINTER_KIND,
     "CREATE INDEX IF NOT EXISTS idx_txlog_time ON transaction_log (recorded_at);",
     // `idx_txlog_entity ON transaction_log (entity_id)` stood here from the
     // baseline to v22, and the v22 -> v23 rung drops it (0.20.0, [D-301]).

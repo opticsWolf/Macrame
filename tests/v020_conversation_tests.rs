@@ -1003,6 +1003,177 @@ mod m3_pointers {
     }
 }
 
+// ── M2 additions · pointer reads at a valid instant (plan 4.3, D-309) ──
+
+mod m2_pointer_valid {
+    use super::*;
+
+    /// "what was the status then" is a valid-time question. The draft read
+    /// the open row and ignored `plan.valid`; on the bare port this read
+    /// answered the workspace of now for an instant that asked about a past
+    /// turn.
+    #[tokio::test]
+    async fn a_pointer_read_at_a_valid_instant_answers_where_the_status_held() {
+        let h = harness();
+        let db = h.db_with_fake_clock().await;
+        trunk_turns(&db, 10).await;
+        // t3's belief was open from 00:03 until t4's move at 00:04; 00:03:30
+        // is inside it, and every later turn's interval is not.
+        let read = db
+            .pointer(
+                "session",
+                "HEAD",
+                ReadPlan::new().valid_at("2026-01-01T00:03:30.000000Z"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(read.as_deref(), Some("t3"));
+    }
+
+    /// Before the first move there was no open target: a valid-time read
+    /// answers `None`, not the workspace of now.
+    #[tokio::test]
+    async fn a_pointer_read_before_the_first_move_names_nothing() {
+        let h = harness();
+        let db = h.db_with_fake_clock().await;
+        trunk_turns(&db, 10).await;
+        let read = db
+            .pointer(
+                "session",
+                "HEAD",
+                ReadPlan::new().valid_at("2025-12-31T00:00:00.000000Z"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(read, None);
+    }
+
+    #[tokio::test]
+    async fn pointers_at_a_valid_instant_lists_the_workspace_of_then() {
+        let h = harness();
+        let db = h.db_with_fake_clock().await;
+        db.register_edge_kind("CURRENT", true).await.unwrap();
+        let mut w = WriteBatch::new();
+        for f in ["f:a", "f:b", "v:a1", "v:a2", "v:b1"] {
+            w = w.concept(ConceptUpsert::new(f, f).valid_from(VF));
+        }
+        db.write_batch(
+            w.pointer(
+                PointerSet::new("f:a", "CURRENT", "v:a1").valid_from("2026-02-01T00:00:00.000000Z"),
+            )
+            .pointer(
+                PointerSet::new("f:b", "CURRENT", "v:b1").valid_from("2026-02-01T00:00:00.000000Z"),
+            ),
+        )
+        .await
+        .unwrap();
+        db.set_pointer(
+            PointerSet::new("f:a", "CURRENT", "v:a2").valid_from("2026-03-01T00:00:00.000000Z"),
+        )
+        .await
+        .unwrap();
+        let read = db
+            .pointers(
+                "CURRENT",
+                ReadPlan::new().valid_at("2026-02-15T00:00:00.000000Z"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            read,
+            vec![
+                ("f:a".to_string(), "v:a1".to_string()),
+                ("f:b".into(), "v:b1".into())
+            ]
+        );
+    }
+
+    /// The two clocks compose as they do on every other reader: the same
+    /// valid instant answers differently at the two recorded cuts, because
+    /// what the fold at each cut holds for that instant is what was believed
+    /// then. At the turn-4 cut the head was t4, and its belief reached the
+    /// valid instant (an open interval in that era's fold); by the turn-6
+    /// cut t5 had held and given way, and the same instant reads t5. Red on
+    /// the bare port: `plan.valid` was ignored, so both arms answered the
+    /// workspace of now.
+    #[tokio::test]
+    async fn the_two_clocks_compose_on_a_pointer_read() {
+        let h = harness();
+        let db = h.db_with_fake_clock().await;
+        db.register_edge_kind("HEAD", true).await.unwrap();
+        db.upsert_concept(ConceptUpsert::new("session", "s").valid_from(VF))
+            .await
+            .unwrap();
+        let mut stamps: Vec<String> = Vec::new();
+        for i in 0..10 {
+            let head = db
+                .pointer(
+                    "session",
+                    "HEAD",
+                    if stamps.is_empty() {
+                        ReadPlan::new()
+                    } else {
+                        ReadPlan::new().recorded_at(stamps[i - 1].as_str())
+                    },
+                )
+                .await
+                .unwrap()
+                .unwrap_or_else(|| "session".to_string());
+            let report = db
+                .write_batch(
+                    WriteBatch::new()
+                        .concept(
+                            ConceptUpsert::new(format!("t{i}"), format!("turn {i}")).valid_from(VF),
+                        )
+                        .edge(EdgeAssertion::new(&head, format!("t{i}"), "NEXT").valid_from(VF))
+                        .pointer(
+                            PointerSet::new("session", "HEAD", format!("t{i}"))
+                                .valid_from(format!("2026-01-01T00:{:02}:00.000000Z", i)),
+                        ),
+                )
+                .await
+                .unwrap();
+            stamps.push(report.recorded_at.clone());
+        }
+        // The present answers t5: it held from 00:05 to 00:06, and at 00:05:30
+        // it was the belief.
+        let now = db
+            .pointer(
+                "session",
+                "HEAD",
+                ReadPlan::new().valid_at("2026-01-01T00:05:30.000000Z"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(now.as_deref(), Some("t5"));
+        // At the turn-4 cut the same instant was future: t4's belief reached
+        // it, because the fold at that stamp still held t4's interval open.
+        let at4 = db
+            .pointer(
+                "session",
+                "HEAD",
+                ReadPlan::new()
+                    .valid_at("2026-01-01T00:05:30.000000Z")
+                    .recorded_at(stamps[4].as_str()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(at4.as_deref(), Some("t4"));
+        // By the turn-6 cut t5 had held, t6 had taken over, and the fold
+        // answers the instant with what was true then.
+        let at6 = db
+            .pointer(
+                "session",
+                "HEAD",
+                ReadPlan::new()
+                    .valid_at("2026-01-01T00:05:30.000000Z")
+                    .recorded_at(stamps[6].as_str()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(at6.as_deref(), Some("t5"));
+    }
+}
 // ── M7 · change feed ────────────────────────────────────────────────────────
 
 mod m7_changes {

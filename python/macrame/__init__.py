@@ -552,18 +552,44 @@ class BranchView:
         )
 
     def pointer(
-        self, source: str, edge_type: str, *, as_of_recorded: Timestamp | None = None
+        self,
+        source: str,
+        edge_type: str,
+        *,
+        as_of_valid: Timestamp | None = None,
+        as_of_recorded: Timestamp | None = None,
     ) -> str | None:
-        """`Database.pointer` on this lineage."""
+        """`Database.pointer` on this lineage.
+
+        `as_of_valid = ts` asks where it held then, not where it points now
+        (0.22.0, plan §4.3).
+        """
         return self._db.pointer(
-            source, edge_type, branch=self._id, as_of_recorded=as_of_recorded
+            source,
+            edge_type,
+            branch=self._id,
+            as_of_valid=as_of_valid,
+            as_of_recorded=as_of_recorded,
         )
 
     def pointers(
-        self, edge_type: str, *, as_of_recorded: Timestamp | None = None
+        self,
+        edge_type: str,
+        *,
+        as_of_valid: Timestamp | None = None,
+        as_of_recorded: Timestamp | None = None,
     ) -> list[tuple[str, str]]:
-        """`Database.pointers` on this lineage."""
-        return self._db.pointers(edge_type, branch=self._id, as_of_recorded=as_of_recorded)
+        """`Database.pointers` on this lineage.
+
+        `as_of_valid = ts` is that instant's workspace — where every source
+        stood then (0.22.0, plan §4.3).
+        """
+        return self._db.pointers(
+            edge_type,
+            branch=self._id,
+            as_of_valid=as_of_valid,
+            as_of_recorded=as_of_recorded,
+        )
 
     def concepts_by_id(
         self,

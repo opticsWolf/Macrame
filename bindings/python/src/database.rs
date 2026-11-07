@@ -1944,16 +1944,21 @@ impl PyDatabase {
     /// Where `(source, edge_type)` points on a lineage, or `None` (0.22.0,
     /// D-309). `as_of_recorded` asks where it pointed at a past transaction
     /// time.
-    #[pyo3(signature = (source, edge_type, *, branch = None, as_of_recorded = None))]
+    /// Where `(source, edge_type)` points on a lineage, or `None` (0.22.0,
+    /// D-309). With `as_of_valid = ts` it is where it *held then* — the
+    /// interval that covers `ts` — while `as_of_recorded` bounds what the
+    /// ledger believed, as every reader takes it (0.22.0, plan §4.3).
+    #[pyo3(signature = (source, edge_type, *, branch = None, as_of_valid = None, as_of_recorded = None))]
     fn pointer(
         &self,
         py: Python<'_>,
         source: &str,
         edge_type: &str,
         branch: Option<&str>,
+        as_of_valid: Option<&Bound<'_, PyAny>>,
         as_of_recorded: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Option<String>> {
-        let plan = conversation_plan(branch, None, as_of_recorded)?;
+        let plan = conversation_plan(branch, as_of_valid, as_of_recorded)?;
         let (source, edge_type) = (source.to_string(), edge_type.to_string());
         self.with_db(py, move |db| {
             runtime()
@@ -1964,15 +1969,19 @@ impl PyDatabase {
 
     /// Every pointer of `edge_type` on a lineage as `(source, target)` pairs,
     /// in source order (0.22.0, D-309) — e.g. every file's current version.
-    #[pyo3(signature = (edge_type, *, branch = None, as_of_recorded = None))]
+    ///
+    /// `as_of_valid` makes it that instant's workspace — where each source
+    /// stood then — instead of what is open now (0.22.0, plan §4.3).
+    #[pyo3(signature = (edge_type, *, branch = None, as_of_valid = None, as_of_recorded = None))]
     fn pointers(
         &self,
         py: Python<'_>,
         edge_type: &str,
         branch: Option<&str>,
+        as_of_valid: Option<&Bound<'_, PyAny>>,
         as_of_recorded: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Vec<(String, String)>> {
-        let plan = conversation_plan(branch, None, as_of_recorded)?;
+        let plan = conversation_plan(branch, as_of_valid, as_of_recorded)?;
         let edge_type = edge_type.to_string();
         self.with_db(py, move |db| {
             runtime()

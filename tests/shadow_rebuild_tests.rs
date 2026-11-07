@@ -238,9 +238,11 @@ async fn the_indexes_come_back_with_their_declared_names() {
             // v14 (0.14.14, D-231). The swap rebuilds whatever
             // `CREATE_INDICES` declares, so a third index on this table needed
             // no code change here — only this list, which is the point of
-            // asserting names rather than a count.
+            // asserting names rather than a count. The ready-set's partial
+            // index joined in 0.22.0 (plan §4.3) with no swap-side change either.
             "idx_lc_lineage_cut".to_string(),
             "idx_lc_open_interval".to_string(),
+            "idx_lc_pointer_kind".to_string(),
             "idx_lc_traversal_cover".to_string(),
         ],
         "the swap left links_current indexed under different names than \

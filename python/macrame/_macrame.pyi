@@ -1648,6 +1648,10 @@ class Database:
         A functional kind holds at most one open target per `(source, kind)` in
         each lineage's view; every edge write refuses a second one with
         `FunctionalEdgeConflictError`, and `set_pointer` moves it.
+
+        Registration scans nothing: a lineage that already holds two open
+        targets keeps them, and the *next* write of that `(source, kind)` is
+        refused until a pointer move closes them (0.22.0, plan §4.3).
         """
     def edge_kinds(self) -> list[tuple[str, bool]]: ...
     def set_pointer(
@@ -1672,6 +1676,7 @@ class Database:
         edge_type: str,
         *,
         branch: str | None = None,
+        as_of_valid: Timestamp | None = None,
         as_of_recorded: Timestamp | None = None,
     ) -> str | None: ...
     def pointers(
@@ -1679,6 +1684,7 @@ class Database:
         edge_type: str,
         *,
         branch: str | None = None,
+        as_of_valid: Timestamp | None = None,
         as_of_recorded: Timestamp | None = None,
     ) -> list[tuple[str, str]]: ...
     def write_batch(

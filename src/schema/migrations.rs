@@ -667,6 +667,12 @@ async fn add_blob_store(conn: &libsql::Connection) -> Result<()> {
 /// [D-309]: ../../docs/architecture/s13-decision-register.md#d-309
 async fn add_edge_kinds(conn: &libsql::Connection) -> Result<()> {
     conn.execute(CREATE_EDGE_KINDS_TABLE, ()).await?;
+    // The ready-set index rides the same rung (0.22.0, plan §4.3): the probe
+    // that priced the listing read was the plan's own condition for adding an
+    // index, and the rung that declares the kind register is the rung that
+    // ships the read that needs it. No table changes — index-only, on the
+    // ground the v22 → v23 and v23 → v24 index rungs stand on.
+    create_indices(conn, &["idx_lc_pointer_kind"]).await?;
     Ok(())
 }
 

@@ -4053,7 +4053,11 @@ impl Database {
     /// Flipping a kind to functional does not check rows already written: a
     /// lineage that already holds two open targets keeps them, and the next
     /// write of that `(source, kind)` is refused until a pointer move closes
-    /// them.
+    /// them. The plan considered a registration-time scan over every
+    /// lineage's view and rejected it — the cost lands on `startup` for an
+    /// offence the writer refuses anyway — so keep the draft's behaviour and
+    /// document it (0.22.0, plan §4.3): register first, sweep only if the
+    /// data demands it.
     ///
     /// # Errors
     ///
@@ -4111,13 +4115,24 @@ impl Database {
     }
 
     /// Where `(source, kind)` points on `plan`'s lineage, or `None` (0.22.0,
-    /// M3, [D-309]).
+    /// M3, [D-309]; the valid instant 0.22.0, plan §4.3).
     ///
-    /// The open target — the latest belief about the pointer, independent of
-    /// a valid-time instant, so `plan.valid` and `plan.limit` are ignored.
-    /// `plan.recorded` asks where it pointed at a past transaction time. On a
-    /// kind that is not functional and holds several open targets, the one
-    /// with the newest `valid_from` (then the smallest id) is returned.
+    /// With no valid instant: the open target — the latest belief about the
+    /// pointer, independent of a valid-time instant. `plan.valid` names an
+    /// instant and the read becomes that instant's question — *where did
+    /// `(source, kind)` hold then* — resolved like
+    /// [`query_as_of_edges`](crate::temporal::query_as_of_edges):
+    /// `valid_from <= ts`, `ts < valid_to`, on `plan`'s lineage view. `None`
+    /// then means "not minted yet" (or moved past and not back), not "now
+    /// points nowhere", and the answer and the present one can differ in
+    /// both directions. `plan.recorded` composes as it does on every reader:
+    /// a past transaction time answers the belief held then. `plan.limit`
+    /// stays unimplemented: a pointer read returns one row or a listing,
+    /// never a bounded sample.
+    ///
+    /// On a kind that is not functional and holds several targets at the
+    /// instant, the one with the newest `valid_from` (then the smallest id)
+    /// is returned — the same deterministic choice as the open read.
     ///
     /// [D-309]: ../docs/architecture/s13-decision-register.md#d-309
     pub async fn pointer(
@@ -4126,7 +4141,7 @@ impl Database {
         kind: &str,
         plan: ReadPlan,
     ) -> Result<Option<String>> {
-        let recorded = self.pointer_instant(&plan).await?;
+        let (valid, recorded) = self.pointer_instants(&plan).await?;
         let lineages = Lineages::load(&self.read_conn).await?;
         let branch = plan
             .branch_name()
@@ -4137,6 +4152,7 @@ impl Database {
             branch,
             Some(source),
             kind,
+            valid.as_deref(),
             recorded.as_deref(),
         )
         .await?
@@ -4146,15 +4162,20 @@ impl Database {
     }
 
     /// Every pointer of `kind` on `plan`'s lineage, as `(source, target)` in
-    /// source order (0.22.0, M3, [D-309]).
+    /// source order (0.22.0, M3, [D-309]; the valid instant 0.22.0, plan
+    /// §4.3).
     ///
     /// The workspace view: `pointers("CURRENT", …)` is every file's current
     /// version on a branch in one read. One row per source, chosen as
-    /// [`Self::pointer`] chooses.
+    /// [`Self::pointer`] chooses. With `plan.valid` it is that instant's
+    /// workspace — Silk's ready-set at a turn's start — resolved per source
+    /// exactly as [`Self::pointer`] resolves one, at the cost of the whole
+    /// kind's rows rather than a seek per source; see the index the probe
+    /// priced for it.
     ///
     /// [D-309]: ../docs/architecture/s13-decision-register.md#d-309
     pub async fn pointers(&self, kind: &str, plan: ReadPlan) -> Result<Vec<(String, String)>> {
-        let recorded = self.pointer_instant(&plan).await?;
+        let (valid, recorded) = self.pointer_instants(&plan).await?;
         let lineages = Lineages::load(&self.read_conn).await?;
         let branch = plan
             .branch_name()
@@ -4165,6 +4186,7 @@ impl Database {
             branch,
             None,
             kind,
+            valid.as_deref(),
             recorded.as_deref(),
         )
         .await?;
@@ -4177,8 +4199,16 @@ impl Database {
         Ok(out)
     }
 
-    /// The recorded instant a pointer read names, checked against the hot log.
-    async fn pointer_instant(&self, plan: &ReadPlan) -> Result<Option<String>> {
+    /// The instants a pointer read names, normalized: the valid instant is
+    /// canonicalized only (a valid question has no hot-log bound — projection
+    /// intervals always answer), the recorded one also checked against the
+    /// hot log, as its own doc records.
+    async fn pointer_instants(&self, plan: &ReadPlan) -> Result<(Option<String>, Option<String>)> {
+        let valid = plan
+            .valid
+            .as_deref()
+            .map(timestamp::normalize)
+            .transpose()?;
         let recorded = plan
             .recorded
             .as_deref()
@@ -4189,7 +4219,7 @@ impl Database {
                 return Err(DbError::RecordedInstantUnreachable { ts: ts.to_string() });
             }
         }
-        Ok(recorded)
+        Ok((valid, recorded))
     }
 
     /// The highest log sequence number ever allocated — where a change-feed
@@ -7909,6 +7939,7 @@ async fn check_functional(
             Some(&e.source),
             &e.edge_type,
             None,
+            None,
         )
         .await?;
         if let Some(other) = open.iter().find(|o| o.target != e.target) {
@@ -7947,6 +7978,7 @@ async fn move_pointer(
         branch,
         Some(&ptr.source),
         &ptr.edge_type,
+        None,
         None,
     )
     .await?;

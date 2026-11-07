@@ -8,11 +8,16 @@
 //! It is a reader of the lowered lineage plan like `plan::edges_at`, with its
 //! own placeholder layout — `?1` source (or unbound when listing every
 //! source), `?2` kind, then the branch when the shape binds one, then the
-//! recorded instant when there is one, then the ancestry block — so every
-//! shape and both clocks are the lowering's, not a fourth spelling of them.
+//! valid instant when there is one, then the recorded instant when there is
+//! one, then the ancestry block — so every shape and both clocks are the
+//! lowering's, not a fifth spelling of them.
 //!
-//! "Open" means `valid_to` is the open sentinel: a pointer is the latest
-//! belief about where `(source, kind)` points, not a valid-time question.
+//! A read with no valid instant asks "what is open": `valid_to` is the open
+//! sentinel, and that is still the only question the write path asks. A read
+//! with one asks "where did `(source, kind)` hold at that instant", resolved
+//! the way [`crate::plan::edges_at`] resolves validity — `valid_from <= ts /
+//! <`, `ts < valid_to` — on the same lineage view, so a workspace read at a
+//! past turn answers with the status that turn saw (0.22.0, plan §4.3).
 //!
 //! [D-309]: ../../docs/architecture/s13-decision-register.md#d-309
 
@@ -42,6 +47,7 @@ pub(crate) async fn open_edges(
     branch: &str,
     source: Option<&str>,
     kind: &str,
+    valid: Option<&str>,
     recorded: Option<&str>,
 ) -> Result<Vec<OpenEdge>> {
     let shape = lineages.shape(branch)?;
@@ -49,17 +55,56 @@ pub(crate) async fn open_edges(
         LineageShape::Resolved => lineages.ancestry(branch),
         _ => Vec::new(),
     };
-    if let (LineageShape::Resolved, Some(src), None) = (shape, source, recorded) {
-        return open_edges_resolved(conn, branch, &ancestry, src, kind).await;
+    // The two-step resolved read answers the open question under the write
+    // path's own shape. A read naming a valid instant asks a different
+    // question — containment, not the sentinel — and the open-sentinel CTEs
+    // the two steps are built from cannot answer it; it takes the one
+    // lowered statement below, the way `edges_at` resolves a listing
+    // (0.22.0, plan §4.3).
+    if shape == LineageShape::Resolved {
+        if let (Some(src), None, None) = (source, valid, recorded) {
+            return open_edges_resolved(conn, branch, &ancestry, src, kind).await;
+        }
     }
+    let (sql, params) = open_statement(shape, &ancestry, branch, source, kind, valid, recorded);
+
+    let mut rows = conn.query(&sql, params).await?;
+    let mut out = Vec::new();
+    while let Some(row) = rows.next().await? {
+        out.push(OpenEdge {
+            source: row.get(0)?,
+            target: row.get(1)?,
+            valid_from: row.get(2)?,
+            branch_id: row.get(3)?,
+        });
+    }
+    Ok(out)
+}
+
+/// The lowered pointer statement and its parameter vector — the one spelling
+/// of the reader outside the two-step resolved fast path, so the plan pin can
+/// explain exactly what executes and a later edit cannot arrive at a plan
+/// nothing pinned.
+pub(crate) fn open_statement(
+    shape: LineageShape,
+    ancestry: &[crate::graph::lineage::Ancestor],
+    branch: &str,
+    source: Option<&str>,
+    kind: &str,
+    valid: Option<&str>,
+    recorded: Option<&str>,
+) -> (String, Vec<libsql::Value>) {
     const BRANCH_SLOT: usize = 3;
-    let recorded_slot = BRANCH_SLOT + usize::from(shape.binds_branch());
+    let valid_slot = BRANCH_SLOT + usize::from(shape.binds_branch());
+    let recorded_slot = valid_slot + usize::from(valid.is_some());
     let ancestry_slot = recorded_slot + usize::from(recorded.is_some());
     // A single-source read pushes `(source, kind)` into the base scans as a
     // prefix key, so a pointer read seeks `idx_lc_open_interval` on the
     // source instead of resolving the lineage's whole projection. The listing
     // has no source to push and resolves everything. The fold (a recorded
-    // instant) takes no key, as `Resolution::key` documents.
+    // instant) takes no key, as `Resolution::key` documents; a valid instant
+    // folds nothing, so it keeps the key, and the reader's own WHERE
+    // below filters the key's rows by the instant.
     let key = match (source, recorded) {
         (Some(_), None) => Some(crate::graph::lineage::KeySlots {
             source: 1,
@@ -74,16 +119,26 @@ pub(crate) async fn open_edges(
         recorded_slot: recorded.map(|_| recorded_slot),
         tag: "",
         key,
-        ancestry: &ancestry,
+        ancestry,
         ancestry_slot,
     });
+    // Open when the read asks the write path's question: a pointer is the
+    // latest belief, and `valid_to` the open sentinel. The `edges_at`
+    // containment when it asks about an instant, the instant bound where this
+    // function computed the slot to be — between the branch and the recorded
+    // one, so a caller composing both clocks binds them in order.
+    let validity = match valid {
+        Some(_) => {
+            format!(" AND l.valid_from <= ?{valid_slot} AND ?{valid_slot} < l.valid_to")
+        }
+        None => format!(" AND l.valid_to = '{OPEN_SENTINEL}'"),
+    };
     // `?1 IS NULL` lets one statement serve both the single-source lookup and
     // the listing; the planner folds the disjunction for a bound value.
     let sql = format!(
         "{}SELECT l.source_id, l.target_id, l.valid_from, l.branch_id \
          FROM {} l \
-         WHERE (?1 IS NULL OR l.source_id = ?1) AND l.edge_type = ?2 \
-           AND l.valid_to = '{OPEN_SENTINEL}'{} \
+         WHERE (?1 IS NULL OR l.source_id = ?1) AND l.edge_type = ?2{validity}{} \
          ORDER BY l.source_id, l.valid_from DESC, l.target_id",
         lowered.with_clause(),
         lowered.source,
@@ -99,22 +154,14 @@ pub(crate) async fn open_edges(
     if shape.binds_branch() {
         params.push(branch.into());
     }
+    if let Some(ts) = valid {
+        params.push(ts.into());
+    }
     if let Some(ts) = recorded {
         params.push(ts.into());
     }
-    params.extend(ancestry_params(&ancestry));
-
-    let mut rows = conn.query(&sql, params).await?;
-    let mut out = Vec::new();
-    while let Some(row) = rows.next().await? {
-        out.push(OpenEdge {
-            source: row.get(0)?,
-            target: row.get(1)?,
-            valid_from: row.get(2)?,
-            branch_id: row.get(3)?,
-        });
-    }
-    Ok(out)
+    params.extend(ancestry_params(ancestry));
+    (sql, params)
 }
 
 /// `open_edges_resolved`' first statement: candidate targets with an open
@@ -302,11 +349,22 @@ mod plan_pins {
     async fn the_candidates_seek_the_prefix_key_and_the_resolution_seeks_the_whole_key() {
         let conn = fresh().await;
 
+        // Re-pinned at 0.22.0 §4.3: with `idx_lc_pointer_kind` in the schema
+        // the candidates read's own WHERE (valid_to open, `source_id`,
+        // `edge_type` all bound) qualifies the partial index as well, and the
+        // planner took it — same two equality columns the prefix key named,
+        // so the seek *is* the prefix key, only on the index whose rows are
+        // all open. Re-measured (conversation_probe, idle): fork pointer 1.41
+        // → 1.31 ms, append-through-link_previous ~3.0 ms unchanged.
         let cand = plan(&conn, &candidates_sql(&anc())).await;
         assert!(
-            cand.contains("SEARCH lc USING INDEX idx_lc_open_interval (source_id=?)"),
-            r"the candidates arm must seek the prefix key, one column, as the \
-              ddl's own note records: {cand}"
+            cand.contains(
+                "SEARCH lc USING INDEX idx_lc_pointer_kind (edge_type=? AND source_id=?)"
+            ),
+            r"the candidates arm must seek the two equality columns the prefix \
+              key binds — via the partial index whose rows are all open, the \
+              planner's pick on this schema; a plan that leaves it for \
+              idx_lc_open_interval re-runs the conversation_probe first: {cand}"
         );
         assert!(
             !cand.contains("target_id=?"),
@@ -328,6 +386,38 @@ mod plan_pins {
         assert!(
             keyed.contains("USE TEMP B-TREE FOR ORDER BY"),
             r"the compound's own ORDER BY (links_cut's D-272 determinism) must               stay where it is, inside the projection rather than on the read: {keyed}"
+        );
+    }
+
+    /// The ready-set listing on the trunk shape, the statement the kind's
+    /// partial index exists for (0.22.0, plan §4.3): a single-seek plan on
+    /// `idx_lc_pointer_kind` (the partial index qualifying exactly because
+    /// the reader's own WHERE carries its WHERE), and the sort the read pays
+    /// for its workspace order — the 14.2 ms p50 the probe measured was
+    /// measured *with* this sort in, so a plan without it is a different
+    /// shape nobody measured and the pin is its reminder. Dropping the index
+    /// to see the scan it replaced is the probe's work; the pin holds the
+    /// shipped plan in the shipped schema.
+    #[tokio::test]
+    async fn the_ready_set_seeks_the_kind_index_and_sorts_the_workspace_order() {
+        let conn = fresh().await;
+        let (sql, _params) = open_statement(
+            LineageShape::Trunk,
+            &[],
+            crate::schema::ddl::MAIN_BRANCH,
+            None,
+            "CURRENT",
+            None,
+            None,
+        );
+        let ready = plan(&conn, &sql).await;
+        assert!(
+            ready.contains("SEARCH l USING INDEX idx_lc_pointer_kind (edge_type=?)"),
+            r"the ready-set read must seek the kind's partial index, one bound               column — a scan of every open pointer row is what the probe found               before the index, and a reorder of the index's columns must               re-measure the 1.70x first. (libsql's in-memory engine words the               plan `USING INDEX` where the file engine words it `USING PARTIAL               INDEX`; the index name is the load-bearing half either way.):               {ready}"
+        );
+        assert!(
+            ready.contains("USE TEMP B-TREE FOR LAST 2 TERMS OF ORDER BY"),
+            r"the workspace order keeps its own sort inside the read — the               measured p50 includes it, and a plan that lost it is a shape               the fixture revised: {ready}"
         );
     }
 }
