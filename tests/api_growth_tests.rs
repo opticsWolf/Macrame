@@ -155,6 +155,61 @@ const REGISTRY: &[Growable] = &[
               at 0.13.2, both additive only because nobody outside had written \
               the literal.",
     },
+    // --- conversation branching (0.22.0, D-307..D-311): the batch's row
+    // builders, registered with the contract each carries ---
+    Growable {
+        name: "WriteBatch",
+        entry: Entry::Tuned {
+            ctor: Ctor::Named("new"),
+            at_entry: &[],
+            renamed: &[
+                ("branch", "on_branch"),
+                ("concepts", "concept"),
+                ("edges", "edge"),
+                ("retirements", "retire"),
+                ("pointers", "pointer"),
+            ],
+        },
+        why: "one act, one stamp (D-308), so a caller assembles it with the               setters and the whole thing is refused or written; the rows               name no lineage individually — `on_branch` claims the batch's.",
+    },
+    Growable {
+        name: "PointerSet",
+        entry: Entry::Tuned {
+            ctor: Ctor::Named("new"),
+            at_entry: &["source", "edge_type", "target"],
+            renamed: &[("branch", "on_branch")],
+        },
+        why: "the pointer move's value (D-309): `new(source, edge_type,               target)` and `valid_from` is a setter the write refuses to run               without — the two clocks must not be derived from each other.",
+    },
+    Growable {
+        name: "Retirement",
+        entry: Entry::Tuned {
+            ctor: Ctor::Named("new"),
+            at_entry: &["source", "target", "edge_type", "valid_from", "valid_to"],
+            renamed: &[("branch", "on_branch")],
+        },
+        why: "the batch row for closing an open target interval: built like               `EdgeAssertion::new`, five fields at construction, lineage by               setter.",
+    },
+    Growable {
+        name: "PointerChange",
+        entry: Entry::Returned,
+        why: "what a pointer move did, as `BatchReport::pointers` reports it —               including the no-op case (`changed: false`).",
+    },
+    Growable {
+        name: "BatchReport",
+        entry: Entry::Returned,
+        why: "the one stamp every row of the batch carries, with the counts.",
+    },
+    Growable {
+        name: "ConceptVersion",
+        entry: Entry::Returned,
+        why: "one concept as one lineage sees it, at or before a cutoff; the               fold cuts at each ancestor's fork point (D-310).",
+    },
+    Growable {
+        name: "Change",
+        entry: Entry::Returned,
+        why: "one ledger write, as the change feed reports it (D-311); the               gap is refused, never faked into a flag.",
+    },
     // --- the same shape, on structs that already carried the attribute ---
     Growable {
         name: "ConceptUpsert",
@@ -405,12 +460,17 @@ const SOURCES: &[(&str, &str)] = &[
 const CRATE_SOURCES: &[&str] = &[
     include_str!("../src/blob.rs"),
     include_str!("../src/branch.rs"),
+    include_str!("../src/batch.rs"),
     include_str!("../src/connection.rs"),
     include_str!("../src/error.rs"),
     include_str!("../src/graph/builder.rs"),
+    include_str!("../src/graph/concept_lineage.rs"),
     include_str!("../src/graph/edge.rs"),
     include_str!("../src/graph/lineage.rs"),
+    include_str!("../src/graph/pointer.rs"),
+    include_str!("../src/graph/subgraph.rs"),
     include_str!("../src/graph/vector_filter.rs"),
+    include_str!("../src/temporal/feed.rs"),
     include_str!("../src/integrity/rebuild.rs"),
     // Behind the `metrics` feature in the crate and not behind one here: this
     // is text, so the property stays checked under `--no-default-features`.

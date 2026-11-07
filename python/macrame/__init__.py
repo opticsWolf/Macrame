@@ -67,8 +67,12 @@ if TYPE_CHECKING:  # pragma: no cover - types only
     from collections.abc import Sequence
 
     from ._macrame import (
+        BatchReport,
+        Change,
+        ConceptVersion,
         CostEstimate,
         Divergence,
+        PointerChange,
         Edge,
         NodeAttributes,
         Subgraph,
@@ -117,6 +121,16 @@ from ._macrame import (
     DEFAULT_MAX_BLOB_BYTES,
     Branch,
     Divergence,
+    BatchReport,
+    Change,
+    ConceptVersion,
+    PointerChange,
+    MAX_BATCH_ROWS,
+    BatchTooLargeError,
+    ChangeFeedGapError,
+    ConceptNotVisibleError,
+    ForkInFutureError,
+    FunctionalEdgeConflictError,
     BranchError,
     BranchExistsError,
     BranchNotArchivableError,
@@ -208,6 +222,12 @@ __all__ = [
     # lineage (W12.7)
     "Branch",
     "Divergence",
+    # conversation branching (0.22.0, D-307..D-311)
+    "BatchReport",
+    "Change",
+    "ConceptVersion",
+    "PointerChange",
+    "MAX_BATCH_ROWS",
     # blobs (0.19.0, D-281)
     "BlobStat",
     "DEFAULT_MAX_BLOB_BYTES",
@@ -258,6 +278,7 @@ __all__ = [
     "ConceptSingleOpenError",
     "BulkCancelledError",
     "SingleOpenViolationError",
+    "FunctionalEdgeConflictError",
     "NegativeEdgeWeightError",
     "CurrentDriftError",
     "RebuildFailedError",
@@ -288,6 +309,7 @@ __all__ = [
     "ArchiveViolationError",
     "ArchiveWindowError",
     "RecordedInstantUnreachableError",
+    "ChangeFeedGapError",
     "FutureRecordedAtError",
     # branch
     "BranchError",
@@ -296,6 +318,8 @@ __all__ = [
     "BranchNotArchivableError",
     "BranchArchivedError",
     "ForkPrecedesParentError",
+    "ForkInFutureError",
+    "ConceptNotVisibleError",
     "CrossLineageError",
     "BranchMismatchError",
     # view
@@ -307,6 +331,7 @@ __all__ = [
     # budget
     "SubgraphTooLargeError",
     "BlobTooLargeError",
+    "BatchTooLargeError",
     # module
     "__version__",
     "chunk_budget_ms",
@@ -476,6 +501,100 @@ class BranchView:
     ) -> tuple[list[VectorHit], CostEstimate]:
         """`Database.search_filtered` on this lineage."""
         return self._db.search_filtered(*args, branch=self._id, **kwargs)
+
+    # -- 0.22.0: pointers, batches, concepts, search, feed (D-307..D-311) ---
+
+    def write_batch(
+        self,
+        concepts: Sequence[ConceptUpsert] = (),
+        edges: Sequence[EdgeAssertion] = (),
+        retire: Sequence[tuple[Any, ...]] = (),
+        pointers: Sequence[tuple[Any, ...]] = (),
+    ) -> BatchReport:
+        """`Database.write_batch` on this lineage, one stamp for every row.
+
+        Concepts and edges naming no lineage are stamped with this view's;
+        one naming another raises `BranchMismatchError` before anything is
+        sent, as every other write through the view does.
+        """
+        return self._db.write_batch(
+            [self._claim(c) for c in concepts],
+            [self._claim(e) for e in edges],
+            list(retire),
+            list(pointers),
+            branch=self._id,
+        )
+
+    def set_pointer(
+        self,
+        source: str,
+        edge_type: str,
+        target: str,
+        *,
+        valid_from: Timestamp,
+        weight: float = 1.0,
+        link_previous: str | None = None,
+    ) -> PointerChange:
+        """`Database.set_pointer` on this lineage."""
+        return self._db.set_pointer(
+            source,
+            edge_type,
+            target,
+            valid_from=valid_from,
+            weight=weight,
+            branch=self._id,
+            link_previous=link_previous,
+        )
+
+    def pointer(
+        self, source: str, edge_type: str, *, as_of_recorded: Timestamp | None = None
+    ) -> str | None:
+        """`Database.pointer` on this lineage."""
+        return self._db.pointer(
+            source, edge_type, branch=self._id, as_of_recorded=as_of_recorded
+        )
+
+    def pointers(
+        self, edge_type: str, *, as_of_recorded: Timestamp | None = None
+    ) -> list[tuple[str, str]]:
+        """`Database.pointers` on this lineage."""
+        return self._db.pointers(edge_type, branch=self._id, as_of_recorded=as_of_recorded)
+
+    def concepts_by_id(
+        self,
+        ids: Sequence[str],
+        *,
+        as_of_valid: Timestamp | None = None,
+        as_of_recorded: Timestamp | None = None,
+    ) -> list[ConceptVersion]:
+        """`Database.concepts_by_id` on this lineage."""
+        return self._db.concepts_by_id(
+            list(ids), branch=self._id, as_of_valid=as_of_valid, as_of_recorded=as_of_recorded
+        )
+
+    def keyword_search(self, query: str, **kwargs: Any) -> list[tuple[str, float]]:
+        """`Database.keyword_search` over the concepts this lineage holds."""
+        return self._db.keyword_search(query, branch=self._id, **kwargs)
+
+    def search_vector(self, model: str, query: Any, **kwargs: Any) -> list[VectorHit]:
+        """`Database.search_vector` over the concepts this lineage holds."""
+        return self._db.search_vector(model, query, branch=self._id, **kwargs)
+
+    def hybrid_search(
+        self, model: str, query_text: str, query_vector: Any, **kwargs: Any
+    ) -> list[VectorHit]:
+        """`Database.hybrid_search` over the concepts this lineage holds."""
+        return self._db.hybrid_search(
+            model, query_text, query_vector, branch=self._id, **kwargs
+        )
+
+    def changes(self, after_seq: int, **kwargs: Any) -> list[Change]:
+        """`Database.changes`, keeping the rows written on this lineage."""
+        return self._db.changes(after_seq, branch=self._id, **kwargs)
+
+    def fork_after(self, name: str, concept_id: str) -> Branch:
+        """Cut a child of this lineage right after `concept_id` appeared on it."""
+        return self._db.fork(name, self._id, after=concept_id)
 
     def diff(self, other: str) -> list[Divergence]:
         """What this lineage believes that `other` does not.

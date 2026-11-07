@@ -103,6 +103,7 @@ const BASELINE: &str = include_str!("../docs/architecture/public-api.txt");
 /// qualified, so the module is its canonical and only path.
 const PUBLIC_MODULES: &[&str] = &[
     "macrame",
+    "macrame::batch",
     "macrame::blob",
     "macrame::branch",
     "macrame::connection",

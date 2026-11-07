@@ -1,4 +1,4 @@
-# Macrame — Architecture Quick Reference
+| v25 | the edge-kind register `edge_kinds (kind, functional, registered_at)`, `WITHOUT ROWID`, outside the ledger for D-280's reasons — no log trigger, no archive, no seed ([D-309](architecture/s13-decision-register.md#d-309)) |# Macrame — Architecture Quick Reference
 
 **v0.21.0 · A Bitemporal Graph Ledger on libSQL**
 

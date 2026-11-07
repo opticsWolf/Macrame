@@ -1,19 +1,22 @@
 pub(crate) mod archive;
 pub(crate) mod as_of;
+pub(crate) mod feed;
 pub(crate) mod interval;
 pub(crate) mod replay;
 pub(crate) mod snapshot;
 
 pub use archive::{archivable_concepts, archive, rehydrate, ArchiveReport, RehydrateReport};
 pub use as_of::{
-    hydrate_attributes, query_as_of_edges, query_as_of_edges_on, AsOf, NodeAttributes,
+    hydrate_attributes, query_as_of_edges, query_as_of_edges_on, AsOf, ConceptVersion,
+    NodeAttributes,
 };
+pub use feed::Change;
 pub use interval::Interval;
+pub(crate) use replay::{concept_interval_overlaps, reconstruct_valid};
 pub use replay::{
     reconstruct, reconstruct_on, resolve_beliefs, verify_last_link, verify_snapshot_chain,
     ChainCheck, EdgeBelief, MaterializedState,
 };
-pub(crate) use replay::{concept_interval_overlaps, reconstruct_valid};
 pub use snapshot::{
     cleanup_expired_snapshots, load_snapshot, save_snapshot, write_final, SnapshotCadence,
 };

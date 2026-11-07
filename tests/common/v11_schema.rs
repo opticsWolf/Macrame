@@ -403,12 +403,22 @@ pub async fn wind_back_to_v23(conn: &libsql::Connection) {
     .unwrap();
 }
 
+/// Undo v25 on a database built from today's baseline (0.22.0, D-309): the
+/// edge-kind register is one table nothing references.
+#[allow(dead_code)]
+pub async fn wind_back_to_v24(conn: &libsql::Connection) {
+    conn.execute("DROP TABLE IF EXISTS edge_kinds", ())
+        .await
+        .unwrap();
+}
+
 /// Undo v22 on a database built from today's baseline (0.19.0, D-288).
 ///
 /// The blob store is a table, an index and two triggers that nothing else
 /// names, so the order is only "triggers and index before the table" — and
 /// `DROP TABLE` would take them anyway. Spelled out so the wind-back says what
 /// v22 added. Idempotent, like the rest.
+#[allow(dead_code)]
 pub async fn wind_back_to_v21(conn: &libsql::Connection) {
     // v23 first, so every caller below v22 is also below v23.
     wind_back_to_v22(conn).await;

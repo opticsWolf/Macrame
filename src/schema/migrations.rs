@@ -19,7 +19,10 @@ use crate::schema::ddl::*;
 // schema's own truth: the marks table the state rule answers through, the
 // start index the correction seeks, and the repair of projections 0.20.0
 // left wrong.
-pub const SCHEMA_VERSION: u32 = 24;
+// 24 → 25 for the D-309 rung (0.22.0, plan §2). The edge-kind register is
+// outside the ledger — a sidecar table nothing references and which
+// references nothing — so the payload versions stay untouched here too.
+pub const SCHEMA_VERSION: u32 = 25;
 
 type StepFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
 
@@ -263,6 +266,17 @@ const STEPS: &[Step] = &[
         // no foreign key consults.
         suspends_foreign_keys: false,
         apply: |conn| Box::pin(repair_backfilled_ledger(conn)),
+    },
+    Step {
+        from: 24,
+        to: 25,
+        name: "edge-kinds",
+        // One `CREATE TABLE` on a table nothing references and which
+        // references nothing — the v19 -> v20 rung's ground. Empty is the
+        // only truth available: no kind was functional before this rung
+        // exists, and an unregistered kind keeps its old behaviour.
+        suspends_foreign_keys: false,
+        apply: |conn| Box::pin(add_edge_kinds(conn)),
     },
     Step {
         from: 22,
@@ -584,6 +598,8 @@ async fn baseline(conn: &libsql::Connection) -> Result<()> {
     // answer for a ledger with no written backfill anywhere in it — and the
     // v23 → v24 rung fills it from written history on files it upgrades.
     conn.execute(CREATE_CONCEPT_DISORDER_TABLE, ()).await?;
+    // v25 (0.22.0, D-309). Outside the ledger, beside the other sidecars.
+    conn.execute(CREATE_EDGE_KINDS_TABLE, ()).await?;
     // Before the triggers, not after: `trg_concepts_fts_*` name this table, and
     // SQLite resolves a trigger body's tables at CREATE TRIGGER time.
     conn.execute(CREATE_CONCEPTS_FTS, ()).await?;
@@ -639,6 +655,18 @@ async fn add_blob_store(conn: &libsql::Connection) -> Result<()> {
     conn.execute(BLOBS_PUT_AT_INDEX, ()).await?;
     conn.execute(CREATE_BLOBS_GUARD_UPDATE, ()).await?;
     conn.execute(CREATE_BLOBS_GUARD_DELETE, ()).await?;
+    Ok(())
+}
+
+/// v24 → v25: the edge-kind register (0.22.0, M3, [D-309]).
+///
+/// One `CREATE TABLE`, no seed: before this release no kind was functional,
+/// and an unregistered kind keeps exactly the behaviour it had. `IF NOT EXISTS`
+/// is safe because no earlier version created the name.
+///
+/// [D-309]: ../../docs/architecture/s13-decision-register.md#d-309
+async fn add_edge_kinds(conn: &libsql::Connection) -> Result<()> {
+    conn.execute(CREATE_EDGE_KINDS_TABLE, ()).await?;
     Ok(())
 }
 

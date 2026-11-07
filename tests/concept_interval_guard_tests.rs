@@ -71,7 +71,10 @@ async fn an_overlapping_closed_interval_is_refused_naming_both() {
         panic!("expected OverlappingConcept, got {err:?}");
     };
     assert_eq!(overlap.id, "a");
-    assert_eq!((overlap.valid_from.as_str(), overlap.valid_to.as_str()), (MAR, SEP));
+    assert_eq!(
+        (overlap.valid_from.as_str(), overlap.valid_to.as_str()),
+        (MAR, SEP)
+    );
     assert_eq!(
         (overlap.existing_from.as_str(), overlap.existing_to.as_str()),
         (JAN, JUN)
@@ -115,12 +118,12 @@ async fn a_batch_that_contradicts_itself_is_refused_with_nothing_written() {
     let harness = TestHarness::new();
     let db = open_db(&harness).await;
 
-    let err = write(&db, vec![
-            concept("c", JAN, Some(JUN)),
-            concept("c", MAR, Some(SEP)),
-        ])
-        .await
-        .expect_err("the batch overlaps itself");
+    let err = write(
+        &db,
+        vec![concept("c", JAN, Some(JUN)), concept("c", MAR, Some(SEP))],
+    )
+    .await
+    .expect_err("the batch overlaps itself");
 
     assert_eq!(err.written, 0, "refused before any chunk committed");
     let DbError::OverlappingConcept { ref overlap } = err.cause else {
@@ -139,7 +142,11 @@ async fn a_batch_that_contradicts_itself_is_refused_with_nothing_written() {
         "no current row was written"
     );
     assert_eq!(
-        count(&db, "SELECT COUNT(*) FROM transaction_log WHERE entity_id = 'c'").await,
+        count(
+            &db,
+            "SELECT COUNT(*) FROM transaction_log WHERE entity_id = 'c'"
+        )
+        .await,
         0,
         "no log row was written"
     );

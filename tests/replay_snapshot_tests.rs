@@ -1651,7 +1651,7 @@ async fn a_pre_rule_snapshot_is_refused_and_reconstruct_folds_from_the_log() {
 
     // Stamp it as 0.20.0's own file. The loader refuses it before parsing.
     let mut raw = std::fs::read(&path).unwrap();
-    raw[6..10].copy_from_slice(&(macrame::schema::SCHEMA_VERSION - 1).to_le_bytes());
+    raw[6..10].copy_from_slice(&(macrame::schema::SCHEMA_VERSION - 2).to_le_bytes());
     std::fs::write(&path, &raw).unwrap();
     match macrame::temporal::load_snapshot(&path).unwrap_err() {
         macrame::error::DbError::SnapshotIncompatible { reason, .. } => {
@@ -1681,6 +1681,82 @@ async fn a_pre_rule_snapshot_is_refused_and_reconstruct_folds_from_the_log() {
     );
 
     db.close().await.unwrap();
+}
+
+/// The stamp window's other half (0.22.0, plan §7.1): a snapshot stamped one
+/// behind this build is **read exactly as it was written**, because the rung
+/// that bumped the schema added only a sidecar the snapshot never holds. This
+/// build reads a v24-stamped file without any rescue, warning or fold-from-
+/// genesis: the header loads, the composed read equals `reconstruct` at the
+/// same anchor, and nothing about the state answers differently than the day
+/// the 0.21.0 file was made. The v23 refusal — whose fold is the pre-rule
+/// answer — is the frame above.
+#[tokio::test]
+async fn a_v24_snapshot_reads_on_v25_the_way_it_was_written() {
+    use macrame::temporal::save_snapshot;
+
+    let harness = TestHarness::new();
+    let db = macrame::Database::open(&harness.db_path).await.unwrap();
+    use macrame::prelude::*;
+    upsert_concept("src/a.rs", "C2", JUN, None, &db).await;
+    upsert_concept("src/a.rs", "C1", JAN, Some(JUN), &db).await;
+
+    let ts = max_recorded_at_stamped(&db).await;
+    let snaps = harness.temp_dir.path().join("gate9-v25-snaps");
+    let state = reconstruct(db.read_conn(), &ts, None, None).await.unwrap();
+    let path = save_snapshot(&snaps, &state).unwrap();
+
+    // Stamp the file with this build's previous version: what a 0.21.0 build
+    // wrote on the same ledger. The stamp is checksummed (W8.2, D-185), so the
+    // flip recomputes the crc across the mutated header and payload — refusing
+    // the *stamp* is the window's job, not the checksum's. (`Crc32` is
+    // crate-private; the test below carries the bitwise IEEE variant of the
+    // same reflected polynomial the crate's table generates.)
+    let mut raw = std::fs::read(&path).unwrap();
+    raw[6..10].copy_from_slice(&(macrame::schema::SCHEMA_VERSION - 1).to_le_bytes());
+    let c = crc32_ieee(0xFFFF_FFFF, &raw[..34]);
+    let c = crc32_ieee(c, &raw[38..]);
+    raw[34..38].copy_from_slice(&(!c).to_le_bytes());
+    std::fs::write(&path, &raw).unwrap();
+
+    let loaded = macrame::temporal::load_snapshot(&path).unwrap();
+    assert_eq!(
+        loaded.concepts["src/a.rs"].title, state.concepts["src/a.rs"].title,
+        "the accepted stamp arrives intact"
+    );
+
+    // And the composed read answers identically with and without it: there is
+    // no skip-and-fold to correct for, because the file is complete.
+    let far = "2027-01-01T00:00:00.000000Z";
+    let composed = reconstruct(db.read_conn(), far, None, Some(&snaps))
+        .await
+        .unwrap();
+    let genesis = reconstruct(db.read_conn(), far, None, None).await.unwrap();
+    assert_eq!(
+        composed.concepts["src/a.rs"].title,
+        genesis.concepts["src/a.rs"].title
+    );
+    assert_eq!(composed.concepts["src/a.rs"].title, "C2");
+
+    db.close().await.unwrap();
+}
+
+/// The bitwise IEEE CRC-32 the snapshot container checks: the reflected
+/// polynomial, run in one pass across the header prefix and the payload
+/// because the mutation spans both halves without reordering them.
+fn crc32_ieee(crc: u32, bytes: &[u8]) -> u32 {
+    let mut c = crc;
+    for &b in bytes {
+        c ^= b as u32;
+        for _ in 0..8 {
+            c = if c & 1 != 0 {
+                0xEDB8_8320 ^ (c >> 1)
+            } else {
+                c >> 1
+            };
+        }
+    }
+    c
 }
 
 /// A snapshot taken at v24 composes to the same state the genesis fold

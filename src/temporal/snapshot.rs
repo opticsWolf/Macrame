@@ -62,6 +62,24 @@ const SNAP_MAGIC: [u8; 4] = *b"MACR";
 /// [D-282]: ../../docs/architecture/s13-decision-register.md#d-282
 const SNAP_FORMAT_VERSION: u16 = 6;
 
+/// The oldest schema stamp a snapshot may carry and still be read as-is.
+///
+/// A rung bumps this only when it changes something a **read consults** —
+/// the floor is a statement about what a snapshot holds, not a second version
+/// counter. v25 (0.22.0, plan §7.1) adds the `edge_kinds` sidecar, which no
+/// snapshot holds and no snapshot read consults, so a v24-stamped snapshot is
+/// complete for a v25 reader and is **accepted exactly as it was written**;
+/// the guillotine-style skip-and-fold of 0.21.0 (the v23-stamped file, whose
+/// fold predates the state rule) stays: v23 and older are refused at the
+/// header and the read folds from genesis. When writing, the stamp is always
+/// this build's own [`SCHEMA_VERSION`], so the floor only ever widens the
+/// set of files an open() keeps, never what it writes.
+///
+/// The stability contract names this in appendix text, and gate 5's
+/// migration test exercises both halves (the accepted v24 file, the refused
+/// v23 one).
+pub(crate) const SNAP_MIN_SCHEMA_VERSION: u32 = 24;
+
 /// The v3 container header, little-endian throughout:
 ///
 /// ```text
@@ -408,10 +426,18 @@ pub(crate) fn parse_snapshot(label: &str, raw: &[u8]) -> Result<MaterializedStat
     let format = u16::from_le_bytes([raw[4], raw[5]]);
     let schema = u32::from_le_bytes([raw[6], raw[7], raw[8], raw[9]]);
     let expected_schema = crate::schema::migrations::SCHEMA_VERSION;
-    if format != SNAP_FORMAT_VERSION || schema != expected_schema {
+    // The stamp window: this build's own version, or any older stamp since
+    // [_SNAP_MIN_SCHEMA_VERSION_] — the floor that says what a snapshot
+    // holds. A future stamp is refused on the other side of the same
+    // comparison. (0.22.0, plan §7.1: the edge-kinds rung added only a
+    // sidecar, so the v24 stamp keeps its full value.)
+    let readable_stamp = schema == expected_schema
+        || (schema < expected_schema && schema >= SNAP_MIN_SCHEMA_VERSION);
+    if format != SNAP_FORMAT_VERSION || !readable_stamp {
         return Err(foreign(format!(
             "snapshot is format v{format}/schema v{schema}; this build reads \
-             format v{SNAP_FORMAT_VERSION}/schema v{expected_schema}"
+             format v{SNAP_FORMAT_VERSION} and stamps v{SNAP_MIN_SCHEMA_VERSION}\
+             \u{2013}v{expected_schema}"
         )));
     }
 
