@@ -7928,14 +7928,6 @@ async fn suppress_open_belief(
         .map_err(DbError::Engine)?;
     debug_assert_eq!(changed, 1, "the close wrote {changed} log rows");
     let _ = changed;
-    eprintln!(
-        "SBX suppress: id={} open_start={open_start:?} changed={changed}",
-        concept.id
-    );
-    eprintln!(
-        "SBX close stmt: {}",
-        CLOSE_SUPERSEDED_CONCEPT.replace('\n', " ")
-    );
     Ok(())
 }
 
