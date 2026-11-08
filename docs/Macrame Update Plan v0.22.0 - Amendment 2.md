@@ -9,6 +9,18 @@
 >
 > This revision **assumes a way forward exists**. It designs the surface as if the probes in §8
 > pass, and it says at each point which probe could still overturn that.
+>
+> **Review outcome (2026-11-07).** §13 Q3 is **accepted**: adoption is not §15.4's merge — the
+> adopting lineage has no belief about the id, the minting lineage is never read, and the caller
+> asserts content it takes from the merge commit's own tree — with one condition: **P-7 must run
+> before any D-315 build**, since its verdict decides whether a batch must write the adoption
+> before its edges. Q1, Q2 and Q5 proceed as recommended: the M6 cycle is branch
+> `dev/0.22.0-revA`, D-314 in full, D-315 in the same cycle. There, P-1 (the rung sketch is
+> additive; both concept guards still refuse direct cross-lineage writes after it exists) and
+> P-2 (the census reproduces: 27 sites in 12 files — 15 content, 5 identity, 7 write machinery,
+> 2 guard/fixture — with two *extends*: membership and the clock ceiling) are on record. The
+> register entries still land with the cycle's docs phase (M6-f), and nothing here moves while
+> 0.22.0's tail is unfinished.
 
 ## 0. What this amendment is, and is not
 
