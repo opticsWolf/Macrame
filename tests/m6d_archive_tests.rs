@@ -504,3 +504,50 @@ async fn a_change_feed_sees_a_version_row_cut_to_the_writer_s_branch() {
         "the trunk's classic supersede wrote nothing to the overlay: {trunk:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The per-lineage hint arm (M6-f; the amendment §5.4 cost 5's fourth cold
+// reader: `archive_hint` answers per lineage)
+// ---------------------------------------------------------------------------
+
+/// A reader that named a lineage is told where that lineage's own surviving
+/// log rows begin — the whole-ledger sentence answers neither branch's
+/// question, because two lineages archive differently. The trunk's error
+/// carries only the whole-ledger sentence.
+#[tokio::test]
+async fn the_archive_hint_answers_per_lineage_for_a_reader_naming_one() {
+    let harness = TestHarness::new();
+    let (db, m) = hold(&harness).await;
+    db.archive(CUTOFF).await.unwrap();
+
+    // Move the archive file away so the reach refusals cannot attach (the
+    // "does not exist" arm is where the hint is spoken).
+    let moved = db.archive_path().with_extension("moved-away");
+    std::fs::rename(db.archive_path(), &moved).unwrap();
+
+    // A branch caller below the hot floor gets its own floor named.
+    let r = act_bounds(&m)[0].clone();
+    let bound = r.clone();
+    let err = db
+        .reconstruct_on(&bound, "b0")
+        .await
+        .expect_err("below the floor, with the archive gone, the fold refuses");
+    let text = err.to_string();
+    assert!(
+        text.contains("lineage b0's own"),
+        "the per-lineage hint names the writer's own surviving rows: {text}"
+    );
+
+    // The whole-ledger reader's error does not pretend to.
+    let err = db
+        .reconstruct(&bound)
+        .await
+        .expect_err("same refusal, no lineage named");
+    let text = err.to_string();
+    assert!(
+        !text.contains("lineage "),
+        "the whole-ledger hint carries no per-lineage sentence: {text}"
+    );
+
+    std::fs::rename(&moved, db.archive_path()).unwrap();
+}

@@ -262,6 +262,7 @@ pub async fn macrame::connection::Database::upsert_concept(&self, macrame::conne
 pub async fn macrame::connection::Database::upsert_concept_superseding(&self, macrame::connection::ConceptUpsert) -> macrame::error::Result<()>
 pub async fn macrame::connection::Database::upsert_embeddings(&self, &macrame::vector::ModelName, alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<f32>)>) -> macrame::error::BulkResult<usize>
 pub async fn macrame::connection::Database::upsert_embeddings_with(&self, &macrame::vector::ModelName, alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<f32>)>, macrame::connection::BulkControl) -> macrame::error::BulkResult<usize>
+pub async fn macrame::connection::Database::upsert_version_embeddings(&self, &macrame::vector::ModelName, alloc::vec::Vec<(alloc::string::String, alloc::string::String, alloc::string::String, alloc::vec::Vec<f32>)>) -> macrame::error::BulkResult<usize>
 pub async fn macrame::connection::Database::verify_concept_intervals(&self) -> macrame::error::Result<alloc::vec::Vec<macrame::error::ConceptOverlap>>
 pub async fn macrame::connection::Database::verify_last_link(&self) -> macrame::error::Result<core::option::Option<macrame::temporal::ChainCheck>>
 pub async fn macrame::connection::Database::verify_snapshot_chain(&self, &str) -> macrame::error::Result<macrame::temporal::ChainCheck>
@@ -314,6 +315,10 @@ pub macrame::error::AbortKind::NotAGuard
 pub macrame::error::AbortKind::RecordedAtRegression
 pub macrame::error::AbortKind::SingleOpenInterval
 #[non_exhaustive] pub enum macrame::error::DbError
+pub macrame::error::DbError::AdoptedRetirement
+pub macrame::error::DbError::AdoptedRetirement::branch: alloc::string::String
+pub macrame::error::DbError::AdoptedRetirement::held_by: alloc::string::String
+pub macrame::error::DbError::AdoptedRetirement::id: alloc::string::String
 pub macrame::error::DbError::ArchiveSessionLeaked
 pub macrame::error::DbError::ArchiveSessionLeaked::marker: alloc::string::String
 pub macrame::error::DbError::ArchiveViolation
@@ -848,6 +853,10 @@ pub const fn macrame::metrics::CommandKind::index(self) -> usize
 impl core::fmt::Display for macrame::metrics::CommandKind
 pub fn macrame::metrics::CommandKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 #[non_exhaustive] pub enum macrame::prelude::DbError
+pub macrame::prelude::DbError::AdoptedRetirement
+pub macrame::prelude::DbError::AdoptedRetirement::branch: alloc::string::String
+pub macrame::prelude::DbError::AdoptedRetirement::held_by: alloc::string::String
+pub macrame::prelude::DbError::AdoptedRetirement::id: alloc::string::String
 pub macrame::prelude::DbError::ArchiveSessionLeaked
 pub macrame::prelude::DbError::ArchiveSessionLeaked::marker: alloc::string::String
 pub macrame::prelude::DbError::ArchiveViolation
@@ -1231,6 +1240,7 @@ pub async fn macrame::connection::Database::upsert_concept(&self, macrame::conne
 pub async fn macrame::connection::Database::upsert_concept_superseding(&self, macrame::connection::ConceptUpsert) -> macrame::error::Result<()>
 pub async fn macrame::connection::Database::upsert_embeddings(&self, &macrame::vector::ModelName, alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<f32>)>) -> macrame::error::BulkResult<usize>
 pub async fn macrame::connection::Database::upsert_embeddings_with(&self, &macrame::vector::ModelName, alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<f32>)>, macrame::connection::BulkControl) -> macrame::error::BulkResult<usize>
+pub async fn macrame::connection::Database::upsert_version_embeddings(&self, &macrame::vector::ModelName, alloc::vec::Vec<(alloc::string::String, alloc::string::String, alloc::string::String, alloc::vec::Vec<f32>)>) -> macrame::error::BulkResult<usize>
 pub async fn macrame::connection::Database::verify_concept_intervals(&self) -> macrame::error::Result<alloc::vec::Vec<macrame::error::ConceptOverlap>>
 pub async fn macrame::connection::Database::verify_last_link(&self) -> macrame::error::Result<core::option::Option<macrame::temporal::ChainCheck>>
 pub async fn macrame::connection::Database::verify_snapshot_chain(&self, &str) -> macrame::error::Result<macrame::temporal::ChainCheck>
@@ -1356,6 +1366,9 @@ pub fn macrame::vector::ModelName::as_str(&self) -> &str
 pub fn macrame::vector::ModelName::index(&self) -> alloc::string::String
 pub fn macrame::vector::ModelName::new(impl core::convert::AsRef<str>) -> macrame::error::Result<Self>
 pub fn macrame::vector::ModelName::table(&self) -> alloc::string::String
+pub fn macrame::vector::ModelName::version_index(&self) -> alloc::string::String
+pub fn macrame::vector::ModelName::version_key(&self) -> alloc::string::String
+pub fn macrame::vector::ModelName::version_table(&self) -> alloc::string::String
 impl core::fmt::Display for macrame::vector::ModelName
 pub fn macrame::vector::ModelName::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 #[non_exhaustive] pub struct macrame::prelude::Overlap
@@ -1516,6 +1529,8 @@ pub const macrame::schema::ddl::CREATE_CONCEPTS_LOG_UPDATE: &str
 pub const macrame::schema::ddl::CREATE_CONCEPTS_MONOTONIC_RA: &str
 pub const macrame::schema::ddl::CREATE_CONCEPTS_TABLE: &str
 pub const macrame::schema::ddl::CREATE_CONCEPT_DISORDER_TABLE: &str
+pub const macrame::schema::ddl::CREATE_CONCEPT_VERSIONS_FTS: &str
+pub const macrame::schema::ddl::CREATE_CONCEPT_VERSION_FTS_ROWS: &str
 pub const macrame::schema::ddl::CREATE_EDGE_KINDS_TABLE: &str
 pub const macrame::schema::ddl::CREATE_INDICES: &[&str]
 pub const macrame::schema::ddl::CREATE_KV_STORE_TABLE: &str
@@ -1533,12 +1548,16 @@ pub const macrame::schema::ddl::EXTRA_LAYER_INDEX: &str
 pub const macrame::schema::ddl::MAIN_BRANCH: &str
 pub const macrame::schema::ddl::OPTIMIZE: &str
 pub const macrame::schema::ddl::REBUILD_CONCEPTS_FTS: &str
+pub const macrame::schema::ddl::REBUILD_CONCEPT_VERSIONS_FTS: &str
 pub const macrame::schema::ddl::SEED_LOG_INTEGRITY: &str
 pub const macrame::schema::ddl::SEED_MAIN_BRANCH: &str
 pub const macrame::schema::ddl::VERIFY_CONCEPTS_FTS: &str
 pub const macrame::schema::ddl::WEIGHT_CHECK: &str
 pub fn macrame::schema::ddl::create_embeddings_index(&macrame::vector::ModelName) -> alloc::string::String
 pub fn macrame::schema::ddl::create_embeddings_table(&macrame::vector::ModelName, usize) -> alloc::string::String
+pub fn macrame::schema::ddl::create_version_embeddings_index(&macrame::vector::ModelName) -> alloc::string::String
+pub fn macrame::schema::ddl::create_version_embeddings_key(&macrame::vector::ModelName) -> alloc::string::String
+pub fn macrame::schema::ddl::create_version_embeddings_table(&macrame::vector::ModelName, usize) -> alloc::string::String
 #[non_exhaustive] pub struct macrame::schema::MigrationOutcome
 pub macrame::schema::MigrationOutcome::from: u32
 pub macrame::schema::MigrationOutcome::to: u32
@@ -1734,6 +1753,9 @@ pub fn macrame::vector::ModelName::as_str(&self) -> &str
 pub fn macrame::vector::ModelName::index(&self) -> alloc::string::String
 pub fn macrame::vector::ModelName::new(impl core::convert::AsRef<str>) -> macrame::error::Result<Self>
 pub fn macrame::vector::ModelName::table(&self) -> alloc::string::String
+pub fn macrame::vector::ModelName::version_index(&self) -> alloc::string::String
+pub fn macrame::vector::ModelName::version_key(&self) -> alloc::string::String
+pub fn macrame::vector::ModelName::version_table(&self) -> alloc::string::String
 impl core::fmt::Display for macrame::vector::ModelName
 pub fn macrame::vector::ModelName::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 #[non_exhaustive] pub struct macrame::vector::VectorSearchResult
@@ -1749,6 +1771,8 @@ pub async fn macrame::vector::registered_models(&libsql::connection::Connection)
 pub async fn macrame::vector::search_vector(&libsql::connection::Connection, &[f32], &macrame::vector::ModelName, usize, core::option::Option<&str>, core::option::Option<core::time::Duration>) -> macrame::error::Result<alloc::vec::Vec<macrame::vector::VectorSearchResult>>
 pub async fn macrame::vector::search_vector_on(&libsql::connection::Connection, &[f32], &macrame::vector::ModelName, usize, core::option::Option<&str>, core::option::Option<core::time::Duration>, core::option::Option<&str>) -> macrame::error::Result<alloc::vec::Vec<macrame::vector::VectorSearchResult>>
 pub macro macrame::concepts_log_payload!
+pub macro macrame::payload_v_concept_cuts!
+pub macro macrame::payload_v_concept_versions!
 pub macro macrame::payload_v_concepts!
 #[non_exhaustive] pub enum macrame::BlobLocation
 pub macrame::BlobLocation::Cold
@@ -1758,6 +1782,10 @@ pub macrame::CadencePolicy::Default
 pub macrame::CadencePolicy::Disabled
 pub macrame::CadencePolicy::Every(macrame::temporal::SnapshotCadence)
 #[non_exhaustive] pub enum macrame::DbError
+pub macrame::DbError::AdoptedRetirement
+pub macrame::DbError::AdoptedRetirement::branch: alloc::string::String
+pub macrame::DbError::AdoptedRetirement::held_by: alloc::string::String
+pub macrame::DbError::AdoptedRetirement::id: alloc::string::String
 pub macrame::DbError::ArchiveSessionLeaked
 pub macrame::DbError::ArchiveSessionLeaked::marker: alloc::string::String
 pub macrame::DbError::ArchiveViolation
@@ -2128,6 +2156,7 @@ pub async fn macrame::connection::Database::upsert_concept(&self, macrame::conne
 pub async fn macrame::connection::Database::upsert_concept_superseding(&self, macrame::connection::ConceptUpsert) -> macrame::error::Result<()>
 pub async fn macrame::connection::Database::upsert_embeddings(&self, &macrame::vector::ModelName, alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<f32>)>) -> macrame::error::BulkResult<usize>
 pub async fn macrame::connection::Database::upsert_embeddings_with(&self, &macrame::vector::ModelName, alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<f32>)>, macrame::connection::BulkControl) -> macrame::error::BulkResult<usize>
+pub async fn macrame::connection::Database::upsert_version_embeddings(&self, &macrame::vector::ModelName, alloc::vec::Vec<(alloc::string::String, alloc::string::String, alloc::string::String, alloc::vec::Vec<f32>)>) -> macrame::error::BulkResult<usize>
 pub async fn macrame::connection::Database::verify_concept_intervals(&self) -> macrame::error::Result<alloc::vec::Vec<macrame::error::ConceptOverlap>>
 pub async fn macrame::connection::Database::verify_last_link(&self) -> macrame::error::Result<core::option::Option<macrame::temporal::ChainCheck>>
 pub async fn macrame::connection::Database::verify_snapshot_chain(&self, &str) -> macrame::error::Result<macrame::temporal::ChainCheck>

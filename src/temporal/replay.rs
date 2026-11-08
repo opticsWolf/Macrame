@@ -501,7 +501,7 @@ pub async fn reconstruct_on(
                         seq: 0,
                         reason: format!(
                             "state at {ts} predates the hot log and no archive path was given; {}",
-                            archive_hint(conn).await
+                            archive_hint(conn, Some(branch)).await
                         ),
                     })
                 }
@@ -511,7 +511,7 @@ pub async fn reconstruct_on(
                     seq: 0,
                     reason: format!(
                         "archive database file {archive:?} does not exist; {}",
-                        archive_hint(conn).await
+                        archive_hint(conn, Some(branch)).await
                     ),
                 });
             }
@@ -1536,7 +1536,7 @@ async fn reconstruct_from(
                 seq: 0,
                 reason: format!(
                     "state at {ts} predates the hot log and no archive path was given; {}",
-                    archive_hint(conn).await
+                    archive_hint(conn, None).await
                 ),
             })
         }
@@ -1546,7 +1546,7 @@ async fn reconstruct_from(
             seq: 0,
             reason: format!(
                 "archive database file {archive:?} does not exist; {}",
-                archive_hint(conn).await
+                archive_hint(conn, None).await
             ),
         });
     }
@@ -1664,7 +1664,7 @@ async fn valid_rows(
             reason: format!(
                 "{what} needs rows the archive holds, \
                  and no archive database was found; {}",
-                archive_hint(conn).await
+                archive_hint(conn, None).await
             ),
         });
     }
@@ -2317,7 +2317,7 @@ async fn hot_stamp(conn: &libsql::Connection, agg: &str) -> Result<Option<String
 /// failure must not replace the diagnosis with its own. A query that does not
 /// answer yields a hint that says so, and the caller still gets the error it came
 /// for.
-async fn archive_hint(conn: &libsql::Connection) -> String {
+async fn archive_hint(conn: &libsql::Connection, branch: Option<&str>) -> String {
     // `COUNT(*)` always returns a row, so `None` here means the query itself
     // failed and there is nothing to say beyond that.
     let row = match conn
@@ -2343,10 +2343,47 @@ async fn archive_hint(conn: &libsql::Connection) -> String {
     let floor: String = row.get(3).unwrap_or_default();
     let removed = max - count;
 
-    format!(
+    let mut hint = format!(
         "{removed} log rows have been archived out of this database; the hot log \
          now begins at seq_id {min} ({floor})"
-    )
+    );
+
+    // The per-lineage arm (0.22.0, M6-f; the amendment's §5.4 cost 5, the last
+    // of §15.2's four cold readers to grow its lineage arm): a reader that
+    // named a lineage is told where that lineage's own surviving rows begin,
+    // because two branches archive differently and the whole-ledger sentence
+    // answers neither's question.
+    if let Some(b) = branch {
+        let line = match conn
+            .query(
+                "SELECT COUNT(*), MIN(seq_id), MIN(recorded_at) FROM transaction_log \
+                 WHERE branch_id = ?1",
+                libsql::params![b],
+            )
+            .await
+        {
+            Ok(mut rows) => rows.next().await.ok().flatten(),
+            Err(_) => None,
+        };
+        match line {
+            Some(line) if line.get::<i64>(0).unwrap_or(0) > 0 => {
+                let own_count: i64 = line.get(0).unwrap_or(0);
+                let own_min: i64 = line.get(1).unwrap_or(0);
+                let own_floor: String = line.get(2).unwrap_or_default();
+                hint.push_str(&format!(
+                    "; lineage {b}'s own \
+                     {own_count} surviving log rows begin at seq_id {own_min} ({own_floor})"
+                ));
+            }
+            _ => {
+                hint.push_str(&format!(
+                    "; lineage {b} wrote no surviving log rows of its own"
+                ));
+            }
+        }
+    }
+
+    hint
 }
 
 /// Was any row ever removed from `transaction_log`? — answered exactly, from

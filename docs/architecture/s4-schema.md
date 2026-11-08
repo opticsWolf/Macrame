@@ -971,3 +971,14 @@ and `blob_stat(&str) -> Option<BlobStat>`, capped at
 `Tuning::max_blob_bytes` (8 MiB by default): libsql 0.9.30 passes a blob only
 as a whole `Vec<u8>`, so every operation holds the full value in memory two or
 three times.
+
+### 4.11 The overlay: per-lineage concept versions and cuts (0.22.0, M6-a)
+
+[D-314](s13-decision-register.md#d-314)'s tables, the rung the v26 step landed beside the v25 schema it extends:
+
+* **`concept_versions`** — `id, branch_id, valid_from, valid_to, title, content, extra, embedding_model, recorded_at`, keyed `(id, branch_id, valid_from)`, `WITHOUT ROWID` (P-1's §14 note: the rowid the FTS wants lives in the version tables' own shadow). One row per lineage's own belief; the mint's row in `concepts` stays immutable and `links` keeps parenting it. The immutability triggers guard `id`, `branch_id` and `valid_from` against edits; a change of heart writes a row, never an edit.
+* **`concept_cuts`** — `id, branch_id, cut_at, recorded_at`, PK `(id, branch_id, cut_at)`, append-only, `DO NOTHING` on a duplicate cut. A cut names an instant from which *this lineage* stops counting a belief it can see; it is never a close of somebody else's row.
+* **`concept_versions_fts`** — external content over the rowid-bearing shadow `concept_version_fts_rows(key, table, field, text, seq_id)` — the versions' own index, filled by triggers when a version row lands, so a branch's own text is findable and the SQL shape D-310's third cost [D-252](s13-decision-register.md#d-252) priced is the reader's union with a resolution drop, not this table's shape.
+* **`{model}_version_embeddings`** — per registered model, `(id, branch_id, valid_from, embedding)` keyed the same way: a version's vector is the version's own, and `upsert_version_embeddings` fills it under the caller's model name (Doctrine VII stands: an embedding is derived from content, and a version is content).
+
+The two triggers' shape is the one law the rung carries from `concepts`: one open belief per `(id, branch)` at a time, mutually worked out with the walk's read law and [D-315](s13-decision-register.md#d-315)'s adoption (which writes the same table with no cut, no close and no copy — a first version whose mint the writer cannot see). Nothing here key-changes any pre-26 row; the whole rung is additive, its P-1 probe byte-checked the children.

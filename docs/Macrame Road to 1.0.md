@@ -3014,6 +3014,8 @@ can afford at that rate. One `INSERT` into `branches` and nothing else.
 
 #### The overlay: what Option A cannot say, and what it would cost to say it
 
+> **Taken in 0.22.0 ([D-314](architecture/s13-decision-register.md#d-314)) — with the review's go and the gates this subsection's fear list built.** The five costs below are paid in the order this section named: (1) the 27 reader sites are classified (M6-P's P-2 probe) and converted behind the single `overlay_engaged` switch rather than re-typed; (2) the write side's mint-versus-effective split is [D-315](architecture/s13-decision-register.md#d-315)'s routing law, one decision per write at the act's stamp; (3) the double-FTS wrongness is the stale-hit red test the review priced high, and the shipped shape unions the trunk index with the version pool then drops superseded hits (M6-c; the version-aware filter measured cheap at scale — `docs/probes/m6-P3-search-scale.md` — and the fallback "per-lineage FTS rebuild if the filter scans" declined on measurement); (4) the resolution rule is the nearest-version-on-the-path law this section demanded, written into the fold, the reads and P-8's brute-force property test; and (5) the archive's second arm is D-128's reachability tested over the overlay beside the classic clauses, with the four cold readers' lineage arms landed (`rehydrate` keeps versions beside the mint, the cold fold applies §5.3 through the archive's kept `branches` rows, the verifier is per `(id, branch)`, and `archive_hint` answers per lineage). The retirement symptom below — a branch wanting to retire an inherited concept — is solved where this section said it had to be: cut rows answered absent-and-stop at the walk, the parent's rows untouched. And the adoption shape is not a smuggled merge: the entry's record says why.
+
 The model above is **Option A**: one row per concept, carrying the lineage that
 minted it. The alternative — call it the **overlay** — adds
 `concept_versions (id, branch_id, …)` resolving along ancestry, so a branch can
@@ -3620,6 +3622,8 @@ and the schema does not move.
   Fork, read, diff and abandon is a complete and useful feature without it. Merge
   is its own decision and should not be smuggled in under branching's schema
   rung.
+
+> **0.22.0's amendment of this item ([D-315](architecture/s13-decision-register.md#d-315)) stands beside it, not over it.** The refusal stays — an engine that chooses a superseder on the caller's behalf is still refused, and nothing in the write law reads another lineage to make the choice. What 0.22.0 ships is the narrower act the same section's vocabulary has room for: **adoption**, a lineage asserting a first belief about an id whose mint it cannot see, with the content from the caller's own tree and nothing copied, closed or cut from anywhere. The difference is decidable per write: adoption has no belief to supersede, merge does. The review's acceptance named this boundary (Q3) and the register keeps both halves D-315's.
 - **Cross-branch traversal.** An edge from a node on one branch to a node on
   another is either a lineage violation or a merge in disguise. Refused, named,
   and tested.
