@@ -64,7 +64,7 @@ const V12_ONLY_TRIGGERS: &[&str] = &[
 /// version above it, and it is the one a future release has to extend.
 ///
 /// [D-249]: ../../docs/architecture/s13-decision-register.md#d-249
-const POST_V12_TRIGGERS: &[&str] = &[
+pub const POST_V12_TRIGGERS: &[&str] = &[
     "trg_txlog_mark_gap",
     // v22 (0.19.0, D-288): both name `blobs`, which no fixture below v22 has.
     "trg_blobs_frozen_update",
@@ -94,6 +94,102 @@ const POST_V12_TRIGGERS: &[&str] = &[
     "trg_cversion_fts_shadow_u",
     "trg_cversion_fts_shadow_d",
 ];
+
+/// Everything the ladder introduced after v11, as `(kind, name, the rung's
+/// `to`)` — the version whose *shape* first contains the object. This is the
+/// residue law the wind-back helpers hold: a file wound down to vN must not
+/// contain anything whose version is above N, because a later object under an
+/// earlier stamp is exactly the fixture failure that let the v28 search
+/// machinery pass through rungs that never issued it (M6-c: the "missing 2"
+/// asymmetry was a wind-back that undid one rung's objects by table drop and
+/// silently kept another's).
+///
+/// Every trigger in [`POST_V12_TRIGGERS`] appears here with its version, and
+/// `a_wind_down_census_covers_the_pre_v12_list` — in migration_tests — holds
+/// the two to each other. Tables from the rungs' own wind-back bodies. Index
+/// reshapes are deliberately out of this list: they are v23-era swaps the
+/// calling helpers spell themselves, and a static per-version list of
+/// indexes would go stale faster than the bodies it duplicated.
+pub const INTRODUCED: &[(&str, &str, u32)] = &[
+    // The first rung after v11 (W14.5, D-249).
+    ("trigger", "trg_txlog_mark_gap", 16),
+    ("table", "log_integrity", 16),
+    ("table", "kv_store", 20),
+    // v22 (0.19.0, D-288).
+    ("table", "blobs", 22),
+    ("trigger", "trg_blobs_frozen_update", 22),
+    ("trigger", "trg_blobs_guard_delete", 22),
+    // v24 (0.21.0, D-303): the marks table the read pair probes through.
+    ("table", "concept_disorder", 24),
+    // v25 (0.22.0, D-309): the edge-kind register.
+    ("table", "edge_kinds", 25),
+    // v26 (0.22.0, M6-a, Amendment 2 §5.1, D-314): the overlay.
+    ("table", "concept_versions", 26),
+    ("table", "concept_cuts", 26),
+    ("trigger", "trg_concept_versions_log_insert", 26),
+    ("trigger", "trg_concept_versions_log_update", 26),
+    ("trigger", "trg_concept_versions_single_open", 26),
+    ("trigger", "trg_concept_versions_branch_immutable", 26),
+    ("trigger", "trg_concept_versions_guard_delete", 26),
+    ("trigger", "trg_concept_cuts_log_insert", 26),
+    ("trigger", "trg_concept_cuts_branch_immutable", 26),
+    ("trigger", "trg_concept_cuts_guard_delete", 26),
+    // v27 (0.22.0, M6-b's continuation): the overlay's row laws.
+    ("trigger", "trg_concept_versions_monotonic_ra", 27),
+    ("trigger", "trg_concept_versions_stable_start", 27),
+    ("trigger", "trg_concept_cuts_no_update", 27),
+    // v28 (0.22.0, M6-c, Amendment 2 §5.4 cost 3): the version pool's search.
+    ("table", "concept_version_fts_rows", 28),
+    ("table", "concept_versions_fts", 28),
+    ("trigger", "trg_cversion_fts_import_i", 28),
+    ("trigger", "trg_cversion_fts_import_u", 28),
+    ("trigger", "trg_cversion_fts_shadow_i", 28),
+    ("trigger", "trg_cversion_fts_shadow_u", 28),
+    ("trigger", "trg_cversion_fts_shadow_d", 28),
+];
+
+/// One column, by name, on one table. The shape guards use it to make their
+/// version-specific restore conditional — a hand-built file below v12 lacks
+/// the columns the later rungs added, and a guard that does not look would
+/// fail there instead of in the rung under test.
+pub async fn column_exists(conn: &libsql::Connection, table: &str, column: &str) -> bool {
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",
+            libsql::params![table, column],
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().expect("COUNT answers one row");
+    row.get::<i64>(0).unwrap() > 0
+}
+
+/// The census law the wind-back helpers end with: nothing the ladder
+/// introduced after version `at` may remain. A rung's `CREATE ... IF NOT
+/// EXISTS` succeeds whether or not the rung runs, so a later object under an
+/// earlier stamp is a fixture that cannot fail on a shortened rung — this is
+/// the check that makes it fail.
+pub async fn assert_wound_down(conn: &libsql::Connection, at: u32) {
+    for (kind, name, introduced) in INTRODUCED {
+        if *introduced <= at {
+            continue;
+        }
+        let mut rows = conn
+            .query(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = ?1 AND name = ?2",
+                libsql::params![kind, name],
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().expect("COUNT answers one row");
+        let present: i64 = row.get(0).unwrap();
+        assert_eq!(
+            present, 0,
+            "wound down to v{at}, but the {kind} `{name}` (introduced at v{introduced}) is \
+             still present: the fixture is describing a later shape under an earlier stamp"
+        );
+    }
+}
 
 /// The five triggers v12 redefines, by name. Their v11 bodies are below.
 const V12_CHANGED_TRIGGERS: &[&str] = &[
@@ -392,12 +488,18 @@ pub async fn v11_schema(conn: &libsql::Connection) {
 /// Undo v23 on a database built from today's baseline (0.20.0, D-300, D-301).
 ///
 /// The rung's two halves in reverse: the concept guard's partial index goes,
-/// and the log's entity index comes back. Idempotent, like the rest.
+/// and the log's entity index comes back. Chained to [`wind_back_to_v23`]
+/// first, so every helper below v22 is below everything above it — the
+/// convention the helpers hold, and the one the v28 search objects were
+/// missed by before their rung was reached (M6-c). Ends with the census law
+/// ([`assert_wound_down`]). Idempotent, like the rest.
 pub async fn wind_back_to_v22(conn: &libsql::Connection) {
+    wind_back_to_v23(conn).await;
     conn.execute("DROP INDEX IF EXISTS idx_txlog_concept_starts", ())
         .await
         .unwrap();
     conn.execute(TXLOG_ENTITY_V22, ()).await.unwrap();
+    assert_wound_down(conn, 22).await;
 }
 /// Take a database back to v23's *shape* (0.21.0, D-303) — schema only; the
 /// stamp is the caller's to pair, like every wind-back before it.
@@ -413,33 +515,51 @@ pub async fn wind_back_to_v22(conn: &libsql::Connection) {
 /// `idx_txlog_entity`, which a v23 file did not have (the v23 rung dropped
 /// it).
 pub async fn wind_back_to_v23(conn: &libsql::Connection) {
+    wind_back_to_v24(conn).await;
     conn.execute("DROP TABLE IF EXISTS concept_disorder", ())
         .await
         .unwrap();
     conn.execute("DROP INDEX IF EXISTS idx_txlog_concept_starts", ())
         .await
         .unwrap();
-    conn.execute(
-        "CREATE INDEX idx_txlog_concept_starts ON transaction_log          (entity_id, branch_id, json_extract(payload, '$.valid_from'), seq_id DESC)          WHERE table_name = 'concepts'",
-        (),
-    )
-    .await
-    .unwrap();
+    // The v23 order is only creatable where the columns exist: the hand-built
+    // pre-v12 shapes (v6 and friends, which reach this helper through the
+    // chain from below) have no `branch_id` on the log, and their own era's
+    // index law is the climb's rung's to re-create, not this helper's to
+    // invent across a version gap.
+    if column_exists(conn, "transaction_log", "branch_id").await {
+        conn.execute(
+            "CREATE INDEX idx_txlog_concept_starts ON transaction_log          (entity_id, branch_id, json_extract(payload, '$.valid_from'), seq_id DESC)          WHERE table_name = 'concepts'",
+            (),
+        )
+        .await
+        .unwrap();
+    }
+    assert_wound_down(conn, 23).await;
 }
 
 /// Undo v25 on a database built from today's baseline (0.22.0, D-309): the
-/// edge-kind register is one table nothing references.
+/// edge-kind register is one table nothing references. Chained to
+/// [`wind_back_to_v25`] first, by the convention's rule; ends with the
+/// census law.
 #[allow(dead_code)]
 pub async fn wind_back_to_v24(conn: &libsql::Connection) {
+    wind_back_to_v25(conn).await;
     conn.execute("DROP TABLE IF EXISTS edge_kinds", ())
         .await
         .unwrap();
+    assert_wound_down(conn, 24).await;
 }
 
 /// Undo v26 on a database built from today's baseline (0.22.0, M6-a, D-314):
-/// two `WITHOUT ROWID` tables and their seven triggers, none named by
-/// anything older.
+/// two `WITHOUT ROWID` tables and their eight triggers, none named by
+/// anything older. Chained to [`wind_back_to_v27`] first — the v28 search
+/// machinery goes, because nothing older drops it and the import pair rides
+/// `concept_versions`, which the drops below remove (M6-c, the lesson the
+/// "missing 2" asymmetry came from); ends with the census law
+/// ([`assert_wound_down`]).
 pub async fn wind_back_to_v25(conn: &libsql::Connection) {
+    wind_back_to_v27(conn).await;
     for stmt in [
         "DROP TRIGGER IF EXISTS trg_concept_cuts_guard_delete",
         "DROP TRIGGER IF EXISTS trg_concept_cuts_branch_immutable",
@@ -448,11 +568,13 @@ pub async fn wind_back_to_v25(conn: &libsql::Connection) {
         "DROP TRIGGER IF EXISTS trg_concept_versions_branch_immutable",
         "DROP TRIGGER IF EXISTS trg_concept_versions_single_open",
         "DROP TRIGGER IF EXISTS trg_concept_versions_log_insert",
+        "DROP TRIGGER IF EXISTS trg_concept_versions_log_update",
         "DROP TABLE IF EXISTS concept_cuts",
         "DROP TABLE IF EXISTS concept_versions",
     ] {
         conn.execute(stmt, ()).await.unwrap();
     }
+    assert_wound_down(conn, 25).await;
 }
 
 /// Undo v28 on a database built from today's baseline (0.22.0, M6-c, the
@@ -473,6 +595,7 @@ pub async fn wind_back_to_v27(conn: &libsql::Connection) {
     ] {
         conn.execute(stmt, ()).await.unwrap();
     }
+    assert_wound_down(conn, 27).await;
 }
 
 /// Undo v22 on a database built from today's baseline (0.19.0, D-288).
@@ -493,6 +616,7 @@ pub async fn wind_back_to_v21(conn: &libsql::Connection) {
     ] {
         conn.execute(stmt, ()).await.unwrap();
     }
+    assert_wound_down(conn, 21).await;
 }
 
 /// Undo v21 on a database built from today's baseline (0.18.0, D-278).
@@ -537,6 +661,7 @@ pub async fn wind_back_to_v20(conn: &libsql::Connection) {
             .await
             .unwrap_or_else(|e| panic!("DROP COLUMN extra: {e}"));
     }
+    assert_wound_down(conn, 20).await;
 }
 
 pub async fn wind_back_to_v11(conn: &libsql::Connection) {
@@ -554,6 +679,12 @@ pub async fn wind_back_to_v11(conn: &libsql::Connection) {
             .await
             .unwrap();
     }
+
+    // v11 has no kv_store either, and the chain (which runs only to v20)
+    // leaves it in place: spelled here the way v16's table is spelled below.
+    conn.execute("DROP TABLE IF EXISTS kv_store", ())
+        .await
+        .unwrap();
 
     // v16's table goes with v16's trigger (W14.5, D-249). Not cosmetic: the
     // caller stamps this database back and climbs again, and the v15 -> v16
@@ -677,4 +808,6 @@ pub async fn wind_back_to_v11(conn: &libsql::Connection) {
     )
     .await
     .unwrap();
+
+    assert_wound_down(conn, 11).await;
 }

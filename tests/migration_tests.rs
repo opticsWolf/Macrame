@@ -459,6 +459,34 @@ fn a_version_bump_must_bring_its_own_rung_test() {
     );
 }
 
+/// The wind-down census and the pre-v12 trigger list say the same thing about
+/// the triggers: every name one holds, the other does too, with a version. When
+/// the two lists drift, one of them is lying about what a wind-back must take
+/// away — and the drift is silent, because both are checked only by being
+/// believed elsewhere.
+#[test]
+fn a_wind_down_census_covers_the_pre_v12_list() {
+    for trigger in v11_schema::POST_V12_TRIGGERS {
+        assert!(
+            v11_schema::INTRODUCED
+                .iter()
+                .any(|(kind, name, _)| *kind == "trigger" && *name == *trigger),
+            "POST_V12_TRIGGERS names {trigger} and the wind-down census does not: \
+             a wind-back relying on the census would leave it in place"
+        );
+    }
+    for (kind, name, version) in v11_schema::INTRODUCED {
+        if *kind == "trigger" {
+            assert!(
+                v11_schema::POST_V12_TRIGGERS.contains(name),
+                "the census names the {kind} `{name}` (v{version}) and \
+                 POST_V12_TRIGGERS does not: the fixture code that filters \
+                 v12-era triggers would no longer exclude it"
+            );
+        }
+    }
+}
+
 /// The v12 body of the `branches` delete guard: unconditional, with no marker
 /// probe. Pinned as text for `CONCEPTS_GUARD_DELETE_V8`'s reason — an old
 /// schema described by hand is a second description that drifts, and this one
@@ -1674,7 +1702,13 @@ async fn wind_back_to_v15(conn: &libsql::Connection) {
     conn.execute("DROP TABLE IF EXISTS log_integrity", ())
         .await
         .unwrap();
-    v11_schema::wind_back_to_v20(conn).await;
+    // v16's other piece's sibling: `kv_store` is in the v20 chain's residue
+    // the chain does not take, and a v15 file does not have it (M6-c's
+    // residue law).
+    conn.execute("DROP TABLE IF EXISTS kv_store", ())
+        .await
+        .unwrap();
+    v11_schema::assert_wound_down(conn, 15).await;
     conn.execute("PRAGMA user_version = 15", ()).await.unwrap();
 }
 
@@ -2576,7 +2610,7 @@ async fn wind_back_to_v19(conn: &libsql::Connection) {
     conn.execute("DROP TABLE IF EXISTS kv_store", ())
         .await
         .unwrap();
-    v11_schema::wind_back_to_v20(conn).await;
+    v11_schema::assert_wound_down(conn, 19).await;
     conn.execute("PRAGMA user_version = 19", ()).await.unwrap();
 }
 
