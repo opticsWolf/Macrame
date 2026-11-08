@@ -452,7 +452,7 @@ async fn plan_string(conn: &libsql::Connection, sql: &str) -> String {
 #[test]
 fn a_version_bump_must_bring_its_own_rung_test() {
     assert_eq!(
-        SCHEMA_VERSION, 26,
+        SCHEMA_VERSION, 27,
         "SCHEMA_VERSION moved. Add a test for the new rung — one that starts \
          from a database at the previous version and asserts what the rung is \
          *for*, not merely that `run` reached the top."
@@ -3193,6 +3193,110 @@ async fn a_v25_database_climbs_to_v26_and_gains_the_overlay_tables() {
     )
     .await
     .expect_err("a physical cut delete was accepted");
+}
+
+/// **v25 → v27 through both overlay rungs; the second carries the row laws
+/// (0.22.0, M6-b's continuation, the post-merge review's low finding).**
+///
+/// What the v26 → v27 rung is *for*: the overlay's rows get the projection's
+/// row laws as triggers — a cut row never rewritten (a cut is a decision,
+/// not a window), a version row's `recorded_at` never moving backwards
+/// ([D-303]'s rule on the overlay), a version row's start
+/// `(id, branch_id, valid_from)` never rewritten (D-291-with's read-side
+/// twin, and the identity the fold channels key on). All three come from the
+/// baseline's `CREATE_TRIGGERS` constants, so a fixture climbing the real
+/// ladder proves the constants round-trip through the rung, not merely that
+/// the tables exist. This is the same discipline v22's rung test used for
+/// its guards: behaviour, not text.
+#[tokio::test]
+async fn a_v25_database_climbing_to_v27_gains_the_overlays_row_laws() {
+    let harness = TestHarness::new();
+    let conn = connect(&harness).await;
+    macrame::schema::run_migrations(&conn).await.unwrap();
+
+    v11_schema::wind_back_to_v25(&conn).await;
+    conn.execute("PRAGMA user_version = 25", ()).await.unwrap();
+    assert_eq!(
+        scalar(
+            &conn,
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' \
+             AND name IN ('trg_concept_versions_monotonic_ra', \
+                          'trg_concept_versions_stable_start', \
+                          'trg_concept_cuts_no_update')"
+        )
+        .await,
+        0,
+        "the fixture is not starting from a pre-v27 body"
+    );
+
+    // The climb crosses v26 (the tables) and v27 (the guards).
+    macrame::schema::run_migrations(&conn).await.unwrap();
+    assert_eq!(user_version(&conn).await, SCHEMA_VERSION);
+
+    // One version row and one cut row on the same pair, the v26 rung's own
+    // shape, to poke the three laws against real rows.
+    conn.execute(
+        "INSERT INTO concept_versions \
+         (id, branch_id, valid_from, valid_to, title, content, extra, recorded_at) \
+         VALUES ('c', 'main', ?1, ?2, '', '', '{}', ?3)",
+        libsql::params![TS, OPEN, TS_3],
+    )
+    .await
+    .unwrap();
+    conn.execute(
+        "INSERT INTO concept_cuts (id, branch_id, cut_at, recorded_at) \
+         VALUES ('c', 'main', ?1, ?2)",
+        libsql::params![TS_2, TS_3],
+    )
+    .await
+    .unwrap();
+
+    // The cut is a decision, not a window: any rewrite refused.
+    conn.execute(
+        "UPDATE concept_cuts SET cut_at = ?1 WHERE id = 'c'",
+        libsql::params![TS_3],
+    )
+    .await
+    .expect_err("the cut row was rewritten");
+
+    // The stamp is monotonic ([D-303]'s rule on the overlay)...
+    conn.execute(
+        "UPDATE concept_versions SET recorded_at = ?1 WHERE id = 'c'",
+        libsql::params![TS],
+    )
+    .await
+    .expect_err("the version row's stamp moved backwards");
+
+    // ...and the start is the row's identity: never rewritten.
+    conn.execute(
+        "UPDATE concept_versions SET valid_from = ?1 WHERE id = 'c'",
+        libsql::params![TS_2],
+    )
+    .await
+    .expect_err("the version row's start was rewritten");
+
+    // The laws do not overblock: the windows themselves stay writable, the
+    // thing the takeover actually does when a row closes instead of cuts.
+    conn.execute(
+        "UPDATE concept_versions SET valid_to = ?1 WHERE id = 'c' AND valid_from = ?2",
+        libsql::params![TS_3, TS],
+    )
+    .await
+    .expect("a window close was refused, overblocking the takeover");
+    let pivots = conn
+        .query(
+            "SELECT valid_to FROM concept_versions WHERE id = 'c' AND valid_from = ?1",
+            libsql::params![TS],
+        )
+        .await
+        .unwrap()
+        .next()
+        .await
+        .unwrap()
+        .unwrap()
+        .get::<String>(0)
+        .unwrap();
+    assert_eq!(pivots, TS_3, "the close did not land");
 }
 
 /// **Acceptance gate 13 (0.19.0, P4, [D-288]): v21 → v22 on a populated

@@ -195,6 +195,16 @@ macro_rules! abort_monotonic_ra {
         "macrame: concept recorded_at must be strictly increasing"
     };
 }
+macro_rules! abort_cuts_immutable {
+    () => {
+        "macrame: a concept cut is a decision and is never rewritten"
+    };
+}
+macro_rules! abort_stable_start {
+    () => {
+        "macrame: a concept version start is its identity and is never rewritten"
+    };
+}
 macro_rules! abort_delete_guard {
     () => {
         "macrame: physical delete blocked outside archive session"
@@ -819,6 +829,71 @@ pub const CREATE_CONCEPT_CUTS_GUARD_DELETE: &str = concat!(
     BEGIN
         SELECT RAISE(ABORT, '"#,
     abort_delete_guard!(),
+    r#"');
+    END;
+    "#
+);
+
+/// A cut row is a decision, not a window: no act rewrites it. The v27 rung
+/// (0.22.0, M6-b's continuation, the post-merge review's low finding) makes
+/// that literal — every `UPDATE` on `concept_cuts` aborts, rather than only a
+/// lineage change (`trg_concept_cuts_branch_immutable` above, kept: addons
+/// only, and it is unreachable text beside this one). A raw edit of `cut_at`
+/// would make the table and the log disagree silently, and both are the
+/// resolution's source of truth.
+#[doc(hidden)]
+pub const CREATE_CONCEPT_CUTS_NO_UPDATE: &str = concat!(
+    r#"
+    CREATE TRIGGER IF NOT EXISTS trg_concept_cuts_no_update
+    BEFORE UPDATE ON concept_cuts
+    BEGIN
+        SELECT RAISE(ABORT, '"#,
+    abort_cuts_immutable!(),
+    r#"');
+    END;
+    "#
+);
+
+/// The overlay's rows are the same class of ledger rows the projection's are:
+/// `recorded_at` carries the act's order, the D-303 state rule reads it as
+/// one, and a backwards edit would put an older belief after a newer one
+/// inside the same pair. The projection has carried this trigger since 0.20.0
+/// ([`CREATE_CONCEPTS_MONOTONIC_RA`], [D-303]); the versions channel carries
+/// the same law from the v27 rung on.
+///
+/// **`<`, not `<=`** — the same shape the projection's own trigger has. A
+/// stamp-preserving window rewrite must stay legal: the takeover's close of
+/// an own-open belief rewrites `valid_to` and leaves `recorded_at` exactly
+/// where it was, and the law is about the *order* becoming wrong, not about
+/// the row being touched.
+#[doc(hidden)]
+pub const CREATE_CONCEPT_VERSIONS_MONOTONIC_RA: &str = concat!(
+    r#"
+    CREATE TRIGGER IF NOT EXISTS trg_concept_versions_monotonic_ra
+    BEFORE UPDATE ON concept_versions
+    WHEN NEW.recorded_at < OLD.recorded_at
+    BEGIN
+        SELECT RAISE(ABORT, '"#,
+    abort_monotonic_ra!(),
+    r#"');
+    END;
+    "#
+);
+
+/// A version row's start is its identity — `(id, branch_id, valid_from)` is
+/// the table's primary key and the fold's channel key. The write law touches
+/// a pair's `valid_to` (a winddown, and the close of its own open belief) and
+/// never its start; a raw edit that rewrote it would orphan the pair's log
+/// rows and split the lineage's windows. Refused from the v27 rung on.
+#[doc(hidden)]
+pub const CREATE_CONCEPT_VERSIONS_STABLE_START: &str = concat!(
+    r#"
+    CREATE TRIGGER IF NOT EXISTS trg_concept_versions_stable_start
+    BEFORE UPDATE ON concept_versions
+    WHEN NEW.valid_from <> OLD.valid_from
+    BEGIN
+        SELECT RAISE(ABORT, '"#,
+    abort_stable_start!(),
     r#"');
     END;
     "#
@@ -2438,9 +2513,18 @@ pub const CREATE_TRIGGERS: &[&str] = &[
     CREATE_CONCEPT_VERSIONS_LOG_UPDATE,
     CREATE_CONCEPT_VERSIONS_SINGLE_OPEN,
     CREATE_CONCEPT_VERSIONS_GUARD_BRANCH,
+    // v27 (0.22.0, M6-b's continuation): the overlay's rows are ledger rows
+    // the way the projection's are — `recorded_at` monotonic, the start
+    // stable. `create_triggers` recovers their names from this list, so the
+    // ladder must produce them; the v26 → v27 rung does.
+    CREATE_CONCEPT_VERSIONS_MONOTONIC_RA,
+    CREATE_CONCEPT_VERSIONS_STABLE_START,
     CREATE_CONCEPT_VERSIONS_GUARD_DELETE,
     CREATE_CONCEPT_CUTS_LOG_INSERT,
     CREATE_CONCEPT_CUTS_GUARD_BRANCH,
+    // v27: cuts are immutable outright (the branch-immutable trigger above
+    // stays, addons only — it is unreachable text beside this one).
+    CREATE_CONCEPT_CUTS_NO_UPDATE,
     CREATE_CONCEPT_CUTS_GUARD_DELETE,
     CREATE_BRANCHES_GUARD_UPDATE,
     CREATE_BRANCHES_GUARD_DELETE,

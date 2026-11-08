@@ -3,12 +3,17 @@
 //!
 //! M6-a made the write actor own the overlay (`concept_versions` rows on the
 //! writer's lineage, cuts stopping the fall-through); M6-b makes the readers
-//! resolve by the law the writes created. In one sentence: a read on a
-//! lineage walks the path nearest first; the first overlay row of `id`
-//! covering the instant answers (a version wins over a cut where both cover),
-//! a covering cut answers *absent* and stops the walk, and only where nothing
+//! resolve by the law the writes created, corrected by the post-merge review
+//! of that same landing. In one sentence: **a read that names a lineage
+//! walks the path nearest first** — the first overlay row of `id` covering
+//! the instant answers (a version wins over a cut where both cover), a
+//! covering cut answers *absent* and stops the walk, and only where nothing
 //! of the overlay decides does the projection answer as it does today
-//! (D-310's fold at the per-lineage caps).
+//! (D-310's fold at the per-lineage caps) — **and a read that names no
+//! lineage walks nothing**: the whole-ledger folds (`reconstruct`,
+//! `reconstruct_as_of`) are D-310's creating-lineage row verbatim, because a
+//! recency rule over branches is no rule at all (*recorded_at* is a total
+//! order only within a branch, the Road's §15.2 cost 4).
 //!
 //! The stories are the amendment's §12 names:
 //!
@@ -22,7 +27,12 @@
 //! - [`a_later_ancestor_edit_after_the_fork_does_not_change_the_branch_reads`]
 //!   (§12.6, monotonicity);
 //! - [`a_branch_supersede_leaves_the_mint_lineage_standing_correctly`]
-//!   (§12.2 — branch rows are branch rows; the trunk's reads never move);
+//!   (§12.2 — branch rows are branch rows; the trunk's reads never move),
+//!   carried into the folds: [`a_lineage_less_fold_answers_the_mint_s_law
+//!   _before_and_after_a_branch_write`] and [`a_windowed_takeover_folds_to
+//!   _the_mint_s_law_and_the_walk_to_the_window`] — a whole-ledger fold
+//!   names no lineage and resolves nothing (the post-merge review's finding
+//!   3, the Road's [§15.2 cost 4](../docs/Macrame%20Update%20Plan%20v0.22.0.md));
 //! - the two "today's law holds where the overlay says nothing" gates:
 //!   a forked store before any version row (§12.13's forked twin) and the
 //!   never-forked database itself;
@@ -448,15 +458,21 @@ async fn a_branch_supersede_leaves_the_mint_lineage_standing_correctly() {
 // the ancestor fold `reconstruct_on`)
 // ---------------------------------------------------------------------------
 
-/// The overlay's rows are the ledger's own log rows, so the lineage-agnostic
-/// folds resolve them by the same law: the ledger's newest assertion on the
-/// pair answers. Before the takeover's stamp the overlays were not yet
-/// written, so the fold carries the mint's row; after it carries the branch's
-/// row. The mint-holder's own fold (`reconstruct_on(ts, "main")`) never
-/// resolves anything, because the branch's rows are cut from its lineage by
-/// the "byte identical" story above.
+/// **A whole-ledger fold answers the mint's law, before and after a branch
+/// write.** The overlay's rows are per-lineage states, and a fold with no
+/// lineage to walk resolves nothing: D-310's answer — the creating lineage's
+/// row — is the answer at every instant the row covers, both axes. Road
+/// [§15.2 cost 4](../docs/Macrame%20Update%20Plan%20v0.22.0.md) rules the
+/// alternative out by name ("the rule cannot be 'the most recent' —
+/// `recorded_at` is a total order only within a branch"); the per-reader list
+/// of §12.1 names [`reconstruct_on`] and the `concepts_by_id` plan, not the
+/// whole-ledger folds. (This test pinned the recency reading when M6-b first
+/// landed and was corrected with the post-merge review's finding 3 same
+/// day.)
+///
+/// [`reconstruct_on`]: crate::temporal::reconstruct_on
 #[tokio::test]
-async fn a_whole_ledger_fold_resolves_the_overlay_s_own_rows() {
+async fn a_lineage_less_fold_answers_the_mint_s_law_before_and_after_a_branch_write() {
     let harness = TestHarness::new();
     let db = forked_view(&harness, None).await;
     let view = db.view(BranchId::new("b0").unwrap());
@@ -478,18 +494,16 @@ async fn a_whole_ledger_fold_resolves_the_overlay_s_own_rows() {
     let pre = db.reconstruct(&r_pre).await.unwrap();
     assert_eq!(pre.concepts.get("x").expect("x pre").title, OLD);
 
-    // After the act: the overlay's version row is the ledger's newest
-    // assertion, and the reconstruction answers it.
+    // After the act: the branch's row is a per-lineage state; the
+    // whole-ledger fold's answer did not move.
     let post = db.reconstruct(&now).await.unwrap();
     assert_eq!(
         post.concepts.get("x").expect("x post").title,
-        NEW,
-        "the whole-ledger fold resolves the branch's own row"
+        OLD,
+        "the whole-ledger fold keeps the mint's row: a read with no lineage resolves nothing"
     );
 
-    // The valid axis: before the version's start the mint's row covers,
-    // from the start the branch's row covers — the same
-    // before-the-cut /-language §12.1 opens with.
+    // The valid axis: the same law at every instant the mint's row covers.
     let pre_valid = macrame::temporal::AsOf::bitemporal(TS, now.clone());
     let post_valid = macrame::temporal::AsOf::bitemporal(T5, now.clone());
     let pre_state = db.reconstruct_as_of(pre_valid).await.unwrap();
@@ -497,8 +511,17 @@ async fn a_whole_ledger_fold_resolves_the_overlay_s_own_rows() {
     let post_state = db.reconstruct_as_of(post_valid).await.unwrap();
     assert_eq!(
         post_state.concepts.get("x").expect("x post valid").title,
+        OLD,
+        "the valid-axis fold keeps the mint's row"
+    );
+
+    // The walked read is the one that answers the branch: same store, named
+    // lineage.
+    let state = db.reconstruct_on(&now, "b0").await.unwrap();
+    assert_eq!(
+        state.concepts.get("x").expect("x on b0").title,
         NEW,
-        "the valid-axis fold resolves the branch's window"
+        "the per-lineage fold is the one that walks"
     );
 }
 
@@ -625,11 +648,17 @@ async fn an_ancestor_s_post_fork_edit_stays_out_of_the_branch_s_reconstruction()
     );
 }
 
-/// The windowed takeover on the folds: on the recorded axis the pair's cut
-/// covers the present, so the id drops — on the valid axis the window's own
-/// text covers while it runs, and the cut covers (absently) after it.
+/// The windowed takeover, read from **both** ends of the resolution's
+/// division: a whole-ledger fold (`reconstruct`, `reconstruct_as_of`) names
+/// no lineage, so it answers the mint's row at every instant it covers — the
+/// present, inside the window, past it — while the per-lineage reads answer
+/// the window where it runs and drop the id past it (the pair's cut covers).
+/// The whole-ledger claims are the story this file's closing gates already
+/// carry for the branch's current reads; this one pins the fold-side half of
+/// the same statement (the post-merge review's finding 3). The window's own
+/// read shape is the story above.
 #[tokio::test]
-async fn a_windowed_takeover_folds_to_absent_now_and_its_title_within_the_window() {
+async fn a_windowed_takeover_folds_to_the_mint_s_law_and_the_walk_to_the_window() {
     let harness = TestHarness::new();
     let db = forked_view(&harness, None).await;
     let view = db.view(BranchId::new("b0").unwrap());
@@ -645,32 +674,50 @@ async fn a_windowed_takeover_folds_to_absent_now_and_its_title_within_the_window
     .unwrap();
 
     let now = stamp_of(&db, "SELECT MAX(recorded_at) FROM concept_versions").await;
-    // The recorded axis, at the present: the cut covers, the id is absent.
+    // The whole-ledger fold, on the recorded axis: the mint's law verbatim.
     let recorded_now = db.reconstruct(&now).await.unwrap();
     assert_eq!(
-        recorded_now.concepts.get("x"),
-        None,
-        "a windowed takeover folds absent outside its window"
+        recorded_now.concepts.get("x").expect("x now").title,
+        OLD,
+        "the windowed pair is the branch's state; the lineage-less fold answers the mint"
     );
-    // The valid axis within the window: the version's text.
+    // The valid axis, whole-ledger: the same law inside and past the window.
     let in_window = db
         .reconstruct_as_of(macrame::temporal::AsOf::bitemporal(T5, now.clone()))
         .await
         .unwrap();
     assert_eq!(
         in_window.concepts.get("x").expect("x in window").title,
-        NEW,
-        "the valid-axis fold shows the window's text"
+        OLD,
+        "the creating lineage's row covers the instant the fold asks about"
     );
-    // The valid axis past the window: absent again, not `OLD` again.
     let past_window = db
         .reconstruct_as_of(macrame::temporal::AsOf::bitemporal(AFTER, now.clone()))
         .await
         .unwrap();
     assert_eq!(
-        past_window.concepts.get("x"),
+        past_window.concepts.get("x").expect("x past window").title,
+        OLD,
+        "past the window the fold still answers the mint: the overlay's cut is the branch's own decision"
+    );
+
+    // The per-lineage fold: the walk answers the window on its own time.
+    let on_b0_in = db.reconstruct_on(&now, "b0").await.unwrap();
+    assert_eq!(
+        on_b0_in.concepts.get("x"),
         None,
-        "the cut covers after the window on the valid axis"
+        "on the branch's own line the window has ended and the cut covers (the far end)"
+    );
+    // And intra-window on the walked read (the valid-axis one is
+    // `concepts_by_id`'s story above).
+    let plan = ReadPlan::new()
+        .on(BranchId::new("b0").unwrap())
+        .valid_at(T5);
+    let rows = db.concepts_by_id(&["x".to_string()], plan).await.unwrap();
+    assert_eq!(
+        rows.into_iter().next().map(|c| c.title),
+        Some(NEW.to_string()),
+        "the branch's window shows on its own interior"
     );
 }
 

@@ -576,6 +576,20 @@ pub(crate) async fn overlay_scan(
 /// is its state there. The versions channel takes by `(id, valid_from)`
 /// partitions, as the write law keeps the same start's rewrites in place;
 /// the cuts channel takes by `(id, cut_at)`.
+///
+/// **The cap and the pick are the two rules the log arms keep, and the two
+/// the review of M6-b refined.** First, a log row counts only on a *named*
+/// cap: under an unbounded read the table row is always `at the cap`, and a
+/// stale log payload of that pair (the pre-close insert, whose window's only
+/// record is the log) would sit beside the current row and be picked over it.
+/// Second, a pair's newest row is picked **before** coverage is applied: a
+/// `WHERE` that filtered on the window first would let an older open row
+/// survive a pick that must answer with the newer closed one (covered
+/// after, then the cut's window), which is exactly the state as of the cap
+/// between a close and a later touch of the same pair. So coverage is a
+/// predicate on the pair-picked rows, not a `WHERE` on the log arms — which
+/// is also why both arms can share the normalized columns: coverage reads
+/// `valid_from`/`valid_to` of whatever the pair-pick left standing.
 fn scan_sql(
     n: usize,
     rows: usize,
@@ -607,12 +621,11 @@ fn scan_sql(
         "v.valid_from <= ?{p} AND {}",
         to_cmp.replace("{t}", "v.valid_to")
     ));
-    let vtw_log = finish(format!(
-        "json_extract(j.payload, '$.valid_from') <= ?{p} AND {}",
-        to_cmp.replace("{t}", "json_extract(j.payload, '$.valid_to')")
-    ));
+    // The pick's coverage predicate over the normalized columns (the table
+    // and log arms share one shape after the union, so one predicate serves
+    // both; cuts guard their named-end arm off with `kind = 'k'`).
+    let vtw_plain = finish(to_cmp.replace("{t}", "valid_to"));
     let ktw = finish("k.cut_at <= ?{p}".to_string());
-    let ktw_log = finish("json_extract(j.payload, '$.cut_at') <= ?{p}".to_string());
 
     let cap = match recorded_slot {
         Some(q) => format!("CASE WHEN cutoff IS NULL OR cutoff > ?{q} THEN ?{q} ELSE cutoff END"),
@@ -642,14 +655,14 @@ ov_rows(id, bid, dist, kind, valid_from, valid_to, title, content, extra, embedd
            j.recorded_at, j.seq_id
     FROM ov_step s JOIN transaction_log j ON j.branch_id = s.bid
     WHERE j.table_name = 'concept_versions' AND j.entity_id IN ({ids})
-      AND (s.cap IS NULL OR j.recorded_at <= s.cap)
+      AND s.cap IS NOT NULL
+      AND j.recorded_at <= s.cap
       AND NOT EXISTS (
           SELECT 1 FROM concept_versions w
           WHERE w.id = j.entity_id AND w.branch_id = s.bid
             AND w.valid_from = json_extract(j.payload, '$.valid_from')
             AND w.recorded_at <= s.cap
       )
-      AND {vtw_log}
     UNION ALL
     SELECT k.id, s.bid, s.dist, 'k', k.cut_at, NULL, NULL, NULL, NULL, NULL, k.recorded_at, 0
     FROM ov_step s JOIN concept_cuts k ON k.branch_id = s.bid
@@ -659,16 +672,33 @@ ov_rows(id, bid, dist, kind, valid_from, valid_to, title, content, extra, embedd
            json_extract(j.payload, '$.cut_at'), NULL, NULL, NULL, NULL, NULL, j.recorded_at, j.seq_id
     FROM ov_step s JOIN transaction_log j ON j.branch_id = s.bid
     WHERE j.table_name = 'concept_cuts' AND j.entity_id IN ({ids})
-      AND (s.cap IS NULL OR j.recorded_at <= s.cap)
+      AND s.cap IS NOT NULL
+      AND j.recorded_at <= s.cap
       AND NOT EXISTS (
           SELECT 1 FROM concept_cuts w
           WHERE w.id = j.entity_id AND w.branch_id = s.bid
             AND w.cut_at = json_extract(j.payload, '$.cut_at')
             AND w.recorded_at <= s.cap
       )
-      AND {ktw_log}
+),
+ov_pair AS (
+    -- A pair's newest row is its state at the cap: one pick per
+    -- (id, lineage, kind, start) — the tables' own keys — before coverage
+    -- says anything. The table arm and the log arm never mix for one pair
+    -- (the NOT EXISTS pairs them), so the seq order is between log rows
+    -- alone; a table row is its pair's whole arm.
+    SELECT id, bid, dist, kind, valid_from, valid_to, title, content, extra, embedding_model, recorded_at, seq,
+           ROW_NUMBER() OVER (
+               PARTITION BY id, bid, kind, valid_from
+               ORDER BY seq DESC
+           ) AS rn
+    FROM ov_rows
 ),
 ov_pick AS (
+    -- The distance pick over the pair-picked rows, coverage applied as a
+    -- filter here and not sooner: at an instant the half-open bound, at the
+    -- far end a version covers while it is open (a cut's `valid_from` is its
+    -- `cut_at`, and NULL `valid_to` never passes the version predicate).
     SELECT id, bid, valid_from, valid_to, kind, title, content, extra, embedding_model, recorded_at,
            ROW_NUMBER() OVER (
                PARTITION BY id
@@ -676,7 +706,10 @@ ov_pick AS (
                         CASE kind WHEN 'k' THEN 1 ELSE 0 END ASC,
                         valid_from DESC, seq DESC
            ) AS rn
-    FROM ov_rows
+    FROM ov_pair
+    WHERE rn = 1
+      AND valid_from <= ?{p}
+      AND (kind = 'k' OR {vtw_plain})
 )
 SELECT kind, id, bid, title, content, extra, embedding_model, valid_from, valid_to, recorded_at
 FROM ov_pick WHERE rn = 1"#
@@ -848,6 +881,107 @@ mod scan_probe {
                 "SQL: {}",
                 scan_sql(ids.len(), anc.len(), 3, None, 6, valid.is_none())
             );
+        }
+    }
+
+    /// The pair-pick rehearsal: a pair opened at T5 and closed at AFTER,
+    /// its table row pushed past the named cap, read inside the window at
+    /// the cap. The cap arm must serve the pair's log rows, pick the close
+    /// (the newest row for the pair), and cover with it.
+    #[tokio::test]
+    async fn the_pair_pick_reads_the_close_at_the_cap() {
+        let conn = plan_pins::fresh().await;
+        // branch identities
+        conn.execute(
+            "INSERT OR IGNORE INTO branches (branch_id, parent_id, forked_at, created_at) \
+             VALUES ('main', NULL, NULL, ?1)",
+            libsql::params!["2026-01-01T00:00:00.000000Z"],
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO branches (branch_id, parent_id, forked_at, created_at) \
+             VALUES ('b0', 'main', ?1, ?1)",
+            libsql::params!["2026-01-02T00:00:00.000000Z"],
+        )
+        .await
+        .unwrap();
+        let (cap, poke) = ("2026-02-01T00:00:00.000000Z", "2027-01-01T00:00:00.000000Z");
+        for row in [
+            // (valid_from, valid_to, recorded)
+            ("2026-01-10T00:00:00.000000Z", "2026-01-11T00:00:00.000000Z"),
+        ] {
+            conn.execute(
+                "INSERT INTO concept_versions (id, branch_id, valid_from, valid_to, title, recorded_at) \
+                 VALUES ('x', 'b0', ?1, ?2, 'v', ?3)",
+                libsql::params![row.0, row.1, cap],
+            )
+            .await
+            .unwrap();
+        }
+        // push the table row past the cap
+        conn.execute(
+            "UPDATE concept_versions SET recorded_at = ?1",
+            libsql::params![poke],
+        )
+        .await
+        .unwrap();
+        // two log rows for the same pair: the open insert and the close
+        for (i, (valid_to, rec)) in [
+            ("9999-12-31T23:59:59.999999Z", "2026-01-10T00:00:00.000000Z"),
+            ("2026-01-11T00:00:00.000000Z", "2026-01-11T00:00:00.000000Z"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let payload = format!(
+                r#"{{"valid_from":"2026-01-10T00:00:00.000000Z","valid_to":"{valid_to}","title":"v","v":1}}"#
+            );
+            conn.execute(
+                "INSERT INTO transaction_log (table_name, entity_id, operation, payload, branch_id, recorded_at) \
+                 VALUES ('concept_versions', 'x', 'I', ?1, 'b0', ?2)",
+                libsql::params![payload, rec],
+            )
+            .await
+            .unwrap();
+            let _ = i;
+        }
+        conn.execute(
+            "INSERT INTO concept_cuts (id, branch_id, cut_at, recorded_at) \
+             VALUES ('x', 'b0', '2026-01-10T00:00:00.000000Z', '2026-01-10T00:00:00.000000Z')",
+            (),
+        )
+        .await
+        .unwrap();
+        let anc = vec![
+            Ancestor {
+                branch_id: "b0".into(),
+                dist: 0,
+                cutoff: None,
+            },
+            Ancestor {
+                branch_id: "main".into(),
+                dist: 1,
+                cutoff: Some("2026-01-02T00:00:00.000000Z".into()),
+            },
+        ];
+        let rows = overlay_scan(
+            &conn,
+            &["x".to_string()],
+            &anc,
+            Some(cap),
+            Some("2026-01-10T12:00:00.000000Z"),
+        )
+        .await
+        .unwrap();
+        for (id, decision) in &rows {
+            match decision {
+                OverlayDecision::Row(r) => println!(
+                    "proved: {id} -> row [{:?} {:?}) on {}",
+                    r.valid_from, r.valid_to, r.branch_id
+                ),
+                OverlayDecision::Absent => println!("proved: {id} -> absent"),
+            }
         }
     }
 }

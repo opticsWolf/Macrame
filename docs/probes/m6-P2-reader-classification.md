@@ -117,6 +117,22 @@ overlay):
   `search_vector_on`), and drops work like the M6-c stale-hit gate will;
 - row 15 (the clock silo) extends `MAX(recorded_at)` over `concept_versions` ∪ `concept_cuts`.
 
-Still open in this family: the ledger folds (`reconstruct_on`'s per-lineage concept resolution
-and their overlay channels) and the archive predicate arm (row 9–14), which the amendment
+Still open in this family: the archive predicate arm (row 9–14), which the amendment
 prices into M6-d.
+
+## M6-b's continuation recount (0.22.0, the post-merge review): 37 sites in 12 files
+
+The write-side correction moved the census again — `connection.rs` from 6 to 9, all three
+new rows **write machinery**:
+
+- the route's P-7 vista now reads the id's *creation* stamp from the log (the projection's
+  `recorded_at` is the last edit's, which read post-fork edits as invisibility); its fallback
+  predicate on `concepts` is the legacy row of that read;
+- the effective-state read (`effective_state_at`) is a hybrid like the fold's: a projection
+  row recorded at the writer's cap, or the pair's newest log row otherwise — one `concepts`
+  table arm, one payload arm, one pairing subquery; and the interval-shaped half of the G-1
+  law (`refuse_path_interval_w2`) is the same hybrid over the overlay's open windows, plus
+  the write's interval upper bound.
+
+The ledger folds themselves (the commit that carried the resolution) added no census rows —
+their rows read `transaction_log` and the overlay tables, not `concepts`.

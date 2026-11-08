@@ -7039,17 +7039,33 @@ async fn upsert_concept(
     if !concept.supersede {
         return match route {
             ConceptRoute::Owned => upsert_concept_plain(conn, concept, stamp).await,
-            ConceptRoute::Inherited { open } if concept.retired => {
+            ConceptRoute::Inherited { open, .. } if concept.retired => {
                 // §5.2's retire row: the retirement of the inheritance.
                 w2_retire(conn, concept, open, stamp).await
             }
-            ConceptRoute::Inherited { open: Some(open) } => {
+            ConceptRoute::Inherited {
+                open: Some(open), ..
+            } => {
                 // No supersede over the open state of the path (§5.2's
                 // no-supersede row): a lineage never gains an implicit
                 // supersede its trunk does not have.
                 Err(single_open_from_path(concept, &open))
             }
-            ConceptRoute::Inherited { open: None } => upsert_w2_version(conn, concept, stamp).await,
+            // The instant read said nothing covers the write's start. The
+            // interval read is the second half of the same §5.3 rule: an
+            // inherited belief whose START sits inside this write's window is
+            // exactly the second-open refusal, and a plain write that passed
+            // it today currently hides the belief from its start onward —
+            // the resurrection arrives at the later retirement, which finds
+            // no takeover cut to hold the ancestor down. The 0.22.0
+            // post-merge correction (review finding 5).
+            ConceptRoute::Inherited { open: None, path } => {
+                if let Some(intruder) = refuse_path_interval_w2(conn, &path, concept, stamp).await?
+                {
+                    return Err(single_open_from_path(concept, &intruder));
+                }
+                upsert_w2_version(conn, concept, stamp).await
+            }
             ConceptRoute::Foreign { held_by } => Err(cross_lineage(concept, &held_by)),
         };
     }
@@ -7062,13 +7078,15 @@ async fn upsert_concept(
         .await?;
     let res = match route {
         ConceptRoute::Owned => supersede_in_tx(&tx, concept, stamp).await,
-        ConceptRoute::Inherited { open } if concept.retired => {
+        ConceptRoute::Inherited { open, .. } if concept.retired => {
             // §5.2's retire row inside the same transaction discipline: the
             // retirement names no successor, so the supersede flag adds
             // nothing to it.
             w2_retire(&tx, concept, open, stamp).await
         }
-        ConceptRoute::Inherited { open: Some(open) } => {
+        ConceptRoute::Inherited {
+            open: Some(open), ..
+        } => {
             // The takeover ([D-312]; §5.5's I4): cut or own close, then the
             // version row, one stamp. The takeover body runs D-312's forward
             // law first.
@@ -7077,8 +7095,17 @@ async fn upsert_concept(
         // The takeover's nothing-open arm: the belief to supersede is
         // nowhere open on the path, so the act is the ordinary upsert — after
         // D-312's forward law on the writer's own rows ([D-312]'s backwards
-        // refusal, the overlay's shape).
-        ConceptRoute::Inherited { open: None } => {
+        // refusal, the overlay's shape). The interval read decides whether
+        // "the ordinary act" is also a takeover: an inherited belief whose
+        // start sits inside the write's window must be CUT at the write's
+        // start, or the retirement that later closes the writer's own row
+        // resurrects the ancestor's text (the same correction, the supersede
+        // half; the cut is §5.2's two-row rule and lands first).
+        ConceptRoute::Inherited { open: None, path } => {
+            let intruder = refuse_path_interval_w2(conn, &path, concept, stamp).await?;
+            if intruder.is_some() {
+                w2_cut(&tx, concept, stamp).await?;
+            }
             refuse_backward_supersede(&tx, concept).await?;
             upsert_w2_version(&tx, concept, stamp).await
         }
@@ -7145,7 +7172,16 @@ enum ConceptRoute {
     /// cutoff. `open` names the open effective belief the writer's own
     /// lineage resolves at the write's start — its own version rows first,
     /// then the inherited ones — the takeover target when supersede is set.
-    Inherited { open: Option<EffectiveOpen> },
+    /// `path` is the walk the reads ran (own lineage first): the
+    /// interval-shaped half of the route's read
+    /// ([`refuse_path_interval_w2`, below] — the open belief whose *start*
+    /// sits inside the write's interval) needs the same walk, already
+    /// resolved, and the act runs it from the route's answer rather than
+    /// re-loading the lineage (0.22.0, the post-merge correction).
+    Inherited {
+        open: Option<EffectiveOpen>,
+        path: Vec<Ancestor>,
+    },
     /// W3: the mint is on a lineage off the writer's path, or on the path but
     /// recorded after the fork cutoff — nothing of the id was visible when
     /// the lineage forked (P-7's vista). Stays refused under D-314 alone;
@@ -7212,22 +7248,54 @@ async fn route_concept(
         });
     };
 
-    // P-7's vista: the mint's row recorded after the fork cutoff (the
-    // ancestor's cap) — nothing of the id was visible at the fork. W3 under
-    // D-314 alone; D-315 (§6) is the decision that widens this.
+    // P-7's vista: did anything of the id exist on the mint's line when the
+    // writer forked? The projection's `recorded_at` is the LAST edit's stamp
+    // — a trunk edit after the fork is not a new belief, and reading it as
+    // one refused a takeover the branch has a right to. The creation stamp
+    // comes from the log, the way D-310's lineage fold reads a state as of
+    // a cutoff: the mint's first `concepts` row for the id, then — where
+    // the hot log has no row for the pair (an archive-trimmed store, a
+    // legacy build) — the projection's own stamp, which is the old reading
+    // and the only one it has (0.22.0, the post-merge correction).
+    // D-315 (§6) is the decision that widens the vista to any visible
+    // row on the path.
     let Some(cutoff) = anc.cutoff.as_deref() else {
         // The writer itself at dist 0: unreachable after the scan above,
         // kept total for the compiler.
         return Ok(ConceptRoute::Owned);
     };
-    let mut late = conn
-        .query(
-            "SELECT 1 FROM concepts WHERE id = ?1 AND branch_id = ?2 AND recorded_at > ?3 LIMIT 1",
-            libsql::params![concept.id.as_str(), mint.as_str(), cutoff],
-        )
-        .await?;
-    let unseen = late.next().await?.is_some();
-    if unseen {
+    let seen_at_fork = {
+        let mut creation = conn
+            .query(
+                "SELECT recorded_at FROM transaction_log \
+                 WHERE entity_id = ?1 AND branch_id = ?2 AND table_name = 'concepts' \
+                 ORDER BY seq_id LIMIT 1",
+                libsql::params![concept.id.as_str(), mint.as_str()],
+            )
+            .await?;
+        match creation.next().await? {
+            Some(row) => {
+                let at: String = row.get(0)?;
+                at.as_str() <= cutoff
+            }
+            None => {
+                // No log row for the pair: the fallback is today's predicate
+                // on the projection's own stamp (an unedited table row's
+                // `recorded_at` IS its creation stamp; an edited one was
+                // already wrong under it, and the log-first statement above
+                // is the fix that covers this store).
+                let mut late = conn
+                    .query(
+                        "SELECT 1 FROM concepts \
+                         WHERE id = ?1 AND branch_id = ?2 AND recorded_at <= ?3 LIMIT 1",
+                        libsql::params![concept.id.as_str(), mint.as_str(), cutoff],
+                    )
+                    .await?;
+                late.next().await?.is_some()
+            }
+        }
+    };
+    if !seen_at_fork {
         return Ok(ConceptRoute::Foreign { held_by: mint });
     }
 
@@ -7235,7 +7303,10 @@ async fn route_concept(
     // first, then the inherited ones, nearest wins ([Amendment 2](../docs/
     // Macrame%20Update%20Plan%20v0.22.0%20-%20Amendment%202.md) §5.3 rule 3).
     let open = effective_state_at(conn, &ancestry, &concept.id, &concept.valid_from, stamp).await?;
-    Ok(ConceptRoute::Inherited { open })
+    Ok(ConceptRoute::Inherited {
+        open,
+        path: ancestry,
+    })
 }
 
 /// The effective state at the write's start, walked across the overlay
@@ -7254,6 +7325,16 @@ async fn effective_state_at(
         let cap = a.cutoff.as_deref().unwrap_or(stamp);
         // At most one row of one lineage covers one instant (D-291, the
         // overlay included), so one seek per step (D-300's O(1) idea).
+        //
+        // The inheritance arm now reads the state **as of the cap** (the
+        // post-merge correction): a row that was written at or before the
+        // cutoff and edited later is *this lineage's row as the writer's line
+        // saw it*, and the projection's `recorded_at` — the edit's stamp —
+        // must not hide it. The log supplies the pair's newest row recorded
+        // at or before the cap: the pair insert, or a winddown, would have
+        // that as the state; a table row whose own recording is at the cap is
+        // already the cap-state by itself and the log arm stands down for the
+        // pair, exactly as the [`versions_cte`] hybrid pairs table and log.
         let mut rows = conn
             .query(
                 "SELECT valid_from, valid_to FROM ( \
@@ -7266,6 +7347,24 @@ async fn effective_state_at(
                     WHERE id = ?1 AND branch_id = ?2 \
                       AND valid_from <= ?3 AND valid_to > ?3 \
                       AND recorded_at <= ?4 \
+                    UNION ALL \
+                   SELECT valid_from, valid_to FROM ( \
+                     SELECT json_extract(j.payload, '$.valid_from') AS valid_from, \
+                            json_extract(j.payload, '$.valid_to') AS valid_to, \
+                            ROW_NUMBER() OVER ( \
+                                PARTITION BY json_extract(j.payload, '$.valid_from') \
+                                ORDER BY j.seq_id DESC \
+                             ) AS rn \
+                     FROM transaction_log j \
+                     WHERE j.branch_id = ?2 AND j.entity_id = ?1 \
+                       AND j.table_name = 'concepts' AND j.recorded_at <= ?4 \
+                       AND NOT EXISTS ( \
+                         SELECT 1 FROM concepts w \
+                          WHERE w.id = ?1 AND w.branch_id = ?2 \
+                            AND w.valid_from = json_extract(j.payload, '$.valid_from') \
+                            AND w.recorded_at <= ?4 \
+                       ) \
+                   ) WHERE rn = 1 AND valid_from <= ?3 AND valid_to > ?3 \
                  ) \
                  ORDER BY valid_from DESC LIMIT 1",
                 libsql::params![id, a.branch_id.as_str(), valid_at, cap],
@@ -7295,6 +7394,110 @@ async fn effective_state_at(
             .await?;
         if cuts.next().await?.is_some() {
             return Ok(None);
+        }
+    }
+    Ok(None)
+}
+
+/// The interval-shaped half of the route's read (0.22.0, the post-merge
+/// correction): the open belief whose **start sits inside the write's
+/// interval** — the row the instant read of [`effective_state_at`] cannot
+/// see, because nothing covers the write's start yet, and the one a plain
+/// write must not pass without supersede: from the belief's own start onward
+/// the plain row hides it, and a later retirement without a takeover cut
+/// resurrects the ancestor's text. Returns the nearest such belief on the
+/// writer's path, `None` where the interval is clean.
+///
+/// One lineage, one query pair (the overlay's version rows and the
+/// projection's), per the same walk [`effective_state_at`] reads; each is a
+/// hybrid again — a table row recorded at the cap, or the pair's newest log
+/// row otherwise — so a belief standing *as of the cap* is refused even when
+/// the ancestor wrote over it later.
+async fn refuse_path_interval_w2(
+    conn: &libsql::Connection,
+    path: &[Ancestor],
+    concept: &ConceptUpsert,
+    stamp: &str,
+) -> Result<Option<EffectiveOpen>> {
+    // The upper bound of "inside": at an open-ended write every later start
+    // is inside; a named end excludes starts at and past it (half-open: a
+    // belief starting exactly at the write's end does not overlap it).
+    let unbounded = concept.valid_to == timestamp::OPEN_SENTINEL;
+    for a in path {
+        let cap = a.cutoff.as_deref().unwrap_or(stamp);
+        let bound = if unbounded {
+            "valid_from > ?3".to_string()
+        } else {
+            "valid_from > ?3 AND valid_from < ?4".to_string()
+        };
+        let mut rows = conn
+            .query(
+                &format!(
+                    "SELECT valid_from FROM (  \
+                       SELECT valid_from FROM concept_versions  \
+                        WHERE id = ?1 AND branch_id = ?2 AND valid_to = ?5  \
+                          AND recorded_at <= ?6 AND {bound}  \
+                        UNION ALL  \
+                       SELECT valid_from FROM concepts  \
+                        WHERE id = ?1 AND branch_id = ?2 AND valid_to = ?5  \
+                          AND recorded_at <= ?6 AND {bound}  \
+                        UNION ALL  \
+                       SELECT valid_from FROM (  \
+                         SELECT json_extract(j.payload, '$.valid_from') AS valid_from,  \
+                                ROW_NUMBER() OVER (  \
+                                    PARTITION BY json_extract(j.payload, '$.valid_from')  \
+                                    ORDER BY j.seq_id DESC  \
+                                 ) AS rn  \
+                         FROM transaction_log j  \
+                         WHERE j.branch_id = ?2 AND j.entity_id = ?1  \
+                           AND j.table_name = 'concepts'  \
+                           AND j.recorded_at <= ?6  \
+                           AND json_extract(j.payload, '$.valid_to') = ?5  \
+                           AND NOT EXISTS (  \
+                             SELECT 1 FROM concepts w  \
+                              WHERE w.id = ?1 AND w.branch_id = ?2  \
+                                AND w.valid_from = json_extract(j.payload, '$.valid_from')  \
+                                AND w.recorded_at <= ?6  \
+                           )  \
+                       ) WHERE rn = 1 AND {bound}  \
+                        UNION ALL  \
+                       SELECT valid_from FROM (  \
+                         SELECT json_extract(j.payload, '$.valid_from') AS valid_from,  \
+                                ROW_NUMBER() OVER (  \
+                                    PARTITION BY json_extract(j.payload, '$.valid_from')  \
+                                    ORDER BY j.seq_id DESC  \
+                                 ) AS rn  \
+                         FROM transaction_log j  \
+                         WHERE j.branch_id = ?2 AND j.entity_id = ?1  \
+                           AND j.table_name = 'concept_versions'  \
+                           AND j.recorded_at <= ?6  \
+                           AND json_extract(j.payload, '$.valid_to') = ?5  \
+                           AND NOT EXISTS (  \
+                             SELECT 1 FROM concept_versions w  \
+                              WHERE w.id = ?1 AND w.branch_id = ?2  \
+                                AND w.valid_from = json_extract(j.payload, '$.valid_from')  \
+                                AND w.recorded_at <= ?6  \
+                           )  \
+                       ) WHERE rn = 1 AND {bound}  \
+                     ) LIMIT 1",
+                    bound = bound,
+                ),
+                libsql::params![
+                    concept.id.as_str(),
+                    a.branch_id.as_str(),
+                    concept.valid_from.as_str(),
+                    concept.valid_to.as_str(),
+                    timestamp::OPEN_SENTINEL,
+                    cap,
+                ],
+            )
+            .await?;
+        if let Some(row) = rows.next().await? {
+            let start: String = row.get(0)?;
+            return Ok(Some(EffectiveOpen {
+                bid: a.branch_id.clone(),
+                start,
+            }));
         }
     }
     Ok(None)
@@ -8951,7 +9154,22 @@ async fn upsert_concepts_checked(
                 }
                 owned.push(concept);
             }
-            ConceptRoute::Inherited { open } => {
+            ConceptRoute::Inherited { open, path } => {
+                // The interval-shaped half of the route's read (0.22.0, the
+                // post-merge correction), at the batched write: a plain write
+                // whose window starts inside an inherited open belief is
+                // refused here (the same statement the single-write route
+                // refuses with, read per concept — the batch's own rows are
+                // not yet standing, and the validator below reads them the
+                // same way); a supersede over nothing covering becomes a
+                // takeover over the intruder, which cuts at the write's start
+                // and so it goes as a normal takeover (the ancestor's text
+                // cannot resurrect through the missing cut).
+                let intruder = if open.is_none() && !concept.retired {
+                    Some(refuse_path_interval_w2(conn, &path, concept, stamp).await?)
+                } else {
+                    None
+                };
                 if concept.retired {
                     // §5.2's retire row, batched: the retirement of the
                     // inheritance. The open-vs-bare split is decided in
@@ -8963,6 +9181,21 @@ async fn upsert_concepts_checked(
                         w2_takeovers.push((concept, open));
                     } else {
                         refusals.push(single_open_from_path(concept, &open));
+                    }
+                } else if let Some(intruder) = intruder.flatten() {
+                    if concept.supersede {
+                        // Take over the intruder: the same two-row act, the
+                        // cut at the write's start covering the intruder's
+                        // later window.
+                        w2_takeovers.push((
+                            concept,
+                            EffectiveOpen {
+                                bid: intruder.bid,
+                                start: concept.valid_from.clone(),
+                            },
+                        ));
+                    } else {
+                        refusals.push(single_open_from_path(concept, &intruder));
                     }
                 } else if concept.supersede {
                     // Nothing open to take over: the act is the ordinary

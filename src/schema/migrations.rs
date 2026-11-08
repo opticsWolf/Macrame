@@ -22,7 +22,7 @@ use crate::schema::ddl::*;
 // 24 → 25 for the D-309 rung (0.22.0, plan §2). The edge-kind register is
 // outside the ledger — a sidecar table nothing references and which
 // references nothing — so the payload versions stay untouched here too.
-pub const SCHEMA_VERSION: u32 = 26;
+pub const SCHEMA_VERSION: u32 = 27;
 
 type StepFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
 
@@ -266,6 +266,21 @@ const STEPS: &[Step] = &[
         // no foreign key consults.
         suspends_foreign_keys: false,
         apply: |conn| Box::pin(repair_backfilled_ledger(conn)),
+    },
+    Step {
+        from: 26,
+        to: SCHEMA_VERSION,
+        name: "overlay-guards",
+        // Three `CREATE TRIGGER IF NOT EXISTS` statements carried by the same
+        // constants the baseline issues (0.22.0, M6-b's continuation, the
+        // post-merge review's low finding): a cut row never rewritten, a
+        // version row's stamp monotonic, a version row's start stable. No
+        // table touched, no row moved, nothing to defer — the v19 → v20
+        // rung's ground again. The `IF NOT EXISTS` is safe for the same
+        // reason the v20 rung's comment gives: no earlier version created
+        // any of these names.
+        suspends_foreign_keys: false,
+        apply: |conn| Box::pin(add_overlay_guards(conn)),
     },
     Step {
         from: 25,
@@ -647,6 +662,23 @@ async fn baseline(conn: &libsql::Connection) -> Result<()> {
 /// [D-280]'s exclusion list applies unchanged: not in `COLD_SCHEMA`, no
 /// archive membership, invisible to `reconstruct` until M6-b teaches the
 /// fold to read it.
+/// v26 → v27: the overlay's rows get the projection's row laws (0.22.0,
+/// M6-b's continuation). Three triggers from the baseline's constants: a cut
+/// row refuses every update (it is a decision, not a window), a version row
+/// refuses `recorded_at` going backwards ([D-303]'s law on the overlay), and
+/// a version row refuses a rewritten start (`(id, branch_id, valid_from)` is
+/// the table's — and the fold channels' — identity).
+async fn add_overlay_guards(conn: &libsql::Connection) -> Result<()> {
+    for trigger_ddl in [
+        CREATE_CONCEPT_CUTS_NO_UPDATE,
+        CREATE_CONCEPT_VERSIONS_MONOTONIC_RA,
+        CREATE_CONCEPT_VERSIONS_STABLE_START,
+    ] {
+        conn.execute(trigger_ddl, ()).await?;
+    }
+    Ok(())
+}
+
 async fn add_concept_overlay(conn: &libsql::Connection) -> Result<()> {
     conn.execute(CREATE_CONCEPT_VERSIONS_TABLE, ()).await?;
     conn.execute(CREATE_CONCEPT_CUTS_TABLE, ()).await?;
@@ -1014,6 +1046,11 @@ const LATER_TRIGGERS: &[&str] = &[
     "trg_concept_cuts_log_insert",
     "trg_concept_cuts_branch_immutable",
     "trg_concept_cuts_guard_delete",
+    // v27 (0.22.0, M6-b's continuation): the overlay's row laws — same
+    // reason, same tables no rung before v26's can mention.
+    "trg_concept_versions_monotonic_ra",
+    "trg_concept_versions_stable_start",
+    "trg_concept_cuts_no_update",
 ];
 
 /// The five redefined triggers **as v11 had them** (§15.2, D-214).

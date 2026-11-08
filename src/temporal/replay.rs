@@ -1180,14 +1180,20 @@ struct Delta {
     /// there is no edge equivalent.
     concepts_gone: HashSet<String>,
     /// The overlay's own rows, watched the way `edges` is (0.22.0, M6-b,
-    /// [D-314], the amendment's §5.3 walk). Keyed `(concept id, branch_id)` —
-    /// one row per pair per lineage — and consumed by every
-    /// [`resolve_concepts_overlay`], which is the only reader: [`apply_to`]
-    /// leaves the projection's answer untouched by them, so a whole-ledger
-    /// fold's output is whatever the walk resolved and a snapshot's payload
-    /// keeps the v6 shape the state has always had.
-    versions: HashMap<(String, String), OverlayRow>,
-    cuts: HashMap<(String, String), OverlayCut>,
+    /// [D-314], the amendment's §5.3 walk, corrected in the post-merge
+    /// review). Keyed `(concept id, branch_id, valid_from)` and
+    /// `(concept id, branch_id, cut_at)` — the tables' own primary keys, one
+    /// row per window the lineage holds — because a lineage that supersedes
+    /// its own chain holds several windows, and each stays a decision: today's
+    /// open window answers the present, yesterday's closed one answers its
+    /// interior, the cut answers everything past it. Consumed only by the
+    /// per-lineage folds through [`resolve_concepts_overlay`]; [`apply_to`]
+    /// leaves them untouched, so a whole-ledger fold's output is D-310's law
+    /// verbatim (the creating lineage's row — "the most recent" has no rule
+    /// beyond one lineage, §15.2 cost 4) and a snapshot's payload keeps the
+    /// v6 shape the state has always had.
+    versions: HashMap<(String, String, String), OverlayRow>,
+    cuts: HashMap<(String, String, String), OverlayCut>,
     max_seq: i64,
 }
 
@@ -1203,6 +1209,10 @@ struct Delta {
 #[derive(Debug, Clone)]
 struct OverlayRow {
     seq_id: i64,
+    /// The channel's `(id, branch_id)` pair, restated on the row (the fold
+    /// reads the resolver from values, not the map's keys).
+    entity_id: String,
+    branch_id: String,
     valid_from: String,
     valid_to: String,
     title: String,
@@ -1212,6 +1222,14 @@ struct OverlayRow {
 }
 
 impl OverlayRow {
+    /// The row's channel identity, beside [`Delta::versions`]'s key: the
+    /// walk filters on (id, lineage) and reads the windows per lineage.
+    fn holds(&self, id: &str, bid: &str) -> bool {
+        // The channel key carries these two; the rows restate them so the
+        // resolver never has to reach for the map's keys.
+        self.entity_id == id && self.branch_id == bid
+    }
+
     /// The row's coverage against the covering form every read in this crate
     /// applies: at a named instant, the interval's own containment; at the
     /// axis's far end (current belief), open — a window version that has
@@ -1244,10 +1262,17 @@ impl OverlayRow {
 #[derive(Debug, Clone)]
 struct OverlayCut {
     seq_id: i64,
+    entity_id: String,
+    branch_id: String,
     cut_at: String,
 }
 
 impl OverlayCut {
+    /// The cut's channel identity, beside [`Delta::cuts`]'s key.
+    fn holds(&self, id: &str, bid: &str) -> bool {
+        self.entity_id == id && self.branch_id == bid
+    }
+
     /// A cut covers the present — the axis's far end is inside
     /// [cut_at, ∞), which is every cut's own window — and an instant when
     /// the cut has already run.
@@ -1259,32 +1284,41 @@ impl OverlayCut {
     }
 }
 
-/// Resolve a fold's `concepts` behind the overlay's own rows (0.22.0, M6-b,
-/// [D-314], the amendment's §5.3 walk, folded).
+/// Resolve a per-lineage fold's `concepts` behind the overlay's own rows
+/// (0.22.0, M6-b, [D-314], the amendment's §5.3 walk, folded — and corrected
+/// by the post-merge review of this very commit's first landing).
 ///
 /// The overlay's rows land in [`Delta::versions`] and [`Delta::cuts`] keyed
-/// `(id, branch_id)` — they are the fold's own rows, each already bounded at
-/// its lineage's cap, so nothing here re-asks what is visible. The law is
-/// the scan's:
+/// `(id, branch_id, valid_from)` and `(id, branch_id, cut_at)` — the tables'
+/// own keys — because a lineage's window chain holds several windows and all
+/// of them stay decisions: today's open one answers the present, yesterday's
+/// closed one answers its interior, the cut answers everything past it. They
+/// are the fold's own rows, each already bounded at its lineage's cap, so
+/// nothing here re-asks what is visible. The law is the scan's, over a
+/// **named** lineage:
 ///
-/// - with a lineage to walk (the per-lineage folds), walk nearest first; the
-///   first overlay row whose coverage holds answers — a version wins over a
-///   cut where both cover — and a covering cut answers *absent* and stops
-///   the walk;
-/// - the lineage-agnostic folds (no view to walk) reduce the same law to
-///   recency over the rows in hand: the newest `seq_id` among the coverage
-///   winners answers, and the version-beats-cut tie is read off the write
-///   actor's own order (the cut is written inside its transaction before
-///   the version, so a true tie cannot arise; `<=` keeps the version on a
-///   suspicious ledger rather than preferring the cut).
+/// - walk the ancestry nearest first; the lineage's own window that covers
+///   answers with it — a version wins over a cut where both cover, and the
+///   write law keeps at most one of a lineage's windows open, so the far
+///   end's covering set is that one — and a covering cut answers *absent*
+///   and stops the walk;
+/// - **a read that named no lineage resolves nothing.** The lineage-less
+///   folds (`reconstruct`, `reconstruct_as_of`, the snapshot-composed arms)
+///   call this with an empty ancestry, and the empty arm is a no-op: the
+///   overlay's rows are per-lineage states, and "which lineage's row answers
+///   a read with no lineage" is exactly the question the Road refuses to
+///   settle by recency (`§15.2 cost 4: "the rule cannot be 'the most
+///   recent' — recorded_at is a total order only within a branch"`). D-310's
+///   law answers those reads verbatim, and D-310's law is the projection's:
+///   the creating lineage's row is what the fold already absorbed into
+///   [`Delta::concepts`]. The channels stay folded-out state only —
+///   `apply_to` drops them on either path — so a snapshot's payload keeps
+///   the v6 shape.
 ///
-/// What the overlay does not decide is the projection's row, untouched: the
-/// mint's row is what the fold already absorbed into [`Delta::concepts`], and
-/// it stands wherever no overlay row covers. An overlay row that answers
-/// replaces the entry; a covering cut answers absent — removed as a
-/// retirement (`concepts_gone`) and not merely as an absence, because the
-/// map the delta composes onto may already hold the id and the overlay's
-/// decision has to outrank whatever is standing.
+/// An overlay answer replaces the entry; a covering cut answers absent —
+/// removed as a retirement (`concepts_gone`) and not merely as an absence,
+/// because the map the delta composes onto may already hold the id and the
+/// overlay's decision has to outrank whatever is standing.
 ///
 /// `at` is the coverage's instant: `None` reads current belief (the axis's
 /// far end, where a version covers while it is open), `Some(ts)` reads the
@@ -1293,6 +1327,18 @@ impl OverlayCut {
 /// which is why yesterday's fold is byte-identical, not merely equal: nothing
 /// in it was touched.
 fn resolve_concepts_overlay(d: &mut Delta, ancestry: &[Ancestor], at: Option<&str>) {
+    if ancestry.is_empty() {
+        // The lineage-less folds consult the walk of nothing: the overlay's
+        // rows are per-lineage states, and "which lineage's row answers a
+        // read that named no lineage" is exactly the question the Road's
+        // resolution law refuses to settle by recency ("recorded_at is a
+        // total order only within a branch", D-310's cost 4). So the answer
+        // is the one D-310 gives verbatim: the creating lineage's row, which
+        // is what the projection's channels carried in and what the fold
+        // already absorbed. The channels stay folded-out state only —
+        // `apply_to` drops them either way.
+        return;
+    }
     if d.versions.is_empty() && d.cuts.is_empty() {
         return;
     }
@@ -1300,10 +1346,10 @@ fn resolve_concepts_overlay(d: &mut Delta, ancestry: &[Ancestor], at: Option<&st
     // deterministically (the map's own answer is order-free; the retirement
     // set's is not).
     let mut ids: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    for (id, _) in d.versions.keys() {
+    for (id, _, _) in d.versions.keys() {
         ids.insert(id.clone());
     }
-    for (id, _) in d.cuts.keys() {
+    for (id, _, _) in d.cuts.keys() {
         ids.insert(id.clone());
     }
 
@@ -1316,37 +1362,33 @@ fn resolve_concepts_overlay(d: &mut Delta, ancestry: &[Ancestor], at: Option<&st
     for id in ids {
         let mut answer: Option<Answer> = None;
 
-        if !ancestry.is_empty() {
-            // The walk: nearest first; a version's coverage answers with the
-            // row, a cut's answers absent and stops.
-            for a in ancestry {
-                if let Some(v) = d.versions.get(&(id.clone(), a.branch_id.clone())) {
-                    if v.covers(at) {
-                        answer = Some(Answer::Row(v));
-                        break;
-                    }
-                }
-                if let Some(c) = d.cuts.get(&(id.clone(), a.branch_id.clone())) {
-                    if c.covers(at) {
-                        answer = Some(Answer::Absent);
-                        break;
-                    }
-                }
-            }
-        } else {
-            // No view: recency among the covering rows in hand.
-            let mut best_seq: i64 = i64::MIN;
-            for v in d.versions.values().filter(|v| v.covers(at)) {
-                if best_seq <= v.seq_id {
-                    best_seq = v.seq_id;
-                    answer = Some(Answer::Row(v));
+        // The walk: nearest first; a lineage's own window that covers answers
+        // with it (the newest of its covering windows — the write law keeps
+        // at most one open, so at the far end the covering set is that one),
+        // a cut's coverage answers absent and stops.
+        for a in ancestry {
+            let mut best: Option<i64> = None;
+            let mut row: Option<&OverlayRow> = None;
+            for v in d
+                .versions
+                .values()
+                .filter(|v| v.holds(&id, &a.branch_id) && v.covers(at))
+            {
+                if best.is_none_or(|b| v.seq_id >= b) {
+                    best = Some(v.seq_id);
+                    row = Some(v);
                 }
             }
-            for c in d.cuts.values().filter(|c| c.covers(at)) {
-                if best_seq < c.seq_id {
-                    best_seq = c.seq_id;
-                    answer = Some(Answer::Absent);
-                }
+            if let Some(v) = row {
+                answer = Some(Answer::Row(v));
+                break;
+            }
+            if d.cuts
+                .values()
+                .any(|c| c.holds(&id, &a.branch_id) && c.covers(at))
+            {
+                answer = Some(Answer::Absent);
+                break;
             }
         }
 
@@ -1451,7 +1493,7 @@ async fn reconstruct_from(
         HotLogReach::Covers => {
             if let Some(base) = base {
                 let anchor = base.seq_anchor;
-                let mut delta = fold_delta_state_rule(
+                let delta = fold_delta_state_rule(
                     conn,
                     ANCHORED_HOT_FOLD,
                     libsql::params![ts, anchor],
@@ -1459,7 +1501,9 @@ async fn reconstruct_from(
                     libsql::params![ts],
                 )
                 .await?;
-                resolve_concepts_overlay(&mut delta, &[], None);
+                // The whole-ledger fold resolves no lineage: its answer is
+                // D-310's creating-lineage row (see `resolve_concepts_overlay`'
+                // empty-ancestry paragraph). No resolution call, no change.
                 return Ok(delta.apply_to(base, ts));
             }
             return fold(conn, ts, HOT_FOLD, DISORDER_CORRECTION).await;
@@ -1523,8 +1567,9 @@ async fn reconstruct_from(
                 libsql::params![ts],
             )
             .await
-            .map(|mut delta| {
-                resolve_concepts_overlay(&mut delta, &[], None);
+            .map(|delta| {
+                // Whole-ledger: no resolution (D-310's law verbatim; see
+                // `resolve_concepts_overlay`'s empty-ancestry paragraph).
                 delta.apply_to(base, ts)
             })
         }
@@ -1569,14 +1614,25 @@ pub(crate) async fn reconstruct_valid(
     archive_path: Option<&Path>,
 ) -> Result<MaterializedState> {
     let what = format!("state at {valid} on the valid axis");
-    let rows = valid_rows(conn, &what, recorded, archive_path).await?;
+    // The overlay's rows are not claims on this axis. The valid-axis fold is
+    // a whole-ledger read — it names no lineage, receives therefore
+    // none — and D-310's law answers it: the creating lineage's row. The
+    // branch's windows are per-lineage states that no lineage-less read
+    // decides by (the same reason the recorded fold resolves nothing; Road
+    // cost 4: "the rule cannot be 'the most recent'"). The per-lineage valid
+    //-axis read is `concepts_by_id(..., plan.valid_at(..).on(branch))`, whose
+    // overlay walk answers the branch's windows at the instant.
+    // `concept_interval_overlaps` still reaches the rows it needs through
+    // `valid_rows` (below) — the filter lives here, at the claim list, so
+    // the two cannot drift apart on which rows each reader admits.
+    let rows: Vec<ValidStart> = valid_rows(conn, &what, recorded, archive_path)
+        .await?
+        .into_iter()
+        .filter(|s| s.table_name != "concept_versions" && s.table_name != "concept_cuts")
+        .collect();
     // The state is at the valid instant, so that is its timestamp, and it is
-    // marked so it cannot be saved as a snapshot (D-298). The overlay's rows
-    // resolve the same law at the instant: a window covering `valid`
-    // answers, a cut covering it answers absent, and the projection's own
-    // row covers exactly where nothing of the overlay decides.
-    let mut delta = select_valid(rows, valid)?;
-    resolve_concepts_overlay(&mut delta, &[], Some(valid));
+    // marked so it cannot be saved as a snapshot (D-298).
+    let delta = select_valid(rows, valid)?;
     let mut state = delta.apply_to(MaterializedState::empty(valid), valid);
     state.valid_axis = true;
     Ok(state)
@@ -2428,7 +2484,7 @@ async fn fold(
     query: &str,
     correction: &str,
 ) -> Result<MaterializedState> {
-    let mut delta = fold_delta_state_rule(
+    let delta = fold_delta_state_rule(
         conn,
         query,
         libsql::params![ts],
@@ -2436,7 +2492,8 @@ async fn fold(
         libsql::params![ts],
     )
     .await?;
-    resolve_concepts_overlay(&mut delta, &[], None);
+    // Whole-ledger: `fold` takes no view, so no resolution (D-310's law
+    // verbatim — the channels are folded-out state `apply_to` drops).
     Ok(delta.apply_to(MaterializedState::empty(ts), ts))
 }
 
@@ -2586,6 +2643,8 @@ fn absorb_row(
         };
         let row = OverlayRow {
             seq_id,
+            entity_id: entity_id.clone(),
+            branch_id: branch_id.clone(),
             valid_from: field("valid_from"),
             valid_to: field("valid_to"),
             title: field("title"),
@@ -2602,7 +2661,10 @@ fn absorb_row(
                 .and_then(|s| s.as_str())
                 .map(|s| s.to_string()),
         };
-        let key = (entity_id, branch_id);
+        // The tables' own keys: the row's start is part of its identity, so
+        // a lineage's window chain keeps every window (today's open one
+        // beside yesterday's closed one beside the decision's cut).
+        let key = (entity_id.clone(), branch_id.clone(), row.valid_from.clone());
         if d.versions.get(&key).is_none_or(|old| old.seq_id <= seq_id) {
             d.versions.insert(key, row);
         }
@@ -2613,9 +2675,17 @@ fn absorb_row(
             .and_then(|s| s.as_str())
             .unwrap_or("")
             .to_string();
-        let key = (entity_id, branch_id);
+        let key = (entity_id.clone(), branch_id.clone(), cut_at.clone());
         if d.cuts.get(&key).is_none_or(|old| old.seq_id <= seq_id) {
-            d.cuts.insert(key, OverlayCut { seq_id, cut_at });
+            d.cuts.insert(
+                key,
+                OverlayCut {
+                    seq_id,
+                    cut_at,
+                    entity_id,
+                    branch_id,
+                },
+            );
         }
     } else if table_name == "links" {
         ceiling(PAYLOAD_VERSION_LINKS)?;

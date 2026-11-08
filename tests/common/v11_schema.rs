@@ -79,6 +79,11 @@ const POST_V12_TRIGGERS: &[&str] = &[
     "trg_concept_cuts_log_insert",
     "trg_concept_cuts_branch_immutable",
     "trg_concept_cuts_guard_delete",
+    // v27 (0.22.0, M6-b's continuation): the overlay's row laws — same
+    // reason, same fixtures.
+    "trg_concept_versions_monotonic_ra",
+    "trg_concept_versions_stable_start",
+    "trg_concept_cuts_no_update",
 ];
 
 /// The five triggers v12 redefines, by name. Their v11 bodies are below.

@@ -8,13 +8,15 @@
 //! new row's class in `docs/probes/m6-P2-reader-classification.md`, update the
 //! document's counts, and update this pin.
 //!
-//! Pinned at the M6-a rung's recount: 34 sites in 12 files. Before M6-a the
-//! probe's number was 27; the overlay added the routing's mint scan, the
-//! takeover's reads, and the rung's payload rebuilds.
+//! Pinned at the M6-b continuation's recount: 37 sites in 12 files. M6-a's
+//! recount was 34; the post-merge review's write-side correction added the
+//! route's log-first creation read, the state-at-cap hybrid (a table row at
+//! the cap, the pair's newest log row otherwise), and the interval read's
+//! own hybrids — all write machinery, classified in the P-2 doc.
 
 use std::path::{Path, PathBuf};
 
-const PINNED: usize = 34;
+const PINNED: usize = 37;
 
 /// The statement shapes the census counts (rows of `concepts` in `FROM`,
 /// `JOIN`, `INTO` and `UPDATE` positions, word-bounded as the probe's grep
