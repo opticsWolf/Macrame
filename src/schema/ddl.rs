@@ -89,6 +89,35 @@ pub(crate) const PAYLOAD_VERSION_LINKS: u8 = 1;
 /// A macro rather than a `const` for the same reason as [`ts_glob`]: `concat!`
 /// splices it into the table DDL and only accepts literals. [`WEIGHT_CHECK`] is
 /// the same text as a value, and carries the reasoning.
+/// The concept-versions ledger payload shape, and the cuts one. See
+/// [`payload_v_concepts`] for why a macro: both splices into trigger bodies
+/// via `concat!`, and both pair with the write-side's reading (`payload_version_concept_versions` —
+/// the same number as a value) so trigger and fold cannot drift ([D-056]).
+/// v1 since 0.22.0 (M6-a): the shape as the rung first wrote it.
+#[macro_export]
+macro_rules! payload_v_concept_versions {
+    () => {
+        "1"
+    };
+}
+
+/// The concept-cuts ledger payload shape. See [`payload_v_concept_versions`].
+#[macro_export]
+macro_rules! payload_v_concept_cuts {
+    () => {
+        "1"
+    };
+}
+
+/// See [`PAYLOAD_VERSION_CONCEPTS`]. The overlay shapes minted their first
+/// rows with the rung, so v1 is the only version that has ever existed.
+#[doc(hidden)]
+pub(crate) const PAYLOAD_VERSION_CONCEPT_VERSIONS: u8 = 1;
+
+/// See [`PAYLOAD_VERSION_CONCEPT_VERSIONS`].
+#[doc(hidden)]
+pub(crate) const PAYLOAD_VERSION_CONCEPT_CUTS: u8 = 1;
+
 macro_rules! weight_check {
     () => {
         "CHECK (weight >= 0.0 AND weight < 9e999 AND typeof(weight) = 'real')"
@@ -614,6 +643,187 @@ pub const CREATE_CONCEPTS_GUARD_BRANCH: &str = concat!(
     "#
 );
 
+/// The version rows' ledger mirror (0.22.0, M6-a, [D-056]'s rule).
+///
+/// One payload body for both writers: this trigger's `json_object` and the
+/// shape the fold reads are the same macro, [`payload_v_concept_versions`],
+/// and the unit test at the bottom of this file holds them together. The
+/// archive-session gate is the same one `concepts` carries: a session's
+/// rehydration writes rows the log would otherwise rank newest and the
+/// closed-fold would serve instead of the retired row (D-255's caveat).
+#[doc(hidden)]
+pub const CREATE_CONCEPT_VERSIONS_LOG_INSERT: &str = concat!(
+    r#"
+    CREATE TRIGGER IF NOT EXISTS trg_concept_versions_log_insert
+    AFTER INSERT ON concept_versions
+    WHEN NOT EXISTS (
+        SELECT 1 FROM sqlite_master
+        WHERE type = 'table' AND name = 'macrame_archive_session'
+    )
+    BEGIN
+        INSERT INTO transaction_log (table_name, entity_id, operation, payload, recorded_at, branch_id)
+        VALUES ('concept_versions', NEW.id, 'I',
+                json_object('v', "#,
+    payload_v_concept_versions!(),
+    r#", 'title', NEW.title, 'content', NEW.content,
+                            'valid_from', NEW.valid_from, 'valid_to', NEW.valid_to,
+                            'embedding_model', NEW.embedding_model,
+                            'extra', json(NEW.extra)),
+                NEW.recorded_at, NEW.branch_id);
+    END;
+    "#
+);
+
+/// The version rows' ledger mirror for **updates** (0.22.0, M6-a, [D-056]'s
+/// rule).
+///
+/// The versions table carries one row per valid start per `(id, branch_id)`,
+/// which means a same-start re-assertion is an in-place rewrite — Doctrine
+/// III's superseded start, mutated like `concepts`' projection row is — and
+/// an `AFTER INSERT` trigger cannot see it. This mirror is the payload the
+/// rewritelogs, unconditional for the reason `trg_concepts_log_update` is:
+/// nothing inside an archive session updates a version row, so the gate
+/// would suppress nothing and widen the surface. Whether the M6-b fold
+/// reads the `'U'` rows as history or as state is that phase's decision;
+/// the ledger, not the fold, is why this row exists.
+#[doc(hidden)]
+pub const CREATE_CONCEPT_VERSIONS_LOG_UPDATE: &str = concat!(
+    r#"
+    CREATE TRIGGER IF NOT EXISTS trg_concept_versions_log_update
+    AFTER UPDATE ON concept_versions
+    BEGIN
+        INSERT INTO transaction_log (table_name, entity_id, operation, payload, recorded_at, branch_id)
+        VALUES ('concept_versions', NEW.id, 'U',
+                json_object('v', "#,
+    payload_v_concept_versions!(),
+    r#", 'title', NEW.title, 'content', NEW.content,
+                            'valid_from', NEW.valid_from, 'valid_to', NEW.valid_to,
+                            'embedding_model', NEW.embedding_model,
+                            'extra', json(NEW.extra)),
+                NEW.recorded_at, NEW.branch_id);
+    END;
+    "#
+);
+
+/// One open interval per `(id, branch_id)` in the version rows, at the
+/// database level (0.22.0, M6-a).
+///
+/// `links` has carried this shape since v18 (`trg_links_single_open`) and the
+/// projection reuse its body: a quarrel about the same id on the same
+/// lineage with both windows open is a collision of one belief's truth, not
+/// two, and the write actor's guards (D-291's position) are the second
+/// copy of this rule, not the only one. Same-start rewrites are not a
+/// collision (Doctrine III — a re-asserted start supersedes what it
+/// replaces), and a version with a named end is not an open interval.
+#[doc(hidden)]
+pub const CREATE_CONCEPT_VERSIONS_SINGLE_OPEN: &str = concat!(
+    r#"
+    CREATE TRIGGER IF NOT EXISTS trg_concept_versions_single_open
+    BEFORE INSERT ON concept_versions
+    WHEN NEW.valid_to = '9999-12-31T23:59:59.999999Z'
+         AND EXISTS (
+             SELECT 1 FROM concept_versions
+             WHERE id = NEW.id
+               AND +branch_id = NEW.branch_id
+               AND valid_from <> NEW.valid_from
+               AND valid_to   = '9999-12-31T23:59:59.999999Z'
+         )
+    BEGIN
+        SELECT RAISE(ABORT, '"#,
+    abort_single_open!(),
+    r#"');
+    END;
+    "#
+);
+
+/// `branch_id` is provenance in the overlay as it is in `concepts`.
+#[doc(hidden)]
+pub const CREATE_CONCEPT_VERSIONS_GUARD_BRANCH: &str = concat!(
+    r#"
+    CREATE TRIGGER IF NOT EXISTS trg_concept_versions_branch_immutable
+    BEFORE UPDATE ON concept_versions
+    WHEN NEW.branch_id <> OLD.branch_id
+    BEGIN
+        SELECT RAISE(ABORT, '"#,
+    abort_branch_immutable!(),
+    r#"');
+    END;
+    "#
+);
+
+/// No physical delete on the version rows outside an archive session.
+#[doc(hidden)]
+pub const CREATE_CONCEPT_VERSIONS_GUARD_DELETE: &str = concat!(
+    r#"
+    CREATE TRIGGER IF NOT EXISTS trg_concept_versions_guard_delete
+    BEFORE DELETE ON concept_versions
+    WHEN NOT EXISTS (
+        SELECT 1 FROM sqlite_master
+        WHERE type = 'table' AND name = 'macrame_archive_session'
+    )
+    BEGIN
+        SELECT RAISE(ABORT, '"#,
+    abort_delete_guard!(),
+    r#"');
+    END;
+    "#
+);
+
+/// The cut rows' ledger mirror (0.22.0, M6-a, [D-056]'s rule) — the
+/// payload is §5.1's point: `cut_at`, nothing about content, because a cut
+/// carries none.
+#[doc(hidden)]
+pub const CREATE_CONCEPT_CUTS_LOG_INSERT: &str = concat!(
+    r#"
+    CREATE TRIGGER IF NOT EXISTS trg_concept_cuts_log_insert
+    AFTER INSERT ON concept_cuts
+    WHEN NOT EXISTS (
+        SELECT 1 FROM sqlite_master
+        WHERE type = 'table' AND name = 'macrame_archive_session'
+    )
+    BEGIN
+        INSERT INTO transaction_log (table_name, entity_id, operation, payload, recorded_at, branch_id)
+        VALUES ('concept_cuts', NEW.id, 'I',
+                json_object('v', "#,
+    payload_v_concept_cuts!(),
+    r#", 'cut_at', NEW.cut_at),
+                NEW.recorded_at, NEW.branch_id);
+    END;
+    "#
+);
+
+#[doc(hidden)]
+pub const CREATE_CONCEPT_CUTS_GUARD_BRANCH: &str = concat!(
+    r#"
+    CREATE TRIGGER IF NOT EXISTS trg_concept_cuts_branch_immutable
+    BEFORE UPDATE ON concept_cuts
+    WHEN NEW.branch_id <> OLD.branch_id
+    BEGIN
+        SELECT RAISE(ABORT, '"#,
+    abort_branch_immutable!(),
+    r#"');
+    END;
+    "#
+);
+
+/// No physical delete on the cut rows outside an archive session.
+#[doc(hidden)]
+pub const CREATE_CONCEPT_CUTS_GUARD_DELETE: &str = concat!(
+    r#"
+    CREATE TRIGGER IF NOT EXISTS trg_concept_cuts_guard_delete
+    BEFORE DELETE ON concept_cuts
+    WHEN NOT EXISTS (
+        SELECT 1 FROM sqlite_master
+        WHERE type = 'table' AND name = 'macrame_archive_session'
+    )
+    BEGIN
+        SELECT RAISE(ABORT, '"#,
+    abort_delete_guard!(),
+    r#"');
+    END;
+    "#
+);
+
 /// App-defined attributes ride the concept row (0.18.0, [D-278]).
 ///
 /// `extra` is `TEXT NOT NULL DEFAULT '{}'` — a JSON object, opaque to this
@@ -647,6 +857,81 @@ pub const CREATE_CONCEPTS_GUARD_BRANCH: &str = concat!(
 /// [D-278]: ../../docs/architecture/s13-decision-register.md#d-278
 /// [D-283]: ../../docs/architecture/s13-decision-register.md#d-283
 /// [`register_extra_index`]: crate::connection::Database::register_extra_index
+/// The overlay's version rows (0.22.0, M6-a, [Amendment 2](../../docs/Macrame%20Update%20Plan%20v0.22.0%20-%20Amendment%202.md)
+/// §5.1, revision 3).
+///
+/// What a lineage believes about an id it did not mint, at its own stamps, in
+/// its own rows — the S2 proposal the amendment adopts as D-314. `concepts`
+/// keeps one row per id (the mint's projection row); this table holds one
+/// row **per valid start** per `(id, branch_id)`, keyed the way the write
+/// paths key intervals, so two lineages holding two beliefs about one id is
+/// no constraint collision at all. `id` is *not* a foreign key — the id's
+/// mint row may live on a lineage this row cannot see (D-315) and a
+/// reference that would fail the write for a lineage-local truth is the
+/// whole problem the overlay refuses.
+///
+/// There is no `kind` column. Revision 2's sketch carried one (`version` |
+/// `cut`) and revision 3 split the shapes: a supersede writes a cut row and
+/// a version row that both start at the same instant, and a single key key
+/// `(id, branch_id, valid_from)` the act cannot hold as two rows — the
+/// collision was the tell. Cuts are their own table below; this one holds
+/// beliefs and nothing else.
+///
+/// The `recorded_at` axis can go backwards between rows — the fork-cutoff
+/// reads (D-223) and the write actor's stamps accept it — while columns
+/// stay canonical (the same CHECK as `concepts`).
+#[doc(hidden)]
+pub const CREATE_CONCEPT_VERSIONS_TABLE: &str = concat!(
+    r#"
+CREATE TABLE IF NOT EXISTS concept_versions (
+    id              TEXT NOT NULL,
+    "#,
+    branch_column!(),
+    r#",
+    valid_from      TEXT NOT NULL,
+    valid_to        TEXT NOT NULL DEFAULT '9999-12-31T23:59:59.999999Z',
+    title           TEXT NOT NULL,
+    content         TEXT NOT NULL DEFAULT '',
+    extra           TEXT NOT NULL DEFAULT '{}',
+    embedding_model TEXT,
+    recorded_at     TEXT NOT NULL,
+    "#,
+    canonical_ts_check!("valid_from", "valid_to", "recorded_at"),
+    r#",
+    PRIMARY KEY (id, branch_id, valid_from)
+) WITHOUT ROWID;
+"#
+);
+
+/// A lineage's explicit, permanent rejection of farther beliefs for one id
+/// (0.22.0, M6-a, §5.1).
+///
+/// From `cut_at` on, and while it is recorded-visible, no read falls through
+/// past this lineage for this id — whatever this lineage's own version rows
+/// cover or miss. That is the resurrection fix (P-8's finding, the S1-class
+/// shape), and the reason the table takes a *point* rather than an interval:
+/// the cut is a decision, not a window, so there is no second instant to
+/// aspirate and no way for a later write on this id to unset it without
+/// being an ever-later supersede. `id` is not a foreign key (see
+/// [`CREATE_CONCEPT_VERSIONS_TABLE`]).
+#[doc(hidden)]
+pub const CREATE_CONCEPT_CUTS_TABLE: &str = concat!(
+    r#"
+CREATE TABLE IF NOT EXISTS concept_cuts (
+    id          TEXT NOT NULL,
+    "#,
+    branch_column!(),
+    r#",
+    cut_at      TEXT NOT NULL,
+    recorded_at TEXT NOT NULL,
+    "#,
+    canonical_ts_check!("cut_at", "recorded_at"),
+    r#",
+    PRIMARY KEY (id, branch_id, cut_at)
+) WITHOUT ROWID;
+"#
+);
+
 pub const CREATE_CONCEPTS_TABLE: &str = concat!(
     r#"
 CREATE TABLE IF NOT EXISTS concepts (
@@ -2145,6 +2430,18 @@ pub const CREATE_TRIGGERS: &[&str] = &[
     // this array, so a trigger added here is a trigger the ladder must produce.
     CREATE_CONCEPTS_GUARD_LINEAGE,
     CREATE_CONCEPTS_GUARD_BRANCH,
+    // v26 (0.22.0, M6-a, Amendment 2 §5.1): the overlay's own mirrors and
+    // guards, in the same family shapes. The single-open trigger on the
+    // version rows is the DB-level copy of the write actor's D-291 guard,
+    // exactly as `links` has carried one since v18.
+    CREATE_CONCEPT_VERSIONS_LOG_INSERT,
+    CREATE_CONCEPT_VERSIONS_LOG_UPDATE,
+    CREATE_CONCEPT_VERSIONS_SINGLE_OPEN,
+    CREATE_CONCEPT_VERSIONS_GUARD_BRANCH,
+    CREATE_CONCEPT_VERSIONS_GUARD_DELETE,
+    CREATE_CONCEPT_CUTS_LOG_INSERT,
+    CREATE_CONCEPT_CUTS_GUARD_BRANCH,
+    CREATE_CONCEPT_CUTS_GUARD_DELETE,
     CREATE_BRANCHES_GUARD_UPDATE,
     CREATE_BRANCHES_GUARD_DELETE,
     CREATE_LINKS_GUARD_DELETE,

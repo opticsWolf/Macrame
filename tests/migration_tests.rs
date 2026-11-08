@@ -16,6 +16,8 @@ use plan_fixture::populated_without_statistics;
 use v7_schema::seeded_v7;
 
 const TS: &str = "2026-01-01T00:00:00.000000Z";
+const TS_2: &str = "2026-01-06T00:00:00.000000Z";
+const TS_3: &str = "2026-01-02T00:00:00.000000Z";
 const OPEN: &str = "9999-12-31T23:59:59.999999Z";
 
 /// Open the harness database and hand back a connection.
@@ -450,7 +452,7 @@ async fn plan_string(conn: &libsql::Connection, sql: &str) -> String {
 #[test]
 fn a_version_bump_must_bring_its_own_rung_test() {
     assert_eq!(
-        SCHEMA_VERSION, 25,
+        SCHEMA_VERSION, 26,
         "SCHEMA_VERSION moved. Add a test for the new rung — one that starts \
          from a database at the previous version and asserts what the rung is \
          *for*, not merely that `run` reached the top."
@@ -3076,6 +3078,121 @@ async fn a_v24_database_climbs_to_v25_and_gains_an_empty_edge_kind_register() {
     )
     .await
     .expect_err("a non-canonical stamp was accepted");
+}
+
+/// **v25 → v26 on a populated database, and `verify` clean (0.22.0, M6-a,
+/// [Amendment 2](../docs/Macrame%20Update%20Plan%20v0.22.0%20-%20Amendment%202.md)
+/// §5.1, revision 3, [D-314]).**
+///
+/// What the rung is *for*: the overlay's two tables and their triggers, on
+/// a file that already holds a fork tree — P-1's sketch promoted. Asserted
+/// by behaviour: both tables exist and start empty; a cut row and a version
+/// row of one `(id, branch_id)` share one start in two tables (the revision 3
+/// point); the single-open trigger refuses a second open interval per
+/// `(id, branch_id)`; the provenance guards refuse a physical delete; the
+/// log mirrors keep the ledger rows. The rung itself changes no behaviour —
+/// that is what makes this a rung test rather than a routing one.
+///
+/// [D-314]: ../docs/architecture/s13-decision-register.md#d-314
+#[tokio::test]
+async fn a_v25_database_climbs_to_v26_and_gains_the_overlay_tables() {
+    let harness = TestHarness::new();
+    let conn = connect(&harness).await;
+    macrame::schema::run_migrations(&conn).await.unwrap();
+
+    v11_schema::wind_back_to_v25(&conn).await;
+    conn.execute("PRAGMA user_version = 25", ()).await.unwrap();
+    assert_eq!(
+        scalar(
+            &conn,
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' \
+             AND name IN ('concept_versions', 'concept_cuts')"
+        )
+        .await,
+        0,
+        "the fixture is not starting from a v25 database"
+    );
+
+    macrame::schema::run_migrations(&conn).await.unwrap();
+    assert_eq!(user_version(&conn).await, SCHEMA_VERSION);
+
+    assert_eq!(
+        scalar(&conn, "SELECT COUNT(*) FROM concept_versions").await,
+        0,
+        "the versions table starts empty"
+    );
+    assert_eq!(
+        scalar(&conn, "SELECT COUNT(*) FROM concept_cuts").await,
+        0,
+        "the cuts table starts empty"
+    );
+
+    // The revision 3 point: one start, two tables, both stored.
+    conn.execute(
+        "INSERT INTO concept_versions \
+         (id, branch_id, valid_from, valid_to, title, content, extra, recorded_at) \
+         VALUES ('c', 'main', ?1, ?2, '', '', '{}', ?3)",
+        libsql::params![TS, OPEN, TS_3],
+    )
+    .await
+    .unwrap();
+    conn.execute(
+        "INSERT INTO concept_cuts (id, branch_id, cut_at, recorded_at) \
+         VALUES ('c', 'main', ?1, ?2)",
+        libsql::params![TS, TS_3],
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        scalar(
+            &conn,
+            "SELECT COUNT(*) FROM concept_versions WHERE id = 'c'"
+        )
+        .await,
+        1
+    );
+    assert_eq!(
+        scalar(&conn, "SELECT COUNT(*) FROM concept_cuts WHERE id = 'c'").await,
+        1,
+        "the cut stored beside the version at the same start"
+    );
+
+    // The ledger mirrors: one row each, named for their tables.
+    assert_eq!(
+        scalar(
+            &conn,
+            "SELECT COUNT(*) FROM transaction_log WHERE table_name = 'concept_versions' AND entity_id = 'c'"
+        )
+        .await,
+        1,
+        "the version row is logged"
+    );
+    assert_eq!(
+        scalar(
+            &conn,
+            "SELECT COUNT(*) FROM transaction_log WHERE table_name = 'concept_cuts' AND entity_id = 'c'"
+        )
+        .await,
+        1,
+        "the cut is logged"
+    );
+
+    // The single-open audit: a second open interval on the same (id, branch).
+    conn.execute(
+        "INSERT INTO concept_versions \
+         (id, branch_id, valid_from, valid_to, title, content, extra, recorded_at) \
+         VALUES ('c', 'main', ?1, ?2, '', '', '{}', ?3)",
+        libsql::params![TS_2, OPEN, TS_3],
+    )
+    .await
+    .expect_err("a second open interval on one (id, branch) was stored");
+
+    conn.execute(
+        "DELETE FROM concept_cuts WHERE id = 'c' AND cut_at = ?1",
+        libsql::params![TS],
+    )
+    .await
+    .expect_err("a physical cut delete was accepted");
 }
 
 /// **Acceptance gate 13 (0.19.0, P4, [D-288]): v21 → v22 on a populated

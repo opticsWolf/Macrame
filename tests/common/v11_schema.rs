@@ -69,6 +69,16 @@ const POST_V12_TRIGGERS: &[&str] = &[
     // v22 (0.19.0, D-288): both name `blobs`, which no fixture below v22 has.
     "trg_blobs_frozen_update",
     "trg_blobs_guard_delete",
+    // v26 (0.22.0, M6-a, Amendment 2 §5.1): all eight name the overlay
+    // tables, which no pre-v26 fixture has.
+    "trg_concept_versions_log_insert",
+    "trg_concept_versions_log_update",
+    "trg_concept_versions_single_open",
+    "trg_concept_versions_branch_immutable",
+    "trg_concept_versions_guard_delete",
+    "trg_concept_cuts_log_insert",
+    "trg_concept_cuts_branch_immutable",
+    "trg_concept_cuts_guard_delete",
 ];
 
 /// The five triggers v12 redefines, by name. Their v11 bodies are below.
@@ -410,6 +420,25 @@ pub async fn wind_back_to_v24(conn: &libsql::Connection) {
     conn.execute("DROP TABLE IF EXISTS edge_kinds", ())
         .await
         .unwrap();
+}
+
+/// Undo v26 on a database built from today's baseline (0.22.0, M6-a, D-314):
+/// two `WITHOUT ROWID` tables and their seven triggers, none named by
+/// anything older.
+pub async fn wind_back_to_v25(conn: &libsql::Connection) {
+    for stmt in [
+        "DROP TRIGGER IF EXISTS trg_concept_cuts_guard_delete",
+        "DROP TRIGGER IF EXISTS trg_concept_cuts_branch_immutable",
+        "DROP TRIGGER IF EXISTS trg_concept_cuts_log_insert",
+        "DROP TRIGGER IF EXISTS trg_concept_versions_guard_delete",
+        "DROP TRIGGER IF EXISTS trg_concept_versions_branch_immutable",
+        "DROP TRIGGER IF EXISTS trg_concept_versions_single_open",
+        "DROP TRIGGER IF EXISTS trg_concept_versions_log_insert",
+        "DROP TABLE IF EXISTS concept_cuts",
+        "DROP TABLE IF EXISTS concept_versions",
+    ] {
+        conn.execute(stmt, ()).await.unwrap();
+    }
 }
 
 /// Undo v22 on a database built from today's baseline (0.19.0, D-288).

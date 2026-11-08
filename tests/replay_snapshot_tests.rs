@@ -1650,8 +1650,13 @@ async fn a_pre_rule_snapshot_is_refused_and_reconstruct_folds_from_the_log() {
     );
 
     // Stamp it as 0.20.0's own file. The loader refuses it before parsing.
+    // The stamp is the one below the snapshot floor (`SNAP_MIN_SCHEMA_VERSION`
+    // in `src/temporal/snapshot.rs` is private; the pin says 23 in words so
+    // the rung above it is what the test names, not a −2 with today's
+    // SCHEMA_VERSION read in) was 25's 23 and is still 23 at 26 — a pre-rule
+    // stamp is a pre-rule stamp whatever the schema is now.
     let mut raw = std::fs::read(&path).unwrap();
-    raw[6..10].copy_from_slice(&(macrame::schema::SCHEMA_VERSION - 2).to_le_bytes());
+    raw[6..10].copy_from_slice(&23u32.to_le_bytes());
     std::fs::write(&path, &raw).unwrap();
     match macrame::temporal::load_snapshot(&path).unwrap_err() {
         macrame::error::DbError::SnapshotIncompatible { reason, .. } => {

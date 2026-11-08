@@ -1,4 +1,4 @@
-| v25 | the edge-kind register `edge_kinds (kind, functional, registered_at)`, `WITHOUT ROWID`, outside the ledger for D-280's reasons — no log trigger, no archive, no seed ([D-309](architecture/s13-decision-register.md#d-309)) |# Macrame — Architecture Quick Reference
+# Macrame — Architecture Quick Reference
 
 **v0.21.0 · A Bitemporal Graph Ledger on libSQL**
 
@@ -188,6 +188,8 @@ Every temporal column is exactly 27 characters: `YYYY-MM-DDTHH:MM:SS.ffffffZ`
 | v22 | `blobs`, `idx_blobs_put_at`, an unconditional update guard and a marker-gated delete guard; `cold.blobs` arrives with the first session ([D-281](architecture/s13-decision-register.md#d-281), [D-288](architecture/s13-decision-register.md#d-288)) |
 | v23 | `idx_txlog_concept_starts`, partial over the log's concept rows, so the concept interval guard seeks one row per valid start instead of reading the concept's history; and `idx_txlog_entity` **dropped**, its last reader moved to the fold partition. Index-only ([D-300](architecture/s13-decision-register.md#d-300), [D-301](architecture/s13-decision-register.md#d-301)) |
 | v24 | the state rule (D-303): `concept_disorder`, the marks the skip path fills and the read pair probes; `idx_txlog_concept_starts` rebuilt with `valid_from DESC` so the correction's winner rides the index; and every projection a backfill overwrote re-derived from its greatest start, with `trg_concepts_log_update` and `trg_concepts_monotonic_ra` dropped around the repair and re-issued from their DDL constants |
+| v25 | the edge-kind register `edge_kinds (kind, functional, registered_at)`, `WITHOUT ROWID`, outside the ledger for D-280's reasons — no log trigger, no archive, no seed ([D-309](architecture/s13-decision-register.md#d-309)) |
+| v26 | the concept overlay (M6-a, D-314): `concept_versions (id, branch_id, valid_from, …)`, one row per valid start per lineage, and `concept_cuts (id, branch_id, cut_at)`, the permanent fall-through cap — both `WITHOUT ROWID`, both outside the ledger's own keying, with log mirrors, the single-open audit on versions and the provenance guards on both ([Amendment 2](Macrame%20Update%20Plan%20v0.22.0%20-%20Amendment%202.md) §5.1, revision 3) |
 
 **This table stopped at v10 for seven rungs and fourteen releases** (corrected while writing the 0.16.0 release note). `tests/doc_currency_tests.rs` gates `docs/architecture/README.md`'s revision history and the register's `D-001…D-NNN` line; it does not read this file, which is why the drift here ran longer than anywhere the gate looks. The authority on the ladder is `src/schema/migrations.rs`'s `STEPS`, and `SCHEMA_VERSION` is the number to trust over this table.
 

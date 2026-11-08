@@ -22,7 +22,7 @@ use crate::schema::ddl::*;
 // 24 → 25 for the D-309 rung (0.22.0, plan §2). The edge-kind register is
 // outside the ledger — a sidecar table nothing references and which
 // references nothing — so the payload versions stay untouched here too.
-pub const SCHEMA_VERSION: u32 = 25;
+pub const SCHEMA_VERSION: u32 = 26;
 
 type StepFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
 
@@ -266,6 +266,20 @@ const STEPS: &[Step] = &[
         // no foreign key consults.
         suspends_foreign_keys: false,
         apply: |conn| Box::pin(repair_backfilled_ledger(conn)),
+    },
+    Step {
+        from: 25,
+        to: 26,
+        name: "concept-overlay",
+        // Two `CREATE TABLE`s on tables nothing references and which
+        // reference nothing (`concept_versions.id` is not a foreign key by
+        // design — the mint may be on a lineage the writer cannot see —
+        // D-315), plus eight `CREATE TRIGGER`s carried by the same
+        // `CREATE_TRIGGERS` constants the baseline issues. Both tables are
+        // `WITHOUT ROWID`, so the baseline-0.5.4 path and the rung land the
+        // same shapes. The v19 → v20 rung's ground: nothing to defer.
+        suspends_foreign_keys: false,
+        apply: |conn| Box::pin(add_concept_overlay(conn)),
     },
     Step {
         from: 24,
@@ -600,6 +614,11 @@ async fn baseline(conn: &libsql::Connection) -> Result<()> {
     conn.execute(CREATE_CONCEPT_DISORDER_TABLE, ()).await?;
     // v25 (0.22.0, D-309). Outside the ledger, beside the other sidecars.
     conn.execute(CREATE_EDGE_KINDS_TABLE, ()).await?;
+    // v26 (0.22.0, M6-a, Amendment 2 §5.1 revision 3). Beside the other
+    // sidecars — nothing references these two and they reference nothing, so
+    // before the triggers resolves the trigger bodies' tables at CREATE time.
+    conn.execute(CREATE_CONCEPT_VERSIONS_TABLE, ()).await?;
+    conn.execute(CREATE_CONCEPT_CUTS_TABLE, ()).await?;
     // Before the triggers, not after: `trg_concepts_fts_*` name this table, and
     // SQLite resolves a trigger body's tables at CREATE TRIGGER time.
     conn.execute(CREATE_CONCEPTS_FTS, ()).await?;
@@ -612,6 +631,37 @@ async fn baseline(conn: &libsql::Connection) -> Result<()> {
         conn.execute(trigger_ddl, ()).await?;
     }
 
+    Ok(())
+}
+
+/// v25 → v26: the concept overlay (0.22.0, M6-a, [Amendment 2](../../docs/Macrame%20Update%20Plan%20v0.22.0%20-%20Amendment%202.md)
+/// §5.1 revision 3, P-1's sketch promoted from `examples/).
+///
+/// Two `CREATE TABLE IF NOT EXISTS` statements and the seven overlays
+/// triggers, all issued from the constants the baseline carries — so a fresh
+/// file and an upgraded one hold byte-identical DDL, which is the condition
+/// P-1 measured on a populated v25 file and 什么 the rung must keep. Empty is
+/// the only truth available: no version row or cut was functional before
+/// this rung exists, and the write actor routes nothing to these tables
+/// until M6-a's routing lands (the rung changes no behaviour by itself).
+/// [D-280]'s exclusion list applies unchanged: not in `COLD_SCHEMA`, no
+/// archive membership, invisible to `reconstruct` until M6-b teaches the
+/// fold to read it.
+async fn add_concept_overlay(conn: &libsql::Connection) -> Result<()> {
+    conn.execute(CREATE_CONCEPT_VERSIONS_TABLE, ()).await?;
+    conn.execute(CREATE_CONCEPT_CUTS_TABLE, ()).await?;
+    for trigger_ddl in [
+        CREATE_CONCEPT_VERSIONS_LOG_INSERT,
+        CREATE_CONCEPT_VERSIONS_LOG_UPDATE,
+        CREATE_CONCEPT_VERSIONS_SINGLE_OPEN,
+        CREATE_CONCEPT_VERSIONS_GUARD_BRANCH,
+        CREATE_CONCEPT_VERSIONS_GUARD_DELETE,
+        CREATE_CONCEPT_CUTS_LOG_INSERT,
+        CREATE_CONCEPT_CUTS_GUARD_BRANCH,
+        CREATE_CONCEPT_CUTS_GUARD_DELETE,
+    ] {
+        conn.execute(trigger_ddl, ()).await?;
+    }
     Ok(())
 }
 
@@ -954,6 +1004,16 @@ const LATER_TRIGGERS: &[&str] = &[
     "trg_txlog_mark_gap",
     "trg_blobs_frozen_update",
     "trg_blobs_guard_delete",
+    // v26 (0.22.0, M6-a): all eight name the overlay tables, which no rung
+    // before v26's can even mention.
+    "trg_concept_versions_log_insert",
+    "trg_concept_versions_log_update",
+    "trg_concept_versions_single_open",
+    "trg_concept_versions_branch_immutable",
+    "trg_concept_versions_guard_delete",
+    "trg_concept_cuts_log_insert",
+    "trg_concept_cuts_branch_immutable",
+    "trg_concept_cuts_guard_delete",
 ];
 
 /// The five redefined triggers **as v11 had them** (§15.2, D-214).
@@ -2214,6 +2274,15 @@ pub(crate) const BASELINE_TABLES: &[&str] = &[
     // v24 (0.21.0, D-303). The shape-5 sidecar the read pair probes and the
     // write path fills; required by name like the rest.
     "concept_disorder",
+    // v26 (0.22.0, M6-a, Amendment 2 §5.1 revision 3). Outside the ledger by
+    // the same token as `concept_disorder`: required by name, verified by the
+    // open-time gate, carried by the baseline and the rung alike. (v25's
+    // `edge_kinds` was never in this list — its rung's text covers the reason:
+    // an unregistered kind keeps its old behaviour — and the overlay's two
+    // tables are registered because a table `verify` does not name is a table
+    // a broken rung can silently skip.)
+    "concept_versions",
+    "concept_cuts",
 ];
 
 /// Confirm the database actually holds what the DDL claims to create.
@@ -2388,6 +2457,17 @@ async fn verify(conn: &libsql::Connection) -> Result<()> {
         ("trg_concepts_log_insert", PAYLOAD_VERSION_CONCEPTS),
         ("trg_concepts_log_update", PAYLOAD_VERSION_CONCEPTS),
         ("trg_links_log_insert", PAYLOAD_VERSION_LINKS),
+        // v26's overlay triggers carry their payload versions the same way
+        // (M3's pairing check, extended to D-314's two row kinds).
+        (
+            "trg_concept_versions_log_insert",
+            PAYLOAD_VERSION_CONCEPT_VERSIONS,
+        ),
+        (
+            "trg_concept_versions_log_update",
+            PAYLOAD_VERSION_CONCEPT_VERSIONS,
+        ),
+        ("trg_concept_cuts_log_insert", PAYLOAD_VERSION_CONCEPT_CUTS),
     ]
     .iter()
     .filter(|(name, version)| {

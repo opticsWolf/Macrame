@@ -2570,9 +2570,20 @@ pub(crate) async fn concept_interval_overlaps(
     conn: &libsql::Connection,
     archive_path: Option<&Path>,
 ) -> Result<Vec<ConceptOverlap>> {
+    // v26 (0.22.0, M6-a, [Amendment 2](../docs/Macrame%20Update%20Plan%20v0.22.0%20-%20Amendment%202.md)
+    // \u00a75.4 Verification row): the audit runs per `(id, branch_id)` across
+    // `concepts` \u222a `concept_versions` — the overlay's version rows are
+    // intervals under the same D-291 law as the projection's ([D-314]'s
+    // division). The two together are the single-open audit of one lineage.
+    //
+    // `concept_cuts`'s rows are deliberately **not** intervals here: a cut is
+    // the decision that nothing is there from `cut_at` on, and a lineage's cut
+    // and version legitimately cover the same instant (the takeover pair,
+    // \u00a75.3's "a version wins over a cut"; \u00a75.2 revision 3's two rows).
+    // Auditing a cut as an interval would refuse the law's own act.
     let mut groups: BTreeMap<(String, String), Vec<ValidStart>> = BTreeMap::new();
     for start in valid_rows(conn, "the concept interval check", None, archive_path).await? {
-        if start.table_name == "concepts" {
+        if start.table_name == "concepts" || start.table_name == "concept_versions" {
             groups
                 .entry((start.entity_id.clone(), start.branch_id.clone()))
                 .or_default()

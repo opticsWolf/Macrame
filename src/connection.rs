@@ -5960,6 +5960,65 @@ fn concept_params<'a>(concept: &'a ConceptUpsert, stamp: &'a str) -> [libsql::Va
     ]
 }
 
+/// The overlay's version row: one lineage's own belief at one instant
+/// (0.22.0, M6-a, D-314). Column names and order mirror [`UPSERT_CONCEPT`]'s
+/// minus the projection-only columns (`retired` ends a window, `branch_id` is
+/// the table's PK); the update arm is `excluded` across the board, because the
+/// row's start is its identity and D-303's write-last rule reads the row's
+/// `recorded_at`, which every update arrives with.
+const UPSERT_CONCEPT_VERSION: &str = "
+INSERT INTO concept_versions      (id, branch_id, valid_from, valid_to, title, content, extra, embedding_model,       recorded_at)    VALUES (?1, ?2, ?3, ?4, ?5, ?6, COALESCE(?7, '{}'), ?8, ?9)    ON CONFLICT(branch_id, id, valid_from) DO UPDATE SET      valid_to = excluded.valid_to,      title = excluded.title,      content = excluded.content,      extra = COALESCE(?7, concept_versions.extra),      embedding_model = excluded.embedding_model,      recorded_at = excluded.recorded_at";
+
+/// A cut row: the lineage stops counting an inherited belief from `cut_at` on
+/// (0.22.0, M6-a, D-314). Append-only by the trigger and by this statement's
+/// `DO NOTHING` — a change of heart is a version row (D-315's shape), never an
+/// edit to a cut. `DO NOTHING` also makes a duplicate cut row of one takeover
+/// idempotent.
+const INSERT_CONCEPT_CUT: &str = "
+INSERT INTO concept_cuts      (id, branch_id, cut_at, recorded_at)    VALUES (?1, ?2, ?3, ?4)    ON CONFLICT(branch_id, id, cut_at) DO NOTHING";
+
+/// The close of this lineage's own open version ([D-312]'s contract on the
+/// overlay, 0.22.0 M6-a): same transaction, same stamp as the superseding row.
+const CLOSE_CONCEPT_VERSION: &str = "
+UPDATE concept_versions    SET valid_to = ?3, recorded_at = ?4  WHERE id = ?1 AND branch_id = ?2 AND valid_to = ?5";
+
+/// The overlay statements' parameter rows, mirror-shaped to
+/// [`concept_params`](fn.concept_params.html) for the same reason.
+fn concept_version_params<'a>(c: &'a ConceptUpsert, stamp: &'a str) -> [libsql::Value; 9] {
+    [
+        c.id.as_str().into(),
+        c.branch_name().into(),
+        c.valid_from.as_str().into(),
+        c.valid_to.as_str().into(),
+        c.title.as_str().into(),
+        c.content.as_str().into(),
+        c.embedding_model
+            .as_deref()
+            .map_or(libsql::Value::Null, Into::into),
+        c.extra.as_deref().map_or(libsql::Value::Null, Into::into),
+        stamp.into(),
+    ]
+}
+
+fn concept_cut_params(id: &str, branch: &str, cut_at: &str, stamp: &str) -> [libsql::Value; 4] {
+    [id.into(), branch.into(), cut_at.into(), stamp.into()]
+}
+
+fn concept_version_close_params(
+    id: &str,
+    branch: &str,
+    close_to: &str,
+    stamp: &str,
+) -> [libsql::Value; 5] {
+    [
+        id.into(),
+        branch.into(),
+        close_to.into(),
+        stamp.into(),
+        timestamp::OPEN_SENTINEL.into(),
+    ]
+}
+
 /// A skipped backfill still belongs in the log: this is the row the trigger
 /// would have written, written by the path that detected the skip — one
 /// statement, one transaction with the guard's refusal, payload composed by
@@ -6965,18 +7024,55 @@ async fn upsert_concept(
     concept: &ConceptUpsert,
     stamp: &str,
 ) -> Result<()> {
+    let route = route_concept(conn, concept, stamp).await?;
     if !concept.supersede {
-        return upsert_concept_plain(conn, concept, stamp).await;
+        return match route {
+            ConceptRoute::Owned => upsert_concept_plain(conn, concept, stamp).await,
+            ConceptRoute::Inherited { open } if concept.retired => {
+                // §5.2's retire row: the retirement of the inheritance.
+                w2_retire(conn, concept, open, stamp).await
+            }
+            ConceptRoute::Inherited { open: Some(open) } => {
+                // No supersede over the open state of the path (§5.2's
+                // no-supersede row): a lineage never gains an implicit
+                // supersede its trunk does not have.
+                Err(single_open_from_path(concept, &open))
+            }
+            ConceptRoute::Inherited { open: None } => upsert_w2_version(conn, concept, stamp).await,
+            ConceptRoute::Foreign { held_by } => Err(cross_lineage(concept, &held_by)),
+        };
     }
-    // (M1b, [D-312]) The close and the open are one act, so they share one
-    // transaction as well as one stamp: a failure in either writes nothing,
-    // which is the crash window the flag exists to close. Inside the actor
-    // there is one writer (D-014), so the reads the guards make here see
-    // exactly what the inserts see.
+    // The supersede act: close/cut and the open are one transaction, one
+    // stamp ([D-312]; for the W2 arm,
+    // [Amendment 2](../docs/Macrame%20Update%20Plan%20v0.22.0%20-%20Amendment%202.md)
+    // §5.2's two rows under one stamp).
     let tx = conn
         .transaction_with_behavior(libsql::TransactionBehavior::Immediate)
         .await?;
-    let res = supersede_in_tx(&tx, concept, stamp).await;
+    let res = match route {
+        ConceptRoute::Owned => supersede_in_tx(&tx, concept, stamp).await,
+        ConceptRoute::Inherited { open } if concept.retired => {
+            // §5.2's retire row inside the same transaction discipline: the
+            // retirement names no successor, so the supersede flag adds
+            // nothing to it.
+            w2_retire(&tx, concept, open, stamp).await
+        }
+        ConceptRoute::Inherited { open: Some(open) } => {
+            // The takeover ([D-312]; §5.5's I4): cut or own close, then the
+            // version row, one stamp. The takeover body runs D-312's forward
+            // law first.
+            w2_takeover_in_tx(&tx, concept, &open, stamp).await
+        }
+        // The takeover's nothing-open arm: the belief to supersede is
+        // nowhere open on the path, so the act is the ordinary upsert — after
+        // D-312's forward law on the writer's own rows ([D-312]'s backwards
+        // refusal, the overlay's shape).
+        ConceptRoute::Inherited { open: None } => {
+            refuse_backward_supersede(&tx, concept).await?;
+            upsert_w2_version(&tx, concept, stamp).await
+        }
+        ConceptRoute::Foreign { held_by } => Err(cross_lineage(concept, &held_by)),
+    };
     match res {
         Err(e) => {
             let _ = tx.rollback().await;
@@ -6984,6 +7080,395 @@ async fn upsert_concept(
         }
         Ok(()) => tx.commit().await.map_err(DbError::Engine),
     }
+}
+// (end of upsert_concept)
+
+// ---------------------------------------------------------------------------
+// Write routing (0.22.0, M6-a, [Amendment 2](../docs/Macrame%20Update%20Plan
+// %20v0.22.0%20-%20Amendment%202.md) §5.2)
+// ---------------------------------------------------------------------------
+//
+// One decision per write, at the act's stamp ([D-014]'s one-writer
+// discipline: the reads that decide the route see committed state, and
+// nothing inserts between the decision and the act).
+
+/// The open effective belief a writer's path resolves for an id at an
+/// instant — [Amendment 2](../docs/Macrame%20Update%20Plan%20v0.22.0%20-%20Amendment%202.md)
+/// §5.3's resolution read, kept to the one query pair the write side needs.
+#[derive(Debug, Clone)]
+struct EffectiveOpen {
+    bid: String,
+    start: String,
+}
+
+/// [D-312]'s forward-only / covered refusal, built from the belief the path
+/// resolves and the write that has to go around it. The provenance is
+/// [`OverlapProvenance::AlreadyRecorded`] on both shapes, as on one lineage.
+fn single_open_from_path(c: &ConceptUpsert, open: &EffectiveOpen) -> DbError {
+    DbError::ConceptSingleOpen {
+        overlap: Box::new(crate::error::ConceptOverlap::new(
+            &c.id,
+            (c.valid_from.as_str(), c.valid_to.as_str()),
+            (open.start.as_str(), timestamp::OPEN_SENTINEL),
+            OverlapProvenance::AlreadyRecorded,
+        )),
+    }
+}
+
+pub(crate) fn cross_lineage(c: &ConceptUpsert, held_by: &str) -> DbError {
+    DbError::CrossLineage {
+        id: c.id.clone(),
+        held_by: held_by.to_string(),
+        attempted: c.branch_name().to_string(),
+    }
+}
+
+/// Where a concept write belongs: [Amendment 2](../docs/Macrame%20Update%20Plan
+/// %20v0.22.0%20-%20Amendment%202.md) §5.2's three ways.
+#[derive(Debug)]
+enum ConceptRoute {
+    /// W1: the writer minted the id — or the id is nowhere yet, and **this
+    /// write** mints it. Yesterday's path, byte for byte.
+    Owned,
+    /// W2: the id was minted on an ancestor and is visible at the fork
+    /// cutoff. `open` names the open effective belief the writer's own
+    /// lineage resolves at the write's start — its own version rows first,
+    /// then the inherited ones — the takeover target when supersede is set.
+    Inherited { open: Option<EffectiveOpen> },
+    /// W3: the mint is on a lineage off the writer's path, or on the path but
+    /// recorded after the fork cutoff — nothing of the id was visible when
+    /// the lineage forked (P-7's vista). Stays refused under D-314 alone;
+    /// D-315 is the decision that widens it (§6).
+    Foreign { held_by: String },
+}
+
+/// The dispatch, at the act's stamp, [Amendment 2](../docs/Macrame%20Update%20Plan
+/// %20v0.22.0%20-%20Amendment%202.md) §5.2's per-id law:
+///
+/// - the writer's own row present → W1;
+/// - no row at all → W1 (the write is the mint);
+/// - the mint's lineage off the path → W3;
+/// - the mint's row recorded after the writer's fork cutoff → W3 (the row
+///   exists, but nothing of the id was visible at the fork);
+/// - else W2, with `open` the open effective belief at `valid_from`.
+///
+/// W2's takeover needs only the open belief: a covering row that is closed,
+/// a visible cut, or nothing at all all mean the same thing for the act —
+/// the plain route, and no cut with it (the inheritance is intact).
+async fn route_concept(
+    conn: &libsql::Connection,
+    concept: &ConceptUpsert,
+    stamp: &str,
+) -> Result<ConceptRoute> {
+    let writer = concept.branch_name();
+
+    // The writer exists or nothing else matters. Today's refusal, unchanged,
+    // and the reason the unknown-lineage spell at the write's own table stays
+    // first.
+    let lineages = Lineages::load(conn).await?;
+    if !lineages.rows.iter().any(|b| b.id == writer) {
+        return Err(DbError::UnknownBranch(writer.to_string()));
+    }
+
+    // The mint (D-214): the projection row's own lineage, [I2]'s one row per
+    // id. No row → the id is nowhere, and a write on any lineage mints it.
+    let mut rows = conn
+        .query(
+            "SELECT branch_id FROM concepts WHERE id = ?1",
+            libsql::params![concept.id.as_str()],
+        )
+        .await?;
+    let mut mint: Option<String> = None;
+    while let Some(row) = rows.next().await? {
+        let bid: String = row.get(0)?;
+        if bid == writer {
+            return Ok(ConceptRoute::Owned);
+        }
+        if mint.is_none() {
+            mint = Some(bid);
+        }
+    }
+    let Some(mint) = mint else {
+        return Ok(ConceptRoute::Owned);
+    };
+
+    // The resolution machinery: the ancestry is the same source the read path
+    // and P-8's oracle use, so there is exactly one law.
+    let ancestry = lineages.ancestry(writer);
+    let Some(anc) = ancestry.iter().find(|n| n.branch_id == mint) else {
+        return Ok(ConceptRoute::Foreign {
+            held_by: mint.clone(),
+        });
+    };
+
+    // P-7's vista: the mint's row recorded after the fork cutoff (the
+    // ancestor's cap) — nothing of the id was visible at the fork. W3 under
+    // D-314 alone; D-315 (§6) is the decision that widens this.
+    let Some(cutoff) = anc.cutoff.as_deref() else {
+        // The writer itself at dist 0: unreachable after the scan above,
+        // kept total for the compiler.
+        return Ok(ConceptRoute::Owned);
+    };
+    let mut late = conn
+        .query(
+            "SELECT 1 FROM concepts WHERE id = ?1 AND branch_id = ?2 AND recorded_at > ?3 LIMIT 1",
+            libsql::params![concept.id.as_str(), mint.as_str(), cutoff],
+        )
+        .await?;
+    let unseen = late.next().await?.is_some();
+    if unseen {
+        return Ok(ConceptRoute::Foreign { held_by: mint });
+    }
+
+    // The act's effective state at the write's start: the writer's own rows
+    // first, then the inherited ones, nearest wins ([Amendment 2](../docs/
+    // Macrame%20Update%20Plan%20v0.22.0%20-%20Amendment%202.md) §5.3 rule 3).
+    let open = effective_state_at(conn, &ancestry, &concept.id, &concept.valid_from, stamp).await?;
+    Ok(ConceptRoute::Inherited { open })
+}
+
+/// The effective state at the write's start, walked across the overlay
+/// ([Amendment 2](../docs/Macrame%20Update%20Plan%20v0.22.0%20-%20Amendment%202.md)
+/// §5.3 rule 3's shapes; the oracle is P-8's).
+async fn effective_state_at(
+    conn: &libsql::Connection,
+    ancestry: &[Ancestor],
+    id: &str,
+    valid_at: &str,
+    stamp: &str,
+) -> Result<Option<EffectiveOpen>> {
+    for a in ancestry {
+        // The writer's own rows (dist 0): the recorded cap is the act's stamp;
+        // ancestors read rows written before they crossed into their child.
+        let cap = a.cutoff.as_deref().unwrap_or(stamp);
+        // At most one row of one lineage covers one instant (D-291, the
+        // overlay included), so one seek per step (D-300's O(1) idea).
+        let mut rows = conn
+            .query(
+                "SELECT valid_from, valid_to FROM ( \
+                   SELECT valid_from, valid_to FROM concept_versions \
+                    WHERE id = ?1 AND branch_id = ?2 \
+                      AND valid_from <= ?3 AND valid_to > ?3 \
+                      AND recorded_at <= ?4 \
+                    UNION ALL \
+                   SELECT valid_from, valid_to FROM concepts \
+                    WHERE id = ?1 AND branch_id = ?2 \
+                      AND valid_from <= ?3 AND valid_to > ?3 \
+                      AND recorded_at <= ?4 \
+                 ) \
+                 ORDER BY valid_from DESC LIMIT 1",
+                libsql::params![id, a.branch_id.as_str(), valid_at, cap],
+            )
+            .await?;
+        if let Some(row) = rows.next().await? {
+            let vt: String = row.get(1)?;
+            if vt == timestamp::OPEN_SENTINEL {
+                let start: String = row.get(0)?;
+                return Ok(Some(EffectiveOpen {
+                    bid: a.branch_id.clone(),
+                    start,
+                }));
+            }
+            return Ok(None); // covers, and the end is named
+        }
+        // Nothing of this lineage covers the instant: a cut caps the
+        // fall-through (the law that closes the S1-class hole — §5.3 rule 3's
+        // else-arm).
+        let mut cuts = conn
+            .query(
+                "SELECT 1 FROM concept_cuts \
+                 WHERE id = ?1 AND branch_id = ?2 AND cut_at <= ?3 AND recorded_at <= ?4 \
+                 LIMIT 1",
+                libsql::params![id, a.branch_id.as_str(), valid_at, cap],
+            )
+            .await?;
+        if cuts.next().await?.is_some() {
+            return Ok(None);
+        }
+    }
+    Ok(None)
+}
+
+/// A cut row, inside the transaction given. The retirement of the
+/// inheritance: the write decides nothing covers at or past the cut.
+async fn w2_cut(conn: &libsql::Connection, concept: &ConceptUpsert, stamp: &str) -> Result<()> {
+    conn.execute(
+        INSERT_CONCEPT_CUT,
+        concept_cut_params(
+            concept.id.as_str(),
+            concept.branch_name(),
+            concept.valid_from.as_str(),
+            stamp,
+        ),
+    )
+    .await
+    .map_err(DbError::Engine)?;
+    Ok(())
+}
+
+/// A plain W2 version row: no takeover, no cut; the single-open guard within
+/// the lineage's own overlay rows, then the row ([Amendment 2](../docs/
+/// Macrame%20Update%20Plan%20v0.22.0%20-%20Amendment%202.md) §5.2's "later
+/// writes ... go W2 against the lineage's own versions" — D-291 within, the
+/// ordinary upsert's shape on the overlay).
+async fn upsert_w2_version(
+    conn: &libsql::Connection,
+    concept: &ConceptUpsert,
+    stamp: &str,
+) -> Result<()> {
+    reject_overlapping_w2(conn, concept, stamp).await?;
+    conn.execute(
+        UPSERT_CONCEPT_VERSION,
+        concept_version_params(concept, stamp),
+    )
+    .await
+    .map_err(DbError::Engine)?;
+    Ok(())
+}
+
+/// The D-291 guard for the overlay's own-row space. Same shape as
+/// [`reject_overlapping_concept`], pointed at the version table: the one
+/// walk over the lineage's own rows, so the state law that yields
+/// [`ConceptSingleOpen`] on a covering overlay row stays the read shape's.
+async fn reject_overlapping_w2(
+    conn: &libsql::Connection,
+    concept: &ConceptUpsert,
+    stamp: &str,
+) -> Result<()> {
+    if let Some(open) = effective_state_at(
+        conn,
+        &[Ancestor::new(concept.branch_name().to_string(), 0)],
+        &concept.id,
+        &concept.valid_from,
+        stamp,
+    )
+    .await?
+    {
+        return Err(single_open_from_path(concept, &open));
+    }
+    Ok(())
+}
+
+/// The writer's own open version row's start ([D-312]'s contract, on the
+/// overlay's own-row space): the row [D-291-within] keeps to at most one open
+/// interval per `(id, branch_id)`, so one seek answers.
+async fn own_open_version_start(
+    conn: &libsql::Connection,
+    id: &str,
+    branch: &str,
+) -> Result<Option<String>> {
+    let mut rows = conn
+        .query(
+            "SELECT valid_from FROM concept_versions \
+             WHERE id = ?1 AND branch_id = ?2 AND valid_to = ?3 LIMIT 1",
+            libsql::params![id, branch, timestamp::OPEN_SENTINEL],
+        )
+        .await?;
+    Ok(rows.next().await?.map(|row| row.get::<String>(0).unwrap()))
+}
+
+/// [D-312]'s forward law for a supersede on the overlay: the writer's own
+/// open belief starts strictly before the superseding row's start, or the
+/// refusal is [`DbError::ConceptSingleOpen`], the projection's own refusal
+/// shape ([Amendment 2](../docs/Macrame%20Update%20Plan%20v0.22.0%20-%20Amendment%202.md)
+/// §5.2's backwards row).
+async fn refuse_backward_supersede(
+    conn: &libsql::Connection,
+    concept: &ConceptUpsert,
+) -> Result<()> {
+    if let Some(start) =
+        own_open_version_start(conn, concept.id.as_str(), concept.branch_name()).await?
+    {
+        if start.as_str() >= concept.valid_from.as_str() {
+            return Err(single_open_from_path(
+                concept,
+                &EffectiveOpen {
+                    bid: concept.branch_name().to_string(),
+                    start,
+                },
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The retirement ([Amendment 2](../docs/Macrame%20Update%20Plan%20v0.22.0%20-%20Amendment%202.md)
+/// §5.2's `retire_concept` row), on the overlay: the lineage **rejects the
+/// inheritance** from `at` on with a bare cut row — no version row, no
+/// repeal machinery (§5.5's no-resurrection red line is the cut's). Where the
+/// writer's own open belief covers `at` first, the same act closes it
+/// [D-312]-style (the own belief's retirement), because a cut cannot end an
+/// own version that still covers the instant: within one lineage a version
+/// wins over a cut, so the close is the retirement.
+///
+/// No cut beyond the bare one: when the own open belief came from a takeover,
+/// the takeover's cut already caps the ancestor's fall-through for every
+/// instant at or past the takeover, and the retirement's instant is one of
+/// them; when the own belief came from a plain write, the ancestor's visible
+/// rows do not decide at this instant at all (they did not decide at the
+/// plain write's start, and the ancestor's visible set is fixed at the fork).
+async fn w2_retire(
+    conn: &libsql::Connection,
+    concept: &ConceptUpsert,
+    open: Option<EffectiveOpen>,
+    stamp: &str,
+) -> Result<()> {
+    if let Some(open) = open.filter(|o| o.bid == concept.branch_name()) {
+        if open.start.as_str() >= concept.valid_from.as_str() {
+            return Err(single_open_from_path(concept, &open));
+        }
+        let changed = conn
+            .execute(
+                CLOSE_CONCEPT_VERSION,
+                concept_version_close_params(
+                    concept.id.as_str(),
+                    concept.branch_name(),
+                    concept.valid_from.as_str(),
+                    stamp,
+                ),
+            )
+            .await
+            .map_err(DbError::Engine)?;
+        debug_assert_eq!(changed, 1, "the retirement closed {changed} rows");
+        let _ = changed;
+        return Ok(());
+    }
+    // The pure inherited case: the writer's reach-back is nothing of its own;
+    // the bare cut is the whole decision (§5.2's retire row).
+    w2_cut(conn, concept, stamp).await
+}
+/// The takeover, inside the transaction given: the cut row at `valid_from`
+/// where the belief came from the mount, or the close of the lineage's own
+/// open version — then the version row at `valid_from`, one stamp ([D-312];
+/// the cut is the second row of §5.2 revision 3's two-row rule, the bit that
+/// keeps this lineage's fall-through from resurrecting the mount's belief
+/// when its own version later retires).
+async fn w2_takeover_in_tx(
+    conn: &libsql::Connection,
+    concept: &ConceptUpsert,
+    open: &EffectiveOpen,
+    stamp: &str,
+) -> Result<()> {
+    refuse_backward_supersede(conn, concept).await?;
+    if open.bid != concept.branch_name() {
+        w2_cut(conn, concept, stamp).await?;
+    } else {
+        let changed = conn
+            .execute(
+                CLOSE_CONCEPT_VERSION,
+                concept_version_close_params(
+                    concept.id.as_str(),
+                    concept.branch_name(),
+                    concept.valid_from.as_str(),
+                    stamp,
+                ),
+            )
+            .await
+            .map_err(DbError::Engine)?;
+        debug_assert_eq!(changed, 1, "the close updated {changed} rows");
+        let _ = changed;
+    }
+    upsert_w2_version(conn, concept, stamp).await
 }
 
 /// The plain upsert: the D-291 guard, the prepared-statement upsert, the
@@ -8416,23 +8901,80 @@ async fn upsert_concepts_checked(
 
     reject_concept_overlaps_within(concepts)?;
 
-    // The supersede intercepts first (M1b, [D-312]): a superseding row is the
-    // second-open case *as written*, and the batch-vs-ledger guard below would
-    // refuse it on the belief it is superseding. The close rows land inside
-    // this transaction, so the ledger check — and every reader after the
-    // commit — sees the closed interval the guard needs. A refused batch
-    // (below, or in the loop) rolls the closes back with everything else in
-    // the act.
+    // Write routing (0.22.0, M6-a,
+    // [Amendment 2](../docs/Macrame%20Update%20Plan%20v0.22.0%20-%20Amendment%202.md)
+    // §5.2), inside the act's transaction, before any row is written: the
+    // reads that decide the route see the rows this transaction has already
+    // written (the W1 supersede's closes below), and the actor's single-writer
+    // discipline [D-014] holds across it. One decision per id; an overlay id
+    // then drives a different ledger, which the projection's guard no longer
+    // has to answer for (the guard comment names the overlay; v26 built it,
+    // D-314).
+    let mut owned: Vec<&ConceptUpsert> = Vec::with_capacity(concepts.len());
+    let mut w2_plain: Vec<&ConceptUpsert> = Vec::with_capacity(concepts.len());
+    let mut w2_takeovers: Vec<(&ConceptUpsert, EffectiveOpen)> = Vec::new();
+    let mut retires: Vec<(&ConceptUpsert, Option<EffectiveOpen>)> = Vec::new();
+    let mut supersede_plains: Vec<&ConceptUpsert> = Vec::new();
+    let mut refusals: Vec<DbError> = Vec::new();
     for concept in concepts {
-        if concept.supersede {
-            suppress_open_belief(conn, concept, stamp).await?;
+        let route = match route_concept(conn, concept, stamp).await {
+            Ok(r) => r,
+            Err(e) => {
+                // An actor-side query failure: the batch aborts (D-308), like
+                // any guard refusal below.
+                return Err(e);
+            }
+        };
+        match route {
+            ConceptRoute::Owned => {
+                // The supersede intercepts first (M1b, [D-312]): a
+                // superseding row is the second-open case *as written*, and
+                // the batch-vs-ledger guard below would refuse it on the
+                // belief it is superseding. The close rows land inside this
+                // transaction, so the ledger check — and every reader after
+                // the commit — sees the closed interval the guard needs. A
+                // refused batch rolls the closes back with everything else in
+                // the act.
+                if concept.supersede {
+                    suppress_open_belief(conn, concept, stamp).await?;
+                }
+                owned.push(concept);
+            }
+            ConceptRoute::Inherited { open } => {
+                if concept.retired {
+                    // §5.2's retire row, batched: the retirement of the
+                    // inheritance. The open-vs-bare split is decided in
+                    // [`w2_retire`]; the batch carries the decision through
+                    // the same act.
+                    retires.push((concept, open));
+                } else if let Some(open) = open {
+                    if concept.supersede {
+                        w2_takeovers.push((concept, open));
+                    } else {
+                        refusals.push(single_open_from_path(concept, &open));
+                    }
+                } else if concept.supersede {
+                    // Nothing open to take over: the act is the ordinary
+                    // upsert, after D-312's forward law on the writer's own
+                    // rows (the same refusal shape, [D-312]).
+                    supersede_plains.push(concept);
+                } else {
+                    w2_plain.push(concept);
+                }
+            }
+            ConceptRoute::Foreign { held_by } => {
+                refusals.push(cross_lineage(concept, held_by.as_str()));
+            }
         }
     }
 
     // Against the committed ledger — now including this transaction's own
-    // closes — before the ordinary inserts, so the rows read here cannot
-    // include the batch's own upserts (D-291, as the edge phase does).
-    check_batch_against_ledger(conn, concepts).await?;
+    // closes, and **the W1 ids only**: an overlay id's own rows live in
+    // `concept_versions`, where the same guard shape runs below (§5.2's
+    // D-291-within). The rows read here cannot include the batch's own
+    // upserts (D-291, as the edge phase does).
+    let owned_rows: Vec<ConceptUpsert> = owned.iter().map(|c| (*c).clone()).collect();
+    check_batch_against_ledger(conn, &owned_rows).await?;
 
     // Prepared once, like the edge chunk (D-056). This no longer routes through
     // [`upsert_concept`] — that function prepares per call by construction — but
@@ -8440,7 +8982,7 @@ async fn upsert_concepts_checked(
     // the three paths can upsert different columns.
     let stmt = conn.prepare(UPSERT_CONCEPT).await?;
 
-    for concept in concepts {
+    for concept in &owned_rows {
         stmt.reset();
         // Same branch as the single path: zero changed rows is the skipped
         // backfill, whose log row is written here inside the same
@@ -8468,6 +9010,40 @@ async fn upsert_concepts_checked(
     }
 
     drop(stmt);
+
+    // W2, plain shape: the overlay's guarded row writes — the ordinary
+    // upsert's shape on a different table, the version fork guard's
+    // refusals and the single-open check inside [`upsert_w2_version`]
+    // (§5.2 W2's no-supersede rows).
+    for concept in &w2_plain {
+        upsert_w2_version(conn, concept, stamp).await?;
+    }
+    // W2, `retired`: §5.2's retire row — the lineage rejects the inheritance
+    // from `at` on (a bare cut), or closes its own open belief first.
+    for (concept, open) in &retires {
+        w2_retire(conn, concept, open.clone(), stamp).await?;
+    }
+    // W2 supersede with nothing open: the ordinary upsert, after D-312's
+    // forward law.
+    for concept in &supersede_plains {
+        refuse_backward_supersede(conn, concept).await?;
+        upsert_w2_version(conn, concept, stamp).await?;
+    }
+    // W2 takeovers: D-312's act, translated — cut then version, one stamp
+    // (§5.2 revision 3's two rows).
+    for (concept, open) in &w2_takeovers {
+        w2_takeover_in_tx(conn, concept, open, stamp).await?;
+    }
+
+    // The refusals — W3's cross-lineage senders and W2's
+    // no-supersede-over-an-open — fire last but inside the caller's
+    // transaction, before any commit: a batch is atomic (D-308), and a
+    // refusal named here means nothing the act did commits. First refusal
+    // wins: the others are all true statements the caller can fix one row at
+    // a time, and the first is the one the act never got past.
+    if let Some(e) = refusals.into_iter().next() {
+        return Err(e);
+    }
     Ok(())
 }
 

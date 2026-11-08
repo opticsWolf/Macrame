@@ -766,26 +766,75 @@ async fn a_branch_supersede_of_its_own_concept_leaves_the_trunk_untouched() {
     db.close().await.unwrap();
 }
 
-/// An inherited concept belongs to the parent: superseding it on the branch
-/// stays the D-214 refusal, and M6's shadow rows are deliberately not built.
+/// An inherited concept's supersede is M6-a's takeover, not the D-214
+/// refusal v26 replaced (0.22.0,
+/// [Amendment 2](../docs/Macrame%20Update%20Plan%20v0.22.0%20-%20Amendment%202.md)
+/// \u00a75.2, D-314): the act lands a cut row and a version row on the branch's
+/// own overlay rows, in one transaction under one stamp, and the trunk's
+/// projection row is a distant lineage's row (I1) — untouched.
 #[tokio::test]
-async fn a_supersede_of_an_inherited_concept_is_cross_lineage() {
+async fn a_supersede_of_an_inherited_concept_is_the_takeover() {
     let harness = TestHarness::new();
     let db = open_db(&harness).await;
+
+    upsert(&db, concept("a", JAN, None)).await.unwrap();
+    let trunk_rows = log_rows(&db, "a").await.len();
+
+    // The branch now inherits `a`: the mint is on the trunk, recorded before
+    // the branch forked, so the write path routes W2 rather than W3
+    // ([Amendment 2\u00a75.2]; P-7's vista is the refusal on the other order).
     let alt = BranchId::new("alt").unwrap();
     db.fork(alt.clone(), BranchId::main()).await.unwrap();
 
-    upsert(&db, concept("a", JAN, None)).await.unwrap();
-
-    let err = db
-        .upsert_concept_superseding(ConceptUpsert::new("a", "a2").valid_from(SEP).on_branch(alt))
+    tick().await;
+    db.upsert_concept_superseding(ConceptUpsert::new("a", "a2").valid_from(SEP).on_branch(alt))
         .await
-        .expect_err("the branch may not supersede what it inherited");
-    assert!(matches!(err, DbError::CrossLineage { .. }), "got {err:?}");
+        .expect("the takeover: the branch supersedes what it inherited");
 
-    let rows = log_rows(&db, "a").await;
-    assert_eq!(rows.len(), 1, "the refusal writes nothing");
-    assert_eq!(rows[0].4, "main", "and nothing landed on the branch");
+    // The trunk's projection row never moved (I1).
+    assert_eq!(
+        log_rows(&db, "a").await.len() - trunk_rows,
+        0,
+        "the trunk's row is untouched by the branch's act"
+    );
+
+    let mut rows = db
+        .read_conn()
+        .query(
+            "SELECT id, branch_id, kind, at, recorded_at FROM ( \
+               SELECT id, branch_id, 'version' AS kind, valid_from AS at, recorded_at \
+                 FROM concept_versions WHERE id = 'a' \
+               UNION ALL \
+               SELECT id, branch_id, 'cut' AS kind, cut_at AS at, recorded_at \
+                 FROM concept_cuts WHERE id = 'a' \
+             )",
+            (),
+        )
+        .await
+        .unwrap();
+    let mut seen_version = None;
+    let mut seen_cut = None;
+    while let Some(row) = rows.next().await.unwrap() {
+        let kind: String = row.get(2).unwrap();
+        let branch: String = row.get(1).unwrap();
+        let at: String = row.get(3).unwrap();
+        let ra: String = row.get(4).unwrap();
+        assert_eq!(branch, "alt", "the act's rows are the branch's own");
+        assert_eq!(at, SEP);
+        if kind == "version" {
+            seen_version = Some(ra);
+        } else {
+            seen_cut = Some(ra);
+        }
+    }
+    assert!(
+        seen_version.is_some() && seen_cut.is_some(),
+        "the takeover wrote the cut and the version (revision 3: two rows)"
+    );
+    assert_eq!(
+        seen_version, seen_cut,
+        "the two rows carry the act's one stamp ([D-312]'s contract, D-314's)"
+    );
 
     db.close().await.unwrap();
 }

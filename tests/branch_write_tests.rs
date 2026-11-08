@@ -568,8 +568,26 @@ async fn every_write_refuses_an_unregistered_lineage_by_name() {
 // Concepts, whose rule is the schema's rather than this crate's
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Concepts, whose rule is M6-a's (v26 built the overlay; the D-214 deferral is
+// no longer the whole law)
+// ---------------------------------------------------------------------------
+
+async fn scalar(db: &Database, sql: &str) -> i64 {
+    db.read_conn()
+        .query(sql, ())
+        .await
+        .unwrap()
+        .next()
+        .await
+        .unwrap()
+        .unwrap()
+        .get(0)
+        .unwrap()
+}
+
 #[tokio::test]
-async fn a_branch_mints_a_new_concept_and_may_not_restate_an_inherited_one() {
+async fn a_branch_mints_a_new_concept_and_owns_its_takeover_of_an_inherited_one() {
     let h = TestHarness::new();
     let (db, alt) = forked(&h).await;
     db.fork(alt.clone(), BranchId::main()).await.unwrap();
@@ -584,9 +602,12 @@ async fn a_branch_mints_a_new_concept_and_may_not_restate_an_inherited_one() {
     .await
     .unwrap();
 
-    // Restating one it inherited is not. `trg_concepts_cross_lineage` has been
-    // in the schema since v12; until 0.14.8 no caller could reach it, and
-    // `classify` had no arm for it — so it would have surfaced as `Engine`.
+    // The trunk mints `a` before the fork, so the branch inherited it. A
+    // PLAIN restatement is refused \u2014 never an implicit supersede ([Amendment
+    // 2](../docs/Macrame%20Update%20Plan%20v0.22.0%20-%20Amendment%202.md)
+    // \u00a75.2's no-superside row): before M6-a this was the schema's
+    // CrossLineage guard; now the write actor routes W2 and refuses with the
+    // same shape one lineage's guard uses.
     let err = db
         .upsert_concept(
             ConceptUpsert::new("a", "Renamed")
@@ -595,17 +616,49 @@ async fn a_branch_mints_a_new_concept_and_may_not_restate_an_inherited_one() {
         )
         .await
         .unwrap_err();
-    let DbError::CrossLineage {
-        id,
-        held_by,
-        attempted,
-    } = err
-    else {
-        panic!("expected CrossLineage, got {err:?}");
-    };
+    assert!(
+        matches!(err, DbError::ConceptSingleOpen { .. }),
+        "expected ConceptSingleOpen (the no-implicit-supersede law), got {err:?}"
+    );
+
+    // A SUPERSEDE restatement is the takeover (D-314). The routing tests pin
+    // the law end to end (`m6a_routing_tests.rs`); this file asserts the
+    // user-visible row facts: the branch's rows exist, and the trunk's do not
+    // move.
+    h.advance(Duration::from_millis(3));
+    db.upsert_concept_superseding(
+        ConceptUpsert::new("a", "Renamed")
+            .valid_from(TS)
+            .on_branch(alt.clone()),
+    )
+    .await
+    .unwrap();
     assert_eq!(
-        (id.as_str(), held_by.as_str(), attempted.as_str()),
-        ("a", "main", "alt")
+        scalar(
+            &db,
+            "SELECT COUNT(*) FROM concepts WHERE id = 'a' AND branch_id = 'main'"
+        )
+        .await,
+        1,
+        "the trunk's row is untouched (I1)"
+    );
+    assert_eq!(
+        scalar(
+            &db,
+            "SELECT COUNT(*) FROM concept_versions WHERE id = 'a' AND branch_id = 'alt'"
+        )
+        .await,
+        1,
+        "the branch's own version row holds the takeover"
+    );
+    assert_eq!(
+        scalar(
+            &db,
+            "SELECT COUNT(*) FROM concept_cuts WHERE id = 'a' AND branch_id = 'alt'"
+        )
+        .await,
+        1,
+        "the cut caps the fall-through (revision 3's second row)"
     );
 
     db.close().await.unwrap();
