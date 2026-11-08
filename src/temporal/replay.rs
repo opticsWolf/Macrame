@@ -2377,21 +2377,34 @@ async fn archive_hint(conn: &libsql::Connection, branch: Option<&str>) -> String
         // branch's own floor says nothing about it - so the chain is
         // named, and each ancestor's head is answered with the same
         // honesty the own arm keeps.
-        for (parent, cutoff) in lineage_chain(conn, b).await {
-            hint.push_str(&format!(
-                "; the read also folds {parent}'s rows recorded before the fork cutoff {cutoff}"
-            ));
-            match lineage_log_head(conn, &parent).await {
-                Ok(Some((count, min, floor))) => hint.push_str(&format!(
-                    ", of which {count} survive, beginning at seq_id {min} ({floor})"
-                )),
-                Ok(None) => {
-                    hint.push_str(", and none of that ancestor's rows survive in this store")
+        // The chain comes from the shared ancestry ([D-259]'s source, the
+        // same `Lineages` the walk and the route resolve), not a hand walk —
+        // and a load that fails is named, not silently omitted (the same
+        // honesty the per-lineage arm one block up keeps).
+        match crate::graph::lineage::Lineages::load(conn).await {
+            Ok(lineages) => {
+                for a in lineages.ancestry(b).iter().skip(1) {
+                    let cutoff = a.cutoff.clone().unwrap_or_default();
+                    hint.push_str(&format!(
+                        "; the read also folds {}'s rows recorded before the fork cutoff {cutoff}",
+                        a.branch_id
+                    ));
+                    match lineage_log_head(conn, &a.branch_id).await {
+                        Ok(Some((count, min, floor))) => hint.push_str(&format!(
+                            ", of which {count} survive, beginning at seq_id {min} ({floor})"
+                        )),
+                        Ok(None) => hint.push_str(
+                            ", and none of that ancestor's rows survive in this store",
+                        ),
+                        Err(_) => hint.push_str(
+                            ", and the ancestor's surviving rows could not be inspected (its query failed)",
+                        ),
+                    }
                 }
-                Err(_) => hint.push_str(
-                    ", and the ancestor's surviving rows could not be inspected (its query failed)",
-                ),
             }
+            Err(_) => hint.push_str(
+                "; the ancestor chain's rows could not be inspected (the lineages' query failed)",
+            ),
         }
     }
 
@@ -2409,7 +2422,7 @@ async fn lineage_log_head(
 ) -> Result<Option<(i64, i64, String)>> {
     let mut rows = conn
         .query(
-            "SELECT COUNT(*), MIN(seq_id), MIN(recorded_at) FROM transaction_log              WHERE branch_id = ?1",
+            "SELECT COUNT(*), MIN(seq_id), MIN(recorded_at) FROM transaction_log WHERE branch_id = ?1",
             libsql::params![branch],
         )
         .await?;
@@ -2423,39 +2436,6 @@ async fn lineage_log_head(
     let min: i64 = row.get(1).unwrap_or(0);
     let floor: String = row.get(2).unwrap_or_default();
     Ok(Some((count, min, floor)))
-}
-
-/// The lineage's ancestors, nearest first, with the fork cutoff that bounds
-/// each one's contribution to a branch fold: the steps the ancestry descends,
-/// read from `branches` itself.
-async fn lineage_chain(conn: &libsql::Connection, branch: &str) -> Vec<(String, String)> {
-    let mut chain = Vec::new();
-    let mut current = branch.to_string();
-    for _ in 0..16 {
-        let mut rows = match conn
-            .query(
-                "SELECT parent_id, forked_at FROM branches WHERE branch_id = ?1",
-                libsql::params![current],
-            )
-            .await
-        {
-            Ok(rows) => rows,
-            Err(_) => return chain,
-        };
-        let row = match rows.next().await {
-            Ok(row) => row,
-            Err(_) => return chain,
-        };
-        let Some(row) = row else { break };
-        let parent: String = row.get(0).unwrap_or_default();
-        if parent.is_empty() {
-            break;
-        }
-        let cutoff: String = row.get(1).unwrap_or_default();
-        chain.push((parent.clone(), cutoff));
-        current = parent;
-    }
-    chain
 }
 
 /// Was any row ever removed from `transaction_log`? — answered exactly, from

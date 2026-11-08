@@ -7354,8 +7354,10 @@ async fn route_concept(
     // whose overlay rows the writer holds is the writer's own nearest-step
     // matter from its first row on (`[D-314]` §5.3 rule 3): the ordinary W2
     // arms run on it, with `open` the absent where the walk answers absent.
-    let own_history = own_version_row_exists(conn, &concept.id, writer).await?;
-    if open.is_some() || own_history {
+    // The seek is short-circuited, not unconditional (0.22.0's post-review
+    // fix): a walk that already resolved an open belief has answered the
+    // question, and its answer routes inherited without paying the query.
+    if open.is_some() || own_version_row_exists(conn, &concept.id, writer).await? {
         return Ok(ConceptRoute::Inherited {
             open,
             path: ancestry,
@@ -7663,8 +7665,9 @@ async fn upsert_w2_version(
 
 /// Whether the writer's own overlay holds any version row for the id (0.22.0's
 /// post-review recognition of [`route_concept`]): one indexed seek on the
-/// version table's primary key, run only when the resolution walk answers
-/// empty, so the common paths pay nothing.
+/// version table's primary key, and the route's caller short-circuits it
+/// behind an open resolution — the seek pays only when the walk answers
+/// empty, which is the only shape it can decide something about.
 async fn own_version_row_exists(conn: &libsql::Connection, id: &str, branch: &str) -> Result<bool> {
     let mut rows = conn
         .query(
@@ -7796,9 +7799,14 @@ async fn w2_retire(
     open: Option<EffectiveOpen>,
     stamp: &str,
 ) -> Result<()> {
-    if let Some(open) = open.filter(|o| o.bid == concept.branch_name()) {
+    // The walk's answer decides before the filter does (0.22.0's post-review
+    // reply): a walk that resolves the ancestor's belief at the instant keeps
+    // the bare cut as the act, however many rows the writer holds elsewhere.
+    let walk_saw_something = open.is_some();
+    let own_open = open.filter(|o| o.bid == concept.branch_name());
+    if let Some(open) = own_open.as_ref() {
         if open.start.as_str() >= concept.valid_from.as_str() {
-            return Err(single_open_from_path(concept, &open));
+            return Err(single_open_from_path(concept, open));
         }
         let changed = conn
             .execute(
@@ -7816,15 +7824,20 @@ async fn w2_retire(
         let _ = changed;
         return Ok(());
     }
-    // The bare cut is the pure inheritance's retirement: a lineage with no
-    // version rows of its own rejects the inheritance from the instant on.
-    // A lineage whose own overlay history holds the id is past the point of
-    // bare rejection — its rows are its nearest step wherever they stand —
-    // and a retirement instant it holds no belief at cannot complete: the
-    // act names no belief to retire, so the refusal is what speaks (0.22.0's
-    // post-review fix: a fresh-adoption refusal may only be raised for a
-    // true fresh-foreign id, which the route guarantees elsewhere).
-    if own_version_row_exists(conn, concept.id.as_str(), concept.branch_name()).await? {
+    // Open reaches here either dropped by the filter (the ancestor's belief
+    // is what the walk resolves) or never standing (the walk answers empty).
+    // The first is still the plain inheritance — vista having written its own
+    // row somewhere else does not decide what is visible at THIS instant — so
+    // the bare cut is the act, exactly as a lineage with no history takes it.
+    // Only when the walk answers empty does an own-history row make the
+    // instant name nothing to retire: the act asks for a belief at `valid_from`
+    // and none is resolvable, so the refusal is what speaks (0.22.0's
+    // post-review fix, then its reply: the refusal gates on `open.is_none()`,
+    // not on the writer's row count — the last reply took the filter for
+    // the whole walk and refused a valid inheritance's retirement).
+    if !walk_saw_something
+        && own_version_row_exists(conn, concept.id.as_str(), concept.branch_name()).await?
+    {
         return Err(DbError::NotFound(format!(
             "nothing visible to retire: {id} on {branch} holds no belief at {instant}",
             id = concept.id.as_str(),

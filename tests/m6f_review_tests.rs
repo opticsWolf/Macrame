@@ -510,6 +510,30 @@ async fn a_direct_writer_holds_the_interval_law_too() {
     );
 }
 
+/// The inherited store: the trunk mints `early` at `T0` and vista forks
+/// right after the mint ([fork_after]'s point is the concept's own instant),
+/// so the ancestor's row sits inside every cutoff vista ever walks - the
+/// reviewer's "forks now" store, where vista's resolve at T2 is still the
+/// trunk's belief.
+async fn inherited_store(harness: &TestHarness) -> std::sync::Arc<Database> {
+    const T0: &str = "2026-01-01T00:00:00.000000Z";
+    let db: std::sync::Arc<Database> =
+        std::sync::Arc::new(Database::open(&harness.db_path).await.unwrap());
+    db.upsert_concept(
+        ConceptUpsert::new("early", "the trunk's early belief")
+            .valid_from(T0)
+            .valid_to(FOREVER),
+    )
+    .await
+    .unwrap();
+    tick().await;
+    db.fork_after(BranchId::new("vista").unwrap(), BranchId::main(), "early")
+        .await
+        .unwrap();
+    tick().await;
+    db
+}
+
 async fn raw_conn(path: &std::path::Path) -> libsql::Connection {
     libsql::Builder::new_local(path)
         .build()
@@ -517,4 +541,126 @@ async fn raw_conn(path: &std::path::Path) -> libsql::Connection {
         .unwrap()
         .connect()
         .unwrap()
+}
+
+/// The last review's own honesty has lines it must not cross: a lineage with
+/// version rows of its own can still be retiring an INHERITED belief — an
+/// instant its own rows do not yet cover but its ancestor's does. Vista
+/// supersedes the trunk's `early` from `T6` (cut + own version), then retires
+/// at `T2`, where the trunk's belief is still what vista sees: the bare cut
+/// is the overlay's whole retirement vocabulary there, the same shape the
+/// pure inheritance took before vista had written anything — the walk's
+/// answer decides, not the writer's row count.
+#[tokio::test]
+async fn a_retirement_of_the_inheritance_still_cuts_after_the_lineage_wrote_its_own() {
+    let harness = TestHarness::new();
+    let db = inherited_store(&harness).await;
+    let view = db.view(BranchId::new("vista").unwrap());
+
+    // vista takes over the trunk's `early` from T6: the cut at T6 holds the
+    // ancestor down past the point of takeover, and vista's own version row
+    // stands from T6 on.
+    view.upsert_concept(
+        ConceptUpsert::new("early", "vista's takeover of the trunk's belief")
+            .supersede(true)
+            .valid_from(T6)
+            .valid_to(FOREVER),
+    )
+    .await
+    .expect("the takeover rides the overlay's own arms");
+    tick().await;
+    assert_eq!(
+        scalar(
+            &db,
+            "SELECT COUNT(*) FROM concept_versions WHERE id = 'early' AND branch_id = 'vista'"
+        )
+        .await,
+        1,
+        "vista wrote its own row before the retirement's act"
+    );
+
+    // vista retires at T4, where the trunk's belief is still the state the
+    // walk resolves (vista's fork point is the mint's own recording, so the
+    // ancestor's row is inside every cutoff vista walks): the inheritance
+    // rejected from the instant on - the reviewer's proven cell, whose
+    // refusal was the confirmation finding's reply bug.
+    let cut = view
+        .upsert_concept(
+            ConceptUpsert::new("early", "the retirement of the inheritance")
+                .retired(true)
+                .valid_from(T4)
+                .valid_to(FOREVER),
+        )
+        .await;
+    cut.expect(
+        "a retirement whose instant the walk resolves inherited must complete: \
+         the ancestor's belief is what the act names, vista's own rows nothing \
+         to do with it",
+    );
+
+    // The act is the bare cut: one cut row at the instant's opening, and no
+    // window written over it.
+    assert_eq!(
+        scalar(
+            &db,
+            "SELECT COUNT(*) FROM concept_cuts WHERE id = 'early' AND branch_id = 'vista'"
+        )
+        .await,
+        2,
+        "two cuts stand: the takeover's at T6 and the retirement's at T4"
+    );
+    assert_eq!(
+        scalar(
+            &db,
+            &format!(
+                "SELECT COUNT(*) FROM concept_cuts \
+                 WHERE id = 'early' AND branch_id = 'vista' AND cut_at = '{T4}'"
+            )
+        )
+        .await,
+        1,
+        "the retirement's cut stands where the trunk's belief was visible"
+    );
+    assert_eq!(
+        scalar(
+            &db,
+            "SELECT COUNT(*) FROM concept_versions WHERE id = 'early' AND branch_id = 'vista'"
+        )
+        .await,
+        1,
+        "the retirement wrote no version row of its own"
+    );
+
+    // The reads say what the act did: the instant the cut names is absent
+    // from vista's resolve, the takeover's own window still speaks, and the
+    // trunk's row is the trunk's own business throughout.
+    let rows = db
+        .concepts_by_id(
+            &["early".to_string()],
+            ReadPlan::new()
+                .on(BranchId::new("vista").unwrap())
+                .valid_at("2026-03-15T00:00:00.000000Z")
+                .recorded_at("2027-06-01T00:00:00.000000Z"),
+        )
+        .await
+        .unwrap();
+    assert!(
+        rows.is_empty(),
+        "below the cut, vista resolves absent: the inheritance is retired"
+    );
+    let rows = db
+        .concepts_by_id(
+            &["early".to_string()],
+            ReadPlan::new()
+                .on(BranchId::new("vista").unwrap())
+                .valid_at("2026-06-15T00:00:00.000000Z")
+                .recorded_at("2027-06-01T00:00:00.000000Z"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1, "past the cut, vista's own takeover speaks");
+    assert!(
+        rows[0].title.contains("takeover"),
+        "the answer is vista's own version, not the trunk's: {rows:?}"
+    );
 }
