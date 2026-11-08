@@ -603,6 +603,42 @@ pub struct ConceptUpsert {
     pub embedding_model: Option<String>,
     pub valid_from: String,
     pub valid_to: String,
+    /// Assert the concept is not what the writer believes, from this row's
+    /// start on.
+    ///
+    /// On the trunk's own row space this is the absence row the state law
+    /// has carried since v24 ([D-022]'s soft delete). On the overlay's space
+    /// (a branch write; M6-a's vocabulary, recorded as designed by the
+    /// 0.22.0 post-review question, because the act has **two arms told
+    /// apart by what the resolution walk resolves at the instant**):
+    ///
+    /// - the lineage's **own open version** resolving → the *close* of that
+    ///   belief: its `valid_to` becomes this row's `valid_from`. A
+    ///   retirement at or before the own belief's start refuses as
+    ///   [`DbError::ConceptSingleOpen`] ([D-312]'s forward law's shape — the
+    ///   close it asks for would produce an empty or inverted interval);
+    /// - the **ancestor's belief** resolving → the retirement would be the
+    ///   *bare cut* that rejects the inheritance from the instant on; the
+    ///   act is refused when a version row of the lineage's own **starts
+    ///   later** (`valid_from` past the retirement instant) — the cut
+    ///   could not finish what the caller asked (the act said one thing
+    ///   and a later row of the lineage's own would keep the belief alive
+    ///   past the instant), so the refusal is the own row's name in the
+    ///   same single-open shape the own-open case carries. Otherwise the
+    ///   cut runs: a lineage with no own rows later than the instant
+    ///   rejects the inheritance, its own rows all beginning at or before
+    ///   the instant (their windows untouched by an act that answers past
+    ///   them);
+    /// - the walk answering **empty** with the lineage holding own rows →
+    ///   refused with the act's own sentence — nothing visible at the
+    ///   instant to retire;
+    /// - a **fresh adoption** (nothing visible anywhere) → refused whole
+    ///   ([D-315]'s `AdoptedRetirement`): a retirement names a belief that
+    ///   was visible somewhere.
+    ///
+    /// [D-022]: ../docs/architecture/s13-decision-register.md#d-022
+    /// [D-312]: ../docs/architecture/s13-decision-register.md#d-312
+    /// [D-315]: ../docs/architecture/s13-decision-register.md#d-315
     pub retired: bool,
     /// The lineage this concept is minted on, or `None` for the trunk (§15.2,
     /// D-225).
@@ -719,6 +755,13 @@ impl ConceptUpsert {
             .map_or(crate::schema::ddl::MAIN_BRANCH, |b| b.as_str())
     }
 
+    /// Mark this upsert a retirement. The act it becomes is told by what the
+    /// resolution walk resolves at the instant — see the
+    /// [`retired`](Self::retired) field's vocabulary: the close of the
+    /// lineage's own open belief, or the bare cut that rejects the
+    /// inheritance; neither runs when a version row of the lineage's own
+    /// starts after the retirement instant, because the act the caller
+    /// asked for would be done only short of that row.
     pub fn retired(mut self, retired: bool) -> Self {
         self.retired = retired;
         self
@@ -7800,8 +7843,8 @@ async fn w2_retire(
     stamp: &str,
 ) -> Result<()> {
     // The walk's answer decides before the filter does (0.22.0's post-review
-    // reply): a walk that resolves the ancestor's belief at the instant keeps
-    // the bare cut as the act, however many rows the writer holds elsewhere.
+    // replies 1 and 2): the close arm takes the lineage's own open belief,
+    // and what follows is the ancestor-visible shape the bare cut handles.
     let walk_saw_something = open.is_some();
     let own_open = open.filter(|o| o.bid == concept.branch_name());
     if let Some(open) = own_open.as_ref() {
@@ -7826,15 +7869,12 @@ async fn w2_retire(
     }
     // Open reaches here either dropped by the filter (the ancestor's belief
     // is what the walk resolves) or never standing (the walk answers empty).
-    // The first is still the plain inheritance — vista having written its own
-    // row somewhere else does not decide what is visible at THIS instant — so
-    // the bare cut is the act, exactly as a lineage with no history takes it.
-    // Only when the walk answers empty does an own-history row make the
-    // instant name nothing to retire: the act asks for a belief at `valid_from`
-    // and none is resolvable, so the refusal is what speaks (0.22.0's
-    // post-review fix, then its reply: the refusal gates on `open.is_none()`,
-    // not on the writer's row count — the last reply took the filter for
-    // the whole walk and refused a valid inheritance's retirement).
+    // The first is still the plain inheritance - vista having written its
+    // own row somewhere else does not decide what is visible at THIS
+    // instant - so the bare cut is the act a lineage with no history takes.
+    // Only when the walk answers empty does an own-history row name an
+    // instant the lineage holds nothing at: the act asks for a belief at
+    // `valid_from` and none is resolvable, so the refusal speaks.
     if !walk_saw_something
         && own_version_row_exists(conn, concept.id.as_str(), concept.branch_name()).await?
     {
@@ -7844,6 +7884,37 @@ async fn w2_retire(
             branch = concept.branch_name(),
             instant = concept.valid_from.as_str(),
         )));
+    }
+    // The reviewer's second-round question, answered as a refusal (the
+    // reviewer's own recommendation, taken over this reply's first answer of
+    // documenting): the caller named one act - "retired from `valid_from`
+    // onward" - and a version row of the lineage's own starting later would
+    // keep it speaking past the instant. A partial act with no signal is the
+    // shape the crate refuses everywhere else; the same single-open shape
+    // the own-belief-at-the-instant case carries names the row that stands
+    // in the act's way. The walk answered the ANCESTOR'S belief (the close
+    // arm took the own one), so this is the cut's own gate.
+    if walk_saw_something {
+        let mut later = conn
+            .query(
+                "SELECT valid_from FROM concept_versions WHERE id = ?1 AND branch_id = ?2 AND valid_from > ?3 LIMIT 1",
+                libsql::params![
+                    concept.id.as_str(),
+                    concept.branch_name(),
+                    concept.valid_from.as_str()
+                ],
+            )
+            .await?;
+        if let Some(row) = later.next().await? {
+            let start: String = row.get(0)?;
+            return Err(single_open_from_path(
+                concept,
+                &EffectiveOpen {
+                    bid: concept.branch_name().to_string(),
+                    start,
+                },
+            ));
+        }
     }
     w2_cut(conn, concept, stamp).await
 }

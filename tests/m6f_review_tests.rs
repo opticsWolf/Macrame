@@ -543,16 +543,19 @@ async fn raw_conn(path: &std::path::Path) -> libsql::Connection {
         .unwrap()
 }
 
-/// The last review's own honesty has lines it must not cross: a lineage with
-/// version rows of its own can still be retiring an INHERITED belief — an
-/// instant its own rows do not yet cover but its ancestor's does. Vista
-/// supersedes the trunk's `early` from `T6` (cut + own version), then retires
-/// at `T2`, where the trunk's belief is still what vista sees: the bare cut
-/// is the overlay's whole retirement vocabulary there, the same shape the
-/// pure inheritance took before vista had written anything — the walk's
-/// answer decides, not the writer's row count.
+/// The reviewer's second-round question, its answer a refusal rather than a
+/// vocabulary note (the reviewer's recommendation, taken over this suite's
+/// first answer of documenting the shape): a retirement ASKS one act -
+/// "the lineage does not believe this, from `valid_from` onward" - and a
+/// version row of the lineage's own starting later would keep the belief
+/// alive past the instant without telling anyone. Vista supersedes the
+/// trunk's `early` at `T6` (cut + own version), then retires at `T4`:
+/// refused with the same single-open shape the own-belief-at-the-instant
+/// case carries, the overlap naming vista's own takeover row as the thing
+/// that stands in the act's way, nothing written, and every read the same
+/// as before the refused write.
 #[tokio::test]
-async fn a_retirement_of_the_inheritance_still_cuts_after_the_lineage_wrote_its_own() {
+async fn a_retirement_the_lineage_s_own_later_row_would_survive_refuses() {
     let harness = TestHarness::new();
     let db = inherited_store(&harness).await;
     let view = db.view(BranchId::new("vista").unwrap());
@@ -579,12 +582,9 @@ async fn a_retirement_of_the_inheritance_still_cuts_after_the_lineage_wrote_its_
         "vista wrote its own row before the retirement's act"
     );
 
-    // vista retires at T4, where the trunk's belief is still the state the
-    // walk resolves (vista's fork point is the mint's own recording, so the
-    // ancestor's row is inside every cutoff vista walks): the inheritance
-    // rejected from the instant on - the reviewer's proven cell, whose
-    // refusal was the confirmation finding's reply bug.
-    let cut = view
+    // The retirement at T4 asks "absent from T4 onward" while vista's own
+    // row [T6, FOREVER) keeps speaking from T6: refused, naming it.
+    let refused = view
         .upsert_concept(
             ConceptUpsert::new("early", "the retirement of the inheritance")
                 .retired(true)
@@ -592,48 +592,25 @@ async fn a_retirement_of_the_inheritance_still_cuts_after_the_lineage_wrote_its_
                 .valid_to(FOREVER),
         )
         .await;
-    cut.expect(
-        "a retirement whose instant the walk resolves inherited must complete: \
-         the ancestor's belief is what the act names, vista's own rows nothing \
-         to do with it",
-    );
+    match refused {
+        Ok(()) => panic!("the partial retirement stored a cut it could not finish"),
+        Err(e) => {
+            let text = e.to_string();
+            assert!(
+                text.contains("one from 2026-04-01T00:00:00.000000Z is already recorded"),
+                "the refusal is the single-open shape, and it names vista's own                  takeover row as what stands in the act's way: {text}"
+            );
+        }
+    }
 
-    // The act is the bare cut: one cut row at the instant's opening, and no
-    // window written over it.
+    // Nothing was written: no cut at T4 stands, and the pair's reads are
+    // the reads of the state the refusal left untouched - the trunk's
+    // belief where vista has no row of its own, vista's takeover past T6.
     assert_eq!(
-        scalar(
-            &db,
-            "SELECT COUNT(*) FROM concept_cuts WHERE id = 'early' AND branch_id = 'vista'"
-        )
-        .await,
-        2,
-        "two cuts stand: the takeover's at T6 and the retirement's at T4"
+        scalar(&db, &format!("SELECT COUNT(*) FROM concept_cuts WHERE id = 'early' AND branch_id = 'vista' AND cut_at = '{T4}'")).await,
+        0,
+        "no cut stands where the act was refused"
     );
-    assert_eq!(
-        scalar(
-            &db,
-            &format!(
-                "SELECT COUNT(*) FROM concept_cuts \
-                 WHERE id = 'early' AND branch_id = 'vista' AND cut_at = '{T4}'"
-            )
-        )
-        .await,
-        1,
-        "the retirement's cut stands where the trunk's belief was visible"
-    );
-    assert_eq!(
-        scalar(
-            &db,
-            "SELECT COUNT(*) FROM concept_versions WHERE id = 'early' AND branch_id = 'vista'"
-        )
-        .await,
-        1,
-        "the retirement wrote no version row of its own"
-    );
-
-    // The reads say what the act did: the instant the cut names is absent
-    // from vista's resolve, the takeover's own window still speaks, and the
-    // trunk's row is the trunk's own business throughout.
     let rows = db
         .concepts_by_id(
             &["early".to_string()],
@@ -644,9 +621,14 @@ async fn a_retirement_of_the_inheritance_still_cuts_after_the_lineage_wrote_its_
         )
         .await
         .unwrap();
+    assert_eq!(
+        rows.len(),
+        1,
+        "inside the refused window the walk still answers the trunk's belief"
+    );
     assert!(
-        rows.is_empty(),
-        "below the cut, vista resolves absent: the inheritance is retired"
+        rows[0].title.contains("trunk"),
+        "the answer is the trunk's own row: {rows:?}"
     );
     let rows = db
         .concepts_by_id(
@@ -658,7 +640,7 @@ async fn a_retirement_of_the_inheritance_still_cuts_after_the_lineage_wrote_its_
         )
         .await
         .unwrap();
-    assert_eq!(rows.len(), 1, "past the cut, vista's own takeover speaks");
+    assert_eq!(rows.len(), 1, "past the takeover vista's own row speaks");
     assert!(
         rows[0].title.contains("takeover"),
         "the answer is vista's own version, not the trunk's: {rows:?}"
