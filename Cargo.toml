@@ -282,6 +282,11 @@ required-features = ["property-tests"]
 name = "lineage_property_tests"
 required-features = ["property-tests"]
 
+# P-8 of Amendment 2: the resolution rule before any reader converts.
+[[test]]
+name = "m6_resolution_tests"
+required-features = ["property-tests"]
+
 # §9's budgets, measured (D-055). Not a CI gate — see the note at the top of the
 # file for why absolute durations on arbitrary hardware are the wrong shape, and
 # what criterion baselines do instead.
