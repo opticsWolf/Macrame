@@ -175,6 +175,11 @@ EXPECTED: dict[str, tuple[str, str, dict]] = {
         "BranchError",
         {"id": "socrates", "held_by": "main", "attempted": "alt"},
     ),
+    "AdoptedRetirement": (
+        "AdoptedRetirementError",
+        "BranchError",
+        {"id": "socrates", "branch": "vista", "held_by": "main"},
+    ),
     "BranchMismatch": (
         "BranchMismatchError",
         "BranchError",

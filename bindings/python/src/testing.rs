@@ -56,6 +56,7 @@ pub(crate) const DB_ERROR_VARIANTS: &[&str] = &[
     "BranchArchived",
     "ForkPrecedesParent",
     "CrossLineage",
+    "AdoptedRetirement",
     "BranchMismatch",
     "ModelNotRegistered",
     "SubgraphTooLarge",
@@ -205,6 +206,11 @@ fn sample(name: &str) -> Option<DbError> {
             id: "socrates".into(),
             held_by: "main".into(),
             attempted: "alt".into(),
+        },
+        "AdoptedRetirement" => DbError::AdoptedRetirement {
+            id: "socrates".into(),
+            branch: "vista".into(),
+            held_by: "main".into(),
         },
         "BranchMismatch" => DbError::BranchMismatch {
             view: "alt".into(),

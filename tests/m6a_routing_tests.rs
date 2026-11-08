@@ -6,7 +6,10 @@
 //! overlay, supersede writes its cut and its version at one stamp, plain
 //! writes never supersede by accident, `retired` on an inherited id retires
 //! the inheritance (a cut, not a row that mutates a distant projection), and
-//! **W3** stays [`DbError::CrossLineage`]: the mint off the writer's path,
+//! **W3** (the mint off the writer's path, or recorded past its fork cutoff)
+//! is [`D-315`] adoption since M6-e: an ordinary first version on the
+//! writer's own lineage, nothing copied, nothing anywhere closed or cut (the
+//! last `CrossLineage` refusal is the trigger's, for rows written directly);
 //! and the mint on the path but recorded after the writer's fork cutoff
 //! (P-7's vista), are both refusals.
 //!
@@ -457,9 +460,11 @@ async fn a_later_supersede_on_the_own_version_closes_it_and_does_not_re_cut() {
 // W3: the refusals stay refusals
 // ---------------------------------------------------------------------------
 
-/// The mint on a lineage the writer cannot see at all: a sibling.
+/// The mint on a lineage the writer cannot see at all: a sibling. [D-315]
+/// (M6-e) widens W3's refusal into the adoption act: b0 asserts its own first
+/// version of the sibling's id — one row, no cut, nothing copied.
 #[tokio::test]
-async fn the_mint_on_a_sibling_lineage_is_refused() {
+async fn a_sibling_s_mint_is_adopted_off_the_path() {
     let harness = TestHarness::new();
     let db = forked_store(&harness, "c").await;
 
@@ -478,26 +483,50 @@ async fn the_mint_on_a_sibling_lineage_is_refused() {
 
     let view = db.view(BranchId::new("b0").unwrap());
     tick().await;
-    let err = view
-        .upsert_concept(
-            ConceptUpsert::new("sibborn", "off the path")
-                .supersede(true)
-                .valid_from(T4),
+    view.upsert_concept(
+        ConceptUpsert::new("sibborn", "off the path")
+            .supersede(true)
+            .valid_from(T4),
+    )
+    .await
+    .unwrap();
+
+    let versions = scalar(
+        &db,
+        &format!(
+            "SELECT COUNT(*) FROM concept_versions              WHERE id = 'sibborn' AND branch_id = 'b0' AND valid_from = '{T4}'"
+        ),
+    )
+    .await;
+    assert_eq!(
+        versions, 1,
+        "the adoption is one row on the writer's lineage"
+    );
+    let cuts = scalar(
+        &db,
+        "SELECT COUNT(*) FROM concept_cuts WHERE id = 'sibborn' AND branch_id = 'b0'",
+    )
+    .await;
+    assert_eq!(cuts, 0, "nothing is cut on the fresh adoption");
+    // The provenance stays the mint's: the projection still names the minting
+    // lineage, and nothing on it moved.
+    assert_eq!(
+        scalar(
+            &db,
+            "SELECT COUNT(*) FROM concepts WHERE id = 'sibborn' AND branch_id = 'sib'"
         )
-        .await
-        .unwrap_err();
-    assert!(
-        matches!(err, macrame::DbError::CrossLineage { .. }),
-        "W3 stays the cross-lineage refusal: {err:?}"
+        .await,
+        1,
+        "[D-214]'s provenance row: one row per id, naming the mint"
     );
 }
 
 /// P-7's vista: the mint is on the trunk but recorded after the writer's fork
 /// cutoff, so nothing of it was visible at the fork and nothing is visible
-/// now. D-314 alone does not widen this; D-315 (adoption) is the decision
-/// that does.
+/// now. [D-315] (M6-e) widens the refusal into the adoption act: vista
+/// asserts its own first version — one row, no cut, the mint's row unmoved.
 #[tokio::test]
-async fn the_mint_after_the_writer_s_fork_is_refused() {
+async fn a_mint_after_the_writer_s_fork_is_adopted() {
     let harness = TestHarness::new();
     let db: std::sync::Arc<Database> =
         std::sync::Arc::new(Database::open(&harness.db_path).await.unwrap());
@@ -517,16 +546,26 @@ async fn the_mint_after_the_writer_s_fork_is_refused() {
 
     let view = db.view(BranchId::new("vista").unwrap());
     tick().await;
-    let err = view
-        .upsert_concept(
-            ConceptUpsert::new("late", "not visible at the fork")
-                .supersede(true)
-                .valid_from(T4),
-        )
-        .await
-        .unwrap_err();
-    assert!(
-        matches!(err, macrame::DbError::CrossLineage { .. }),
-        "a mint recorded after the fork cutoff is W3: {err:?}"
-    );
+    view.upsert_concept(
+        ConceptUpsert::new("late", "not visible at the fork")
+            .supersede(true)
+            .valid_from(T4),
+    )
+    .await
+    .unwrap();
+
+    let versions = scalar(
+        &db,
+        &format!(
+            "SELECT COUNT(*) FROM concept_versions              WHERE id = 'late' AND branch_id = 'vista' AND valid_from = '{T4}'"
+        ),
+    )
+    .await;
+    assert_eq!(versions, 1, "the vista adopted the id it could not see");
+    let cuts = scalar(
+        &db,
+        "SELECT COUNT(*) FROM concept_cuts WHERE id = 'late' AND branch_id = 'vista'",
+    )
+    .await;
+    assert_eq!(cuts, 0, "nothing is cut on the fresh adoption");
 }

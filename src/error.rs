@@ -532,6 +532,24 @@ pub enum DbError {
         attempted: String,
     },
 
+    /// A *fresh* adoption ([D-315], the 0.22.0 M6-e cycle) came tagged
+    /// `retired`, which the act cannot be: the overlay's retirement is a cut
+    /// or a close, and both name a belief that was visible on a lineage
+    /// (§5.2's retire row) - while a fresh adoption, by the rule's own
+    /// wording, has nothing of the kind to name ("nothing is closed,
+    /// superseded or cut"). The caller is asking the adoption to do a later
+    /// act's work: adopt first, and retire the adopted id on its own
+    /// machinery after, where the cut or the close names the lineage's own
+    /// visible belief.
+    #[error(
+        "a fresh adoption of {id} on {branch} cannot also be a retirement; adopt first and retire the adopted id on its own machinery (the mint lives on {held_by}, invisible to {branch})"
+    )]
+    AdoptedRetirement {
+        id: String,
+        branch: String,
+        held_by: String,
+    },
+
     /// A write reached a [`BranchView`](crate::branch::BranchView) carrying a
     /// different lineage's name (§15.4, 0.14.9, D-226).
     ///
@@ -1272,6 +1290,7 @@ impl DbError {
             | Self::BranchMismatch { .. }
             | Self::BranchNotArchivable { .. }
             | Self::CrossLineage { .. }
+            | Self::AdoptedRetirement { .. }
             | Self::ForkPrecedesParent { .. }
             | Self::UnknownBranch { .. } => ErrorKind::Branch,
         }

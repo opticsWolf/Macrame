@@ -2081,6 +2081,21 @@ class CrossLineageError(BranchError):
     held_by: str
     attempted: str
 
+class AdoptedRetirementError(BranchError):
+    """A fresh adoption of a concept id came tagged `retired`.
+
+    A lineage may adopt an id whose mint it cannot see (D-315): an ordinary
+    first version on the adopting lineage's own rows, with nothing copied,
+    nothing closed, nothing superseded, and nothing cut. A retirement is a
+    cut or a close, and both name a belief that was visible on a lineage —
+    a fresh adoption has none. Adopt first, then retire the adopted id on
+    its own machinery.
+    """
+
+    id: str
+    branch: str
+    held_by: str
+
 class BranchMismatchError(BranchError):
     """A `BranchView` was handed a write naming a different lineage.
 

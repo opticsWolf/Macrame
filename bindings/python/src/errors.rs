@@ -509,6 +509,20 @@ create_exception!(
 );
 create_exception!(
     macrame,
+    AdoptedRetirementError,
+    BranchError,
+    "A fresh adoption of a concept id the lineage cannot see came tagged `retired`, which the adoption act cannot be. Attributes: `id`, `branch`, \
+`held_by`.\n\n\
+A lineage may adopt an id whose mint it cannot see (D-315): the act is an \
+ordinary first version on the adopting lineage's own rows, and its rule is \
+nothing copied, nothing closed, nothing superseded, nothing cut. A retirement \
+is a cut or a close — both name a belief that was visible on a lineage, and a \
+fresh adoption has none. Adopt first, then retire the adopted id on its own \
+machinery."
+);
+
+create_exception!(
+    macrame,
     CrossLineageError,
     BranchError,
     "A branch tried to restate a concept another lineage holds. Attributes: \
@@ -968,6 +982,16 @@ fn build(py: Python<'_>, err: DbError) -> PyErr {
             e.setattr("attempted", attempted)
         }),
 
+        DbError::AdoptedRetirement {
+            id,
+            branch,
+            held_by,
+        } => raise::<AdoptedRetirementError, _>(py, m, |e| {
+            e.setattr("id", id)?;
+            e.setattr("branch", branch)?;
+            e.setattr("held_by", held_by)
+        }),
+
         DbError::BranchMismatch { view, named } => raise::<BranchMismatchError, _>(py, m, |e| {
             e.setattr("view", view)?;
             e.setattr("named", named)
@@ -1289,6 +1313,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
         ForkInFutureError,
         ConceptNotVisibleError,
         CrossLineageError,
+        AdoptedRetirementError,
         BranchMismatchError,
         // writer
         WriterUnavailableError,

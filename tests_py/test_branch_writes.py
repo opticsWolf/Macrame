@@ -199,18 +199,20 @@ def test_a_name_the_ledger_cannot_accept_is_refused_at_the_constructor(db):
         macrame.ConceptUpsert("z", "Z", valid_from=T0, branch="alt ")
 
 
-def test_a_branch_mints_a_concept_and_may_not_restate_an_inherited_one(db):
+def test_a_branch_mints_a_concept_and_a_plain_write_over_an_inherited_one_is_the_single_open_refusal(db):
     alt = db.fork("alt")
     db.upsert_concept(macrame.ConceptUpsert("mine", "Mine", valid_from=T0, branch=alt.id))
 
-    with pytest.raises(macrame.CrossLineageError) as caught:
+    # `a` is minted on the trunk before anything forks, so a branch write of
+    # it is W2 territory (M6-a): the plain shape gains no implicit supersede,
+    # which is `ConceptSingleOpenError` — the refusal that says "supersede it
+    # first" rather than "not your id". The view write that names nothing is
+    # the same refusal routed through the write law.
+    with pytest.raises(macrame.ConceptSingleOpenError) as caught:
         db.upsert_concept(
             macrame.ConceptUpsert("a", "Renamed", valid_from=T0, branch=alt.id)
         )
-    assert caught.value.id == "a"
-    assert caught.value.held_by == "main"
-    assert caught.value.attempted == "alt"
-    assert isinstance(caught.value, macrame.BranchError)
+    assert caught.value.concept_id == "a"
 
 
 # ───────────────────────────────────────────────────────────────────────────

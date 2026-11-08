@@ -94,14 +94,30 @@ def test_a_batch_row_supersedes(db):
     assert rows[1].recorded_at == rows[2].recorded_at == report.recorded_at
 
 
-def test_an_inherited_concept_is_not_superseded_by_the_branch(db):
+def test_an_inherited_concept_is_takeover_superseded_by_the_branch(db):
+    # M6-a's Wu002DLau2 law, now the Python surface's own spell: the branch's
+    # takeover of the trunk's open belief writes its cut and its version row
+    # under one stamp, answers the branch's belief on the branch, and leaves
+    # the trunk's own fold exactly as it was.
     alt = db.fork("alt", "main")
     view = macrame.BranchView(db, alt.id)
-    with pytest.raises(macrame.CrossLineageError):
-        view.upsert_concept(
-            macrame.ConceptUpsert("a", "a2", valid_from=ts(SEP)),
-            supersede=True,
-        )
-    [v] = db.concepts_by_id(["a"])
-    assert v.title == "a"
-    assert len(concept_changes(db)) == 1
+    view.upsert_concept(
+        macrame.ConceptUpsert("a", "a2", valid_from=ts(SEP)),
+        supersede=True,
+    )
+    by_branch = db.concepts_by_id(["a"], branch=alt.id)
+    [v] = by_branch
+    assert v.title == "a2"
+    assert v.valid_from == ts(SEP)
+    # the trunk's own belief is untouched
+    [trunk] = db.concepts_by_id(["a"], branch="main")
+    assert trunk.title == "a"
+    # the act's two overlay mirror rows
+    pairs = [
+        c
+        for c in db.changes(0)
+        if c.table in ("concept_versions", "concept_cuts") and c.entity_id == "a"
+    ]
+    assert len(pairs) == 2
+    assert {p.table for p in pairs} == {"concept_versions", "concept_cuts"}
+    assert all(p.branch_id == "alt" for p in pairs)

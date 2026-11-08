@@ -7141,7 +7141,26 @@ async fn upsert_concept(
                 }
                 upsert_w2_version(conn, concept, stamp).await
             }
-            ConceptRoute::Foreign { held_by } => Err(cross_lineage(concept, &held_by)),
+            ConceptRoute::Foreign { held_by } if concept.retired => {
+                // A fresh adoption cannot also be a retirement: nothing is
+                // closed, superseded or cut ([D-315] §6's rule), and the
+                // overlay's retirement names a belief that was visible —
+                // none is.
+                Err(DbError::AdoptedRetirement {
+                    id: concept.id.to_string(),
+                    branch: concept.branch_name().to_string(),
+                    held_by,
+                })
+            }
+            ConceptRoute::Foreign { .. } => {
+                // [D-315] adoption (M6-e): an ordinary first version on the
+                // writer's own lineage, at its own stamps — nothing copied
+                // from the minting lineage, nothing anywhere closed,
+                // superseded or cut. A `supersede` marker has nothing open
+                // its side to supersede, so the plain version row is the
+                // whole act either way.
+                upsert_w2_version(conn, concept, stamp).await
+            }
         };
     }
     // The supersede act: close/cut and the open are one transaction, one
@@ -7184,7 +7203,16 @@ async fn upsert_concept(
             refuse_backward_supersede(&tx, concept).await?;
             upsert_w2_version(&tx, concept, stamp).await
         }
-        ConceptRoute::Foreign { held_by } => Err(cross_lineage(concept, &held_by)),
+        ConceptRoute::Foreign { held_by } if concept.retired => Err(DbError::AdoptedRetirement {
+            id: concept.id.to_string(),
+            branch: concept.branch_name().to_string(),
+            held_by,
+        }),
+        ConceptRoute::Foreign { .. } => {
+            // [D-315] adoption under the same stamp discipline: one row, no
+            // cut, nothing on any lineage closed.
+            upsert_w2_version(&tx, concept, stamp).await
+        }
     };
     match res {
         Err(e) => {
@@ -7225,14 +7253,6 @@ fn single_open_from_path(c: &ConceptUpsert, open: &EffectiveOpen) -> DbError {
             (open.start.as_str(), timestamp::OPEN_SENTINEL),
             OverlapProvenance::AlreadyRecorded,
         )),
-    }
-}
-
-pub(crate) fn cross_lineage(c: &ConceptUpsert, held_by: &str) -> DbError {
-    DbError::CrossLineage {
-        id: c.id.clone(),
-        held_by: held_by.to_string(),
-        attempted: c.branch_name().to_string(),
     }
 }
 
@@ -7315,9 +7335,21 @@ async fn route_concept(
     };
 
     // The resolution machinery: the ancestry is the same source the read path
-    // and P-8's oracle use, so there is exactly one law.
+    // and P-8's oracle use, so there is exactly one law. It runs for every
+    // route this id can shape, because the writer's own version rows are its
+    // nearest step ([D-314] §5.3 rule 3): on an id this lineage has already
+    // adopted ([D-315], M6-e), the walk answers its own open belief and the
+    // ordinary overlay arms decide the write — the id stopped being a
+    // foreign matter the moment this lineage believed it.
     let ancestry = lineages.ancestry(writer);
+    let open = effective_state_at(conn, &ancestry, &concept.id, &concept.valid_from, stamp).await?;
     let Some(anc) = ancestry.iter().find(|n| n.branch_id == mint) else {
+        if open.is_some() {
+            return Ok(ConceptRoute::Inherited {
+                open,
+                path: ancestry,
+            });
+        }
         return Ok(ConceptRoute::Foreign {
             held_by: mint.clone(),
         });
@@ -7371,13 +7403,15 @@ async fn route_concept(
         }
     };
     if !seen_at_fork {
+        if open.is_some() {
+            return Ok(ConceptRoute::Inherited {
+                open,
+                path: ancestry,
+            });
+        }
         return Ok(ConceptRoute::Foreign { held_by: mint });
     }
 
-    // The act's effective state at the write's start: the writer's own rows
-    // first, then the inherited ones, nearest wins ([Amendment 2](../docs/
-    // Macrame%20Update%20Plan%20v0.22.0%20-%20Amendment%202.md) §5.3 rule 3).
-    let open = effective_state_at(conn, &ancestry, &concept.id, &concept.valid_from, stamp).await?;
     Ok(ConceptRoute::Inherited {
         open,
         path: ancestry,
@@ -9273,8 +9307,18 @@ async fn upsert_concepts_checked(
                     w2_plain.push(concept);
                 }
             }
-            ConceptRoute::Foreign { held_by } => {
-                refusals.push(cross_lineage(concept, held_by.as_str()));
+            ConceptRoute::Foreign { held_by } if concept.retired => {
+                refusals.push(DbError::AdoptedRetirement {
+                    id: concept.id.to_string(),
+                    branch: concept.branch_name().to_string(),
+                    held_by,
+                });
+            }
+            ConceptRoute::Foreign { .. } => {
+                // [D-315] adoption, batched: the same one-row act the single
+                // write runs, through the batch's version writes (the
+                // writer's own overlap guard included).
+                w2_plain.push(concept);
             }
         }
     }

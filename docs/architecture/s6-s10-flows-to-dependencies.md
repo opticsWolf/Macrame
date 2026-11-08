@@ -171,6 +171,16 @@ pub enum DbError {
         attempted: String,
     },
 
+    /// A fresh adoption ([D-315], the M6-e cycle) came tagged `retired`,
+    /// which the act cannot be: the overlay's retirement is a cut or a
+    /// close, and both name a belief that was visible on a lineage — while
+    /// a fresh adoption has nothing of the kind to name.
+    AdoptedRetirement {
+        id: String,
+        branch: String,
+        held_by: String,
+    },
+
     #[error("view of branch {view} was handed a write naming {named}")]
     BranchMismatch {
         view: String,

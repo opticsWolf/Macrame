@@ -45,6 +45,13 @@ async fn tick() {
     tokio::time::sleep(std::time::Duration::from_millis(2)).await;
 }
 
+/// A scalar read against the store's read connection.
+async fn scalar(db: &Database, sql: &str) -> i64 {
+    let mut rows = db.read_conn().query(sql, ()).await.unwrap();
+    let v: i64 = rows.next().await.unwrap().unwrap().get(0).unwrap();
+    v
+}
+
 async fn upsert(db: &Database, concept: ConceptUpsert) -> macrame::Result<()> {
     tick().await;
     db.upsert_concept(concept).await
@@ -335,12 +342,15 @@ async fn a_non_overlapping_backfill_is_admitted() {
     db.close().await.unwrap();
 }
 
-/// A concept minted on a branch belongs to that branch, and the trunk cannot
-/// restate it. The refusal is the trigger's (`CrossLineage`), and it has to stay
-/// that one: the guard reads only the writing lineage's rows, so the branch's
-/// belief is not charged to the trunk as an overlap (D-291).
+/// A concept minted on a branch stays the branch's — the projection row's
+/// provenance is immutable — but since [D-315] (M6-e) the trunk *restating*
+/// it is adoption, not a cross-lineage refusal: the trunk asserts its own
+/// overlay belief of the id, and the guard reads only the writing lineage's
+/// rows, so the branch's belief is not charged to the trunk as an overlap
+/// (D-291). Adoption is not §15.4's merge: the trunk had no belief about the
+/// id, and the branch's rows were neither read nor touched.
 #[tokio::test]
-async fn a_trunk_restatement_of_a_branch_concept_is_cross_lineage_not_an_overlap() {
+async fn a_trunk_restatement_of_a_branch_concept_is_the_trunk_s_adoption() {
     let harness = TestHarness::new();
     let db = open_db(&harness).await;
     let alt = BranchId::new("alt").unwrap();
@@ -349,10 +359,31 @@ async fn a_trunk_restatement_of_a_branch_concept_is_cross_lineage_not_an_overlap
     upsert(&db, concept("mine", JAN, Some(JUN)).on_branch(alt))
         .await
         .unwrap();
-    let err = upsert(&db, concept("mine", MAR, Some(SEP)))
-        .await
-        .expect_err("the trunk may not restate a concept the branch minted");
-    assert!(matches!(err, DbError::CrossLineage { .. }), "got {err:?}");
+    upsert(&db, concept("mine", MAR, Some(SEP))).await.unwrap();
+
+    let versions = scalar(
+        &db,
+        &format!(
+            "SELECT COUNT(*) FROM concept_versions              WHERE id = 'mine' AND branch_id = 'main' AND valid_from = '{MAR}'"
+        ),
+    )
+    .await;
+    assert_eq!(
+        versions, 1,
+        "the trunk's adoption is an overlay row on main"
+    );
+    let cuts = scalar(
+        &db,
+        "SELECT COUNT(*) FROM concept_cuts WHERE id = 'mine' AND branch_id = 'main'",
+    )
+    .await;
+    assert_eq!(cuts, 0, "nothing is cut on the branch");
+    let provenance = scalar(
+        &db,
+        "SELECT COUNT(*) FROM concepts WHERE id = 'mine' AND branch_id = 'alt'",
+    )
+    .await;
+    assert_eq!(provenance, 1, "the mint's provenance row stands");
 
     db.close().await.unwrap();
 }

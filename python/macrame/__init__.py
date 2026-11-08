@@ -139,6 +139,7 @@ from ._macrame import (
     BranchArchivedError,
     BranchMismatchError,
     CrossLineageError,
+    AdoptedRetirementError,
     DiagnosticConnError,
     DimMismatchError,
     ForkPrecedesParentError,
@@ -328,6 +329,7 @@ __all__ = [
     "ForkInFutureError",
     "ConceptNotVisibleError",
     "CrossLineageError",
+    "AdoptedRetirementError",
     "BranchMismatchError",
     # view
     "BranchView",
