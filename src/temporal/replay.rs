@@ -2351,39 +2351,111 @@ async fn archive_hint(conn: &libsql::Connection, branch: Option<&str>) -> String
     // The per-lineage arm (0.22.0, M6-f; the amendment's §5.4 cost 5, the last
     // of §15.2's four cold readers to grow its lineage arm): a reader that
     // named a lineage is told where that lineage's own surviving rows begin,
-    // because two branches archive differently and the whole-ledger sentence
-    // answers neither's question.
+    // because two lineages archive differently and the whole-ledger sentence
+    // answers neither's question. The arm keeps the doc comment's own
+    // virtue, which the review caught it folding (0.22.0's post-review
+    // fix): a query that does not answer says so - "the lineage wrote no
+    // surviving rows" is a claim about the ledger, and a failed query is
+    // not evidence for it.
     if let Some(b) = branch {
-        let line = match conn
-            .query(
-                "SELECT COUNT(*), MIN(seq_id), MIN(recorded_at) FROM transaction_log \
-                 WHERE branch_id = ?1",
-                libsql::params![b],
-            )
-            .await
-        {
-            Ok(mut rows) => rows.next().await.ok().flatten(),
-            Err(_) => None,
-        };
-        match line {
-            Some(line) if line.get::<i64>(0).unwrap_or(0) > 0 => {
-                let own_count: i64 = line.get(0).unwrap_or(0);
-                let own_min: i64 = line.get(1).unwrap_or(0);
-                let own_floor: String = line.get(2).unwrap_or_default();
-                hint.push_str(&format!(
-                    "; lineage {b}'s own \
-                     {own_count} surviving log rows begin at seq_id {own_min} ({own_floor})"
-                ));
-            }
-            _ => {
-                hint.push_str(&format!(
-                    "; lineage {b} wrote no surviving log rows of its own"
-                ));
+        match lineage_log_head(conn, b).await {
+            Ok(Some((count, min, floor))) => hint.push_str(&format!(
+                "; lineage {b}'s own {count} surviving log rows begin at seq_id {min} ({floor})"
+            )),
+            Ok(None) => hint.push_str(&format!(
+                "; lineage {b} wrote no surviving log rows of its own"
+            )),
+            Err(_) => hint.push_str(&format!(
+                "; could not tell what lineage {b}'s own surviving log rows hold (the lineage's own query failed)"
+            )),
+        }
+        // The ancestry arm (0.22.0's post-review fix for the shape the own
+        // arm could not see): a branch's fold also consumes its ancestors'
+        // rows, each ancestor contributing up to the fork cutoff between it
+        // and the step below it. An ancestor whose rows moved cold can be
+        // the whole reason a low instant goes unanswerable while the
+        // branch's own floor says nothing about it - so the chain is
+        // named, and each ancestor's head is answered with the same
+        // honesty the own arm keeps.
+        for (parent, cutoff) in lineage_chain(conn, b).await {
+            hint.push_str(&format!(
+                "; the read also folds {parent}'s rows recorded before the fork cutoff {cutoff}"
+            ));
+            match lineage_log_head(conn, &parent).await {
+                Ok(Some((count, min, floor))) => hint.push_str(&format!(
+                    ", of which {count} survive, beginning at seq_id {min} ({floor})"
+                )),
+                Ok(None) => {
+                    hint.push_str(", and none of that ancestor's rows survive in this store")
+                }
+                Err(_) => hint.push_str(
+                    ", and the ancestor's surviving rows could not be inspected (its query failed)",
+                ),
             }
         }
     }
 
     hint
+}
+
+/// How much of a lineage's own log survives in the hot file: the row count,
+/// the lowest surviving seq_id, and that row's recorded stamp. `Ok(None)` is
+/// a clean emptiness - the query answered and the answer was zero; `Err` is
+/// a query that failed, which the hint reports as a failure rather than
+/// inventing an emptiness from it.
+async fn lineage_log_head(
+    conn: &libsql::Connection,
+    branch: &str,
+) -> Result<Option<(i64, i64, String)>> {
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*), MIN(seq_id), MIN(recorded_at) FROM transaction_log              WHERE branch_id = ?1",
+            libsql::params![branch],
+        )
+        .await?;
+    let Some(row) = rows.next().await? else {
+        return Ok(None);
+    };
+    let count: i64 = row.get(0).unwrap_or(0);
+    if count == 0 {
+        return Ok(None);
+    }
+    let min: i64 = row.get(1).unwrap_or(0);
+    let floor: String = row.get(2).unwrap_or_default();
+    Ok(Some((count, min, floor)))
+}
+
+/// The lineage's ancestors, nearest first, with the fork cutoff that bounds
+/// each one's contribution to a branch fold: the steps the ancestry descends,
+/// read from `branches` itself.
+async fn lineage_chain(conn: &libsql::Connection, branch: &str) -> Vec<(String, String)> {
+    let mut chain = Vec::new();
+    let mut current = branch.to_string();
+    for _ in 0..16 {
+        let mut rows = match conn
+            .query(
+                "SELECT parent_id, forked_at FROM branches WHERE branch_id = ?1",
+                libsql::params![current],
+            )
+            .await
+        {
+            Ok(rows) => rows,
+            Err(_) => return chain,
+        };
+        let row = match rows.next().await {
+            Ok(row) => row,
+            Err(_) => return chain,
+        };
+        let Some(row) = row else { break };
+        let parent: String = row.get(0).unwrap_or_default();
+        if parent.is_empty() {
+            break;
+        }
+        let cutoff: String = row.get(1).unwrap_or_default();
+        chain.push((parent.clone(), cutoff));
+        current = parent;
+    }
+    chain
 }
 
 /// Was any row ever removed from `transaction_log`? — answered exactly, from

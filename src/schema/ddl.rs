@@ -724,19 +724,30 @@ pub const CREATE_CONCEPT_VERSIONS_LOG_UPDATE: &str = concat!(
 /// two, and the write actor's guards (D-291's position) are the second
 /// copy of this rule, not the only one. Same-start rewrites are not a
 /// collision (Doctrine III — a re-asserted start supersedes what it
-/// replaces), and a version with a named end is not an open interval.
+/// replaces).
+///
+/// From v29 the trigger checks the *interval*, not an open-ended window:
+/// the write actor's point check answered an insert whose start sat before
+/// an own open row, but a bounded insert written under an open one slipped
+/// past it and the trigger — which only moved for open-ended `NEW` — never
+/// caught the shape either (0.22.0's post-review fix, the confirmed one;
+/// the rung that re-issues this body is `single-open-interval`). The
+/// predicate is the guard's own: another row whose window and the write's
+/// share an instant (`invalid_from < NEW.valid_to` half-open), minus the
+/// same-start rewrites.
 #[doc(hidden)]
 pub const CREATE_CONCEPT_VERSIONS_SINGLE_OPEN: &str = concat!(
     r#"
     CREATE TRIGGER IF NOT EXISTS trg_concept_versions_single_open
     BEFORE INSERT ON concept_versions
-    WHEN NEW.valid_to = '9999-12-31T23:59:59.999999Z'
-         AND EXISTS (
+    WHEN EXISTS (
              SELECT 1 FROM concept_versions
              WHERE id = NEW.id
                AND +branch_id = NEW.branch_id
                AND valid_from <> NEW.valid_from
-               AND valid_to   = '9999-12-31T23:59:59.999999Z'
+               AND valid_from < NEW.valid_to
+               AND (valid_to = '9999-12-31T23:59:59.999999Z'
+                    OR valid_to > NEW.valid_from)
          )
     BEGIN
         SELECT RAISE(ABORT, '"#,

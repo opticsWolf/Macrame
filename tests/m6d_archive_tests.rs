@@ -551,3 +551,49 @@ async fn the_archive_hint_answers_per_lineage_for_a_reader_naming_one() {
 
     std::fs::rename(&moved, db.archive_path()).unwrap();
 }
+
+/// And the ancestry is named too (0.22.0's post-review fix): a branch's fold
+/// consumes its ancestors' rows up to each fork cutoff, so a branch caller's
+/// hint names the chain it descends and answers each ancestor's surviving
+/// head with the same honesty — an ancestor that wrote nothing surviving in
+/// this store says so, instead of letting the branch's own floor carry the
+/// blame it did not incur.
+#[tokio::test]
+async fn the_archive_hint_names_the_ancestry_the_branch_folds() {
+    let harness = TestHarness::new();
+    let (db, m) = hold(&harness).await;
+    db.archive(CUTOFF).await.unwrap();
+
+    // Move the archive file away, as the per-lineage arm's pin does: the
+    // reach refusals cannot attach to a cold file that is not there, and
+    // the "does not exist" arm is where the hint is spoken.
+    let moved = db.archive_path().with_extension("moved-away-2");
+    std::fs::rename(db.archive_path(), &moved).unwrap();
+
+    // b2 folds b0 first (its nearest step), then the trunk, each bounded at
+    // the fork point between them.
+    let bound = act_bounds(&m)[0].clone();
+    let err = db
+        .reconstruct_on(&bound, "b2")
+        .await
+        .expect_err("below the floor, the fold refuses with its hint");
+    let text = err.to_string();
+    assert!(
+        text.contains("lineage b2's own"),
+        "the branch's own head is named: {text}"
+    );
+    assert!(
+        text.contains("the read also folds b0's rows recorded before the fork cutoff"),
+        "the nearest ancestor's contribution is named: {text}"
+    );
+    assert!(
+        text.contains("the read also folds main's rows recorded before the fork cutoff"),
+        "the trunk's contribution is named past the nearest step: {text}"
+    );
+    assert!(
+        text.contains("of which"),
+        "each named ancestor's surviving head is answered: {text}"
+    );
+
+    std::fs::rename(&moved, db.archive_path()).unwrap();
+}

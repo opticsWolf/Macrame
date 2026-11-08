@@ -180,11 +180,17 @@ async fn a_cut_and_a_version_share_a_start_in_two_tables() {
     );
 }
 
-/// A second version row, starting under the existing open interval, is
-/// refused at the database level — one open interval per `(id, branch_id)`
-/// is D-291's invariant spelled by a trigger, exactly as `links` has carried
-/// one since v18. A version with a named end is not an open interval and is
-/// admitted.
+/// A second version row whose window overlaps the existing one is refused
+/// at the database level — one belief per instant per `(id, branch_id)` is
+/// D-291's invariant spelled by a trigger, exactly as `links` has carried
+/// one since v18. From v29 the trigger checks the interval, not an
+/// open-ended window: a bounded row written under an open one is the same
+/// overlap the write actor's guard refuses (0.22.0's post-review fix, the
+/// confirmed finding — the sentence "a named end is not an open interval",
+/// which had stood here, was the hole's own docstring). What stays admitted
+/// is the window that does not share an instant with what stands: a row
+/// that ends where an open row begins is adjacent, and the same-start
+/// rewrite is the D-291 heal.
 #[tokio::test]
 async fn the_versions_single_open_trigger_refuses() {
     let harness = TestHarness::new();
@@ -219,7 +225,9 @@ async fn the_versions_single_open_trigger_refuses() {
         }
     }
 
-    let ok = conn
+    // The review's confirmed shape, now at the database level too: a
+    // bounded row overlapping the open one is the same overlap.
+    let bounded_refused = conn
         .execute(
             "INSERT INTO concept_versions \
              (id, branch_id, valid_from, valid_to, title, content, extra, recorded_at) \
@@ -232,7 +240,33 @@ async fn the_versions_single_open_trigger_refuses() {
             ],
         )
         .await;
-    assert!(ok.is_ok(), "a closed second interval is not single-open");
+    match bounded_refused {
+        Ok(_) => panic!("a bounded row under an open one was stored"),
+        Err(e) => {
+            let m = e.to_string();
+            assert!(
+                m.contains("already has an open interval"),
+                "the widened trigger speaks the same sentence: {m}"
+            );
+        }
+    }
+
+    // And the window that shares no instant with what stands is admitted:
+    // the pre-open-window row ends exactly where the open row begins.
+    let ok = conn
+        .execute(
+            "INSERT INTO concept_versions \
+             (id, branch_id, valid_from, valid_to, title, content, extra, recorded_at) \
+             VALUES (?1, 'b0', ?2, ?3, '', '', '{}', ?4)",
+            libsql::params![
+                USAGE,
+                "2026-01-02T00:00:00.000000Z",
+                "2026-01-04T00:00:00.000000Z",
+                "2026-01-12T00:00:00.000000Z"
+            ],
+        )
+        .await;
+    assert!(ok.is_ok(), "an adjacent closed row is not an overlap");
 
     drop(conn);
 }

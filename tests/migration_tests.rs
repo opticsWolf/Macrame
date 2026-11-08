@@ -452,7 +452,7 @@ async fn plan_string(conn: &libsql::Connection, sql: &str) -> String {
 #[test]
 fn a_version_bump_must_bring_its_own_rung_test() {
     assert_eq!(
-        SCHEMA_VERSION, 28,
+        SCHEMA_VERSION, 29,
         "SCHEMA_VERSION moved. Add a test for the new rung — one that starts \
          from a database at the previous version and asserts what the rung is \
          *for*, not merely that `run` reached the top."
@@ -3940,4 +3940,107 @@ async fn the_fill_reads_the_archive_with_the_log() {
         1
     );
     assert_eq!(user_version(&conn).await, SCHEMA_VERSION);
+}
+
+/// **v28 → v29: the rung rebrands the single-open trigger's law to the
+/// interval it spoke of read-side (0.22.0's post-review fix, the confirmed
+/// finding).** What the rung is *for*: `CREATE TRIGGER IF NOT EXISTS` keeps
+/// an old body on every file the baseline has already stamped ([D-126]'s
+/// whole point), so the fixture starts at v28 carrying the *old* body —
+/// admitting, as the m6a-era sentence said, "a version with a named end" —
+/// climbs, and must arrive at v29 with that same insert refused: the
+/// guard's own interval, not its point. The test checks the law, not
+/// merely that the trigger exists.
+#[tokio::test]
+async fn a_v28_database_climbing_to_v29_gains_the_interval_law_its_old_body_omitted() {
+    let harness = TestHarness::new();
+    let conn = connect(&harness).await;
+    macrame::schema::run_migrations(&conn).await.unwrap();
+
+    // There is no `wind_back_to_v28` because v28 was the top of this dev
+    // cycle only. The fixture builds the v28 state itself: the engine at
+    // full version, the trigger dropped and re-issued from the narrow body
+    // it carried at v28, the stamp set back to 28 — what every file this
+    // dev cycle wrote looks like.
+    const OLD_BODY: &str = "CREATE TRIGGER trg_concept_versions_single_open         BEFORE INSERT ON concept_versions         WHEN NEW.valid_to = '9999-12-31T23:59:59.999999Z'         AND EXISTS (         SELECT 1 FROM concept_versions         WHERE id = NEW.id         AND +branch_id = NEW.branch_id         AND valid_from <> NEW.valid_from         AND valid_to = '9999-12-31T23:59:59.999999Z'         )         BEGIN         SELECT RAISE(ABORT, 'macrame: edge already has an         open interval; retire it first');         END;";
+    conn.execute(
+        "DROP TRIGGER IF EXISTS trg_concept_versions_single_open",
+        (),
+    )
+    .await
+    .unwrap();
+    const TS_4: &str = "2026-01-02T00:00:01.000000Z";
+    conn.execute(OLD_BODY, ()).await.unwrap();
+    conn.execute("PRAGMA user_version = 28", ()).await.unwrap();
+
+    // The v28 body admits a bounded row under the open one: insert it while
+    // the stamp says 28 — then a second, overlapping interval stands there
+    // and the rung has to have widened the trigger that let it in.
+    let admitted_at_v28 = conn
+        .execute(
+            "INSERT INTO concept_versions \
+             (id, branch_id, valid_from, valid_to, title, content, extra, recorded_at) \
+             VALUES ('understandable', 'main', ?1, ?2, 'The bounded window', \
+                     'an interval the old body admitted', '{}', ?3)",
+            libsql::params![TS, TS_2, TS_3],
+        )
+        .await;
+    assert!(
+        admitted_at_v28.is_ok(),
+        "the fixture is not starting from a v28 database: the old body admits \
+         the bounded-overlap shape the widened one refuses"
+    );
+
+    macrame::schema::run_migrations(&conn).await.unwrap();
+    assert_eq!(user_version(&conn).await, SCHEMA_VERSION);
+    // The body on file carries the interval, not a compile-time claim.
+    let mut body_rows = conn
+        .query(
+            "SELECT sql FROM sqlite_master WHERE name = 'trg_concept_versions_single_open'",
+            (),
+        )
+        .await
+        .unwrap();
+    let body = body_rows
+        .next()
+        .await
+        .unwrap()
+        .unwrap()
+        .get::<String>(0)
+        .unwrap();
+    assert!(
+        body.contains("valid_to > NEW.valid_from"),
+        "the trigger on file carries the interval's predicate: {body}"
+    );
+    let refused = conn
+        .execute(
+            "INSERT INTO concept_versions \
+             (id, branch_id, valid_from, valid_to, title, content, extra, recorded_at) \
+             VALUES ('understandable', 'main', ?1, ?2, 'The overlapping window', \
+                     'the same law the widened body refuses', '{}', ?3)",
+            libsql::params![TS_3, TS_2, TS_4],
+        )
+        .await;
+    match refused {
+        Ok(_) => panic!("the widened trigger did not catch the overlap it guards"),
+        Err(e) => {
+            let m = e.to_string();
+            assert!(
+                m.contains("already has an open interval"),
+                "the interval refusal is the overlay's own single-open sentence: \
+                 {m}"
+            );
+        }
+    }
+
+    // The rung moved nothing but the trigger: the admitted row is still
+    // there to be spoken about.
+    assert_eq!(
+        scalar(
+            &conn,
+            "SELECT COUNT(*) FROM concept_versions WHERE id = 'understandable'"
+        )
+        .await,
+        1
+    );
 }

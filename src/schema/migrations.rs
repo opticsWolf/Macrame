@@ -22,7 +22,7 @@ use crate::schema::ddl::*;
 // 24 → 25 for the D-309 rung (0.22.0, plan §2). The edge-kind register is
 // outside the ledger — a sidecar table nothing references and which
 // references nothing — so the payload versions stay untouched here too.
-pub const SCHEMA_VERSION: u32 = 28;
+pub const SCHEMA_VERSION: u32 = 29;
 
 type StepFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
 
@@ -268,8 +268,24 @@ const STEPS: &[Step] = &[
         apply: |conn| Box::pin(repair_backfilled_ledger(conn)),
     },
     Step {
-        from: 27,
+        from: 28,
         to: SCHEMA_VERSION,
+        name: "single-open-interval",
+        // One `DROP TRIGGER` and one `CREATE TRIGGER` from the same constant
+        // the baseline issues (0.22.0's post-review fix, the confirmed
+        // finding): the v12 → v13 rung's recipe. `CREATE TRIGGER IF NOT
+        // EXISTS` keeps an old body on every file the baseline has already
+        // stamped, and the v28 files carry the start-only check — a bounded
+        // insert written under an open own row sat inside the interval the
+        // guard's sentence already spoke of, and no guard moved for it. The
+        // rung reissues from the widened constant; no table is touched, no
+        // row moves, and the trigger names no table but the one it is on.
+        suspends_foreign_keys: false,
+        apply: |conn| Box::pin(widen_single_open_trigger(conn)),
+    },
+    Step {
+        from: 27,
+        to: 28,
         name: "overlay-search",
         // The version pool's search machinery (0.22.0, M6-c, Amendment 2
         // §5.4 costs 3 and 3b): the rowid-bearing shadow and the FTS index
@@ -734,6 +750,17 @@ async fn add_overlay_search(conn: &libsql::Connection) -> Result<()> {
 /// refuses `recorded_at` going backwards ([D-303]'s law on the overlay), and
 /// a version row refuses a rewritten start (`(id, branch_id, valid_from)` is
 /// the table's — and the fold channels' — identity).
+async fn widen_single_open_trigger(conn: &libsql::Connection) -> Result<()> {
+    conn.execute(
+        "DROP TRIGGER IF EXISTS trg_concept_versions_single_open",
+        (),
+    )
+    .await?;
+    conn.execute(CREATE_CONCEPT_VERSIONS_SINGLE_OPEN, ())
+        .await?;
+    Ok(())
+}
+
 async fn add_overlay_guards(conn: &libsql::Connection) -> Result<()> {
     for trigger_ddl in [
         CREATE_CONCEPT_CUTS_NO_UPDATE,

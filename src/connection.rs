@@ -7343,13 +7343,25 @@ async fn route_concept(
     // foreign matter the moment this lineage believed it.
     let ancestry = lineages.ancestry(writer);
     let open = effective_state_at(conn, &ancestry, &concept.id, &concept.valid_from, stamp).await?;
+    // The writer's own overlay history decides before the vista does (0.22.0's
+    // post-review fix): the walk answers the stance at `valid_from` alone, so
+    // an id a lineage has adopted is invisible to it at instants outside the
+    // admitting window, and reading that blankness as fresh-foreignness made
+    // a rewrite a second adoption — whose plain arm let a bounded window
+    // co-exist with the lineage's own row, the interval shape both the guard
+    // and the trigger checked at the start only — and made a re-retirement
+    // ask "a fresh adoption" of a lineage that had already adopted. An id
+    // whose overlay rows the writer holds is the writer's own nearest-step
+    // matter from its first row on (`[D-314]` §5.3 rule 3): the ordinary W2
+    // arms run on it, with `open` the absent where the walk answers absent.
+    let own_history = own_version_row_exists(conn, &concept.id, writer).await?;
+    if open.is_some() || own_history {
+        return Ok(ConceptRoute::Inherited {
+            open,
+            path: ancestry,
+        });
+    }
     let Some(anc) = ancestry.iter().find(|n| n.branch_id == mint) else {
-        if open.is_some() {
-            return Ok(ConceptRoute::Inherited {
-                open,
-                path: ancestry,
-            });
-        }
         return Ok(ConceptRoute::Foreign {
             held_by: mint.clone(),
         });
@@ -7649,10 +7661,29 @@ async fn upsert_w2_version(
     Ok(())
 }
 
+/// Whether the writer's own overlay holds any version row for the id (0.22.0's
+/// post-review recognition of [`route_concept`]): one indexed seek on the
+/// version table's primary key, run only when the resolution walk answers
+/// empty, so the common paths pay nothing.
+async fn own_version_row_exists(conn: &libsql::Connection, id: &str, branch: &str) -> Result<bool> {
+    let mut rows = conn
+        .query(
+            "SELECT 1 FROM concept_versions WHERE id = ?1 AND branch_id = ?2 LIMIT 1",
+            libsql::params![id, branch],
+        )
+        .await?;
+    Ok(rows.next().await?.is_some())
+}
+
 /// The D-291 guard for the overlay's own-row space. Same shape as
 /// [`reject_overlapping_concept`], pointed at the version table: the one
 /// walk over the lineage's own rows, so the state law that yields
 /// [`ConceptSingleOpen`] on a covering overlay row stays the read shape's.
+/// And the shape is D-291's whole partition, not only its point: a row the
+/// walk does not see — its start lies outside the write's window while its
+/// interval still reaches into it — is the same clash the read would speak
+/// twice on (0.22.0's post-review fix for the interval shape the start-only
+/// check admitted once an id's overlay rows were the only ones on the path).
 async fn reject_overlapping_w2(
     conn: &libsql::Connection,
     concept: &ConceptUpsert,
@@ -7669,7 +7700,36 @@ async fn reject_overlapping_w2(
     {
         return Err(single_open_from_path(concept, &open));
     }
-    Ok(())
+    // The interval partition (0.22.0's post-review fix): the same walk
+    // `reject_overlapping_concept` runs on `concepts`, pointed at the
+    // version table — starts before the asserted end (an open end admits
+    // all of them), the same-start rows carved out for the D-291 heal, and
+    // `check_concept_against` applying the partition's whole judgement:
+    // two opens are the single-open refusal, anything else that overlaps
+    // is the overlap. The overlay's rows are current rows keyed by
+    // `(id, branch_id, valid_from)`, so the source needs no log fold: the
+    // rows the lineage holds are the rows the table holds.
+    let asserted_valid_to = concept.valid_to.clone();
+    let asserted = Interval::new(concept.valid_from.as_str(), asserted_valid_to.as_str());
+    let mut rows = conn
+        .query(
+            "SELECT valid_from, valid_to FROM concept_versions \
+             WHERE id = ?1 AND branch_id = ?2 AND valid_from < ?3",
+            libsql::params![
+                concept.id.as_str(),
+                concept.branch_name(),
+                asserted_valid_to
+            ],
+        )
+        .await?;
+    let mut current: Vec<Interval> = Vec::new();
+    while let Some(row) = rows.next().await? {
+        current.push(Interval::new(row.get::<String>(0)?, row.get::<String>(1)?));
+    }
+    // Re-asserting an existing start supersedes that start's belief
+    // (Doctrine III), so it cannot clash with what it replaces.
+    current.retain(|e| e.valid_from != asserted.valid_from);
+    check_concept_against(&concept.id, std::slice::from_ref(&asserted), &current)
 }
 
 /// The writer's own open version row's start ([D-312]'s contract, on the
@@ -7756,8 +7816,22 @@ async fn w2_retire(
         let _ = changed;
         return Ok(());
     }
-    // The pure inherited case: the writer's reach-back is nothing of its own;
-    // the bare cut is the whole decision (§5.2's retire row).
+    // The bare cut is the pure inheritance's retirement: a lineage with no
+    // version rows of its own rejects the inheritance from the instant on.
+    // A lineage whose own overlay history holds the id is past the point of
+    // bare rejection — its rows are its nearest step wherever they stand —
+    // and a retirement instant it holds no belief at cannot complete: the
+    // act names no belief to retire, so the refusal is what speaks (0.22.0's
+    // post-review fix: a fresh-adoption refusal may only be raised for a
+    // true fresh-foreign id, which the route guarantees elsewhere).
+    if own_version_row_exists(conn, concept.id.as_str(), concept.branch_name()).await? {
+        return Err(DbError::NotFound(format!(
+            "nothing visible to retire: {id} on {branch} holds no belief at {instant}",
+            id = concept.id.as_str(),
+            branch = concept.branch_name(),
+            instant = concept.valid_from.as_str(),
+        )));
+    }
     w2_cut(conn, concept, stamp).await
 }
 /// The takeover, inside the transaction given: the cut row at `valid_from`
