@@ -1,11 +1,27 @@
-# Macrame Update Plan v0.22.0 — Amendment 2 (PROPOSED, revision 2)
+# Macrame Update Plan v0.22.0 — Amendment 2 (PROPOSED, revision 3)
 
-> **Status: PROPOSED, revision 2, 2026-11-07.** Revision 1 was written for a second review. This
-> revision applies that review (§1). Nothing here is decided, nothing is committed, no code exists,
-> and the register has not moved. If the review accepts it, the next cycle promotes it as **two**
-> register entries, candidate **D-314** (the overlay) and candidate **D-315** (adoption across
-> lineages), on a branch after 0.22.0's tail (§13 Q7). 0.22.0's remaining work is untouched by this
-> file.
+> **Status: PROPOSED, revision 3, 2026-11-08.** Revision 1 was written for a second review, and
+> revision 2 applied that review (§1). Nothing here is decided, nothing else is committed, no code
+> exists, and the register has not moved. If the review accepts it, the next cycle promotes it as
+> **two** register entries, candidate **D-314** (the overlay) and candidate **D-315** (adoption
+> across lineages), on a branch after 0.22.0's tail (§13 Q7). 0.22.0's remaining work is untouched
+> by this file.
+>
+> **What revision 3 changes, and why.** Probe P-8 confirmed before M6-a built on it that §5.3's
+> nearest-row-wins has a hole, in §5.3 itself, not in the probe: the design as written lets a
+> superseded inherited belief come back. Branch supersedes the trunk's open belief at `t`
+> (`version [t, x)`), later retires its own version at `x` with no successor; a branch read at
+> `v ≥ x` finds nothing covering on the branch, §5.3 falls through, and the read returns the trunk
+> text — the very belief the branch superseded, at a silent wrong answer of the S1 class. The fix
+> keeps the write's new state alive: the cut is its own stored row (`concept_cuts`, §5.1),
+> permanent, capping the fall-through from `cut_at` on; supersede writes a cut row and a version
+> row together (§5.2's "the two are one row" was wrong — §5.1's sketch key collided exactly
+> because they are two); a version still wins over a cut within one lineage where both cover `v`
+> (§5.3). The alternative without a stored cut was walked through and refused: take-over at the
+> first own row's start — a later backfill on the branch would move the takeover point earlier
+> and change what every unrelated instant resolves, which makes hidden state derived from data
+> the write did not touch. §5.1–§5.3, §5.5 and §6 carry the change; probe P-8's first round is
+> what caught it (`tests/m6_resolution_tests.rs` on `dev/0.22.0-revA`, commit 8f20eef).
 >
 > This revision **assumes a way forward exists**. It designs the surface as if the probes in §8
 > pass, and it says at each point which probe could still overturn that.
@@ -166,12 +182,25 @@ concept_versions (
     branch_id     TEXT NOT NULL REFERENCES branches(branch_id),
     valid_from    TEXT NOT NULL,
     valid_to      TEXT NOT NULL,      -- OPEN sentinel as concepts
-    kind          TEXT NOT NULL CHECK (kind IN ('version', 'cut')),
-    title, content, extra, embedding_model,   -- NULL iff kind = 'cut'
+    title, content, extra, embedding_model,
     recorded_at   TEXT NOT NULL,
     PRIMARY KEY (id, branch_id, valid_from)
 ) WITHOUT ROWID
+
+concept_cuts (
+    id            TEXT NOT NULL,      -- no FK: same reason
+    branch_id     TEXT NOT NULL REFERENCES branches(branch_id),
+    cut_at        TEXT NOT NULL,
+    recorded_at   TEXT NOT NULL,
+    PRIMARY KEY (id, branch_id, cut_at)
+) WITHOUT ROWID
 ```
+
+Revision 3 splits what revision 2 kept in one table. W2's supersede writes a version and a cut
+that share `valid_from`; since a superseding version and its cut both start at `t`, a `kind`
+column inside one `(id, branch_id, valid_from)` key cannot hold both — the sketch's key is
+the proof that the two rows are two, not a wider key. Cuts carry no content, so they also get
+their own immutability trigger in the v26 rung.
 
 - **`concepts` is unchanged**, one row per id: the mint, with its provenance. Its foreign-key
   children (`links.source_id` and `links.target_id`, the per-model embedding tables at
@@ -185,11 +214,16 @@ concept_versions (
   the replay fold partitions by `(table_name, entity_id, branch_id)`
   (`src/temporal/replay.rs:569-619`). A version is logged as a `concept_versions` row, under the
   writer's lineage and stamp.
-- **A `'cut'` row** is the concept analogue of D-225's shadow retirement for edges. From
-  `valid_from` on, it hides every farther lineage's belief for this id and shows nothing. It answers
-  the retirement symptom: a branch can say "on my lineage this is no longer believed" at its own
-  cost.
-- **The schema rung** is v25 → v26 and additive: one table, its triggers, its index. No foreign-key
+- **A cut row** (`concept_cuts`) is the concept analogue of D-225's shadow retirement for edges.
+  From `cut_at` on, it caps the fall-through: no read resolves a farther lineage's belief for this
+  id past a visible cut, permanently — whatever that lineage's own versions do afterwards. Within
+  the cut's own lineage a version still wins where it covers (§5.3), so the branch's superseding
+  text shows from `cut_at` until its version retires, and *absent* thereafter. It answers the
+  retirement symptom: a branch can say "on my lineage this is no longer believed" at its own cost,
+  explicitly, once, forever.
+
+- **The schema rung** is v25 → v26 and additive: `concept_versions` and `concept_cuts`,
+  their triggers, and the FTS and version-embedding tables costs 3 and 3b add. No foreign-key
   suspension (D-117) and no trigger replacement. That answers old Q3, which this revision drops.
 
 ### 5.2 Write rules
@@ -201,19 +235,28 @@ concept_versions (
 
 - **`supersede=True`** (D-312's contract, generalized). If the effective belief the writer sees
   (§5.3) is open and starts before `valid_from`, write in one transaction under one stamp:
-  - a `'cut'` row at `valid_from`, then
-  - a `'version'` row at `valid_from`.
+  - a cut row in `concept_cuts` at `valid_from`, then
+  - a version row at `valid_from`.
 
-  In practice the two are one row, since a version starting at `t` already hides the farther belief
-  from `t` on. The cut is written separately only for a bare retirement.
+  Revision 2 said "in practice the two are one row" and revision 3 retracts that: two rows, both
+  written. A version starting at `t` does not make the cut redundant, because a version's own
+  interval can end — a branch that supersedes at `t` and later retires its own version at `x` with
+  no successor exposes the hole under §5.3's nearest-row rule: at `v ≥ x` nothing on the branch
+  covers, the walk falls through, and the trunk belief the branch superseded comes back. That is
+  the S1-class shape P-8's differential confirmed before this amendment was built (its generator
+  produces the shape; §5.3 below states the law that closes it). The cut row is what makes the
+  decision explicit and permanent, at one stamp with the version that carries it.
 - **No supersede, and the effective belief is open** → `ConceptSingleOpen`, as on one lineage. A
   lineage never gains an implicit supersede that its trunk does not have.
 - **No supersede, and the effective belief is closed or absent at `valid_from`** → a `'version'`
   row, the same as an ordinary later upsert on one lineage.
 - **Backwards** (`valid_from` before the effective open belief's start) → `ConceptSingleOpen`.
   Supersede only moves forward, as D-312 decided.
-- **`retire_concept(id, at, branch=)`**, new: writes a bare `'cut'` row. On an owned id it is the
-  existing close.
+- **`retire_concept(id, at, branch=)`**, new: writes a bare cut row (`concept_cuts`, `cut_at = at`).
+  On an owned id it is the existing close. On an inherited id it rejects the inheritance from `at`
+  on — the inherited text stays hidden even when the lineage's own version state changes later,
+  and there is no negative machinery: what re-showing ancestor content costs is an own version
+  row (D-315's shape), not a repeal.
 - **After the first version**, later writes of that id on this lineage are W2 against the lineage's
   own versions. D-291's single-open interval and D-303's state rule apply within
   `concept_versions` per `(id, branch_id)`, with D-303's skipped-backfill machinery reused rather
@@ -232,9 +275,20 @@ For a reader on lineage `L` at recorded cutoff `r` and valid instant `v`:
 2. **Per lineage.** Each lineage on the path resolves its own belief for the id at `v` exactly as
    today, using D-303's rule within the lineage. The mint lineage resolves from `concepts` and the
    log; every other lineage resolves from `concept_versions` and the log.
-3. **Nearest wins, per valid instant.** The belief at `v` comes from the nearest lineage on
-   `path(L)` that has a row covering `v`, a `'version'` or a `'cut'`. A `'cut'` resolves to
-   *absent*.
+3. **Nearest wins, per valid instant, and a cut caps the fall-through.** Walk `path(L)` nearest
+   first. The first lineage that decides at `v` answers, and the walk stops:
+   - if a row of that lineage covering `v` is recorded-visible (its own version, or the mint row
+     at the mint lineage), that belief — *a version wins over a cut where both cover `v`*, since
+     a cut on its own means *nothing is here*, and the covering version is what is here;
+   - else, if a cut row of this lineage covers `v` (`cut_at ≤ v`), *absent* — and nothing falls
+     through: the inherited belief is hidden from `cut_at` on, permanently, whatever the lineage's
+     own versions do afterwards;
+   - else the walk continues to the parent.
+
+   Revision 2's step 3 said "the belief comes from the nearest lineage that has a row covering
+   `v`" and left the empty nearest to the ancestor — the resurrection hole in this very bullet,
+   confirmed by P-8 before M6-a. The cap is what keeps a branch's supersede a decision instead of
+   an interval that a later retirement can repeal by accident.
 
 **Monotonic.** A later write to an ancestor is either after the fork cutoff, and so invisible to
 `L`, or a backfill before it, which is resolved inside that ancestor by D-303 and still loses to
@@ -242,9 +296,10 @@ For a reader on lineage `L` at recorded cutoff `r` and valid instant `v`:
 except where `L` has no row of its own. That is what "nearest version on the path to the root"
 requires.
 
-**Single-lineage databases.** With `concept_versions` empty, which includes every database that
-never forked, every reader runs today's statement. This is gate 9's byte-identical condition, the
-same switch D-220 uses (`branches` has more than one row **and** `concept_versions` is non-empty).
+**Single-lineage databases.** With `concept_versions` and `concept_cuts` empty, which includes
+every database that never forked, every reader runs today's statement. This is gate 9's
+byte-identical condition, the same switch D-220 uses (`branches` has more than one row **and**
+`concept_versions` is non-empty **or `concept_cuts` is**).
 
 ### 5.4 The costs, one row each
 
@@ -257,7 +312,7 @@ same switch D-220 uses (`branches` has more than one row **and** `concept_versio
 | 4. Resolution rule | §5.3, with a property test (P-8). | P-8 |
 | 5. Archive and the cold readers | An id is archivable only if no version on any live lineage is reachable. Each cold reader in §15.2's table gains its lineage arm: `rehydrate` returns the mint plus its versions; the cold replay fold applies §5.3, using the `branches` rows archive keeps; `audit` distinguishes an unreachable version from an absent one; `archive_hint` answers per lineage. | P-4 |
 | — Change feed and diff | A version is a log row with its writer's `branch_id` (D-311's filter needs no change). `diff(a, b)` compares resolved beliefs, so a branch version shows as a concept change on that branch. | P-5 |
-| — Verification | `verify_concept_intervals` runs per `(id, branch_id)` across `concepts` ∪ `concept_versions`, plus a resolution check: no lineage resolves two beliefs at one instant. | P-8 |
+| — Verification | `verify_concept_intervals` runs per `(id, branch_id)` across `concepts` ∪ `concept_versions` (`concept_cuts`'s `cut_at` joins the single-open audit), plus a resolution check: no lineage resolves two beliefs at one instant. | P-8 |
 
 ### 5.5 Invariants and red lines
 
@@ -275,6 +330,10 @@ same switch D-220 uses (`branches` has more than one row **and** `concept_versio
 **Red lines** (each is a refusal, not a gap):
 
 - No S1: no read shows a lineage's text at an instant before the version that carries it.
+- **No resurrection:** once a lineage's cut for an id covers `v`, no read at or past that instant
+  resolves any farther lineage's belief for that id, through that lineage — regardless of what the
+  cut lineage's own version rows cover or miss. (§5.3's walk-stop is the law; P-8 generates the
+  supersede-then-retire shape on purpose.)
 - No mutation across lineages.
 - No per-lineage blobs and no per-lineage key-value data.
 - No relation machinery. Edges stay D-225's. M6 must not turn into the edges overlay.
@@ -286,6 +345,13 @@ first version in `concept_versions` on its own lineage, at its own stamps. Nothi
 the minting lineage. Nothing on any lineage is closed, superseded or cut. The id's provenance (its
 `concepts` row) still names the minting lineage. Reads on the adopting lineage resolve by §5.3;
 before the adopting stamp they find nothing, so pre-merge as-of reads on the trunk stay empty.
+
+**Why adoption writes no cut (revision 3 check).** A W3 id is not visible on the adopting lineage,
+and it cannot *become* visible there later: any future write on an ancestor carries a recorded
+stamp after the adopting lineage's fork cutoff (§5.3 rule 1), so the ancestor rows it could ever
+fall through to are fixed at the fork and visible-or-invisible already. Nothing the adoption did
+not decide can leak back, with or without a cut — so "nothing is cut" stays honest, and the cut
+is not written merely for symmetry with W2.
 
 **Why this is not §15.4's merge, the argument the review must accept or reject by name.** §15.4
 refuses merge because the engine would have to *choose a superseder on the caller's behalf*
@@ -314,9 +380,9 @@ routable, so the public API cannot raise it. The trigger keeps raising it for a 
 
 ## 7. What Macrame would change (inventory for costing)
 
-1. **Schema** (`src/schema/ddl.rs`, `migrations.rs`): the v26 rung (`concept_versions`, its FTS,
+1. **Schema** (`src/schema/ddl.rs`, `migrations.rs`): the v26 rung (`concept_versions`, `concept_cuts`, the versions FTS,
    per-model version-embedding tables created alongside the model's table, the immutability and
-   single-open triggers per `(id, branch_id)`); the v11 and v24 fixtures; the quickref ladder.
+   single-open triggers per `(id, branch_id)` on both new tables); the v11 and v24 fixtures; the quickref ladder.
 2. **Write actor** (`src/connection.rs`): W1/W2/W3 routing in front of `upsert_concept`,
    `write_concepts`, `write_batch`'s concept phase and supersede; `retire_concept(…, branch=)`; the
    guard and D-303's backfill machinery parametrized on the target table rather than copied.
@@ -347,7 +413,7 @@ Each probe is small, gates the phase after it, and is written red-first.
 | P-5 | Change feed and diff, with one id versioned on two lineages | no noise rows; the direction of a diff | — |
 | P-6 | Python: `CrossLineageError` consumers (M1b's 6 tests, the branch upsert paths) under W2/W3 | which tests change | — |
 | P-7 | An edge on lineage L to an id with no belief visible on L | whether adoption needs batch ordering | D-315's edge story |
-| P-8 | Property test: random fork trees, random versions, cuts and ancestor backfills; §5.3 by brute force vs the SQL resolution; monotonic under later ancestor writes | cost 4; I3 | the resolution rule itself |
+| P-8 | Property test: random fork trees, random versions, cuts and ancestor backfills; §5.3 by brute force vs the SQL resolution; monotonic under later ancestor writes. **Landed** (`tests/m6_resolution_tests.rs` on `dev/0.22.0-revA`, commit 8f20eef), and its first round is what found the cut hole revision 3 closes: the differential reds against the revision-2 SQL on the supersede-then-retire shape, then greens on the `concept_cuts` candidate | cost 4; I3 and the no-resurrection red line | the resolution rule itself |
 | P-9 | CodeRadar pricing: count `cross-lineage-id` skips on its own store; time the adoption pass at the merge commits against the 72 s / 354-commit baseline | D-315's write volume | — |
 
 ## 9. Risks
