@@ -608,9 +608,8 @@ pub struct ConceptUpsert {
     ///
     /// On the trunk's own row space this is the absence row the state law
     /// has carried since v24 ([D-022]'s soft delete). On the overlay's space
-    /// (a branch write; M6-a's vocabulary, recorded as designed by the
-    /// 0.22.0 post-review question, because the act has **two arms told
-    /// apart by what the resolution walk resolves at the instant**):
+    /// (a branch write; M6-a's vocabulary, **two arms told apart by
+    /// what the resolution walk resolves at the instant**):
     ///
     /// - the lineage's **own open version** resolving → the *close* of that
     ///   belief: its `valid_to` becomes this row's `valid_from`. A
