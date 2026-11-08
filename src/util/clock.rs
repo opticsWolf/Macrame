@@ -80,6 +80,13 @@ pub trait Clock: Send + Sync {
 
 /// The newest `recorded_at` in the ledger tables, or `None` on an empty database.
 ///
+/// The overlay's version rows count here too (0.22.0, M6-b): a branch's
+/// takeover writes its own stamp into `concept_versions`, and a clock raised
+/// to the ledger's ceiling but not the overlay's would issue below it. Cuts
+/// carry the act's stamp as well, but every cut is written next to a version
+/// and a cut's stamp is a ceiling like any other, so the four channels' MAX
+/// is the answer.
+///
 /// One definition of "the floor", used by [`SystemClock::new`] and by
 /// `open_with_clock`, rather than the query existing twice and being kept in
 /// step by hand.
@@ -109,6 +116,10 @@ pub(crate) async fn recorded_at_floor(
         .query(
             "SELECT MAX(recorded_at) FROM (
                  SELECT MAX(recorded_at) AS recorded_at FROM concepts
+                 UNION ALL
+                 SELECT MAX(recorded_at) AS recorded_at FROM concept_versions
+                 UNION ALL
+                 SELECT MAX(recorded_at) AS recorded_at FROM concept_cuts
                  UNION ALL
                  SELECT MAX(recorded_at) AS recorded_at FROM links
              )",

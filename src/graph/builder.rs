@@ -1276,6 +1276,7 @@ WITH RECURSIVE {prelude}walk(node_id, depth) AS (
                         ids,
                         &ancestry,
                         self.as_of_recorded.as_deref(),
+                        self.as_of_valid.as_deref(),
                     )
                     .await?
                 }

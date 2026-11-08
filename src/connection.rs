@@ -4342,11 +4342,12 @@ impl Database {
                 // relation reduces to the live table.
                 None => vec![crate::graph::lineage::Ancestor::new(named, 0)],
             };
-        let rows = crate::graph::concept_lineage::rows_on(
+        let (rows, _) = crate::graph::concept_lineage::rows_on(
             &self.read_conn,
             ids,
             &ancestry,
             recorded.as_deref(),
+            valid.as_deref(),
         )
         .await?;
         let mut out = Vec::with_capacity(rows.len());

@@ -368,11 +368,58 @@ impl FilteredVectorSearch {
             return Ok((Vec::new(), estimate));
         }
 
+        // The overlay resolution, ahead of either strategy (0.22.0, M6-b):
+        // what a lineage's own rows decide about a candidate outranks the
+        // live `concepts` row the strategies' joins read, so the candidates
+        // narrow through the walk first and neither strategy's predicate gets
+        // to undo it. A branch's cut, and the mint's late retirement of a row
+        // whose branch rows answer, are both invisible to that join; the walk
+        // is the one reader that answers
+        // ([Amendment 2](../docs/Macrame%20Update%20Plan%20v0.22.0%20-%20Amendment%202.md)
+        // §5.4's search row: drop every hit whose id resolves to absent).
+        let engaged =
+            match crate::graph::concept_lineage::scope_for(conn, self.traversal.branch.as_deref())
+                .await?
+            {
+                None => None,
+                Some(ancestry) => {
+                    if crate::graph::concept_lineage::overlay_engaged(conn).await? {
+                        Some(ancestry)
+                    } else {
+                        None
+                    }
+                }
+            };
+        let candidates: Vec<String> = match &engaged {
+            None => candidates,
+            Some(ancestry) => {
+                let (held, _absent) = crate::graph::concept_lineage::rows_on(
+                    conn,
+                    &candidates,
+                    ancestry,
+                    self.traversal.as_of_recorded.as_deref(),
+                    self.traversal.as_of_valid.as_deref(),
+                )
+                .await?;
+                candidates
+                    .iter()
+                    .filter(|id| !held.contains_key(id.as_str()) || !held[id.as_str()].retired)
+                    .cloned()
+                    .collect()
+            }
+        };
+        if candidates.is_empty() {
+            return Ok((Vec::new(), estimate));
+        }
+
         let results = match estimate.strategy {
-            VectorFilterStrategy::PreFilterCTE => self.run_pre_filter(conn, &candidates).await?,
+            VectorFilterStrategy::PreFilterCTE => {
+                self.run_pre_filter(conn, &candidates, engaged.as_deref())
+                    .await?
+            }
             VectorFilterStrategy::PostFilter => {
                 let (rows, saturated) = self
-                    .run_post_filter(conn, &candidates, estimate.k_prime)
+                    .run_post_filter(conn, &candidates, estimate.k_prime, engaged.as_deref())
                     .await?;
                 // Short *and* saturated means the index scan ran out before the
                 // filter did, so the missing rows may exist and may be nearer
@@ -384,7 +431,8 @@ impl FilteredVectorSearch {
                         k_prime = estimate.k_prime,
                         "post-filter saturated and short; escalating to PreFilterCTE"
                     );
-                    self.run_pre_filter(conn, &candidates).await?
+                    self.run_pre_filter(conn, &candidates, engaged.as_deref())
+                        .await?
                 } else {
                     rows
                 }
@@ -505,6 +553,7 @@ impl FilteredVectorSearch {
         &self,
         conn: &libsql::Connection,
         candidates: &[String],
+        engaged: Option<&[crate::graph::lineage::Ancestor]>,
     ) -> Result<Vec<VectorSearchResult>> {
         let blob = self.encoded_query(conn).await?;
         let at = self.traversal.as_of_valid.as_deref();
@@ -529,7 +578,15 @@ impl FilteredVectorSearch {
                   LIMIT {k}",
                 table = self.model.table(),
                 ids = placeholders.join(", "),
-                visible = crate::vector::search::visible_concept(at.map(|_| chunk.len() + 2)),
+                // Engaged, the walk has answered retirement and the window
+                // for every surviving id, so the join's own predicate stays
+                // out of the way: the join couples the embedding rows to ids
+                // the walk already decided, and that answer outranks it.
+                visible = if engaged.is_some() {
+                    "1".to_string()
+                } else {
+                    crate::vector::search::visible_concept(at.map(|_| chunk.len() + 2))
+                },
                 k = self.top_k,
             );
 
@@ -586,16 +643,34 @@ impl FilteredVectorSearch {
         conn: &libsql::Connection,
         candidates: &[String],
         k_prime: usize,
+        engaged: Option<&[crate::graph::lineage::Ancestor]>,
     ) -> Result<(Vec<VectorSearchResult>, bool)> {
-        let hits = crate::vector::search_vector(
-            conn,
-            &self.query,
-            &self.model,
-            k_prime,
-            self.traversal.as_of_valid.as_deref(),
-            None,
-        )
-        .await?;
+        // Engaged, the hit pool is the lineage's own view (D-310's fold per
+        // lineage) rather than the ledger's: a resolution-answered id whose
+        // mint row says retired has to be reachable from the pool the
+        // candidates cull, and the walk stays the only drop.
+        let hits = if engaged.is_some() {
+            crate::vector::search_vector_on(
+                conn,
+                &self.query,
+                &self.model,
+                k_prime,
+                self.traversal.as_of_valid.as_deref(),
+                None,
+                self.traversal.branch.as_deref(),
+            )
+            .await?
+        } else {
+            crate::vector::search_vector(
+                conn,
+                &self.query,
+                &self.model,
+                k_prime,
+                self.traversal.as_of_valid.as_deref(),
+                None,
+            )
+            .await?
+        };
         let saturated = hits.len() >= k_prime;
 
         let allow: std::collections::HashSet<&str> =

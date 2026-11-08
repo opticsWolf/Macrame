@@ -85,3 +85,38 @@ The content-class list pins two things the D-224 pattern wants:
 2. each content row's rustdoc gains `over-reader:` tag pointing here; the classification doc is
    stable because the register entry D-314 will cite it — *"what the reader census said on the
    day the decision landed"*.
+
+
+## M6-a's recount, and M6-b's conversion (0.22.0, on `dev/0.22.0-revA`)
+
+The rung changed the count: `concept_lineage.rs`'s DFS, the rung's rebuild steps in
+`migrations.rs`, `error.rs` and M6-a's routing reads in `connection.rs`, and the as-of rustdoc
+bring the census to **34 sites in 12 files** at `dev/0.22.0-revA` after M6-a (probe commit
+`bccdc9a`); the probe's 27 was the day of the original sweep. The K2 gate
+(`tests/k2_reader_census_tests.rs`) pins the 34/12 shape and re-fails on any new unclassified
+`concepts` row.
+
+M6-b converts the content rows behind the switch (Amendment 2 §5.4 cost 1's add-divider; the
+gate is `graph::concept_lineage::overlay_engaged` — a forked ledger with something in the
+overlay):
+
+- rows 2–3 (the traversal's node joins) resolve through `filter_visible`, which now threads the
+  traversal's own `as_of_valid` so `AT_TIME` narrowing runs §5.3's walk at the instant rather
+  than narrowing current-first;
+- row 4 (the D-310 fold) stays byte-identical as the walk's fall-through arm
+  (`legacy_rows_on`); the walk (`overlay_scan`) answers `concept_versions` and `concept_cuts`
+  per the resolution — a version wins over a cut where both cover, a cut stops the walk, and at
+  the axis's far end "covering" means the version is open and every cut covers the present;
+- row 5 (`live_ids`, the named tier) keeps D-214's law; ids the walk answered *absent* are
+  barred from the named tier by the callers, on the branch's-own-cards rule;
+- row 6 (the subgraph loader) and row 7 (the hydrate) are the same reader family through
+  `rows_on`, whose merge is decisions-first, fold-second;
+- row 8 (the traversal's vector filter) resolves its candidates through the same walk before
+  either strategy scores; the strategies' own predicates stand down on engaged stores
+  (`PreFilterCTE`; the post-filter's pool sources the lineage's D-310 fold via
+  `search_vector_on`), and drops work like the M6-c stale-hit gate will;
+- row 15 (the clock silo) extends `MAX(recorded_at)` over `concept_versions` ∪ `concept_cuts`.
+
+Still open in this family: the ledger folds (`reconstruct_on`'s per-lineage concept resolution
+and their overlay channels) and the archive predicate arm (row 9–14), which the amendment
+prices into M6-d.

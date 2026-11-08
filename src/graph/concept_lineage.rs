@@ -75,7 +75,40 @@
 //!
 //! [D-310]: ../../docs/architecture/s13-decision-register.md#d-310
 
-use std::collections::HashMap;
+//! # The overlay, since M6-b (0.22.0, [Amendment 2](../../docs/Macrame%20Update%20Plan%20v0.22.0%20-%20Amendment%202.md)
+//! §5.3)
+//!
+//! D-214's law above ("every version of a concept lives on its minting
+//! lineage") is no longer the whole story: M6-a built the overlay. A branch
+//! writes *versions* of an inherited id on its own lineage and *cuts* for the
+//! rejections it makes; the amendment's §5.3 replaces the one-candidate law
+//! with a walk:
+//!
+//! - a read on lineage `L` walks the path nearest first, each step at its
+//!   recorded cap (~[`Ancestor::cutoff`], composed with the read's instant);
+//! - the first overlay row of an id *covering the instant* answers — a
+//!   version wins over a cut where both cover — and a covering cut answers
+//!   **absent**, stopping the walk outright;
+//! - nothing overlay-relative decides for an id where the projection answers
+//!   as it always did (D-310's fold, byte for byte, down to the marked-pair
+//!   dispatch).
+//!
+//! A read that names no valid instant resolves at the far end of the axis:
+//! "covering" there means the version is *open* (`valid_to` at the sentinel)
+//! and every cut covers the present. So a windowed takeover (a version that
+//! ends, with its cut standing) is absent at current belief — the
+//! amendment's own sentence — and open within its window.
+//!
+//! [`overlay_engaged`] is the switch this milestone runs everything behind
+//! (§5.4 cost 1; the byte-identical condition): a forked ledger with
+//! *something* in the overlay resolves by the walk; anything else runs the
+//! statements above, byte for byte, and the goldens keep pinning them.
+//! [`rows_on`] is where the two laws meet: the walk's decisions first,
+//! [D-310]'s fold for the ids the walk did not decide, and the walk says
+//! **absent** (a cut) for an id, no reader revives it from the named tier —
+//! the branch's law outranks shared vocabulary for ids the walk spoke on.
+
+use std::collections::{HashMap, HashSet};
 
 use crate::error::{DbError, Result};
 use crate::graph::lineage::{ancestry_params, ancestry_values, Ancestor, Lineages};
@@ -234,16 +267,68 @@ pub(crate) async fn rows_on(
     ids: &[String],
     ancestry: &[Ancestor],
     recorded: Option<&str>,
-) -> Result<HashMap<String, ConceptRow>> {
-    let mut out = HashMap::with_capacity(ids.len());
+    valid: Option<&str>,
+) -> Result<(HashMap<String, ConceptRow>, HashSet<String>)> {
+    let mut out: HashMap<String, ConceptRow> = HashMap::with_capacity(ids.len());
+    let mut absent: HashSet<String> = HashSet::new();
     if ids.is_empty() {
-        return Ok(out);
+        return Ok((out, absent));
     }
     if ancestry.is_empty() {
         // Every caller passes `scope_for`'s answer, which is never an empty
         // ancestry; an empty one would lower to `VALUES ()`, which SQLite
         // refuses, so it is caught here with a sentence instead.
         return Err(DbError::UnknownBranch(String::new()));
+    }
+    // M6-b: the resolved ids first ([Amendment 2]
+    // (../../docs/Macrame%20Update%20Plan%20v0.22.0%20-%20Amendment%202.md)
+    // §5.3). Ids the walk did not decide fall through to the fold, byte for
+    // byte; ids the walk answered with a cut are absent and are named back so
+    // no caller revives them from the shared vocabulary.
+    let engaged = overlay_engaged(conn).await?;
+    let todo: Vec<String> = if engaged {
+        for (id, decision) in overlay_scan(conn, ids, ancestry, recorded, valid).await? {
+            match decision {
+                OverlayDecision::Row(r) => {
+                    out.insert(id, r);
+                }
+                OverlayDecision::Absent => {
+                    absent.insert(id);
+                }
+            }
+        }
+        let remaining: Vec<String> = ids
+            .iter()
+            .filter(|i| !out.contains_key(*i) && !absent.contains(*i))
+            .cloned()
+            .collect();
+        remaining
+    } else {
+        ids.to_vec()
+    };
+
+    if !todo.is_empty() {
+        let held = legacy_rows_on(conn, &todo, ancestry, recorded).await?;
+        out.extend(held);
+    }
+    Ok((out, absent))
+}
+
+/// [D-310]'s fold, on the ids the overlay walk left undecided (0.22.0, M4).
+///
+/// The body that ran for every id before the overlay existed; on a store with
+/// nothing in the overlay it still runs for *every* id, byte for byte, which
+/// is the whole of the switch's reason. Valid instants are not passed: today's
+/// callers apply their windows after the fold, on [`ConceptRow::shows_at`].
+async fn legacy_rows_on(
+    conn: &libsql::Connection,
+    ids: &[String],
+    ancestry: &[Ancestor],
+    recorded: Option<&str>,
+) -> Result<HashMap<String, ConceptRow>> {
+    let mut out = HashMap::with_capacity(ids.len());
+    if ids.is_empty() {
+        return Ok(out);
     }
     // The state rule reaches this fold once per call (D-303; 0.22.0 plan
     // §3.2 for the lineage read): one probe, and the fold dispatches on marks
@@ -321,18 +406,19 @@ pub(crate) async fn filter_visible(
     ids: Vec<String>,
     ancestry: &[Ancestor],
     recorded: Option<&str>,
+    valid: Option<&str>,
 ) -> Result<Vec<String>> {
     let mut ask = ids.clone();
     if !ask.iter().any(|i| i == start) {
         ask.push(start.to_string());
     }
-    let held = rows_on(conn, &ask, ancestry, recorded).await?;
+    let (held, absent) = rows_on(conn, &ask, ancestry, recorded, valid).await?;
     if !held.contains_key(start) {
         return Ok(Vec::new());
     }
     let named: Vec<String> = ids
         .iter()
-        .filter(|i| !held.contains_key(*i))
+        .filter(|i| !held.contains_key(*i) && !absent.contains(*i))
         .cloned()
         .collect();
     let named_live = live_ids(conn, &named, recorded).await?;
@@ -340,9 +426,261 @@ pub(crate) async fn filter_visible(
         .into_iter()
         .filter(|id| match held.get(id) {
             Some(r) => !r.retired,
-            None => named_live.contains(id),
+            None => !absent.contains(id) && named_live.contains(id),
         })
         .collect())
+}
+
+// ---------------------------------------------------------------------------
+// The overlay resolution (0.22.0, M6-b, [Amendment 2](../../docs/Macrame%20Update%20Plan%20v0.22.0%20-%20Amendment%202.md)
+// §5.3's walk, SQL-side)
+// ---------------------------------------------------------------------------
+
+/// Whether the overlay resolution runs for this store (§5.4 cost 1's switch):
+/// more than one lineage, **and** the overlay has said something. Anything
+/// else — single-lineage, or forked with an untouched overlay — runs the
+/// readers exactly as they ran before this milestone, which is what the
+/// byte-identical goldens pin and what "the schema is additive" keeps honest.
+///
+/// One query, two EXISTS probes on the way in; readonly connections see only
+/// committed rows, so a write that lands between the probe and the read is
+/// not a shape this read has to answer (the actor serializes them; the
+/// decision is made once, on committed state).
+pub(crate) async fn overlay_engaged(conn: &libsql::Connection) -> Result<bool> {
+    let mut rows = conn
+        .query(
+            "SELECT (SELECT COUNT(*) FROM branches) > 1 \
+             AND (EXISTS (SELECT 1 FROM concept_versions) \
+             OR EXISTS (SELECT 1 FROM concept_cuts))",
+            (),
+        )
+        .await?;
+    Ok(rows
+        .next()
+        .await?
+        .map(|r| r.get::<i64>(0).unwrap_or(0) == 1)
+        .unwrap_or(false))
+}
+
+/// The overlay's answer for one id: the resolved row (the nearest overlay
+/// lineage's version that covers the instant), or an explicit refusal — a cut
+/// the walk stopped on.
+#[derive(Debug)]
+// The variants differ by one `ConceptRow`'s size and the answers are few per
+// read (one per id in the chunk); boxing the row would buy nothing.
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum OverlayDecision {
+    Row(ConceptRow),
+    Absent,
+}
+
+/// The walk per id at a chunk of ids, at the named caps.
+///
+/// `valid` names the instant, or `None` for the axis's far end — current
+/// belief. The distance law is a `row_number` over the candidates, ordered
+/// nearest first; the version-before-cut rule rides the same `ORDER BY`, so
+/// the winner's `kind` decides: a version is the read's text, a cut is
+/// absent. It mirrors `m6_resolution_tests`' `RESOLVE_SQL` at the walk's core
+/// and extends it per chunk with the two things a content reader carries that
+/// the probe did not: the full row and the two hybrid channels (the
+/// projection and the version log, per the same table-else-log rule D-310
+/// spells for the mint lineage).
+pub(crate) async fn overlay_scan(
+    conn: &libsql::Connection,
+    ids: &[String],
+    ancestry: &[Ancestor],
+    recorded: Option<&str>,
+    valid: Option<&str>,
+) -> Result<HashMap<String, OverlayDecision>> {
+    let mut out: HashMap<String, OverlayDecision> = HashMap::with_capacity(ids.len());
+    if ids.is_empty() {
+        return Ok(out);
+    }
+    // The valid slot is always bound: the instant when the read names one,
+    // the axis's far end when it does not. One window text for both modes,
+    // the mode's difference carried by the comparison the bound makes.
+    let open_ended = valid.is_none();
+    for chunk in ids.chunks(HYDRATE_CHUNK) {
+        let n = chunk.len();
+        let recorded_slot = recorded.map(|_| n + 1);
+        let valid_slot = n + 1 + usize::from(recorded.is_some());
+        let first = valid_slot + 1;
+        let sql = scan_sql(
+            n,
+            ancestry.len(),
+            first,
+            recorded_slot,
+            valid_slot,
+            open_ended,
+        );
+        let mut params: Vec<libsql::Value> = chunk
+            .iter()
+            .map(|id| libsql::Value::Text(id.clone()))
+            .collect();
+        if let Some(ts) = recorded {
+            params.push(ts.into());
+        }
+        params.push(match valid {
+            Some(v) => libsql::Value::Text(v.to_string()),
+            None => libsql::Value::Text(crate::util::timestamp::OPEN_SENTINEL.to_string()),
+        });
+        params.extend(ancestry_params(ancestry));
+
+        let mut rows = conn.query(&sql, params).await?;
+        while let Some(row) = rows.next().await? {
+            let kind: String = row.get(0)?;
+            let id: String = row.get(1)?;
+            if kind == "k" {
+                out.insert(id, OverlayDecision::Absent);
+                continue;
+            }
+            let bid: String = row.get(2)?;
+            out.insert(
+                id.clone(),
+                OverlayDecision::Row(ConceptRow {
+                    id,
+                    title: row.get::<Option<String>>(3)?.unwrap_or_default(),
+                    content: row.get::<Option<String>>(4)?.unwrap_or_default(),
+                    embedding_model: row.get::<Option<String>>(5)?,
+                    extra: row.get::<Option<String>>(6)?.unwrap_or_else(|| "{}".into()),
+                    // A version channel row is never the retired row: the
+                    // retire is this lineage's cut or its own window's end.
+                    retired: false,
+                    valid_from: row.get(7)?,
+                    valid_to: row.get(8)?,
+                    branch_id: bid,
+                    recorded_at: row.get::<Option<String>>(9)?.unwrap_or_default(),
+                }),
+            );
+        }
+    }
+    Ok(out)
+}
+
+/// The walk's statement: the bound ancestry, the per-lineage recorded caps,
+/// the two hybrid channels against those caps, the cuts as their own rows,
+/// and a distance pick. Fixed slots first, ancestry last — ids `1..n`, the
+/// recorded instant when named, the valid instant (the sentinel at the far
+/// end), then the `3 × rows` ancestry tuples [`ancestry_params`] fills.
+///
+/// The window's comparison is the mode's whole difference: at an instant the
+/// half-open bound every read in the crate applies (`valid_from <= v AND
+/// v < valid_to`); at the far end a version covers while it is *open*
+/// (`valid_to >= v`, which reaches the sentinel and nothing else), because a
+/// belief whose window ended is not what the lineage believes now — the
+/// amendment's own sentence, put in SQL.
+///
+/// The log arms pair with the table arms the way [`versions_cte`]'s does: a
+/// log row counts only when the table's own row for the same pair is not yet
+/// at the cap (its `recorded_at` past the read), and a pair's newest log row
+/// is its state there. The versions channel takes by `(id, valid_from)`
+/// partitions, as the write law keeps the same start's rewrites in place;
+/// the cuts channel takes by `(id, cut_at)`.
+fn scan_sql(
+    n: usize,
+    rows: usize,
+    first: usize,
+    recorded_slot: Option<usize>,
+    valid_slot: usize,
+    open_ended: bool,
+) -> String {
+    let p = valid_slot;
+    // The window's sources per arm — the table's columns and the log row's
+    // payload — and the mode's one difference, the comparison on `valid_to`:
+    // an instant takes the half-open bound, the axis's far end takes "open",
+    // which reaches exactly the sentinel row.
+    // `{t}` is the compared expression whole — a column when the candidate
+    // row is a table row, its parked payload's field when it is a log row —
+    // and `{op}` is the direction the mode picks: the axis's far end is
+    // covered while the interval is open, an instant by the same half-open
+    // bound every read in this crate applies.
+    let to_cmp = if open_ended {
+        "{t} >= ?{p}"
+    } else {
+        "{t} > ?{p}"
+    };
+    // The staged strings carry `{p}` because the outer `format!` cannot
+    // interpolate a value's braces; the slot is finished here, once.
+    let p_str = p.to_string();
+    let finish = |staged: String| staged.replace("{p}", &p_str);
+    let vtw = finish(format!(
+        "v.valid_from <= ?{p} AND {}",
+        to_cmp.replace("{t}", "v.valid_to")
+    ));
+    let vtw_log = finish(format!(
+        "json_extract(j.payload, '$.valid_from') <= ?{p} AND {}",
+        to_cmp.replace("{t}", "json_extract(j.payload, '$.valid_to')")
+    ));
+    let ktw = finish("k.cut_at <= ?{p}".to_string());
+    let ktw_log = finish("json_extract(j.payload, '$.cut_at') <= ?{p}".to_string());
+
+    let cap = match recorded_slot {
+        Some(q) => format!("CASE WHEN cutoff IS NULL OR cutoff > ?{q} THEN ?{q} ELSE cutoff END"),
+        None => "cutoff".to_string(),
+    };
+    let lineage = ancestry_values(rows, first, "_ov");
+    let ids = (1..=n)
+        .map(|i| format!("?{i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    format!(
+        r#"WITH {lineage},
+ov_step(bid, dist, cap) AS (
+    SELECT branch_id, dist, {cap}
+    FROM lineage_ov
+),
+ov_rows(id, bid, dist, kind, valid_from, valid_to, title, content, extra, embedding_model, recorded_at, seq) AS (
+    SELECT v.id, s.bid, s.dist, 'v', v.valid_from, v.valid_to, v.title, v.content, v.extra, v.embedding_model, v.recorded_at, 0
+    FROM ov_step s JOIN concept_versions v ON v.branch_id = s.bid
+    WHERE v.id IN ({ids}) AND (s.cap IS NULL OR v.recorded_at <= s.cap) AND {vtw}
+    UNION ALL
+    SELECT j.entity_id, s.bid, s.dist, 'v',
+           json_extract(j.payload, '$.valid_from'), json_extract(j.payload, '$.valid_to'),
+           json_extract(j.payload, '$.title'), json_extract(j.payload, '$.content'),
+           COALESCE(json_extract(j.payload, '$.extra'), '{{}}'), json_extract(j.payload, '$.embedding_model'),
+           j.recorded_at, j.seq_id
+    FROM ov_step s JOIN transaction_log j ON j.branch_id = s.bid
+    WHERE j.table_name = 'concept_versions' AND j.entity_id IN ({ids})
+      AND (s.cap IS NULL OR j.recorded_at <= s.cap)
+      AND NOT EXISTS (
+          SELECT 1 FROM concept_versions w
+          WHERE w.id = j.entity_id AND w.branch_id = s.bid
+            AND w.valid_from = json_extract(j.payload, '$.valid_from')
+            AND w.recorded_at <= s.cap
+      )
+      AND {vtw_log}
+    UNION ALL
+    SELECT k.id, s.bid, s.dist, 'k', k.cut_at, NULL, NULL, NULL, NULL, NULL, k.recorded_at, 0
+    FROM ov_step s JOIN concept_cuts k ON k.branch_id = s.bid
+    WHERE k.id IN ({ids}) AND (s.cap IS NULL OR k.recorded_at <= s.cap) AND {ktw}
+    UNION ALL
+    SELECT j.entity_id, s.bid, s.dist, 'k',
+           json_extract(j.payload, '$.cut_at'), NULL, NULL, NULL, NULL, NULL, j.recorded_at, j.seq_id
+    FROM ov_step s JOIN transaction_log j ON j.branch_id = s.bid
+    WHERE j.table_name = 'concept_cuts' AND j.entity_id IN ({ids})
+      AND (s.cap IS NULL OR j.recorded_at <= s.cap)
+      AND NOT EXISTS (
+          SELECT 1 FROM concept_cuts w
+          WHERE w.id = j.entity_id AND w.branch_id = s.bid
+            AND w.cut_at = json_extract(j.payload, '$.cut_at')
+            AND w.recorded_at <= s.cap
+      )
+      AND {ktw_log}
+),
+ov_pick AS (
+    SELECT id, bid, valid_from, valid_to, kind, title, content, extra, embedding_model, recorded_at,
+           ROW_NUMBER() OVER (
+               PARTITION BY id
+               ORDER BY dist ASC,
+                        CASE kind WHEN 'k' THEN 1 ELSE 0 END ASC,
+                        valid_from DESC, seq DESC
+           ) AS rn
+    FROM ov_rows
+)
+SELECT kind, id, bid, title, content, extra, embedding_model, valid_from, valid_to, recorded_at
+FROM ov_pick WHERE rn = 1"#
+    )
 }
 
 /// Which of `ids` are live by the single-lineage reading: the live row now,
@@ -392,7 +730,7 @@ async fn live_ids(
 mod plan_pins {
     use super::*;
 
-    async fn fresh() -> libsql::Connection {
+    pub(super) async fn fresh() -> libsql::Connection {
         let db = libsql::Builder::new_local(":memory:")
             .build()
             .await
@@ -483,5 +821,33 @@ mod plan_pins {
             ),
             "the plain fold's seek is the same shape: {plain}"
         );
+    }
+}
+
+#[cfg(test)]
+mod scan_probe {
+    use super::*;
+
+    /// The scan statement parses and binds against the migrated schema —
+    /// the placeholder layout's own rehearsal (the shape-5 lesson keeps a
+    /// class of probes here rather than out in the tests).
+    #[tokio::test]
+    async fn the_overlay_scan_statement_parses_and_binds() {
+        let conn = plan_pins::fresh().await;
+        let ids = vec!["x".to_string(), "y".to_string()];
+        for (ancestry, valid) in [(2usize, None), (2, Some("2026-01-01T00:00:00.000000Z"))] {
+            let anc: Vec<Ancestor> = (0..ancestry)
+                .map(|i| Ancestor {
+                    branch_id: format!("b{i}"),
+                    dist: i as i64,
+                    cutoff: None,
+                })
+                .collect();
+            let _ = overlay_scan(&conn, &ids, &anc, None, valid).await;
+            println!(
+                "SQL: {}",
+                scan_sql(ids.len(), anc.len(), 3, None, 6, valid.is_none())
+            );
+        }
     }
 }

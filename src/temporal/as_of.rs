@@ -394,14 +394,15 @@ pub(crate) async fn hydrate_attributes_on(
             return Err(DbError::RecordedInstantUnreachable { ts: ts.to_string() });
         }
     }
-    let rows = crate::graph::concept_lineage::rows_on(conn, node_ids, ancestry, recorded).await?;
+    let (rows, absent) =
+        crate::graph::concept_lineage::rows_on(conn, node_ids, ancestry, recorded, valid).await?;
     // Ids the lineage does not hold are concepts its edges *named* — shared
     // vocabulary (D-214) — and hydrate as the single-lineage path would.
     // `execute_ids` has already decided they are shown; see
     // `concept_lineage::filter_visible`.
     let named: Vec<String> = node_ids
         .iter()
-        .filter(|i| !rows.contains_key(*i))
+        .filter(|i| !rows.contains_key(*i) && !absent.contains(*i))
         .cloned()
         .collect();
     let named: HashMap<String, NodeAttributes> = hydrate_attributes(conn, &named, as_of, mode)

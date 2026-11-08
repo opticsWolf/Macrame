@@ -1104,7 +1104,8 @@ ORDER BY l.source_id, l.target_id, l.edge_type
                     }
                 },
             };
-            let rows = crate::graph::concept_lineage::rows_on(conn, &ids, &ancestry, at).await?;
+            let (rows, absent) =
+                crate::graph::concept_lineage::rows_on(conn, &ids, &ancestry, at, valid).await?;
             if !rows.contains_key(start_node) {
                 // A start the lineage cannot see has no subgraph on it, the
                 // rule `TraversalBuilder::execute_ids` applies.
@@ -1115,7 +1116,7 @@ ORDER BY l.source_id, l.target_id, l.edge_type
             // hydrate as on a single lineage (D-214; `filter_visible`).
             let named: Vec<String> = ids
                 .iter()
-                .filter(|i| !rows.contains_key(*i))
+                .filter(|i| !rows.contains_key(*i) && !absent.contains(*i))
                 .cloned()
                 .collect();
             for id in &ids {
