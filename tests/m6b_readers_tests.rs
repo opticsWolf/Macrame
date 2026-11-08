@@ -432,11 +432,245 @@ async fn a_branch_supersede_leaves_the_mint_lineage_standing_correctly() {
         rows_before
     );
     let now = stamp_of(&db, "SELECT MAX(recorded_at) FROM concept_versions").await;
-    let state = db.reconstruct(&now).await.unwrap();
+    // "Byte identical" names the mint lineage's own fold: its ancestry is
+    // itself alone, so nothing the branch wrote can reach it, and the
+    // reconstruction answers the mint's own row everywhere.
+    let state = db.reconstruct_on(&now, "main").await.unwrap();
     let entry = state.concepts.get("x").expect("the mint's projection");
     assert_eq!(
         entry.title, OLD,
-        "the ledger's concept holds the mint's own row"
+        "the mint lineage's reconstruction holds the mint's own row"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The folds (§12.1's per-reader list: `reconstruct`, `reconstruct_as_of` and
+// the ancestor fold `reconstruct_on`)
+// ---------------------------------------------------------------------------
+
+/// The overlay's rows are the ledger's own log rows, so the lineage-agnostic
+/// folds resolve them by the same law: the ledger's newest assertion on the
+/// pair answers. Before the takeover's stamp the overlays were not yet
+/// written, so the fold carries the mint's row; after it carries the branch's
+/// row. The mint-holder's own fold (`reconstruct_on(ts, "main")`) never
+/// resolves anything, because the branch's rows are cut from its lineage by
+/// the "byte identical" story above.
+#[tokio::test]
+async fn a_whole_ledger_fold_resolves_the_overlay_s_own_rows() {
+    let harness = TestHarness::new();
+    let db = forked_view(&harness, None).await;
+    let view = db.view(BranchId::new("b0").unwrap());
+
+    tick().await;
+    view.upsert_concept(
+        ConceptUpsert::new("x", NEW)
+            .supersede(true)
+            .valid_from(T5)
+            .valid_to(FOREVER),
+    )
+    .await
+    .unwrap();
+
+    let now = stamp_of(&db, "SELECT MAX(recorded_at) FROM concept_versions").await;
+    let r_pre = a_micro_before(&now);
+
+    // Before the act: not yet in the ledger, the mint's row is the answer.
+    let pre = db.reconstruct(&r_pre).await.unwrap();
+    assert_eq!(pre.concepts.get("x").expect("x pre").title, OLD);
+
+    // After the act: the overlay's version row is the ledger's newest
+    // assertion, and the reconstruction answers it.
+    let post = db.reconstruct(&now).await.unwrap();
+    assert_eq!(
+        post.concepts.get("x").expect("x post").title,
+        NEW,
+        "the whole-ledger fold resolves the branch's own row"
+    );
+
+    // The valid axis: before the version's start the mint's row covers,
+    // from the start the branch's row covers — the same
+    // before-the-cut /-language §12.1 opens with.
+    let pre_valid = macrame::temporal::AsOf::bitemporal(TS, now.clone());
+    let post_valid = macrame::temporal::AsOf::bitemporal(T5, now.clone());
+    let pre_state = db.reconstruct_as_of(pre_valid).await.unwrap();
+    assert_eq!(pre_state.concepts.get("x").expect("x pre valid").title, OLD);
+    let post_state = db.reconstruct_as_of(post_valid).await.unwrap();
+    assert_eq!(
+        post_state.concepts.get("x").expect("x post valid").title,
+        NEW,
+        "the valid-axis fold resolves the branch's window"
+    );
+}
+
+/// A branch's reconstruction walks its own ancestry nearest first. The
+/// branch's own overlay row answers before any ancestor's row; where the
+/// branch said nothing and the mint holder holds the id, the mint's row is
+/// what the fold carries; and a deeper fork inherits the nearer lineage's
+/// row the way the walk reads it.
+#[tokio::test]
+async fn a_branch_reconstruction_resolves_the_walk() {
+    let harness = TestHarness::new();
+    let db = forked_view(&harness, None).await;
+    let b0 = BranchId::new("b0").unwrap();
+    let view = db.view(b0.clone());
+
+    tick().await;
+    view.upsert_concept(
+        ConceptUpsert::new("x", NEW)
+            .supersede(true)
+            .valid_from(T5)
+            .valid_to(FOREVER),
+    )
+    .await
+    .unwrap();
+    tick().await;
+    db.fork(BranchId::new("b1").unwrap(), b0.clone())
+        .await
+        .unwrap();
+
+    let now = stamp_of(&db, "SELECT MAX(recorded_at) FROM concept_versions").await;
+
+    // The branch's own fold: the walk reaches its own version row first.
+    let on_b0 = db.reconstruct_on(&now, "b0").await.unwrap();
+    assert_eq!(on_b0.concepts.get("x").expect("x on b0").title, NEW);
+
+    // A deeper fork: `b1` inherits `b0`'s overlay row by the same walk.
+    let on_b1 = db.reconstruct_on(&now, "b1").await.unwrap();
+    assert_eq!(
+        on_b1.concepts.get("x").expect("x on b1").title,
+        NEW,
+        "b1 inherits b0's overlay answer"
+    );
+
+    // Where nothing of the overlay decides, the fold is today's: the mint's
+    // row. `a` was never versioned.
+    assert_eq!(on_b0.concepts.get("a").expect("a on b0").title, "Hub");
+}
+
+/// The branch's cut (the retire read side, §12.5) reaches the folds: the
+/// branch's reconstruction answers absent — and where a snapshot-base or an
+/// ancestor's row still stands in the composed map, the overlay's cut must
+/// remove it, not merely decline to add it. The mint-holder's own fold keeps
+/// the id as it ever was.
+#[tokio::test]
+async fn a_branch_reconstruction_stops_at_the_branch_s_cut() {
+    let harness = TestHarness::new();
+    let db = forked_view(&harness, None).await;
+    let view = db.view(BranchId::new("b0").unwrap());
+
+    tick().await;
+    view.upsert_concept(ConceptUpsert::new("x", OLD).retired(true).valid_from(T5))
+        .await
+        .unwrap();
+
+    let now = stamp_of(&db, "SELECT MAX(recorded_at) FROM concept_cuts").await;
+    let on_b0 = db.reconstruct_on(&now, "b0").await.unwrap();
+    assert_eq!(
+        on_b0.concepts.get("x"),
+        None,
+        "the overlay's cut removes the fold's row"
+    );
+    let on_main = db.reconstruct_on(&now, "main").await.unwrap();
+    assert_eq!(
+        on_main
+            .concepts
+            .get("x")
+            .expect("the mint-holder's own fold")
+            .title,
+        OLD,
+        "the mint-holder's own fold is untouched"
+    );
+}
+
+/// §12.6's fold twin: the ancestor's post-fork supersede is cut from the
+/// branch's fold at the fork point, so the branch's reconstruction carries
+/// what the branch said and the mint-holder's carries the ancestor's edit.
+#[tokio::test]
+async fn an_ancestor_s_post_fork_edit_stays_out_of_the_branch_s_reconstruction() {
+    let harness = TestHarness::new();
+    let db = forked_view(&harness, None).await;
+    let view = db.view(BranchId::new("b0").unwrap());
+
+    tick().await;
+    view.upsert_concept(
+        ConceptUpsert::new("x", NEW)
+            .supersede(true)
+            .valid_from(T5)
+            .valid_to(FOREVER),
+    )
+    .await
+    .unwrap();
+    tick().await;
+    db.upsert_concept(
+        ConceptUpsert::new("x", "the trunk's later text")
+            .supersede(true)
+            .valid_from(AFTER)
+            .valid_to(FOREVER),
+    )
+    .await
+    .unwrap();
+
+    let now = stamp_of(&db, "SELECT MAX(recorded_at) FROM transaction_log").await;
+    let on_b0 = db.reconstruct_on(&now, "b0").await.unwrap();
+    assert_eq!(
+        on_b0.concepts.get("x").expect("x on b0").title,
+        NEW,
+        "the ancestor's post-fork edit is cut from the branch's fold"
+    );
+    let on_main = db.reconstruct_on(&now, "main").await.unwrap();
+    assert_eq!(
+        on_main.concepts.get("x").expect("x on main").title,
+        "the trunk's later text",
+        "the mint-holder's own fold carries its edit"
+    );
+}
+
+/// The windowed takeover on the folds: on the recorded axis the pair's cut
+/// covers the present, so the id drops — on the valid axis the window's own
+/// text covers while it runs, and the cut covers (absently) after it.
+#[tokio::test]
+async fn a_windowed_takeover_folds_to_absent_now_and_its_title_within_the_window() {
+    let harness = TestHarness::new();
+    let db = forked_view(&harness, None).await;
+    let view = db.view(BranchId::new("b0").unwrap());
+
+    tick().await;
+    view.upsert_concept(
+        ConceptUpsert::new("x", NEW)
+            .supersede(true)
+            .valid_from(T5)
+            .valid_to(AFTER),
+    )
+    .await
+    .unwrap();
+
+    let now = stamp_of(&db, "SELECT MAX(recorded_at) FROM concept_versions").await;
+    // The recorded axis, at the present: the cut covers, the id is absent.
+    let recorded_now = db.reconstruct(&now).await.unwrap();
+    assert_eq!(
+        recorded_now.concepts.get("x"),
+        None,
+        "a windowed takeover folds absent outside its window"
+    );
+    // The valid axis within the window: the version's text.
+    let in_window = db
+        .reconstruct_as_of(macrame::temporal::AsOf::bitemporal(T5, now.clone()))
+        .await
+        .unwrap();
+    assert_eq!(
+        in_window.concepts.get("x").expect("x in window").title,
+        NEW,
+        "the valid-axis fold shows the window's text"
+    );
+    // The valid axis past the window: absent again, not `OLD` again.
+    let past_window = db
+        .reconstruct_as_of(macrame::temporal::AsOf::bitemporal(AFTER, now.clone()))
+        .await
+        .unwrap();
+    assert_eq!(
+        past_window.concepts.get("x"),
+        None,
+        "the cut covers after the window on the valid axis"
     );
 }
 

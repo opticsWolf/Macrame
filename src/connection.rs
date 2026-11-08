@@ -3933,9 +3933,13 @@ impl Database {
     /// [`Self::reconstruct`] with the ancestry resolved: each ancestor bounded
     /// at its fork point, one belief per edge key from the nearest lineage
     /// holding it. See [`crate::temporal::reconstruct_on`] for how it is
-    /// assembled, what it costs, and the two things it does **not** do —
-    /// concepts are not resolved by lineage, and the result must not be saved
-    /// as a snapshot.
+    /// assembled, what it costs, and the two things it does **not** do — the
+    /// result must not be saved as a snapshot, and before the overlay
+    /// (0.22.0, M6-b, [D-314]) neither were concepts: the folds' concepts are
+    /// now resolved by the ancestry walk behind the overlay (see
+    /// [`crate::temporal::reconstruct_on`]'s own docs), and
+    /// where the store has not written an overlay row the walk answers today's
+    /// mint-law unchanged.
     ///
     /// A read, on `read_conn`, like [`Self::reconstruct`]. The archive path and
     /// the snapshot directory come from the handle, so snapshot composition is

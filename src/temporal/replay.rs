@@ -370,9 +370,17 @@ pub fn resolve_beliefs(beliefs: &[EdgeBelief], ancestry: &[Ancestor]) -> Vec<Edg
 /// routes and prints which the database refuses.
 ///
 /// So this is not a resolution the caller must compensate for. It is a rule
-/// with nothing to decide, and if `concepts` ever gained per-lineage rows —
-/// the overlay design [D-214] defers — it would need one, along with a lineage
-/// on the folded row to apply it to.
+/// with nothing to decide — and the "if it ever needed one" reading aged out
+/// under D-314: the overlay gave folded rows a lineage to resolve over, and
+/// the answer is applied where the fold lands — the delta carries the
+/// overlay's own rows beside the resolved set, and one pass answers them
+/// against the walk before the state composes. On an engaged store the
+/// concepts of a reconstruction walk the
+/// ancestry nearest first (§5.3's law, folded); on today's stores the only
+/// rule this section states it for holds unchanged: `concepts`, the
+/// projection's own table, is still per-id on the mint's lineage and is still
+/// immutable-across-lineages, and the walk's fall-through is this function's
+/// untouched running.
 ///
 /// Only [`MaterializedState::edges`] gets the distance rule, which is the field
 /// review C-10 named and the only one the rule has ever been needed for.
@@ -461,7 +469,7 @@ pub async fn reconstruct_on(
 
     let state = match hot_log_reach(conn, ts, archive_path).await? {
         HotLogReach::Covers => {
-            let delta = fold_delta_state_rule(
+            let mut delta = fold_delta_state_rule(
                 conn,
                 &bounded_hot_fold(rows, ANCESTRY_SLOT),
                 params.clone(),
@@ -469,6 +477,7 @@ pub async fn reconstruct_on(
                 params.clone(),
             )
             .await?;
+            resolve_concepts_overlay(&mut delta, &ancestry, None);
             Some(delta.apply_to(MaterializedState::empty(ts), ts))
         }
         HotLogReach::PredatesRecordedHistory => {
@@ -525,7 +534,10 @@ pub async fn reconstruct_on(
             if let Err(e) = conn.execute("DETACH DATABASE cold", ()).await {
                 tracing::warn!("reconstruct_on: failed to DETACH cold database: {e}");
             }
-            result?.apply_to(MaterializedState::empty(ts), ts)
+            result.map(|mut delta| {
+                resolve_concepts_overlay(&mut delta, &ancestry, None);
+                delta.apply_to(MaterializedState::empty(ts), ts)
+            })?
         }
     };
 
@@ -548,6 +560,10 @@ pub async fn reconstruct_on(
 ///
 /// [D-285]: ../../docs/architecture/s13-decision-register.md#d-285
 use crate::schema::ddl::{PAYLOAD_VERSION_CONCEPTS, PAYLOAD_VERSION_LINKS};
+
+/// The overlay payloads' ceilings, from `schema::ddl` beside the trigger
+/// literals that write them (the same reason the constants above are there).
+use crate::schema::ddl::{PAYLOAD_VERSION_CONCEPT_CUTS, PAYLOAD_VERSION_CONCEPT_VERSIONS};
 
 /// Every fold partitions on `(table_name, entity_id)`, never `entity_id` alone.
 ///
@@ -1163,7 +1179,189 @@ struct Delta {
     /// Concepts retired as of the fold's instant. See the type's note for why
     /// there is no edge equivalent.
     concepts_gone: HashSet<String>,
+    /// The overlay's own rows, watched the way `edges` is (0.22.0, M6-b,
+    /// [D-314], the amendment's §5.3 walk). Keyed `(concept id, branch_id)` —
+    /// one row per pair per lineage — and consumed by every
+    /// [`resolve_concepts_overlay`], which is the only reader: [`apply_to`]
+    /// leaves the projection's answer untouched by them, so a whole-ledger
+    /// fold's output is whatever the walk resolved and a snapshot's payload
+    /// keeps the v6 shape the state has always had.
+    versions: HashMap<(String, String), OverlayRow>,
+    cuts: HashMap<(String, String), OverlayCut>,
     max_seq: i64,
+}
+
+/// The overlay's version row, as the fold's log row records it (0.22.0, M6-b,
+/// the amendment's §5.1 row law).
+///
+/// `seq_id` is the act's order, and the resolution's recency key: both
+/// spellings of "the ledger's newest assertion" and "the nearest lineage's
+/// own" name rows the fold has already bounded, so the pick is made over the
+/// rows in hand, not the tables' indexes. The payload's fields are the
+/// projection row's own — a version *is* content, and the content readers
+/// want a `NodeAttributes`.
+#[derive(Debug, Clone)]
+struct OverlayRow {
+    seq_id: i64,
+    valid_from: String,
+    valid_to: String,
+    title: String,
+    content: String,
+    extra: String,
+    embedding_model: Option<String>,
+}
+
+impl OverlayRow {
+    /// The row's coverage against the covering form every read in this crate
+    /// applies: at a named instant, the interval's own containment; at the
+    /// axis's far end (current belief), open — a window version that has
+    /// ended covers nowhere, which is what makes a windowed takeover's
+    /// current reads leave with the cut and not fall through to the mint's
+    /// row.
+    fn covers(&self, at: Option<&str>) -> bool {
+        match at {
+            None => self.valid_to == OPEN_SENTINEL,
+            Some(v) => Interval::new(&self.valid_from, &self.valid_to).contains(v),
+        }
+    }
+
+    fn attributes(&self, id: String) -> NodeAttributes {
+        NodeAttributes {
+            id,
+            title: self.title.clone(),
+            content: self.content.clone(),
+            embedding_model: self.embedding_model.clone(),
+            extra: self.extra.clone(),
+        }
+    }
+}
+
+/// The overlay's cut, as the fold's log row records it: the decision that
+/// nothing is there from `cut_at` on. A cut and a version legitimately
+/// co-cover (the takeover pair, §5.3's "a version wins over a cut"), so the
+/// resolution reads cuts only where no version covers — never as an
+/// interval of its own ([D-314]'s division, the rule the audit reads by).
+#[derive(Debug, Clone)]
+struct OverlayCut {
+    seq_id: i64,
+    cut_at: String,
+}
+
+impl OverlayCut {
+    /// A cut covers the present — the axis's far end is inside
+    /// [cut_at, ∞), which is every cut's own window — and an instant when
+    /// the cut has already run.
+    fn covers(&self, at: Option<&str>) -> bool {
+        match at {
+            None => true,
+            Some(v) => self.cut_at.as_str() <= v,
+        }
+    }
+}
+
+/// Resolve a fold's `concepts` behind the overlay's own rows (0.22.0, M6-b,
+/// [D-314], the amendment's §5.3 walk, folded).
+///
+/// The overlay's rows land in [`Delta::versions`] and [`Delta::cuts`] keyed
+/// `(id, branch_id)` — they are the fold's own rows, each already bounded at
+/// its lineage's cap, so nothing here re-asks what is visible. The law is
+/// the scan's:
+///
+/// - with a lineage to walk (the per-lineage folds), walk nearest first; the
+///   first overlay row whose coverage holds answers — a version wins over a
+///   cut where both cover — and a covering cut answers *absent* and stops
+///   the walk;
+/// - the lineage-agnostic folds (no view to walk) reduce the same law to
+///   recency over the rows in hand: the newest `seq_id` among the coverage
+///   winners answers, and the version-beats-cut tie is read off the write
+///   actor's own order (the cut is written inside its transaction before
+///   the version, so a true tie cannot arise; `<=` keeps the version on a
+///   suspicious ledger rather than preferring the cut).
+///
+/// What the overlay does not decide is the projection's row, untouched: the
+/// mint's row is what the fold already absorbed into [`Delta::concepts`], and
+/// it stands wherever no overlay row covers. An overlay row that answers
+/// replaces the entry; a covering cut answers absent — removed as a
+/// retirement (`concepts_gone`) and not merely as an absence, because the
+/// map the delta composes onto may already hold the id and the overlay's
+/// decision has to outrank whatever is standing.
+///
+/// `at` is the coverage's instant: `None` reads current belief (the axis's
+/// far end, where a version covers while it is open), `Some(ts)` reads the
+/// valid instant. The empty-channels early return is the whole cost on every
+/// store that has not yet written an overlay row — present and future both —
+/// which is why yesterday's fold is byte-identical, not merely equal: nothing
+/// in it was touched.
+fn resolve_concepts_overlay(d: &mut Delta, ancestry: &[Ancestor], at: Option<&str>) {
+    if d.versions.is_empty() && d.cuts.is_empty() {
+        return;
+    }
+    // The ids the overlay spoke on, sorted so the composition's drops land
+    // deterministically (the map's own answer is order-free; the retirement
+    // set's is not).
+    let mut ids: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for (id, _) in d.versions.keys() {
+        ids.insert(id.clone());
+    }
+    for (id, _) in d.cuts.keys() {
+        ids.insert(id.clone());
+    }
+
+    // The answers the law names, per id.
+    enum Answer<'a> {
+        Row(&'a OverlayRow),
+        Absent,
+    }
+
+    for id in ids {
+        let mut answer: Option<Answer> = None;
+
+        if !ancestry.is_empty() {
+            // The walk: nearest first; a version's coverage answers with the
+            // row, a cut's answers absent and stops.
+            for a in ancestry {
+                if let Some(v) = d.versions.get(&(id.clone(), a.branch_id.clone())) {
+                    if v.covers(at) {
+                        answer = Some(Answer::Row(v));
+                        break;
+                    }
+                }
+                if let Some(c) = d.cuts.get(&(id.clone(), a.branch_id.clone())) {
+                    if c.covers(at) {
+                        answer = Some(Answer::Absent);
+                        break;
+                    }
+                }
+            }
+        } else {
+            // No view: recency among the covering rows in hand.
+            let mut best_seq: i64 = i64::MIN;
+            for v in d.versions.values().filter(|v| v.covers(at)) {
+                if best_seq <= v.seq_id {
+                    best_seq = v.seq_id;
+                    answer = Some(Answer::Row(v));
+                }
+            }
+            for c in d.cuts.values().filter(|c| c.covers(at)) {
+                if best_seq < c.seq_id {
+                    best_seq = c.seq_id;
+                    answer = Some(Answer::Absent);
+                }
+            }
+        }
+
+        match answer {
+            None => {}
+            Some(Answer::Row(v)) => {
+                let idc = id.clone();
+                d.concepts.insert(id, v.attributes(idc));
+            }
+            Some(Answer::Absent) => {
+                d.concepts.remove(&id);
+                d.concepts_gone.insert(id);
+            }
+        }
+    }
 }
 
 /// Release a `cold` handle left attached by an earlier call (§5.5, D-044).
@@ -1253,7 +1451,7 @@ async fn reconstruct_from(
         HotLogReach::Covers => {
             if let Some(base) = base {
                 let anchor = base.seq_anchor;
-                let delta = fold_delta_state_rule(
+                let mut delta = fold_delta_state_rule(
                     conn,
                     ANCHORED_HOT_FOLD,
                     libsql::params![ts, anchor],
@@ -1261,6 +1459,7 @@ async fn reconstruct_from(
                     libsql::params![ts],
                 )
                 .await?;
+                resolve_concepts_overlay(&mut delta, &[], None);
                 return Ok(delta.apply_to(base, ts));
             }
             return fold(conn, ts, HOT_FOLD, DISORDER_CORRECTION).await;
@@ -1324,7 +1523,10 @@ async fn reconstruct_from(
                 libsql::params![ts],
             )
             .await
-            .map(|delta| delta.apply_to(base, ts))
+            .map(|mut delta| {
+                resolve_concepts_overlay(&mut delta, &[], None);
+                delta.apply_to(base, ts)
+            })
         }
         None => {
             fold(
@@ -1369,8 +1571,13 @@ pub(crate) async fn reconstruct_valid(
     let what = format!("state at {valid} on the valid axis");
     let rows = valid_rows(conn, &what, recorded, archive_path).await?;
     // The state is at the valid instant, so that is its timestamp, and it is
-    // marked so it cannot be saved as a snapshot (D-298).
-    let mut state = select_valid(rows, valid)?.apply_to(MaterializedState::empty(valid), valid);
+    // marked so it cannot be saved as a snapshot (D-298). The overlay's rows
+    // resolve the same law at the instant: a window covering `valid`
+    // answers, a cut covering it answers absent, and the projection's own
+    // row covers exactly where nothing of the overlay decides.
+    let mut delta = select_valid(rows, valid)?;
+    resolve_concepts_overlay(&mut delta, &[], Some(valid));
+    let mut state = delta.apply_to(MaterializedState::empty(valid), valid);
     state.valid_axis = true;
     Ok(state)
 }
@@ -2221,7 +2428,7 @@ async fn fold(
     query: &str,
     correction: &str,
 ) -> Result<MaterializedState> {
-    let delta = fold_delta_state_rule(
+    let mut delta = fold_delta_state_rule(
         conn,
         query,
         libsql::params![ts],
@@ -2229,6 +2436,7 @@ async fn fold(
         libsql::params![ts],
     )
     .await?;
+    resolve_concepts_overlay(&mut delta, &[], None);
     Ok(delta.apply_to(MaterializedState::empty(ts), ts))
 }
 
@@ -2259,7 +2467,7 @@ async fn absorb_fold_rows(
         }
 
         let payload = parse_log_row(seq_id, &table_name, &entity_id, &op, &payload_str)?;
-        absorb_row(d, &table_name, entity_id, branch_id, &payload)?;
+        absorb_row(d, seq_id, &table_name, entity_id, branch_id, &payload)?;
     }
 
     Ok(())
@@ -2304,6 +2512,7 @@ fn parse_log_row(
 /// D-285), so a row is judged only against the ceiling of its own shape.
 fn absorb_row(
     d: &mut Delta,
+    seq_id: i64,
     table_name: &str,
     entity_id: String,
     branch_id: String,
@@ -2362,6 +2571,51 @@ fn absorb_row(
             // shows what was visible. Onto a snapshot that means removing the
             // concept, not declining to add it.
             d.concepts_gone.insert(entity_id);
+        }
+    } else if table_name == "concept_versions" {
+        // The overlay's own row, watched into the delta (0.22.0, M6-b,
+        // [D-314]). Its payload has the concept row's fields, so it reads by
+        // the concept payload's ceiling for the same reason.
+        ceiling(PAYLOAD_VERSION_CONCEPT_VERSIONS)?;
+        let field = |name: &str| {
+            payload
+                .get(name)
+                .and_then(|s| s.as_str())
+                .unwrap_or("")
+                .to_string()
+        };
+        let row = OverlayRow {
+            seq_id,
+            valid_from: field("valid_from"),
+            valid_to: field("valid_to"),
+            title: field("title"),
+            content: field("content"),
+            // The trigger writes `json(NEW.extra)`, so the payload carries an
+            // object rather than a string — re-rendered here, not read as
+            // `as_str`, the same reading the projection's arm applies.
+            extra: payload
+                .get("extra")
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| "{}".to_string()),
+            embedding_model: payload
+                .get("embedding_model")
+                .and_then(|s| s.as_str())
+                .map(|s| s.to_string()),
+        };
+        let key = (entity_id, branch_id);
+        if d.versions.get(&key).is_none_or(|old| old.seq_id <= seq_id) {
+            d.versions.insert(key, row);
+        }
+    } else if table_name == "concept_cuts" {
+        ceiling(PAYLOAD_VERSION_CONCEPT_CUTS)?;
+        let cut_at = payload
+            .get("cut_at")
+            .and_then(|s| s.as_str())
+            .unwrap_or("")
+            .to_string();
+        let key = (entity_id, branch_id);
+        if d.cuts.get(&key).is_none_or(|old| old.seq_id <= seq_id) {
+            d.cuts.insert(key, OverlayCut { seq_id, cut_at });
         }
     } else if table_name == "links" {
         ceiling(PAYLOAD_VERSION_LINKS)?;
@@ -2438,6 +2692,7 @@ fn select_valid(rows: Vec<ValidStart>, valid: &str) -> Result<Delta> {
                 }
                 absorb_row(
                     &mut d,
+                    only.seq_id,
                     &only.table_name,
                     only.entity_id.clone(),
                     only.branch_id.clone(),

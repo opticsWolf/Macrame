@@ -86,7 +86,7 @@ pub(crate) const PAYLOAD_VERSION_CONCEPTS: u8 = 3;
 /// no row any version of this crate wrote.
 pub(crate) const PAYLOAD_VERSION_LINKS: u8 = 1;
 
-/// A macro rather than a `const` for the same reason as [`ts_glob`]: `concat!`
+/// A macro rather than a `const` for the same reason as `ts_glob`: `concat!`
 /// splices it into the table DDL and only accepts literals. [`WEIGHT_CHECK`] is
 /// the same text as a value, and carries the reasoning.
 /// The concept-versions ledger payload shape, and the cuts one. See

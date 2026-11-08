@@ -129,7 +129,8 @@ impl PointerSet {
     /// pre-0.22.0 move did. `Some(None)` is the plan's claim-if-free: the
     /// move insists there is **no** open belief to close, and instead of a
     /// second writer's target silently taking the blame, the loser of the
-    /// race gets [`DbError::PointerConflict`] with the winner in `current`.
+    /// race gets [`DbError::PointerConflict`](crate::DbError::PointerConflict)
+    /// with the winner in `current`.
     /// `Some(Some(t))` requires `t` to be the open target — the
     /// double-optional because "expects nothing open" and "does not check"
     /// are different claims, and the field has to say which one was made.
