@@ -5992,10 +5992,16 @@ fn concept_version_params<'a>(c: &'a ConceptUpsert, stamp: &'a str) -> [libsql::
         c.valid_to.as_str().into(),
         c.title.as_str().into(),
         c.content.as_str().into(),
+        // The bind order is the column list's: `extra` at ?7 (and inside the
+        // `ON CONFLICT` arm's own COALESCE, the slot the omission preserves
+        // from), `embedding_model` at ?8. The first draft had these two
+        // swapped and the fixtures held NULL, which is what
+        // `a_version_rows_payload_columns_bind_in_the_statement_order` is
+        // about.
+        c.extra.as_deref().map_or(libsql::Value::Null, Into::into),
         c.embedding_model
             .as_deref()
             .map_or(libsql::Value::Null, Into::into),
-        c.extra.as_deref().map_or(libsql::Value::Null, Into::into),
         stamp.into(),
     ]
 }

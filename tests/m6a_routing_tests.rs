@@ -282,6 +282,53 @@ async fn a_plain_write_over_a_closed_inherited_belief_writes_a_version_and_no_cu
     );
 }
 
+/// The version statement's payload columns bind in its column order: `extra`
+/// at the seventh placeholder, `embedding_model` at the eighth. Pinned with
+/// non-NULL values at both — the first M6-a draft had them swapped and every
+/// fixture held NULL, so the tests could not see the wrong wiring. Same law
+/// the column order's own comment carries ([D-283]/[D-278] for the
+/// COALESCE-preserve: an omission is "leave as it is", and the column the
+/// omission reads must be the column the list names).
+#[tokio::test]
+async fn a_version_rows_payload_columns_bind_in_the_statement_order() {
+    let harness = TestHarness::new();
+    let db = forked_store(&harness, "pay").await;
+    let view = db.view(BranchId::new("b0").unwrap());
+
+    tick().await;
+    view.upsert_concept(
+        ConceptUpsert::new("pay", "the branch's kind")
+            .supersede(true)
+            .valid_from(T4)
+            .valid_to(FOREVER)
+            .embedding_model("jina-v3")
+            .extra("{\"lang\":\"de\",\"tone\":\"formal\"}"),
+    )
+    .await
+    .unwrap();
+
+    let mut rows = db
+        .read_conn()
+        .query(
+            "SELECT extra, embedding_model FROM concept_versions \
+             WHERE id = 'pay' AND branch_id = 'b0' AND valid_from = ?1",
+            libsql::params![T4],
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().expect("the version row");
+    assert_eq!(
+        row.get::<String>(0).unwrap(),
+        "{\"lang\":\"de\",\"tone\":\"formal\"}",
+        "the seventh placeholder is `extra`, in the column list's order"
+    );
+    assert_eq!(
+        row.get::<String>(1).unwrap(),
+        "jina-v3",
+        "the eighth placeholder is `embedding_model`, in the column list's order"
+    );
+}
+
 /// `retired` on an inherited id is the branch's retirement of the
 /// inheritance: a cut row at the named instant, no version row. From there
 /// on the id resolves absent on this lineage whatever its versions do — the
