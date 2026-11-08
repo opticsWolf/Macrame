@@ -1023,6 +1023,15 @@ pub(crate) enum LowPriCommand {
         chunk: Vec<(String, Vec<f32>)>,
         responder: oneshot::Sender<Result<ChunkOutcome>>,
     },
+    /// One chunk of version vectors for one model (0.22.0, M6-c, Amendment 2
+    /// SS5.4 cost 3b) - the trunk variant's shape with the version trio for
+    /// a key, and the same Doctrine VII reasoning about priority: bulk
+    /// derived work, always yieldable to an interactive assertion.
+    UpsertVersionEmbeddingChunk {
+        model: ModelName,
+        chunk: Vec<(String, String, String, Vec<f32>)>,
+        responder: oneshot::Sender<Result<ChunkOutcome>>,
+    },
     /// Drop a model's DiskANN index — bulk-embedding setup (D-276).
     ///
     /// Low priority like the chunk it serves: it is a caller's bulk load that
@@ -4454,6 +4463,48 @@ impl Database {
         .await
     }
 
+    /// Store or replace the vector of an overlay VERSION row, chunked
+    /// (0.22.0, M6-c, [Amendment 2](../docs/Macrame%20Update%20Plan%20v0.22.0%20-%20Amendment%202.md)
+    /// SS5.4 cost 3b).
+    ///
+    /// The key is `(concept_id, branch_id, valid_from)` - the identity the
+    /// fold channels and the version FTS shadow key by - and the write is
+    /// the caller's because the crate does not host models (Doctrine
+    /// VII): the vector must be of the version's own text, which the
+    /// caller computes. A row is addressed by its version pair and a
+    /// re-embedding replaces it, so this is idempotent in exactly the way
+    /// `upsert_embeddings` is.
+    ///
+    /// Low priority and chunked like the trunk's embedding write, for the
+    /// reason its doc gives: bulk derived work yields to interactive
+    /// assertions at every chunk boundary. It is chunked by the same
+    /// `chunk_rows::EMBEDDINGS` budget, because a version vector is the
+    /// same kind of row the DiskANN index maintenance prices.
+    ///
+    /// Fails with [`DbError::ModelNotRegistered`] when the model has no
+    /// tables and [`DbError::DimMismatch`] on a wrong length, the same
+    /// inventory the trunk's writer raises.
+    ///
+    /// [`DbError::ModelNotRegistered`]: crate::error::DbError::ModelNotRegistered
+    /// [`DbError::DimMismatch`]: crate::error::DbError::DimMismatch
+    pub async fn upsert_version_embeddings(
+        &self,
+        model: &ModelName,
+        rows: Vec<(String, String, String, Vec<f32>)>,
+    ) -> BulkResult<usize> {
+        self.low_chunked(
+            rows,
+            chunk_rows::EMBEDDINGS,
+            BulkControl::new(),
+            |chunk, responder| LowPriCommand::UpsertVersionEmbeddingChunk {
+                model: model.clone(),
+                chunk,
+                responder,
+            },
+        )
+        .await
+    }
+
     /// Load embeddings **without the DiskANN index in the way**, then rebuild
     /// it in one pass (D-276, plan §9.1).
     ///
@@ -6718,6 +6769,13 @@ impl LowPriCommand {
             LowPriCommand::WriteConceptsChunk { .. } => K::WriteConceptsChunk,
             LowPriCommand::WriteAnalyticsChunk { .. } => K::WriteAnalyticsChunk,
             LowPriCommand::UpsertEmbeddingChunk { .. } => K::UpsertEmbeddingChunk,
+            // The version twin (0.22.0, M6-c) reports under the same kind on
+            // purpose: it is the same operation class of the same surfaces
+            // (a derived-artifact bulk write against a DiskANN index), so
+            // budget attribution and the T1.4 counters see one thing. A new
+            // `CommandKind` would be an additive enum variant spent on
+            // nothing the operator could act on differently.
+            LowPriCommand::UpsertVersionEmbeddingChunk { .. } => K::UpsertEmbeddingChunk,
             LowPriCommand::DropEmbeddingIndex { .. } => K::DropEmbeddingIndex,
             LowPriCommand::RebuildEmbeddingIndex { .. } => K::RebuildEmbeddingIndex,
             LowPriCommand::BulkImportChunk { .. } => K::BulkImportChunk,
@@ -6786,6 +6844,23 @@ impl LowPriCommand {
                     write_edges_atomic(state, conn, &chunk, &stamp).await,
                 );
             }
+            LowPriCommand::UpsertVersionEmbeddingChunk {
+                model,
+                chunk,
+                responder,
+            } => {
+                // No clock reading, like the trunk twin: an embedding
+                // carries no timestamp on either axis. It is a derived
+                // artifact of a model applied to the version's own text
+                // (Doctrine VII), and the ledger already records when the
+                // content changed.
+                turn.answer_chunk(
+                    responder,
+                    crate::vector::search::upsert_version_embedding_chunk(conn, &model, &chunk)
+                        .await,
+                );
+            }
+
             LowPriCommand::LinksCurrentMirror { present, responder } => {
                 // Schema work on the actor's own connection, like
                 // RegisterModel and the embedding-index pair: the

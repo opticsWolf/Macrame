@@ -27,8 +27,17 @@ const MAX_MODEL_NAME: usize = 48;
 
 impl ModelName {
     /// Validate `raw` as a model name, or explain why it is not one.
+    ///
+    /// One suffix is reserved (0.22.0, M6-c): a name ending in `_versions`
+    /// would put a trunk table and a version pool in one walk —
+    /// `embeddings_a_versions` is `a`'s version pool, so naming a model
+    /// `a_versions` would collide. Refusing the near-miss keeps `a`'s
+    /// registration and `a_versions`'s impossible-at-the-same-time.
     pub fn new(raw: impl AsRef<str>) -> Result<Self> {
         let raw = raw.as_ref();
+        if raw.ends_with("_versions") {
+            return Err(DbError::InvalidModelName(raw.to_string()));
+        }
         let invalid = || DbError::InvalidModelName(raw.to_string());
 
         if raw.is_empty() || raw.len() > MAX_MODEL_NAME {
@@ -54,12 +63,39 @@ impl ModelName {
         format!("embeddings_{}", self.0)
     }
 
+    /// The per-model *version* embedding table, `embeddings_<model>_versions`
+    /// (0.22.0, M6-c, Amendment 2 §5.4 cost 3b).
+    ///
+    /// `{model}_embeddings` is keyed `concept_id PRIMARY KEY`, so a branch
+    /// version's text is scored with the trunk's vector unless the version has
+    /// a row of its own. The version table's identity is the fold channels'
+    /// identity — `(id, branch_id, valid_from)` — one row per version pair
+    /// the caller has embedded. Same spelling reasoning as [`ModelName::table`]: the
+    /// suffix is the validated name with separators laid out up front, so the
+    /// table name cannot collide with a ledger object that belongs to
+    /// something else.
+    pub fn version_table(&self) -> String {
+        format!("embeddings_{}_versions", self.0)
+    }
+
     /// The DiskANN index over that table's vector column.
     ///
     /// Named, and named predictably, because `vector_top_k` takes the index by
     /// name as a string argument rather than resolving one from the query plan.
     pub fn index(&self) -> String {
         format!("idx_embeddings_{}_vec", self.0)
+    }
+
+    /// The DiskANN index over the version table's vector column, for the same
+    /// reason [`ModelName::index`] is named; the two names differ by suffix so a bulk
+    /// load's drop/rebuild cannot touch the other pool.
+    pub fn version_index(&self) -> String {
+        format!("idx_embeddings_{}_versions_vec", self.0)
+    }
+
+    /// The unique key over the version identity, created with the table.
+    pub fn version_key(&self) -> String {
+        format!("idx_embeddings_{}_versions_key", self.0)
     }
 }
 
@@ -95,7 +131,8 @@ mod tests {
             "nomic;",
             "nomic(1)",
             "concepts\" --",
-            "näh", // non-ASCII
+            "näh",            // non-ASCII
+            "nomic_versions", // the reserved version-pool suffix (M6-c)
         ] {
             assert!(
                 matches!(ModelName::new(bad), Err(DbError::InvalidModelName(_))),
@@ -113,6 +150,18 @@ mod tests {
         let m = ModelName::new("nomic_v1").unwrap();
         assert_eq!(m.table(), "embeddings_nomic_v1");
         assert_eq!(m.index(), "idx_embeddings_nomic_v1_vec");
+    }
+
+    /// The derived identifiers are what actually reaches SQL, so assert their
+    /// exact spelling rather than just the name they were built from — the
+    /// version family included, since its suffix is what keeps a bulk load's
+    /// drop/rebuild from touching the other pool.
+    #[test]
+    fn derives_the_version_family_identifiers() {
+        let m = ModelName::new("nomic_v1").unwrap();
+        assert_eq!(m.version_table(), "embeddings_nomic_v1_versions");
+        assert_eq!(m.version_index(), "idx_embeddings_nomic_v1_versions_vec");
+        assert_eq!(m.version_key(), "idx_embeddings_nomic_v1_versions_key");
     }
 
     /// A model table must never be able to collide with a ledger table, or

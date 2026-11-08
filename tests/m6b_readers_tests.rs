@@ -863,9 +863,20 @@ async fn vector_fixture(harness: &TestHarness) -> (std::sync::Arc<Database>, Bra
     (db, BranchId::new("b0").unwrap())
 }
 
-/// The branch's traversal-candidate vector search keeps `c02`: its own rows
-/// answer, and the trunk's late retirement of it is a different lineage's
-/// row the caps never show.
+/// The branch's traversal-candidate vector search: the walk's own rows
+/// answer over the mint's late retirement — the candidate set culls exactly
+/// like the content readers — AND, since M6-c (the amendment's §5.4 cost
+/// 3b), a version-resolved id is scored by **its own pair's vector**, not
+/// the mint's: a version whose text changed has a different meaning, and
+/// ranking it by the trunk's embedding is the wrong-text defect the cost
+/// row names. So the story's two halves:
+///
+/// - the pair with no vector of its own is **not a vector result** (the
+///   trunk's row is dropped because the id resolves elsewhere — the same
+///   absence Doctrine VII gives any concept whose embedding has not been
+///   derived yet);
+/// - once the caller embeds the version (Doctrine VII's caller-driven
+///   shape), the pair is a result, scored by that vector.
 #[tokio::test]
 async fn a_traversal_vector_filter_keeps_what_the_branch_resolves() {
     let harness = TestHarness::new();
@@ -898,6 +909,36 @@ async fn a_traversal_vector_filter_keeps_what_the_branch_resolves() {
 
     let m = ModelName::new("r_v1").unwrap();
     let search = FilteredVectorSearch::new(
+        m.clone(),
+        vec![1.0, 0.0],
+        TraversalBuilder::new("a")
+            .max_depth(1)
+            .on_branch(b0.clone()),
+    )
+    .top_k(3)
+    .execute(db.read_conn(), TS)
+    .await
+    .unwrap();
+    let ids: Vec<String> = search.iter().map(|r| r.concept_id.clone()).collect();
+    assert!(
+        !ids.contains(&"c02".to_string()),
+        "a version-resolved id without a version vector is not a vector result: {ids:?}"
+    );
+
+    // Embed the version. The pair is now a result — and because the query
+    // direction is the version's own vector, it ranks first.
+    db.upsert_version_embeddings(
+        &m,
+        vec![(
+            "c02".to_string(),
+            "b0".to_string(),
+            T5.to_string(),
+            vec![1.0, 0.0],
+        )],
+    )
+    .await
+    .unwrap();
+    let search = FilteredVectorSearch::new(
         m,
         vec![1.0, 0.0],
         TraversalBuilder::new("a").max_depth(1).on_branch(b0),
@@ -906,10 +947,17 @@ async fn a_traversal_vector_filter_keeps_what_the_branch_resolves() {
     .execute(db.read_conn(), TS)
     .await
     .unwrap();
+    let first = &search[0];
+    assert_eq!(
+        first.concept_id, "c02",
+        "the branch's own c02, scored by its own vector, ranks first"
+    );
+    // The trunk's late retirement never hid a route: the candidate set
+    // resolved through the walk, which is why c02 is scored at all.
     let ids: Vec<String> = search.iter().map(|r| r.concept_id.clone()).collect();
     assert!(
-        ids.contains(&"c02".to_string()),
-        "the branch's own c02 stays in the answer: {ids:?}"
+        ids.contains(&"c00".to_string()) || ids.contains(&"c01".to_string()),
+        "the rest of the branch's candidates still answer: {ids:?}"
     );
 }
 

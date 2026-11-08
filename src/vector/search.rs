@@ -125,6 +125,119 @@ pub(crate) async fn upsert_embedding_chunk(
     }
 }
 
+/// Store the vector of ONE overlay version row (0.22.0, M6-c, Amendment 2
+/// §5.4 cost 3b): keyed by `(concept_id, branch_id, valid_from)`, the fold
+/// channels' identity, so a re-derived vector of the same version replaces
+/// its row instead of doubling it (the unique key the register created).
+///
+/// Doctrine VII is unchanged and it is the whole point: an embedding is
+/// derived from content, *and a version is content*. The caller embeds the
+/// version's own text, which is why the caller-driven shape of
+/// `upsert_embedding` is kept rather than any trigger-time derivation -
+/// the crate does not host models (Doctrine VII's reasoning about where
+/// the vector comes from), so a knock-on vector at write time would be
+/// the trunk's, which is exactly the defect the cost row names.
+///
+/// Like the trunk's twin this touches no ledger and no log; there are no
+/// triggers on the version table.
+///
+/// # Prefer `Database::upsert_version_embeddings`
+///
+/// A bare connection is SS4.7 invariant 2's third hole, hidden from the
+/// docs alongside `raw` (D-091) for the trunk twin's own reason.
+///
+/// [`DbError::DimMismatch`]: crate::error::DbError::DimMismatch
+#[doc(hidden)]
+pub async fn upsert_version_embedding(
+    conn: &libsql::Connection,
+    model: &ModelName,
+    concept_id: &str,
+    branch_id: &str,
+    valid_from: &str,
+    vector: &[f32],
+) -> Result<()> {
+    let blob = encode_for_model(conn, model, vector).await?;
+
+    // `model.version_table()` is a bare identifier by construction; the
+    // values bind.
+    conn.execute(
+        &format!(
+            "INSERT INTO {table} (id, branch_id, valid_from, embedding) \
+             VALUES (?1, ?2, ?3, ?4) \
+             ON CONFLICT(id, branch_id, valid_from) DO UPDATE SET \
+                 embedding = excluded.embedding",
+            table = model.version_table()
+        ),
+        libsql::params![concept_id, branch_id, valid_from, blob],
+    )
+    .await?;
+    Ok(())
+}
+
+/// Store or replace one chunk of VERSION vectors for a model, in one
+/// transaction (0.22.0, M6-c). The trunk twin's chunk discipline, carried
+/// over: the dimension resolved once per chunk, the statement prepared
+/// once, the rows reset-then-bound. What differs is the key the conflict
+/// clause names - the trio the fold channels key by, not a `concept_id`
+/// alone - which is what makes the same version's re-embedding a
+/// replacement.
+pub(crate) async fn upsert_version_embedding_chunk(
+    conn: &libsql::Connection,
+    model: &ModelName,
+    rows: &[(String, String, String, Vec<f32>)],
+) -> Result<usize> {
+    if rows.is_empty() {
+        return Ok(0);
+    }
+
+    let dim = declared_dimension(conn, model).await?;
+    let sql = format!(
+        "INSERT INTO {table} (id, branch_id, valid_from, embedding) VALUES (?1, ?2, ?3, ?4) \
+         ON CONFLICT(id, branch_id, valid_from) DO UPDATE SET \
+             embedding = excluded.embedding",
+        table = model.version_table()
+    );
+
+    let tx = conn
+        .transaction_with_behavior(libsql::TransactionBehavior::Immediate)
+        .await?;
+
+    // Prepared once per chunk, for the same reason the dimension is resolved once
+    // per chunk and the same reason the edge chunk hoists its insert (D-056).
+    let stmt = tx.prepare(&sql).await?;
+
+    let res: Result<()> = async {
+        for (concept_id, branch_id, valid_from, vector) in rows {
+            let blob = EmbeddingCodec::encode(vector, dim, model.as_str())?;
+            stmt.reset();
+            stmt.execute(libsql::params![
+                concept_id.as_str(),
+                branch_id.as_str(),
+                valid_from.as_str(),
+                blob
+            ])
+            .await?;
+        }
+        Ok(())
+    }
+    .await;
+
+    // Dropped before either arm ends the transaction: a live statement on the
+    // connection is what makes SQLite refuse to commit or roll back.
+    drop(stmt);
+
+    match res {
+        Ok(()) => {
+            tx.commit().await?;
+            Ok(rows.len())
+        }
+        Err(e) => {
+            let _ = tx.rollback().await;
+            Err(e)
+        }
+    }
+}
+
 /// **The visibility predicate every vector read applies** (0.13.18, W9.3,
 /// [D-191](../../docs/architecture/s13-decision-register.md#d-191)).
 ///
@@ -336,6 +449,33 @@ pub async fn search_vector_on(
         Some(b) => crate::graph::concept_lineage::scope_for(conn, Some(b)).await?,
         None => None,
     };
+    // The overlay's switch, M6-c style (0.22.0, [Amendment 2]
+    // (../docs/Macrame%20Update%20Plan%20v0.22.0%20-%20Amendment%202.md)
+    // §5.4 costs 3 and 3b): the version pool and the resolution drop run
+    // only on a forked ledger that has said something in the overlay. A
+    // never-forked database, and a forked one with nothing versioned yet,
+    // run the statement below byte for byte as it was issued in 0.13.19.
+    let engaged: Option<Vec<crate::graph::lineage::Ancestor>> = match &scope {
+        Some(ancestry) if crate::graph::concept_lineage::overlay_engaged(conn).await? => {
+            Some(ancestry.clone())
+        }
+        _ => None,
+    };
+
+    if let Some(ancestry) = &engaged {
+        return search_vector_on_overlay(
+            conn,
+            &blob,
+            model,
+            top_k,
+            as_of_valid,
+            half_life,
+            want,
+            ancestry,
+        )
+        .await;
+    }
+
     let (with, source) = match &scope {
         None => (String::new(), "concepts"),
         Some(ancestry) => (
@@ -423,6 +563,254 @@ pub async fn search_vector_on(
     }
 }
 
+/// `search_vector_on`'s engaged half (0.22.0, M6-c, [Amendment 2]
+/// (../docs/Macrame%20Update%20Plan%20v0.22.0%20-%20Amendment%202.md) §5.4
+/// costs 3 and 3b).
+///
+/// Two pools answer a branch query now: the trunk index's `vector_top_k`
+/// (the mint vectors the file has always held), and the version pool's own
+/// `vector_top_k` over `embeddings_<m>_versions` — a version's text is
+/// content under Doctrine VII, so a version has its own vector once the
+/// caller embedded it, and scoring it with the trunk's row is the
+/// wrong-text defect cost 3b names. The union is then judged by resolution
+/// (the walk, M6-b's): a trunk-pool hit whose id resolves to a version is
+/// the wrong-text hit; a version-pool hit whose id resolves to another
+/// version is likewise; ids resolved absent are dropped from both. At most
+/// one hit per id survives — the two arm-keeping predicates are exclusive
+/// by the law that judges them.
+///
+/// The escalation is the trunk one's, deepened by version rows: `k'`
+/// doubles until every visible neighbour the two indexes hold is in the
+/// pool, which is where `k'` at the larger of the two row counts says
+/// closer to exhaustion than the trunk count alone did. Termination is by
+/// exhaustion, as it has been.
+///
+/// The decay pool's valid_from is the **resolved** row's window start in
+/// both arms — a version's own start on the version pool, the mint row's
+/// on the trunk pool — which is the same number each row carried before
+/// the union existed.
+// The overlay arm's signature is deliberately the trunk arm's shape plus the
+// ancestry: call sites pass every arg positionally, and a struct to carry
+// them would exist for two call sites and put a name between the statement
+// and the params it already spells out.
+#[allow(clippy::too_many_arguments)]
+async fn search_vector_on_overlay(
+    conn: &libsql::Connection,
+    blob: &[u8],
+    model: &ModelName,
+    top_k: usize,
+    as_of_valid: Option<&str>,
+    half_life: Option<Duration>,
+    want: usize,
+    ancestry: &[crate::graph::lineage::Ancestor],
+) -> Result<Vec<VectorSearchResult>> {
+    let reference = match half_life {
+        Some(_) => as_of_valid,
+        None => None,
+    };
+    // The trunk arm: the same statement the unengaged path issues, WITH
+    // list and all (D-303's state-rule probe included, for the same §3.2
+    // shape reason its caller cites).
+    let with = format!(
+        "WITH {} ",
+        crate::graph::concept_lineage::versions_cte(
+            ancestry.len(),
+            4 + usize::from(as_of_valid.is_some()),
+            None,
+            "",
+            crate::temporal::replay::state_rule_owed(conn).await?,
+        )
+    );
+    let trunk_sql = format!(
+        "{with}SELECT e.concept_id, vector_distance_cos(e.embedding, ?1), c.valid_from
+           FROM vector_top_k('{index}', ?1, ?2) AS t
+           JOIN {table} AS e ON e.rowid = t.id
+           JOIN concept_versions AS c ON c.id = e.concept_id
+          WHERE {visible}
+          ORDER BY 2 ASC
+          LIMIT ?3",
+        index = model.index(),
+        table = model.table(),
+        visible = visible_concept(as_of_valid.map(|_| 4)),
+    );
+    // The version arm: the index the register built beside the trunk's, so
+    // the same `vector_top_k` shape answers in the same budget class. Nothing
+    // else joins it: the resolution drop judges the pairs, not a view.
+    let version_sql = format!(
+        "SELECT ve.id, vector_distance_cos(ve.embedding, ?1), ve.branch_id, ve.valid_from
+           FROM vector_top_k('{index}', ?1, ?2) AS t
+           JOIN {table} AS ve ON ve.rowid = t.id
+          ORDER BY 2 ASC
+          LIMIT ?3",
+        index = model.version_index(),
+        table = model.version_table(),
+    );
+
+    let mut k_prime = want;
+    let mut indexed: Option<usize> = None;
+    let mut version_rows: Option<usize> = None;
+
+    loop {
+        // The trunk pool.
+        let mut params: Vec<libsql::Value> = vec![
+            blob.to_vec().into(),
+            (k_prime as i64).into(),
+            (want as i64).into(),
+        ];
+        if let Some(instant) = as_of_valid {
+            params.push(instant.into());
+        }
+        params.extend(crate::graph::lineage::ancestry_params(ancestry));
+        let mut trunk_hits: Vec<VectorSearchResult> = Vec::new();
+        {
+            let mut rows = conn.query(&trunk_sql, params).await?;
+            while let Some(row) = rows.next().await? {
+                trunk_hits.push(VectorSearchResult {
+                    concept_id: row.get(0)?,
+                    score: row.get::<f64>(1)? as f32,
+                });
+            }
+        }
+
+        // The version pool. A version without a row here is not a vector
+        // result, the same honesty `search_vector` gives a concept without
+        // one (Doctrine VII: absence means the derived artifact was not
+        // written, not that the belief is unreachable).
+        let mut version_hits: Vec<(String, String, VectorSearchResult)> = Vec::new();
+        {
+            let params: Vec<libsql::Value> = vec![
+                blob.to_vec().into(),
+                (k_prime as i64).into(),
+                (want as i64).into(),
+            ];
+            let mut rows = conn.query(&version_sql, params).await?;
+            while let Some(row) = rows.next().await? {
+                version_hits.push((
+                    row.get::<String>(2)?,
+                    row.get::<String>(3)?,
+                    VectorSearchResult {
+                        concept_id: row.get(0)?,
+                        score: row.get::<f64>(1)? as f32,
+                    },
+                ));
+            }
+        }
+
+        // The resolution drop: one walk over the union's id set; each hit is
+        // kept only when the resolution is the text/vector the hit carries
+        // (§5.4's cost-3 sentence: "drops every hit whose id resolves to a
+        // different version or to absent").
+        let mut asked: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for hit in trunk_hits.iter() {
+            asked.insert(hit.concept_id.clone());
+        }
+        for (id, _, _) in version_hits.iter() {
+            asked.insert(id.clone());
+        }
+        let ids: Vec<String> = asked.into_iter().collect();
+        let (answers, _absent) =
+            crate::graph::concept_lineage::rows_on(conn, &ids, ancestry, None, as_of_valid).await?;
+
+        let mut pool: Vec<(VectorSearchResult, Option<String>)> = Vec::new();
+        for hit in trunk_hits {
+            // A trunk-pool hit is the mint's vector: it survives only where
+            // the walk answers with the mint's row.
+            if let Some(ans) = answers.get(hit.concept_id.as_str()) {
+                if !ans.versioned {
+                    pool.push((hit, ans.valid_from.clone()));
+                }
+            }
+        }
+        for (branch_id, valid_from, hit) in version_hits {
+            // A version-pool hit is that pair's vector: it survives only
+            // where the walk answers with that pair.
+            if let Some(ans) = answers.get(hit.concept_id.as_str()) {
+                if ans.versioned
+                    && ans.branch_id == branch_id
+                    && ans.valid_from.as_deref() == Some(valid_from.as_str())
+                {
+                    let base = ans.valid_from.clone();
+                    pool.push((hit, base));
+                }
+            }
+        }
+
+        if pool.len() >= want {
+            return finalize_pool(pool, reference, half_life, top_k);
+        }
+
+        // The pools' caps, read at most once each and only on the escalating
+        // path: the trunk arm's index count, and the version table's row
+        // count, as `vector_top_k` already asks by `k'`.
+        let n1 = match &indexed {
+            Some(n) => *n,
+            None => {
+                let n = indexed_rows(conn, model).await?;
+                indexed = Some(n);
+                n
+            }
+        };
+        let n2 = match &version_rows {
+            Some(n) => *n,
+            None => {
+                let n = version_row_count(conn, model).await?;
+                version_rows = Some(n);
+                n
+            }
+        };
+        // Each arm has been asked for at least its own count, so what the two
+        // pools hold is every visible neighbour there is.
+        if k_prime >= n1.max(n2) {
+            return finalize_pool(pool, reference, half_life, top_k);
+        }
+        k_prime = k_prime.saturating_mul(2).min(n1.max(n2));
+    }
+}
+
+/// Order a merged pool, cut it to the answer, decay where the caller asked.
+///
+/// The merged pool arrives with both arms' rows at a `LIMIT` this function no
+/// longer trusts, so the identity case orders by (score, id) itself — the
+/// ordering the single-arm SQL did `ORDER BY 2 ASC` — and truncates. The
+/// decay case delegates to `rank_by_age`, which already does both.
+fn finalize_pool(
+    pool: Vec<(VectorSearchResult, Option<String>)>,
+    reference: Option<&str>,
+    half_life: Option<Duration>,
+    top_k: usize,
+) -> Result<Vec<VectorSearchResult>> {
+    if reference.is_none() || half_life.is_none() {
+        let mut out: Vec<VectorSearchResult> = pool.into_iter().map(|(h, _)| h).collect();
+        out.sort_by(|a, b| {
+            a.score
+                .partial_cmp(&b.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.concept_id.cmp(&b.concept_id))
+        });
+        out.truncate(top_k);
+        return Ok(out);
+    }
+    rank_by_age(pool, reference, half_life, top_k)
+}
+
+/// The version pool's row count, the escalation cap's second half.
+///
+/// One `COUNT(*)` over the version table, read at most once per search and
+/// only on the escalating path — the same economy `indexed_rows` keeps, and
+/// the reason the count is here rather than a registry: D-005's non-registry
+/// is a fact about this crate, and the table plus its F32_BLOB declaration
+/// is the registry the schema itself maintains.
+async fn version_row_count(conn: &libsql::Connection, model: &ModelName) -> Result<usize> {
+    let sql = format!("SELECT COUNT(*) FROM {}", model.version_table());
+    let mut rows = conn.query(&sql, ()).await?;
+    let n: i64 = rows
+        .next()
+        .await?
+        .map(|r| r.get(0))
+        .transpose()?
+        .unwrap_or(0);
+    Ok(n.max(0) as usize)
+}
 /// Apply decay to a retrieved pool, reorder, and cut it to `top_k`.
 ///
 /// With no half-life this is the identity but for the truncation, and the

@@ -11,5 +11,6 @@ pub use hybrid::{
 pub use model::ModelName;
 pub use registry::{declared_dimension, register_model, registered_models};
 pub use search::{
-    reciprocal_rank_fusion, search_vector, search_vector_on, upsert_embedding, VectorSearchResult,
+    reciprocal_rank_fusion, search_vector, search_vector_on, upsert_embedding,
+    upsert_version_embedding, VectorSearchResult,
 };

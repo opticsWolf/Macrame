@@ -46,6 +46,8 @@
 //! every query, for every graph. Strategy is then a performance decision and
 //! nothing else, which is the only form in which a planner is safe.
 
+use std::collections::HashMap;
+
 use crate::error::{DbError, Result};
 use crate::graph::builder::TraversalBuilder;
 use crate::vector::{declared_dimension, ModelName, VectorSearchResult};
@@ -390,6 +392,10 @@ impl FilteredVectorSearch {
                     }
                 }
             };
+        // The resolution answers, threaded into the pre-filter so a
+        // version-resolved candidate is scored from the version table its
+        // pair lives in (0.22.0, M6-c).
+        let mut resolved: Option<HashMap<String, crate::graph::concept_lineage::ConceptRow>> = None;
         let candidates: Vec<String> = match &engaged {
             None => candidates,
             Some(ancestry) => {
@@ -401,6 +407,7 @@ impl FilteredVectorSearch {
                     self.traversal.as_of_valid.as_deref(),
                 )
                 .await?;
+                resolved = Some(held.clone());
                 candidates
                     .iter()
                     .filter(|id| !held.contains_key(id.as_str()) || !held[id.as_str()].retired)
@@ -414,7 +421,7 @@ impl FilteredVectorSearch {
 
         let results = match estimate.strategy {
             VectorFilterStrategy::PreFilterCTE => {
-                self.run_pre_filter(conn, &candidates, engaged.as_deref())
+                self.run_pre_filter(conn, &candidates, engaged.as_deref(), resolved.as_ref())
                     .await?
             }
             VectorFilterStrategy::PostFilter => {
@@ -431,7 +438,7 @@ impl FilteredVectorSearch {
                         k_prime = estimate.k_prime,
                         "post-filter saturated and short; escalating to PreFilterCTE"
                     );
-                    self.run_pre_filter(conn, &candidates, engaged.as_deref())
+                    self.run_pre_filter(conn, &candidates, engaged.as_deref(), resolved.as_ref())
                         .await?
                 } else {
                     rows
@@ -554,6 +561,7 @@ impl FilteredVectorSearch {
         conn: &libsql::Connection,
         candidates: &[String],
         engaged: Option<&[crate::graph::lineage::Ancestor]>,
+        resolved: Option<&HashMap<String, crate::graph::concept_lineage::ConceptRow>>,
     ) -> Result<Vec<VectorSearchResult>> {
         let blob = self.encoded_query(conn).await?;
         let at = self.traversal.as_of_valid.as_deref();
@@ -565,43 +573,119 @@ impl FilteredVectorSearch {
         // interpolated — is the injection shape D-039 removed from the traversal
         // CTE, and it is not reintroduced here for a read path either.
         const IDS_PER_STATEMENT: usize = 500;
+        // The version pairs go through their own statement, three bound
+        // slots a row - so their chunk is a third of the size the ids get,
+        // keeping the placeholder budget the constant bound owns (0.22.0,
+        // M6-c, [Amendment 2](../docs/Macrame%20Update%20Plan%20v0.22.0%20-%20Amendment%202.md)
+        // §5.4 cost 3b).
+        const PAIRS_PER_STATEMENT: usize = 166;
         for chunk in candidates.chunks(IDS_PER_STATEMENT) {
-            let placeholders: Vec<String> =
-                (0..chunk.len()).map(|i| format!("?{}", i + 2)).collect();
-            let sql = format!(
-                "SELECT e.concept_id, vector_distance_cos(e.embedding, ?1)
-                   FROM {table} AS e
-                   JOIN concepts AS c ON c.id = e.concept_id
-                  WHERE e.concept_id IN ({ids})
-                    AND {visible}
-                  ORDER BY 2 ASC
-                  LIMIT {k}",
-                table = self.model.table(),
-                ids = placeholders.join(", "),
-                // Engaged, the walk has answered retirement and the window
-                // for every surviving id, so the join's own predicate stays
-                // out of the way: the join couples the embedding rows to ids
-                // the walk already decided, and that answer outranks it.
-                visible = if engaged.is_some() {
-                    "1".to_string()
-                } else {
-                    crate::vector::search::visible_concept(at.map(|_| chunk.len() + 2))
-                },
-                k = self.top_k,
-            );
+            // Engaged, the chunk splits by what the resolution answered:
+            // the mint-answered ids score from the trunk table's rows, the
+            // version-answered pairs score from the version table rows
+            // their pair names. A version answer whose pair has no vector
+            // row is like a concept with no embedding: absence means the
+            // derived artifact was not written (Doctrine VII), not that
+            // the belief is unreachable.
+            let (mint_ids, version_pairs): (Vec<&String>, Vec<(String, String, String)>) =
+                match resolved {
+                    None => (chunk.iter().collect(), Vec::new()),
+                    Some(answers) => {
+                        let mut mint = Vec::with_capacity(chunk.len());
+                        let mut pairs = Vec::new();
+                        for id in chunk {
+                            match answers.get(id.as_str()) {
+                                // The walk answered mint: the vector is the
+                                // trunk row's, and the version table must
+                                // not be asked for it.
+                                Some(r) if !r.versioned => mint.push(id),
+                                Some(r) => pairs.push((
+                                    id.clone(),
+                                    r.branch_id.clone(),
+                                    r.valid_from
+                                        .clone()
+                                        .expect("a version row always carries its start"),
+                                )),
+                                // Not answered (the vector filter's
+                                // candidates were culled by resolution
+                                // before the walk was asked - rows_on
+                                // answered nothing): the trunk row keeps
+                                // answering, the way the disengaged path
+                                // does.
+                                None => mint.push(id),
+                            }
+                        }
+                        (mint, pairs)
+                    }
+                };
 
-            let mut params: Vec<libsql::Value> = vec![blob.clone().into()];
-            params.extend(chunk.iter().map(|id| id.as_str().into()));
-            if let Some(t) = at {
-                params.push(t.into());
+            if !mint_ids.is_empty() {
+                let placeholders: Vec<String> =
+                    (0..mint_ids.len()).map(|i| format!("?{}", i + 2)).collect();
+                let sql = format!(
+                    "SELECT e.concept_id, vector_distance_cos(e.embedding, ?1)
+                       FROM {table} AS e
+                       JOIN concepts AS c ON c.id = e.concept_id
+                      WHERE e.concept_id IN ({ids})
+                        AND {visible}
+                      ORDER BY 2 ASC
+                      LIMIT {k}",
+                    table = self.model.table(),
+                    ids = placeholders.join(", "),
+                    // Engaged, the walk has answered retirement and the
+                    // window for every surviving id, so the join's own
+                    // predicate stays out of the way: the join couples the
+                    // embedding rows to ids the walk already decided, and
+                    // that answer outranks it.
+                    visible = if engaged.is_some() {
+                        "1".to_string()
+                    } else {
+                        crate::vector::search::visible_concept(at.map(|_| chunk.len() + 2))
+                    },
+                    k = self.top_k,
+                );
+
+                let mut params: Vec<libsql::Value> = vec![blob.clone().into()];
+                params.extend(mint_ids.iter().map(|id| id.as_str().into()));
+                if let Some(t) = at {
+                    params.push(t.into());
+                }
+
+                let mut rows = conn.query(&sql, params).await?;
+                while let Some(row) = rows.next().await? {
+                    out.push(VectorSearchResult {
+                        concept_id: row.get(0)?,
+                        score: row.get::<f64>(1)? as f32,
+                    });
+                }
             }
 
-            let mut rows = conn.query(&sql, params).await?;
-            while let Some(row) = rows.next().await? {
-                out.push(VectorSearchResult {
-                    concept_id: row.get(0)?,
-                    score: row.get::<f64>(1)? as f32,
-                });
+            // The version pairs, three slots a row: exact distances, the
+            // pre-filter's whole reason, now over the pool the branch owns.
+            for pair_chunk in version_pairs.chunks(PAIRS_PER_STATEMENT) {
+                let tuples: Vec<String> =
+                    pair_chunk.iter().map(|_| "(?, ?, ?)".to_string()).collect();
+                let sql = format!(
+                    "SELECT e.id, vector_distance_cos(e.embedding, ?1)
+                       FROM {table} AS e
+                      WHERE (e.id, e.branch_id, e.valid_from) IN ({tuples})",
+                    table = self.model.version_table(),
+                    tuples = tuples.join(", "),
+                );
+                let mut params: Vec<libsql::Value> = vec![blob.clone().into()];
+                for (id, branch, valid_from) in pair_chunk.iter() {
+                    params.push(id.as_str().into());
+                    params.push(branch.as_str().into());
+                    params.push(valid_from.as_str().into());
+                }
+
+                let mut rows = conn.query(&sql, params).await?;
+                while let Some(row) = rows.next().await? {
+                    out.push(VectorSearchResult {
+                        concept_id: row.get(0)?,
+                        score: row.get::<f64>(1)? as f32,
+                    });
+                }
             }
         }
 

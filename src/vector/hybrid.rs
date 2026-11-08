@@ -171,6 +171,27 @@ pub async fn keyword_search_on(
         Some(b) => crate::graph::concept_lineage::scope_for(conn, Some(b)).await?,
         None => None,
     };
+    // M6-c's switch (0.22.0, [Amendment 2]
+    // (../docs/Macrame%20Update%20Plan%20v0.22.0%20-%20Amendment%202.md)
+    // §5.4 cost 3): the version FTS arm and the resolution drop run on
+    // a forked ledger that has versioned something. Anything else runs
+    // the statement below byte for byte as M5 issued it.
+    if let Some(ancestry) = &scope {
+        if crate::graph::concept_lineage::overlay_engaged(conn).await? {
+            return keyword_search_on_overlay(
+                conn,
+                query,
+                top_k,
+                as_of_valid,
+                half_life,
+                want,
+                reference,
+                ancestry,
+            )
+            .await;
+        }
+    }
+
     let (with, source) = match &scope {
         None => (String::new(), "concepts"),
         Some(ancestry) => (
@@ -233,6 +254,232 @@ pub async fn keyword_search_on(
         out.truncate(top_k);
     }
     Ok(out)
+}
+
+/// `keyword_search_on`'s engaged half (0.22.0, M6-c, [Amendment 2]
+/// (../docs/Macrame%20Update%20Plan%20v0.22.0%20-%20Amendment%202.md) §5.4
+/// cost 3).
+///
+/// Two arms answer a branch keyword query now: `concepts_fts` (the mint text
+/// per id, the file's index), and `concept_versions_fts` — the version pool,
+/// one row per overlay version pair, keyed by `(id, branch_id, valid_from)`
+/// through its shadow. The union alone is not the answer; the drop is:
+/// **every hit whose id resolves (§5.3's walk) to a different version or to
+/// absent is discarded.** A trunk-arm hit is the mint's text, so it survives
+/// only where the walk answers with the mint's row; a version-arm hit is
+/// that pair's text, so it survives only where the walk answers with that
+/// pair. That is the K1 defect's fix: the branch that superseded `x` no
+/// longer returns it under the words it repudiated, and finds it under the
+/// words it asserted.
+///
+/// Two bm25 ranks now share one ordered list. bm25 is scale-free per corpus
+/// but not across corpora, and the arms are different corpora (different
+/// document counts feed the IDF); the reciprocal-rank fusion of
+/// [`HybridSearch`] reads *ranks*, which is why hybrid cares about order and
+/// not about cross-arm score comparability. A caller comparing raw `f64`
+/// ranks across arms is reading a comparison the engine does not promise,
+/// which is a sentence the answer numbers carry rather than a claim to
+/// rewrite FTS5 over.
+///
+/// The escalation is by exhaustion, as it is on the vector arm: `limit`
+/// doubles while hits are being dropped and matches remain, terminating at
+/// `limit >=` the union of both arms' MATCH counts — a complete answer, not
+/// a truncated one. The per-arm `MATCH` counts are read at most once and
+/// only on the escalating path.
+///
+/// The decay pool's valid_from is the resolved row's window start in both
+/// arms — a version's own start on the version arm, the mint row's on the
+/// trunk arm — which is the same number each row carried before the union
+/// existed.
+// Same shape as the vector overlay arm — the trunk keyword arm's signature
+// plus the ancestry — for the same reason: two call sites, positional, and a
+// struct would put a name between the statement and its params.
+#[allow(clippy::too_many_arguments)]
+async fn keyword_search_on_overlay(
+    conn: &libsql::Connection,
+    query: &str,
+    top_k: usize,
+    as_of_valid: Option<&str>,
+    half_life: Option<Duration>,
+    want: usize,
+    reference: Option<&str>,
+    ancestry: &[crate::graph::lineage::Ancestor],
+) -> Result<Vec<(String, f64)>> {
+    // The trunk arm: the same statement the unengaged path issues, with its
+    // WITH list and its visible clause (D-303's state-rule probe included,
+    // for the same §3.2 shape reason its caller cites).
+    let with = format!(
+        "WITH {} ",
+        crate::graph::concept_lineage::versions_cte(
+            ancestry.len(),
+            3 + usize::from(as_of_valid.is_some()),
+            None,
+            "",
+            crate::temporal::replay::state_rule_owed(conn).await?,
+        )
+    );
+    let trunk_sql = format!(
+        "{with}SELECT c.id, bm25(concepts_fts) AS rank
+           FROM concepts_fts
+           JOIN concept_versions c ON c.rowid_pk = concepts_fts.rowid
+          WHERE concepts_fts MATCH ?1
+            AND {visible}
+          ORDER BY rank ASC, c.id ASC
+          LIMIT ?2",
+        visible = crate::vector::search::visible_concept(as_of_valid.map(|_| 3)),
+    );
+    // The version arm: the whole index, unfiltered in SQL — the drop is the
+    // reader's law and it applies the resolution, not a window the FTS
+    // cannot see. Ordered and capped like the trunk arm so one escalation
+    // step reads the same depth from both.
+    let version_sql = "SELECT s.id, s.branch_id, s.valid_from, bm25(concept_versions_fts) AS rank
+           FROM concept_versions_fts
+           JOIN concept_version_fts_rows s ON s.seq_id = concept_versions_fts.rowid
+          WHERE concept_versions_fts MATCH ?1
+          ORDER BY rank ASC, s.id ASC, s.branch_id ASC, s.valid_from ASC
+          LIMIT ?2";
+
+    let mut limit = want;
+    let mut trunk_matches: Option<i64> = None;
+    let mut version_matches: Option<i64> = None;
+
+    loop {
+        // The trunk arm's rows.
+        let mut trunk_hits: Vec<(String, f64)> = Vec::new();
+        {
+            let mut params: Vec<libsql::Value> = vec![query.into(), (limit as i64).into()];
+            if let Some(t) = as_of_valid {
+                params.push(t.into());
+            }
+            params.extend(crate::graph::lineage::ancestry_params(ancestry));
+            let mut rows = conn.query(&trunk_sql, params).await?;
+            while let Some(row) = rows.next().await? {
+                trunk_hits.push((row.get(0)?, row.get(1)?));
+            }
+        }
+
+        // The version arm's rows, with their identity columns.
+        let mut version_hits: Vec<(String, String, String, f64)> = Vec::new();
+        {
+            let params: Vec<libsql::Value> = vec![query.into(), (limit as i64).into()];
+            let mut rows = conn.query(version_sql, params).await?;
+            while let Some(row) = rows.next().await? {
+                version_hits.push((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?));
+            }
+        }
+
+        // The drop: one walk over the union's id set at the read instant.
+        let mut asked: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for (id, _) in trunk_hits.iter() {
+            asked.insert(id.clone());
+        }
+        for (id, _, _, _) in version_hits.iter() {
+            asked.insert(id.clone());
+        }
+        let ids: Vec<String> = asked.into_iter().collect();
+        let (answers, _absent) =
+            crate::graph::concept_lineage::rows_on(conn, &ids, ancestry, None, as_of_valid).await?;
+
+        // A survivor keeps the rank its arm computed. The valid_from for the
+        // decay comes from the resolution, in both arms.
+        let mut out: Vec<(String, f64, Option<String>)> = Vec::new();
+        for (id, rank) in trunk_hits {
+            if let Some(ans) = answers.get(id.as_str()) {
+                if !ans.versioned {
+                    out.push((id, rank, ans.valid_from.clone()));
+                }
+            }
+        }
+        for (id, branch_id, valid_from, rank) in version_hits {
+            if let Some(ans) = answers.get(id.as_str()) {
+                if ans.versioned
+                    && ans.branch_id == branch_id
+                    && ans.valid_from.as_deref() == Some(valid_from.as_str())
+                {
+                    out.push((id, rank, ans.valid_from.clone()));
+                }
+            }
+        }
+
+        if out.len() >= want {
+            return finalize_keyword(out, reference, half_life, top_k);
+        }
+
+        // Escalate: matches remaining behind the caps the arms report.
+        let n1 = match trunk_matches {
+            Some(n) => n,
+            None => {
+                let n = fts_match_count(conn, "concepts_fts", query).await?;
+                trunk_matches = Some(n);
+                n
+            }
+        };
+        let n2 = match version_matches {
+            Some(n) => n,
+            None => {
+                let n = fts_match_count(conn, "concept_versions_fts", query).await?;
+                version_matches = Some(n);
+                n
+            }
+        };
+        let cap = n1.max(n2);
+        if limit as i64 >= cap {
+            return finalize_keyword(out, reference, half_life, top_k);
+        }
+        limit = ((limit as i64).saturating_mul(2).min(cap)).max(1) as usize;
+    }
+}
+
+/// A MATCH count over an FTS5 index, read at most once per search and only
+/// on the escalating path — the economy the vector arm's `indexed_rows`
+/// keeps, and the shape P-3's fallback concern prices: the drop must not
+/// have to re-read the whole corpus to answer honestly, and these counts are
+/// what let it stop.
+async fn fts_match_count(conn: &libsql::Connection, index: &str, query: &str) -> Result<i64> {
+    let mut rows = conn
+        .query(
+            &format!("SELECT COUNT(*) FROM {index} WHERE {index} MATCH ?1"),
+            libsql::params![query],
+        )
+        .await?;
+    Ok(rows
+        .next()
+        .await?
+        .map(|r| r.get::<i64>(0))
+        .transpose()?
+        .unwrap_or(0))
+}
+
+/// Order a merged keyword pool and cut it to `top_k`.
+///
+/// The escalation's rows arrive from two arms whose ranks are both bm25 but
+/// whose corpora differ; ordering is by (rank, id) and the top_k cut is
+/// explicit because a union's rows no longer arrive from one `LIMIT`. The
+/// decay applies last, against the resolution's own window start.
+fn finalize_keyword(
+    out: Vec<(String, f64, Option<String>)>,
+    reference: Option<&str>,
+    half_life: Option<Duration>,
+    top_k: usize,
+) -> Result<Vec<(String, f64)>> {
+    let mut results: Vec<(String, f64)> = Vec::with_capacity(out.len());
+    for (id, rank, valid_from) in out {
+        let rank = match (reference, half_life) {
+            (Some(reference), Some(half_life)) => {
+                let valid_from = valid_from.expect("a resolution row always carries its window");
+                decayed_rank(rank, decay_factor(reference, &valid_from, half_life)?)
+            }
+            _ => rank,
+        };
+        results.push((id, rank));
+    }
+    results.sort_by(|a, b| {
+        a.1.partial_cmp(&b.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    results.truncate(top_k);
+    Ok(results)
 }
 
 /// A bm25 rank, decayed, still a bm25-shaped rank (0.13.20, W9.5, D-193).

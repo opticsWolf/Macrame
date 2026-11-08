@@ -84,6 +84,15 @@ const POST_V12_TRIGGERS: &[&str] = &[
     "trg_concept_versions_monotonic_ra",
     "trg_concept_versions_stable_start",
     "trg_concept_cuts_no_update",
+    // v28 (0.22.0, M6-c): the version pool's search machinery. The import
+    // pair names `concept_versions`, which pre-v26 fixtures lack, and the
+    // shadow trio names the shadow table itself — a trigger does not defer
+    // the table in its `ON` clause.
+    "trg_cversion_fts_import_i",
+    "trg_cversion_fts_import_u",
+    "trg_cversion_fts_shadow_i",
+    "trg_cversion_fts_shadow_u",
+    "trg_cversion_fts_shadow_d",
 ];
 
 /// The five triggers v12 redefines, by name. Their v11 bodies are below.
@@ -441,6 +450,26 @@ pub async fn wind_back_to_v25(conn: &libsql::Connection) {
         "DROP TRIGGER IF EXISTS trg_concept_versions_log_insert",
         "DROP TABLE IF EXISTS concept_cuts",
         "DROP TABLE IF EXISTS concept_versions",
+    ] {
+        conn.execute(stmt, ()).await.unwrap();
+    }
+}
+
+/// Undo v28 on a database built from today's baseline (0.22.0, M6-c, the
+/// amendment's §5.4 cost 3): the version pool's search machinery. The shadow
+/// trio rides its own table — `DROP TABLE` takes it, as `concept_versions`'s
+/// drop took the import pair in the earlier wind-backs' paths — and the
+/// import pair is named because its home, `concept_versions`, is a table
+/// v27 *has* and keeps (it may already hold rows; filing them is exactly
+/// what the overlay-search rung's backfill is for). The rung re-issues every
+/// piece from the baseline's constants, so a caller climbing on from here
+/// re-creates nothing by hand. Idempotent, like the rest.
+pub async fn wind_back_to_v27(conn: &libsql::Connection) {
+    for stmt in [
+        "DROP TRIGGER IF EXISTS trg_cversion_fts_import_i",
+        "DROP TRIGGER IF EXISTS trg_cversion_fts_import_u",
+        "DROP TABLE IF EXISTS concept_versions_fts",
+        "DROP TABLE IF EXISTS concept_version_fts_rows",
     ] {
         conn.execute(stmt, ()).await.unwrap();
     }

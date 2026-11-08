@@ -1177,6 +1177,63 @@ pub fn create_embeddings_index(model: &crate::vector::ModelName) -> String {
     )
 }
 
+/// The *version* pool of one model's vectors (0.22.0, M6-c, [Amendment 2]
+/// (../Macrame%20Update%20Plan%20v0.22.0%20-%20Amendment%202.md) §5.4 cost 3b).
+///
+/// `embeddings_<m>` is keyed `concept_id PRIMARY KEY`, so a branch version's
+/// text would be scored with the trunk's vector - the defect the cost row
+/// names. This table is the version's own: keyed by the fold channels'
+/// identity `(id, branch_id, valid_from)`, one row per version pair the
+/// caller has embedded, with the same `F32_BLOB(dim)` column the
+/// storage-layer dimension check hangs on and the same DiskANN index shape
+/// so a branch vector search asks it through `vector_top_k` exactly as the
+/// trunk arm is asked.
+///
+/// No foreign key, no log trigger, no guard, nothing archived: it is
+/// Doctrine VII to the letter - derived from content, and a version is
+/// content - re-embedding rebuilds it, losing it costs the recompute. The
+/// unique key is what makes the write path's `ON CONFLICT` rewrite a
+/// version's vector when it is re-derived.
+///
+/// The trio (table, vector index, identity key) is created **in the same
+/// transaction as the trunk pair** by `register_model`, and by one
+/// discovery pass in the v28 rung for models registered before it.
+pub fn create_version_embeddings_table(model: &crate::vector::ModelName, dim: usize) -> String {
+    format!(
+        "CREATE TABLE IF NOT EXISTS {table} (\n\
+    id         TEXT NOT NULL,\n\
+    branch_id  TEXT NOT NULL,\n\
+    valid_from TEXT NOT NULL,\n\
+    embedding  F32_BLOB({dim}) NOT NULL\n);",
+        table = model.version_table(),
+        // The binding is by name like the trunk table's; the format
+        // machinery needs no second source for the number.
+        dim = dim,
+    )
+}
+
+/// The version table's DiskANN index, same reasoning as the trunk's: it is
+/// what gives the column its dimension enforcement at insert time, and
+/// dropping it for a bulk load is the caller's explicit recipe, not an
+/// optimization that can be taken silently.
+pub fn create_version_embeddings_index(model: &crate::vector::ModelName) -> String {
+    format!(
+        "CREATE INDEX IF NOT EXISTS {index} ON {table} (libsql_vector_idx(embedding));",
+        index = model.version_index(),
+        table = model.version_table(),
+    )
+}
+
+/// The version table's identity key, so the write path's upsert (same
+/// trio, new vector) is a statement, not a select-then-decide.
+pub fn create_version_embeddings_key(model: &crate::vector::ModelName) -> String {
+    format!(
+        "CREATE UNIQUE INDEX IF NOT EXISTS {idx} ON {table} (id, branch_id, valid_from);",
+        idx = model.version_key(),
+        table = model.version_table(),
+    )
+}
+
 /// Derived analytics output, keyed by concept and label (§5.4, D-041).
 ///
 /// Deliberately outside the ledger. Three properties are load-bearing and each
@@ -1542,7 +1599,145 @@ CREATE VIRTUAL TABLE IF NOT EXISTS concepts_fts USING fts5(
 );
 "#;
 
-/// FTS5's own consistency check — **and it cannot see the failure that matters**
+/// The keyword arm's *version* pool (0.22.0, M6-c, [Amendment 2]
+/// (../Macrame%20Update%20Plan%20v0.22.0%20-%20Amendment%202.md) §5.4 cost 3).
+///
+/// `concepts_fts` holds one row per concept — the *mint's* text — so M5's
+/// branch keyword search matched a branch's inherited id by words the branch
+/// repudiated (K1's silent wrong answer, the amendment's own red test). The
+/// version arm's index closes that: one row per overlay version row, keyed by
+/// the fold channels' identity `(id, branch_id, valid_from)`, so a branch
+/// search unions the trunk arm and this one and then *drops* every hit whose
+/// id resolves (§5.3) to a different version or to absent.
+///
+/// The shape is the same external-content pattern [`CREATE_CONCEPTS_FTS`]
+/// uses, with one twist: [`concept_versions`] is `WITHOUT ROWID` (the identity
+/// argues for it; the write law keeps one start's rewrites in place), so an
+/// external-content FTS5 index cannot key on it directly — `content_rowid`
+/// names a ROWID column it can reach back to. `concept_version_fts_rows`
+/// is the rowid-bearing shadow: the sequence number is its own, the identity
+/// columns are carried, and the tokenized text reads back through
+/// `content='...rows`, so the index and the shadow cannot disagree about
+/// what a version says — one copy, in the version table itself.
+///
+/// **The shadow is filled by triggers on the version table, and updated when
+/// the row is rewritten.** A version row's text legally changes when the
+/// same start is re-upserted (D-303's write-last rule — the takeover's own
+/// `DO UPDATE` arm reaches the pair), so the import trigger fires on both
+/// `INSERT` and `UPDATE`; the shadow's upsert keeps its rowid stable, and
+/// the shadow's own maintenance triggers run the external-content retraction
+/// the way `trg_concepts_fts_update` does. A window move (`valid_to`,
+/// `recorded_at`) rewrites the shadow's text to the same text — churn, not
+/// drift — and the reader drops a closed window by resolution, not by
+/// token.
+///
+/// [`concept_versions`]: #concept-versions
+pub const CREATE_CONCEPT_VERSION_FTS_ROWS: &str = r#"
+CREATE TABLE IF NOT EXISTS concept_version_fts_rows (
+    seq_id     INTEGER PRIMARY KEY,
+    id         TEXT NOT NULL,
+    branch_id  TEXT NOT NULL,
+    valid_from TEXT NOT NULL,
+    title      TEXT NOT NULL,
+    content    TEXT NOT NULL,
+    UNIQUE (id, branch_id, valid_from)
+);
+"#;
+
+/// The version pool's FTS5 index itself — external content over the shadow,
+/// content_rowid its sequence number. Rebuildable from it by the engine's own
+/// operation, like [`REBUILD_CONCEPTS_FTS`] is from `concepts`.
+pub const CREATE_CONCEPT_VERSIONS_FTS: &str = r#"
+CREATE VIRTUAL TABLE IF NOT EXISTS concept_versions_fts USING fts5(
+    title,
+    content,
+    content='concept_version_fts_rows',
+    content_rowid='seq_id'
+);
+"#;
+
+/// Reconstruct the version FTS index from its shadow (D-036, same reasoning
+/// as the trunk's rebuild).
+pub const REBUILD_CONCEPT_VERSIONS_FTS: &str =
+    "INSERT INTO concept_versions_fts (concept_versions_fts) VALUES ('rebuild');";
+/// The `trg_cversion_fts_shadow_i` trigger, a named constant so the v28 rung issues the same
+/// bytes the baseline issues (the `CREATE TRIGGER IF NOT EXISTS`
+/// caveat: an old name keeps its old body, so two spellings of one
+/// guard is how guards drift). The array below references it.
+#[doc(hidden)]
+pub const CREATE_CVERSION_FTS_SHADOW_I: &str = r#"
+    CREATE TRIGGER IF NOT EXISTS trg_cversion_fts_shadow_i
+    AFTER INSERT ON concept_version_fts_rows
+    BEGIN
+        INSERT INTO concept_versions_fts (rowid, title, content)
+        VALUES (NEW.seq_id, NEW.title, NEW.content);
+    END;
+    "#;
+
+/// The `trg_cversion_fts_shadow_u` trigger, a named constant so the v28 rung issues the same
+/// bytes the baseline issues (the `CREATE TRIGGER IF NOT EXISTS`
+/// caveat: an old name keeps its old body, so two spellings of one
+/// guard is how guards drift). The array below references it.
+#[doc(hidden)]
+pub const CREATE_CVERSION_FTS_SHADOW_U: &str = r#"
+    CREATE TRIGGER IF NOT EXISTS trg_cversion_fts_shadow_u
+    AFTER UPDATE ON concept_version_fts_rows
+    BEGIN
+        INSERT INTO concept_versions_fts (concept_versions_fts, rowid, title, content)
+        VALUES ('delete', OLD.seq_id, OLD.title, OLD.content);
+        INSERT INTO concept_versions_fts (rowid, title, content)
+        VALUES (NEW.seq_id, NEW.title, NEW.content);
+    END;
+    "#;
+
+/// The `trg_cversion_fts_shadow_d` trigger, a named constant so the v28 rung issues the same
+/// bytes the baseline issues (the `CREATE TRIGGER IF NOT EXISTS`
+/// caveat: an old name keeps its old body, so two spellings of one
+/// guard is how guards drift). The array below references it.
+#[doc(hidden)]
+pub const CREATE_CVERSION_FTS_SHADOW_D: &str = r#"
+    CREATE TRIGGER IF NOT EXISTS trg_cversion_fts_shadow_d
+    AFTER DELETE ON concept_version_fts_rows
+    BEGIN
+        INSERT INTO concept_versions_fts (concept_versions_fts, rowid, title, content)
+        VALUES ('delete', OLD.seq_id, OLD.title, OLD.content);
+    END;
+    "#;
+
+/// The `trg_cversion_fts_import_i` trigger, a named constant so the v28 rung issues the same
+/// bytes the baseline issues (the `CREATE TRIGGER IF NOT EXISTS`
+/// caveat: an old name keeps its old body, so two spellings of one
+/// guard is how guards drift). The array below references it.
+#[doc(hidden)]
+pub const CREATE_CVERSION_FTS_IMPORT_I: &str = r#"
+    CREATE TRIGGER IF NOT EXISTS trg_cversion_fts_import_i
+    AFTER INSERT ON concept_versions
+    BEGIN
+        INSERT INTO concept_version_fts_rows (id, branch_id, valid_from, title, content)
+        VALUES (NEW.id, NEW.branch_id, NEW.valid_from, NEW.title, NEW.content)
+        ON CONFLICT(id, branch_id, valid_from) DO UPDATE SET
+            title = excluded.title,
+            content = excluded.content;
+    END;
+    "#;
+
+/// The `trg_cversion_fts_import_u` trigger, a named constant so the v28 rung issues the same
+/// bytes the baseline issues (the `CREATE TRIGGER IF NOT EXISTS`
+/// caveat: an old name keeps its old body, so two spellings of one
+/// guard is how guards drift). The array below references it.
+#[doc(hidden)]
+pub const CREATE_CVERSION_FTS_IMPORT_U: &str = r#"
+    CREATE TRIGGER IF NOT EXISTS trg_cversion_fts_import_u
+    AFTER UPDATE ON concept_versions
+    BEGIN
+        INSERT INTO concept_version_fts_rows (id, branch_id, valid_from, title, content)
+        VALUES (NEW.id, NEW.branch_id, NEW.valid_from, NEW.title, NEW.content)
+        ON CONFLICT(id, branch_id, valid_from) DO UPDATE SET
+            title = excluded.title,
+            content = excluded.content;
+    END;
+    "#;
+
 /// (§5.9, D-071).
 ///
 /// Kept as a named constant so the finding has somewhere to live, and used by
@@ -2613,6 +2808,15 @@ pub const CREATE_TRIGGERS: &[&str] = &[
         VALUES ('delete', OLD.rowid_pk, OLD.title, OLD.content);
     END;
     "#,
+    // v28 (0.22.0, M6-c, Amendment 2 §5.4 cost 3). The version pool's own FTS
+    // machinery: the shadow's maintenance trio and the import pair, named
+    // constants in this file so the v28 rung issues the same bodies. Their
+    // reasoning lives beside the constants.
+    CREATE_CVERSION_FTS_SHADOW_I,
+    CREATE_CVERSION_FTS_SHADOW_U,
+    CREATE_CVERSION_FTS_SHADOW_D,
+    CREATE_CVERSION_FTS_IMPORT_I,
+    CREATE_CVERSION_FTS_IMPORT_U,
     // v22 (0.19.0, D-288). Last because `blobs` is the newest table; the
     // baseline creates it before this array runs.
     CREATE_BLOBS_GUARD_UPDATE,

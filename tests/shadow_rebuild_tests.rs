@@ -250,10 +250,15 @@ async fn the_indexes_come_back_with_their_declared_names() {
          copy of each"
     );
 
-    // And nothing is left behind under the shadow's name.
+    // And nothing is left behind under the shadow's name. Tables only: the
+    // law is about the swap's own shadow table, and since 0.22.0 (M6-c) the
+    // version pool's FTS shadow carries a maintenance trio whose trigger
+    // names contain the word — permanent furniture a reading of this probe
+    // without the type would mistake for leftovers.
     let leftover: i64 = conn
         .query(
-            "SELECT COUNT(*) FROM sqlite_master WHERE name LIKE '%shadow%'",
+            "SELECT COUNT(*) FROM sqlite_master \
+             WHERE name LIKE '%shadow%' AND type = 'table'",
             (),
         )
         .await

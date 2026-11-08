@@ -56,6 +56,17 @@ pub async fn register_model(
         tx.execute(&ddl::create_embeddings_table(model, dim), ())
             .await?;
         tx.execute(&ddl::create_embeddings_index(model), ()).await?;
+        // The version pool arrives with the pair it belongs to (0.22.0,
+        // M6-c, Amendment 2 SS5.4 cost 3b): a model registered before the
+        // v28 rung has no version table yet, and a search that could see
+        // one but must reaching `INSERT`ing into a table that was never
+        // created would run a branch vector search into `no such table`.
+        tx.execute(&ddl::create_version_embeddings_table(model, dim), ())
+            .await?;
+        tx.execute(&ddl::create_version_embeddings_index(model), ())
+            .await?;
+        tx.execute(&ddl::create_version_embeddings_key(model), ())
+            .await?;
         Ok(())
     }
     .await;
@@ -70,6 +81,35 @@ pub async fn register_model(
             Err(e)
         }
     }
+}
+
+/// Create the version trio for every model whose table already exists,
+/// in one pass (0.22.0, M6-c; the v28 rung's discovery step).
+///
+/// The crate keeps no model registry of its own (the same reasoning the
+/// doc above gives), so the walk discovers registered models the way
+/// `registered_models` does - by table name, `embeddings_*` not being a
+/// version table itself - and validates each suffix through
+/// `ModelName::new` before splicing a thing into DDL: a stray table with
+/// an unbuildable name is skipped rather than turned into SQL. The
+/// dimension comes from the trunk table's own `F32_BLOB` declaration
+/// (`PRAGMA table_info`), so the trio cannot disagree with the pair it
+/// extends. Idempotent, like `register_model` itself: a rung that
+/// replays or a caller who runs it twice pays probes, not objects.
+pub async fn backfill_version_tables(conn: &libsql::Connection) -> Result<()> {
+    for model in registered_models(conn).await? {
+        if read_declared_dimension(conn, &model).await?.is_none() {
+            continue;
+        }
+        let dim = read_declared_dimension(conn, &model).await?.unwrap();
+        conn.execute(&ddl::create_version_embeddings_table(&model, dim), ())
+            .await?;
+        conn.execute(&ddl::create_version_embeddings_index(&model), ())
+            .await?;
+        conn.execute(&ddl::create_version_embeddings_key(&model), ())
+            .await?;
+    }
+    Ok(())
 }
 
 /// The dimension a registered model's table declares, read from the schema.
@@ -204,12 +244,19 @@ fn parse_f32_blob_dim(declared: &str) -> Option<usize> {
 /// underscore would have kept a filter that can only ever fire on a real model
 /// whose name happens to end in `_shadow`, which is the same defect one
 /// character narrower.
+///
+/// The **version-table exclusion is a naming rule, not a filter refinement**
+/// (0.22.0, M6-c): `embeddings_<m>_versions` is the version pool of model
+/// `<m>`, and `represents a registered model` is true of the trunk table
+/// only. `ModelName::new` refuses a name ending in `_versions` for the same
+/// reason - a registered model and a version pool never share a walk.
 pub async fn registered_models(conn: &libsql::Connection) -> Result<Vec<ModelName>> {
     let mut rows = conn
         .query(
             "SELECT name FROM sqlite_master
               WHERE type = 'table'
                 AND name GLOB 'embeddings_*'
+                AND name NOT GLOB 'embeddings_*_versions'
               ORDER BY name",
             (),
         )

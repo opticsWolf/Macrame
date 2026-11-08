@@ -452,7 +452,7 @@ async fn plan_string(conn: &libsql::Connection, sql: &str) -> String {
 #[test]
 fn a_version_bump_must_bring_its_own_rung_test() {
     assert_eq!(
-        SCHEMA_VERSION, 27,
+        SCHEMA_VERSION, 28,
         "SCHEMA_VERSION moved. Add a test for the new rung — one that starts \
          from a database at the previous version and asserts what the rung is \
          *for*, not merely that `run` reached the top."
@@ -3297,6 +3297,94 @@ async fn a_v25_database_climbing_to_v27_gains_the_overlays_row_laws() {
         .get::<String>(0)
         .unwrap();
     assert_eq!(pivots, TS_3, "the close did not land");
+}
+
+/// **v27 → v28 with rows already in the version table: the rung backfills
+/// the search index it adds (0.22.0, M6-c, the amendment's §5.4 cost 3).**
+///
+/// What the rung is *for* beyond the new machinery: a file that carries
+/// concept version rows written before the search index existed must arrive
+/// at v28 with those rows **findable** — a rung that created only the
+/// triggers would leave the index silently empty and every existing version
+/// unsearchable, the failure mode D-036 warns about for any shadow. So the
+/// fixture inserts two rows at the v27 stamp (no import pair there — the
+/// wind-back took the v28 pieces, and their home survives), climbs, and
+/// asks the FTS index itself: one row's own word finds it and not the other.
+/// The test checks the backfill, not merely that the triggers exist.
+#[tokio::test]
+async fn a_v27_database_climbing_to_v28_backfills_its_version_rows_into_the_search() {
+    let harness = TestHarness::new();
+    let conn = connect(&harness).await;
+    macrame::schema::run_migrations(&conn).await.unwrap();
+
+    v11_schema::wind_back_to_v27(&conn).await;
+    conn.execute("PRAGMA user_version = 27", ()).await.unwrap();
+    assert_eq!(
+        scalar(
+            &conn,
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' \
+             AND name IN ('concept_version_fts_rows', 'concept_versions_fts')"
+        )
+        .await,
+        0,
+        "the fixture is not starting from a v27 database"
+    );
+
+    // Rows a pre-v28 binary wrote: the version table takes them at this
+    // stamp — the v26 rung's triggers are the only pairs on the table.
+    conn.execute(
+        "INSERT INTO concept_versions \
+         (id, branch_id, valid_from, valid_to, title, content, extra, recorded_at) \
+         VALUES ('backfillable', 'main', ?1, ?2, 'Backfillable title', \
+                 'a backfillable branch sentence', '{}', ?3)",
+        libsql::params![TS, TS_2, TS_3],
+    )
+    .await
+    .unwrap();
+    conn.execute(
+        "INSERT INTO concept_versions \
+         (id, branch_id, valid_from, valid_to, title, content, extra, recorded_at) \
+         VALUES ('other', 'main', ?1, ?2, 'Other title', \
+                 'an unrelated sentence', '{}', ?3)",
+        libsql::params![TS, TS_2, TS_3],
+    )
+    .await
+    .unwrap();
+
+    macrame::schema::run_migrations(&conn).await.unwrap();
+    assert_eq!(user_version(&conn).await, SCHEMA_VERSION);
+
+    assert_eq!(
+        scalar(&conn, "SELECT COUNT(*) FROM concept_version_fts_rows").await,
+        2,
+        "the backfill left rows behind: the shadow must hold every version row \
+         the file carried"
+    );
+
+    // In the search itself, one row's own word finds it and not the other.
+    // The FTS table exposes only what it indexes, so the answer is named
+    // through the shadow's rowid pair — the same join the projection's own
+    // reader takes.
+    for (word, want) in [("backfillable", "backfillable"), ("unrelated", "other")] {
+        let mut rows = conn
+            .query(
+                "SELECT s.id FROM concept_versions_fts f \
+                 JOIN concept_version_fts_rows s ON s.seq_id = f.rowid \
+                 WHERE concept_versions_fts MATCH ?1",
+                libsql::params![word],
+            )
+            .await
+            .unwrap();
+        let mut ids: Vec<String> = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            ids.push(row.get::<String>(0).unwrap());
+        }
+        assert_eq!(
+            ids,
+            vec![want.to_string()],
+            "MATCH '{word}' must answer exactly its own row after the climb"
+        );
+    }
 }
 
 /// **Acceptance gate 13 (0.19.0, P4, [D-288]): v21 → v22 on a populated

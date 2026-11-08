@@ -22,7 +22,7 @@ use crate::schema::ddl::*;
 // 24 → 25 for the D-309 rung (0.22.0, plan §2). The edge-kind register is
 // outside the ledger — a sidecar table nothing references and which
 // references nothing — so the payload versions stay untouched here too.
-pub const SCHEMA_VERSION: u32 = 27;
+pub const SCHEMA_VERSION: u32 = 28;
 
 type StepFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
 
@@ -268,8 +268,26 @@ const STEPS: &[Step] = &[
         apply: |conn| Box::pin(repair_backfilled_ledger(conn)),
     },
     Step {
-        from: 26,
+        from: 27,
         to: SCHEMA_VERSION,
+        name: "overlay-search",
+        // The version pool's search machinery (0.22.0, M6-c, Amendment 2
+        // §5.4 costs 3 and 3b): the rowid-bearing shadow and the FTS index
+        // over it, the import pair on `concept_versions`, the shadow's own
+        // maintenance triggers - all from the same constants the baseline
+        // issues - and a backfill of the shadow from the version rows a
+        // pre-v28 file already holds, each via one `INSERT ... SELECT` so
+        // the shadow's FTS import fires per row. The version tables of
+        // every model registered before this rung are discovered from the
+        // schema (identifiers named `embeddings_*` only), because the
+        // crate keeps no registry (D-005's reasoning) and `PRAGMA
+        // table_info` is the dimension.
+        suspends_foreign_keys: false,
+        apply: |conn| Box::pin(add_overlay_search(conn)),
+    },
+    Step {
+        from: 26,
+        to: 27,
         name: "overlay-guards",
         // Three `CREATE TRIGGER IF NOT EXISTS` statements carried by the same
         // constants the baseline issues (0.22.0, M6-b's continuation, the
@@ -279,6 +297,11 @@ const STEPS: &[Step] = &[
         // rung's ground again. The `IF NOT EXISTS` is safe for the same
         // reason the v20 rung's comment gives: no earlier version created
         // any of these names.
+        //
+        // The `to` is 27, and not `SCHEMA_VERSION`: the newest rung alone
+        // targets the top, or an upgraded file stops there with the rungs
+        // below it never run (`the_ladder_has_no_gap_between_rungs` holds
+        // the chain, after this file shipped exactly that mistake).
         suspends_foreign_keys: false,
         apply: |conn| Box::pin(add_overlay_guards(conn)),
     },
@@ -634,6 +657,12 @@ async fn baseline(conn: &libsql::Connection) -> Result<()> {
     // before the triggers resolves the trigger bodies' tables at CREATE time.
     conn.execute(CREATE_CONCEPT_VERSIONS_TABLE, ()).await?;
     conn.execute(CREATE_CONCEPT_CUTS_TABLE, ()).await?;
+    // v28 (0.22.0, M6-c). Before the triggers, not after: the import pair
+    // names the shadow and the shadows' own maintenance triggers name the
+    // index, and SQLite resolves a trigger body's tables at CREATE TRIGGER
+    // time (the same ground the trunk FTS line below stands on).
+    conn.execute(CREATE_CONCEPT_VERSION_FTS_ROWS, ()).await?;
+    conn.execute(CREATE_CONCEPT_VERSIONS_FTS, ()).await?;
     // Before the triggers, not after: `trg_concepts_fts_*` name this table, and
     // SQLite resolves a trigger body's tables at CREATE TRIGGER time.
     conn.execute(CREATE_CONCEPTS_FTS, ()).await?;
@@ -655,13 +684,50 @@ async fn baseline(conn: &libsql::Connection) -> Result<()> {
 /// Two `CREATE TABLE IF NOT EXISTS` statements and the seven overlays
 /// triggers, all issued from the constants the baseline carries — so a fresh
 /// file and an upgraded one hold byte-identical DDL, which is the condition
-/// P-1 measured on a populated v25 file and 什么 the rung must keep. Empty is
+/// P-1 measured on a populated v25 file and the one the rung must keep. Empty is
 /// the only truth available: no version row or cut was functional before
 /// this rung exists, and the write actor routes nothing to these tables
 /// until M6-a's routing lands (the rung changes no behaviour by itself).
 /// [D-280]'s exclusion list applies unchanged: not in `COLD_SCHEMA`, no
 /// archive membership, invisible to `reconstruct` until M6-b teaches the
 /// fold to read it.
+/// v27 → v28: the version pool's search machinery (0.22.0, M6-c). In
+/// dependency order: the shadow (the import pair and the maintenance
+/// triggers reference it, so it goes first), the FTS5 index over it, the
+/// five triggers, then the backfill - one `INSERT ... SELECT` whose rows
+/// all pass through the shadow's own triggers, so a pre-v28 file's
+/// existing version rows join the index in the same statement that fills
+/// the shadow. Finally the per-model version tables of every
+/// already-registered model: the pairs a pre-v28 `register_model` call
+/// left behind have a version trio to gain, and the discovery is a walk
+/// over `sqlite_master` names validated through `ModelName::new`,
+/// not a registry the code keeps (the crate has none, D-005's design).
+async fn add_overlay_search(conn: &libsql::Connection) -> Result<()> {
+    use crate::vector::registry::backfill_version_tables;
+
+    conn.execute(crate::schema::ddl::CREATE_CONCEPT_VERSION_FTS_ROWS, ())
+        .await?;
+    conn.execute(crate::schema::ddl::CREATE_CONCEPT_VERSIONS_FTS, ())
+        .await?;
+    for trigger_ddl in [
+        crate::schema::ddl::CREATE_CVERSION_FTS_SHADOW_I,
+        crate::schema::ddl::CREATE_CVERSION_FTS_SHADOW_U,
+        crate::schema::ddl::CREATE_CVERSION_FTS_SHADOW_D,
+        crate::schema::ddl::CREATE_CVERSION_FTS_IMPORT_I,
+        crate::schema::ddl::CREATE_CVERSION_FTS_IMPORT_U,
+    ] {
+        conn.execute(trigger_ddl, ()).await?;
+    }
+    conn.execute(
+        "INSERT INTO concept_version_fts_rows (id, branch_id, valid_from, title, content) \
+         SELECT id, branch_id, valid_from, title, content FROM concept_versions",
+        (),
+    )
+    .await?;
+    backfill_version_tables(conn).await?;
+    Ok(())
+}
+
 /// v26 → v27: the overlay's rows get the projection's row laws (0.22.0,
 /// M6-b's continuation). Three triggers from the baseline's constants: a cut
 /// row refuses every update (it is a decision, not a window), a version row
@@ -1051,6 +1117,14 @@ const LATER_TRIGGERS: &[&str] = &[
     "trg_concept_versions_monotonic_ra",
     "trg_concept_versions_stable_start",
     "trg_concept_cuts_no_update",
+    // v28 (0.22.0, M6-c): the version pool's search machinery — the import
+    // pair sits on `concept_versions` and the shadow trio sits on
+    // `concept_version_fts_rows`; no fixture below v28 has either.
+    "trg_cversion_fts_import_i",
+    "trg_cversion_fts_import_u",
+    "trg_cversion_fts_shadow_i",
+    "trg_cversion_fts_shadow_u",
+    "trg_cversion_fts_shadow_d",
 ];
 
 /// The five redefined triggers **as v11 had them** (§15.2, D-214).
@@ -2700,6 +2774,49 @@ mod tests {
                  be opened by this build"
             );
         }
+    }
+
+    /// A step whose `to` skips over a rung stops the climb at a stamp the
+    /// database has not earned: on an upgrade, `run` sees `current ==
+    /// SCHEMA_VERSION` and walks out, and `verify` then reports what the
+    /// skipped rung never built — the failure looks like a rung bug and is
+    /// actually an old target left behind (0.22.0, M6-c: the overlay-guards
+    /// step kept `to: SCHEMA_VERSION` after the overlay-search step took up
+    /// residence at v27, and every upgraded file was stamped v28 with the
+    /// search machinery never issued). The from-side walk above cannot catch
+    /// this — a free `to` *looks* like reaching the top.
+    ///
+    /// So the chain is pinned from the far end: a non-baseline step whose
+    /// `to` is not the top must be led out of by some rung, and exactly one
+    /// non-baseline step — the newest one — may target the top at all. Two
+    /// targets are the bug in both of its shapes: an ambiguity, or a sibling
+    /// that stopped climbing too early.
+    #[test]
+    fn the_ladder_has_no_gap_between_rungs() {
+        let mut targeting_the_top = 0;
+        for step in STEPS {
+            if step.from == 0 {
+                continue;
+            }
+            if step.to == SCHEMA_VERSION {
+                targeting_the_top += 1;
+                continue;
+            }
+            assert!(
+                STEPS.iter().any(|s| s.from == step.to),
+                "step {:?} leaves the database at v{} and no rung leads out of \
+                 it: an upgraded file stops there, missing everything under it",
+                step.name,
+                step.to
+            );
+        }
+        assert_eq!(
+            targeting_the_top, 1,
+            "exactly one rung may target SCHEMA_VERSION — the newest one; a \
+             second target is either an ambiguity or a rung that stopped \
+             climbing too early, and both stamp a version the database has \
+             not earned"
+        );
     }
 
     /// `verify` requires every name this returns, so a parse that silently

@@ -577,6 +577,9 @@ db.register_model(&model, 768).await?;                 // high-pri: table + inde
 db.upsert_embeddings(&model, vec![                     // low-pri, chunked
     (concept_id.to_string(), vector),
 ]).await?;
+db.upsert_version_embeddings(&model, vec![             // low-pri, chunked (M6-c)
+    (concept_id.to_string(), branch.to_string(), valid_from.to_string(), vector),
+]).await?;                                             // the version's own vector
 
 let dim  = declared_dimension(db.read_conn(), &model).await?;
 let all  = registered_models(db.read_conn()).await?;
@@ -863,7 +866,7 @@ Minor-version changes, and several of them are expected rather than merely permi
 
 **3. The derivative tables** — `links_current`, the per-model `embeddings_*` tables, and `concepts_fts`. **No schema-stability guarantee at all.** A minor version needing a different materialization drops the table, recreates it from the DDL and re-derives it inside the same migration step ([D-036](s13-decision-register.md#d-036), [Doctrine VI](s0-s3-foundations.md#doctrine-vi), [Doctrine VII](s0-s3-foundations.md#doctrine-vii)).
 
-**4. The schema version and its migration rungs.** **v27** today. Rungs are forward-only and run at `open()`; adding one is a minor version, and refusing to open a database from a *newer* build is the behaviour, not a bug.
+**4. The schema version and its migration rungs.** **v28** today. Rungs are forward-only and run at `open()`; adding one is a minor version, and refusing to open a database from a *newer* build is the behaviour, not a bug.
 
 **5. The snapshot container format.** **v6** today. A snapshot is a cache of a fold the ledger can always reproduce, so the format is versioned and an unrecognised version is **refused rather than parsed** ([D-043](s13-decision-register.md#d-043)); a build that cannot read an old snapshot folds from the log instead. Losing every snapshot costs time and no information.
 

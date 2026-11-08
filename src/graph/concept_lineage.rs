@@ -229,6 +229,13 @@ concept_versions{tag}(id, rowid_pk, title, content, embedding_model, extra, reti
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ConceptRow {
     pub(crate) id: String,
+    /// Whether this answer is an overlay version row (`(id, branch_id,
+    /// valid_from)`), as opposed to the fold's answer (the mint lineage's
+    /// row, whatever lineage currently holds it). Search needs the
+    /// distinction to name the drop: a trunk-index hit for an id whose
+    /// resolution is a version, and a version-index hit whose resolution
+    /// is another version, contradict the answer the reader gives.
+    pub(crate) versioned: bool,
     pub(crate) title: String,
     pub(crate) content: String,
     pub(crate) embedding_model: Option<String>,
@@ -366,6 +373,10 @@ async fn legacy_rows_on(
                 id.clone(),
                 ConceptRow {
                     id,
+                    // Not an overlay row: this is the fold's answer, the
+                    // mint lineage's row (or the live one on the reading
+                    // lineage) - the law the overlay walk falls through to.
+                    versioned: false,
                     title: row.get::<Option<String>>(1)?.unwrap_or_default(),
                     content: row.get::<Option<String>>(2)?.unwrap_or_default(),
                     embedding_model: row.get::<Option<String>>(3)?,
@@ -539,6 +550,9 @@ pub(crate) async fn overlay_scan(
                 id.clone(),
                 OverlayDecision::Row(ConceptRow {
                     id,
+                    // An overlay row by definition - the walk answered
+                    // with concept_versions' own row.
+                    versioned: true,
                     title: row.get::<Option<String>>(3)?.unwrap_or_default(),
                     content: row.get::<Option<String>>(4)?.unwrap_or_default(),
                     embedding_model: row.get::<Option<String>>(5)?,
