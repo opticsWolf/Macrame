@@ -37,6 +37,8 @@ const T0: &str = "2026-01-01T00:00:00.000000Z";
 const T1: &str = "2026-01-15T00:00:00.000000Z";
 const T2: &str = "2026-02-01T00:00:00.000000Z";
 const T3: &str = "2026-03-01T00:00:00.000000Z";
+const T5: &str = "2026-04-01T00:00:00.000000Z";
+const T6: &str = "2026-05-01T00:00:00.000000Z";
 const FOREVER: &str = "9999-12-31T23:59:59.999999Z";
 
 /// Every write waits a tick, so each act carries its own wall stamp (the
@@ -268,5 +270,64 @@ async fn the_branch_walk_windows_stay_over_the_fold_s_rows() {
         title_at(&db, alt, T3).await,
         Some("new text".to_string()),
         "the branch's own overlay row wins at an instant its rows cover"
+    );
+}
+
+/// **The post-push review's confirmed leak: the paste must inherit the
+/// fold's ancestry cutoff.** The trunk believes `g` from T5, the branch
+/// forks, the trunk then backfills `g` [T0, T5) — a belief recorded after
+/// the fork. The branch read at T1 must answer **nothing**: the cutoff
+/// fold answers the pre-fork row ([T5, FOREVER)), which does not serve
+/// T1, and an ancestor's post-fork writes are invisible below the fork
+/// cutoff (the visibility rule the fold's own `versions_cte` enforces on
+/// every ancestor it folds). D-316's first draft pasted with the read's
+/// recorded cap alone, so the ancestor's backfill surfaced below the
+/// fork. The trunk's own reads keep the paste in both directions; the
+/// branch keeps the vista its fork cut admits and nothing else.
+#[tokio::test]
+async fn a_branch_s_past_does_not_surface_the_ancestor_s_post_fork_beliefs() {
+    let harness = TestHarness::new();
+    let db = Database::open(&harness.db_path).await.unwrap();
+
+    // The trunk's row, recorded before the fork.
+    db.upsert_concept(
+        ConceptUpsert::new("g", "trunk's row")
+            .valid_from(T5)
+            .valid_to(FOREVER),
+    )
+    .await
+    .unwrap();
+    tick().await;
+    let feat = BranchId::new("feature").unwrap();
+    db.fork(feat.clone(), BranchId::main()).await.unwrap();
+    tick().await;
+
+    // The trunk backfills below its own row's start, recorded after the
+    // fork: the branch never saw this belief.
+    db.upsert_concept(
+        ConceptUpsert::new("g", "post-fork backfill")
+            .valid_from(T0)
+            .valid_to(T5),
+    )
+    .await
+    .unwrap();
+    tick().await;
+
+    // The leak, at the named instant: the branch must answer nothing.
+    assert_eq!(title_at(&db, feat.clone(), T1).await, None);
+    assert_eq!(title_at(&db, feat.clone(), T3).await, None);
+    // The vista the fork cut admits: the pre-fork row above its start.
+    assert_eq!(
+        title_at(&db, feat.clone(), T6).await,
+        Some("trunk's row".to_string())
+    );
+    // The trunk's paste survives intact in both directions.
+    assert_eq!(
+        title_at(&db, BranchId::main(), T1).await,
+        Some("post-fork backfill".to_string())
+    );
+    assert_eq!(
+        title_at(&db, BranchId::main(), T6).await,
+        Some("trunk's row".to_string())
     );
 }

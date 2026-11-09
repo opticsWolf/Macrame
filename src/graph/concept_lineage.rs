@@ -420,7 +420,28 @@ async fn legacy_rows_on(
                 && valid.is_none_or(|v| current.valid_to.as_deref().is_none_or(|t| v < t));
             match valid {
                 Some(v) if !serves => {
-                    if let Some(pasted) = paste_fold_row(conn, &current, v, recorded).await? {
+                    // The paste carries the fold's own two caps, earlier
+                    // wins ([D-316], amended): the read's recorded instant
+                    // when one is named, and the ancestry cutoff of the
+                    // spelling the paste reads - the visibility rule the
+                    // fold's own CTE bounds every ancestor's rows with, so
+                    // on an inherited row the ancestor's post-fork writes
+                    // stay invisible below the fork even where a backfill's
+                    // window covers. The membership is the fold's own join
+                    // (the CTE answered this row through it), so a spelling
+                    // without an ancestry entry cannot reach here; the
+                    // trunk's own paste has no cutoff above it and stays
+                    // uncut. Stamps are Zulu, so text order is instant
+                    // order - the same comparison `lineage::resolve` makes.
+                    let cut = ancestry
+                        .iter()
+                        .find(|a| a.branch_id == current.branch_id)
+                        .and_then(|a| a.cutoff.as_deref());
+                    let bound = match (recorded, cut) {
+                        (Some(r), Some(c)) => Some(if r <= c { r } else { c }),
+                        (r, c) => r.or(c),
+                    };
+                    if let Some(pasted) = paste_fold_row(conn, &current, v, bound).await? {
                         out.insert(id, pasted);
                     }
                 }
@@ -461,14 +482,28 @@ async fn log_recorded_at(conn: &libsql::Connection, seq_id: i64) -> Result<Strin
 ///
 /// The query is [D-292]'s valid-fold selection narrowed to one id and one
 /// lineage spelling: one current belief per valid start (`ROW_NUMBER` per
-/// `(table_name, entity_id, branch_id, valid_from)`, newest `seq_id` wins —
+/// `(table_name, entity_id, branch_id, valid_from)`, newest `seq_id` wins -
 /// the D-291 partition law's read shape), `concepts` rows only (the version
 /// and cut rows are the overlay's own and the already-decided ids never get
-/// here), and **no recorded bound on purpose**: the question is "what was
-/// believed at this instant", and a backfill's stamps do not move the valid
-/// axis — the whole-ledger [`VALID_FOLD`] runs unbounded in `recorded` too,
-/// and the per-lineage read would answer differently if the paste bounded
-/// what the whole read does not.
+/// here). The bound is the fold it stands in for already carries, twice
+/// over: the read's own recorded instant when one is named (the bitemporal
+/// cell's cap - the whole-ledger [`VALID_FOLD`] runs unbounded because it
+/// names no lineage and asserts nothing about what a reader believed; a
+/// per-lineage read of this id does), and the ancestry cutoff of the
+/// lineage the paste reads - the visibility rule the fold's own CTE
+/// bounds every ancestor's rows with, so on an inherited row an ancestor's
+/// post-fork writes stay invisible below the fork even where a backfill's
+/// window covers (D-315 already named the shape: "ancestor rows it could
+/// ever fall through to are fixed at the fork"). The caller passes the
+/// earlier of the two; `None` is the trunk's own paste, uncapped in
+/// either axis.
+///
+/// (An earlier draft of this paragraph said the query ran with **no
+/// recorded bound on purpose** — the first draft of the law, left behind
+/// when the recorded cap landed in the same push. A reader of the draft
+/// would have believed as-of reads unbounded and could have argued
+/// against the very cutoff the branch read needs; it is rewritten with
+/// the cutoff because the law it documents is caps, not their absence.)
 ///
 /// The id and spelling come from the current row the fold already answered
 /// (the id the caller asked for; the lineage the projection carries — the
