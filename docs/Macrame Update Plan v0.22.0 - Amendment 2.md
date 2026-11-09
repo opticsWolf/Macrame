@@ -414,7 +414,7 @@ Each probe is small, gates the phase after it, and is written red-first.
 | P-6 | Python: `CrossLineageError` consumers (M1b's 6 tests, the branch upsert paths) under W2/W3 | which tests change | — |
 | P-7 | An edge on lineage L to an id with no belief visible on L | whether adoption needs batch ordering | D-315's edge story |
 | P-8 | Property test: random fork trees, random versions, cuts and ancestor backfills; §5.3 by brute force vs the SQL resolution; monotonic under later ancestor writes. **Landed** (`tests/m6_resolution_tests.rs` on `dev/0.22.0-revA`, commit 8f20eef), and its first round is what found the cut hole revision 3 closes: the differential reds against the revision-2 SQL on the supersede-then-retire shape, then greens on the `concept_cuts` candidate | cost 4; I3 and the no-resurrection red line | the resolution rule itself |
-| P-9 | CodeRadar pricing: count `cross-lineage-id` skips on its own store; time the adoption pass at the merge commits against the 72 s / 354-commit baseline | D-315's write volume | — |
+| P-9 | CodeRadar pricing: count `cross-lineage-id` skips on its own store; time the adoption pass at the merge commits against the 72 s / 354-commit baseline. The write volume counts under D-299's keep law too (a same-start **keep** re-asserts the row at its own start, so superseded blobs stay in the hot tier through ordinary writes — an adoption pass's ordinary re-asserts grow the hot pool, not the cold one), and over the trunk's two `branch_id` spellings (`''` for the vintage mints, `'main'` since the naming rung — count both when sums are taken) | D-315's write volume | — |
 
 ## 9. Risks
 

@@ -498,12 +498,9 @@ async fn log_recorded_at(conn: &libsql::Connection, seq_id: i64) -> Result<Strin
 /// earlier of the two; `None` is the trunk's own paste, uncapped in
 /// either axis.
 ///
-/// (An earlier draft of this paragraph said the query ran with **no
-/// recorded bound on purpose** — the first draft of the law, left behind
-/// when the recorded cap landed in the same push. A reader of the draft
-/// would have believed as-of reads unbounded and could have argued
-/// against the very cutoff the branch read needs; it is rewritten with
-/// the cutoff because the law it documents is caps, not their absence.)
+/// (An earlier draft said "no recorded bound on purpose"; the decision
+/// Register's D-316 amendment carries that history.)
+///
 ///
 /// The id and spelling come from the current row the fold already answered
 /// (the id the caller asked for; the lineage the projection carries — the
