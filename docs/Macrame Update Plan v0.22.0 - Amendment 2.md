@@ -441,7 +441,11 @@ Each probe is small, gates the phase after it, and is written red-first.
    cuts for deleted ones (replacing tombstones). This replaces "bytes only".
 3. **U-5**: take D-312 when 0.22.0 ships. F2's two-flush window closes.
 4. **Migration op** (P5a.5): a post-merge re-ingest step for existing stores; `verify_history
-   --branch` keeps its semantics.
+   --branch` keeps its semantics. Spec'd 2026-11-09 (in CodeRadar's temporal plan, §8): the carrier is
+   a named-commit re-walk (`reingest_merged_commits`), cursor untouched — a cursor rewind is
+   too dangerous for a heal to carry, and the hollow state is otherwise unreachable under the
+   0.22 pin (an inline adoption keeps it from forming), so the op serves the pre-0.22 vintage
+   stores and its tests forge the cursor shape Rust-side.
 5. **Docs**: the three "until the D-214 overlay exists" sites become "since schema v26"; F4 and U-4
    are marked delivered or refused according to D-315.
 6. **Version pairing**: the adoption and version paths require schema v26 or later. On older stores
