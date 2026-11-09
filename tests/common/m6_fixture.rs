@@ -201,23 +201,63 @@ impl Model {
             }
         }
         // Where nothing of the overlay decides: the mint line's row. The
-        // first path node holding mint rows decides; a row it cannot show
-        // (retired, or past its window) is a verdict, not a hole.
+        // first path node holding mint rows decides. [D-316] rewrote the
+        // fall-through's instant law: the fold's current row serves the
+        // present tense and any instant its window covers; a row it cannot
+        // serve (retired, or superseded past its own start) pastes the log's
+        // own one-belief-per-valid-start selection for the id — what
+        // `reconstruct_as_of`'s valid axis answers, narrowed to the id — and
+        // a retired selection is absent exactly as the projection's doc
+        // reads `retired`.
         for (node, cutoff) in &path {
             if !self.mints.iter().any(|m| m.node == *node && m.id == id) {
                 continue;
             }
             let bound = cap(cutoff.as_deref(), r);
             let row = self.newest_mint(id, node, bound.as_deref())?;
-            if row.retired {
-                return None;
+            match v {
+                Some(v) if !row.retired && covers(&row.start, &row.end, Some(v)) => {
+                    return Some(row.answer());
+                }
+                Some(v) => {
+                    return self.pasted_mint(id, node, v, bound.as_deref());
+                }
+                None => {
+                    return if row.retired {
+                        None
+                    } else {
+                        Some(row.answer())
+                    };
+                }
             }
-            return match v {
-                Some(v) if !covers(&row.start, &row.end, Some(v)) => None,
-                _ => Some(row.answer()),
-            };
         }
         None
+    }
+
+    /// [D-316]'s paste, as the reader runs it: one current belief per valid
+    /// start for `(id, node)` — the newest write per start at or before the
+    /// cap — and the belief whose window covers the instant answers. A
+    /// retired start is not believed at any instant (the doc's law) and is
+    /// skipped, not fatal; nothing covering is the honest absent.
+    fn pasted_mint(&self, id: &str, node: &str, v: &str, bound: Option<&str>) -> Option<Answer> {
+        let mut by_start: std::collections::BTreeMap<&str, &MintRow> =
+            std::collections::BTreeMap::new();
+        for m in &self.mints {
+            if m.id != id || m.node != node {
+                continue;
+            }
+            if !bound.is_none_or(|b| m.bound.as_str() <= b) {
+                continue;
+            }
+            let slot = by_start.entry(m.start.as_str()).or_insert(m);
+            if m.seq > slot.seq {
+                *slot = m;
+            }
+        }
+        by_start
+            .into_values()
+            .find(|m| !m.retired && covers(&m.start, &m.end, Some(v)))
+            .map(|m| m.answer())
     }
 
     /// [`reconstruct_on`](macrame::Database::reconstruct_on)'s law: the walk

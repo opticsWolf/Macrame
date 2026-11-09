@@ -315,23 +315,40 @@ pub(crate) async fn rows_on(
     };
 
     if !todo.is_empty() {
-        let held = legacy_rows_on(conn, &todo, ancestry, recorded).await?;
+        let held = legacy_rows_on(conn, &todo, ancestry, recorded, valid).await?;
         out.extend(held);
     }
     Ok((out, absent))
 }
 
-/// [D-310]'s fold, on the ids the overlay walk left undecided (0.22.0, M4).
+/// [D-310]'s fold, on the ids the overlay walk left undecided (0.22.0, M4,
+/// valid arm [D-316]).
 ///
 /// The body that ran for every id before the overlay existed; on a store with
-/// nothing in the overlay it still runs for *every* id, byte for byte, which
-/// is the whole of the switch's reason. Valid instants are not passed: today's
-/// callers apply their windows after the fold, on [`ConceptRow::shows_at`].
+/// nothing in the overlay it still runs for *every* id, byte for byte at the
+/// present tense, which is the whole of the switch's reason. At the present
+/// tense (`valid` unset) the window law is yesterday's: the fold answers one
+/// current row per id and the caller applies `shows_at` after — no read
+/// changed, byte for byte. At a named instant the fold serves the window when
+/// the current row cannot: the projection's row is tried first (the fast path
+/// it always was), and a row that is retired, or whose window excludes the
+/// instant, pastes [`VALID_FOLD`]'s own answer for the id — one current belief
+/// per valid start, the same selection a whole-ledger valid read holds, read
+/// through the id (and lineage spelling) the projection's row carries. That
+/// is the one-row-per-id blind the retirement review proved on the trunk
+/// ([D-316]): a branch read decided its past from the overlay while the
+/// trunk's tombstone (or a plain supersede's newer row) answered nothing at
+/// every instant before the row's own start, and the same method was giving
+/// two answers for one past date. The D-310 fold's own docstring gave the
+/// reason once — "valid instants are not passed: today's callers apply their
+/// windows after the fold" — and that sentence is the defect the instant
+/// arm answers.
 async fn legacy_rows_on(
     conn: &libsql::Connection,
     ids: &[String],
     ancestry: &[Ancestor],
     recorded: Option<&str>,
+    valid: Option<&str>,
 ) -> Result<HashMap<String, ConceptRow>> {
     let mut out = HashMap::with_capacity(ids.len());
     if ids.is_empty() {
@@ -369,28 +386,199 @@ async fn legacy_rows_on(
         let mut rows = conn.query(&sql, params).await?;
         while let Some(row) = rows.next().await? {
             let id: String = row.get(0)?;
-            out.insert(
-                id.clone(),
-                ConceptRow {
-                    id,
-                    // Not an overlay row: this is the fold's answer, the
-                    // mint lineage's row (or the live one on the reading
-                    // lineage) - the law the overlay walk falls through to.
-                    versioned: false,
-                    title: row.get::<Option<String>>(1)?.unwrap_or_default(),
-                    content: row.get::<Option<String>>(2)?.unwrap_or_default(),
-                    embedding_model: row.get::<Option<String>>(3)?,
-                    extra: row.get::<Option<String>>(4)?.unwrap_or_else(|| "{}".into()),
-                    retired: row.get::<Option<i64>>(5)?.unwrap_or(0) != 0,
-                    valid_from: row.get::<Option<String>>(6)?,
-                    valid_to: row.get::<Option<String>>(7)?,
-                    branch_id: row.get(8)?,
-                    recorded_at: row.get::<Option<String>>(9)?.unwrap_or_default(),
-                },
-            );
+            let current = ConceptRow {
+                id: id.clone(),
+                // Not an overlay row: this is the fold's answer, the
+                // mint lineage's row (or the live one on the reading
+                // lineage) - the law the overlay walk falls through to.
+                versioned: false,
+                title: row.get::<Option<String>>(1)?.unwrap_or_default(),
+                content: row.get::<Option<String>>(2)?.unwrap_or_default(),
+                embedding_model: row.get::<Option<String>>(3)?,
+                extra: row.get::<Option<String>>(4)?.unwrap_or_else(|| "{}".into()),
+                retired: row.get::<Option<i64>>(5)?.unwrap_or(0) != 0,
+                valid_from: row.get::<Option<String>>(6)?,
+                valid_to: row.get::<Option<String>>(7)?,
+                branch_id: row.get(8)?,
+                recorded_at: row.get::<Option<String>>(9)?.unwrap_or_default(),
+            };
+            // [D-316]'s paste: the current row serves the present-tense law
+            // and any instant its window names; a retired row serves nothing,
+            // and a non-retired row that was superseded (or cut, or written
+            // at a later start) does not serve the instants before its own
+            // start. There the log's own valid fold answers — one current
+            // belief per valid start at the instant, the same selection a
+            // whole-ledger valid read returns for this id — and only when it
+            // itself holds a belief does the paste land. An empty fold is
+            // the honest answer: the ledger remembered nothing, and this
+            // read does not invent a belief to cover that.
+            let serves = !current.retired
+                && current
+                    .valid_from
+                    .as_deref()
+                    .is_none_or(|f| f <= valid.unwrap_or(""))
+                && valid.is_none_or(|v| current.valid_to.as_deref().is_none_or(|t| v < t));
+            match valid {
+                Some(v) if !serves => {
+                    if let Some(pasted) = paste_fold_row(conn, &current, v, recorded).await? {
+                        out.insert(id, pasted);
+                    }
+                }
+                _ => {
+                    out.insert(id, current);
+                }
+            }
         }
     }
     Ok(out)
+}
+
+/// The `recorded_at` of one log row, read by its `seq_id` (the paste's
+/// stamp-arm: a raw log payload carries the payload's fields, not the row's
+/// own stamps, and the read's `recorded_at` answer names the belief's row,
+/// not the fold's).
+///
+/// One indexed lookup, and only for a payload the fold's own arm would have
+/// stamped — the log trigger composes the stamp into the `json_set` arm's
+/// payload, but a paste meeting a pre-stamp shape (the trigger's literal
+/// row) reads the column here.
+async fn log_recorded_at(conn: &libsql::Connection, seq_id: i64) -> Result<String> {
+    let mut rows = conn
+        .query(
+            "SELECT recorded_at FROM transaction_log WHERE seq_id = ?1",
+            libsql::params![seq_id],
+        )
+        .await?;
+    Ok(rows
+        .next()
+        .await?
+        .map(|r| r.get::<String>(0).unwrap_or_default())
+        .unwrap_or_default())
+}
+
+/// The log's own window for one id, pasted where the fold's current row cannot
+/// serve the instant ([D-316]).
+///
+/// The query is [D-292]'s valid-fold selection narrowed to one id and one
+/// lineage spelling: one current belief per valid start (`ROW_NUMBER` per
+/// `(table_name, entity_id, branch_id, valid_from)`, newest `seq_id` wins —
+/// the D-291 partition law's read shape), `concepts` rows only (the version
+/// and cut rows are the overlay's own and the already-decided ids never get
+/// here), and **no recorded bound on purpose**: the question is "what was
+/// believed at this instant", and a backfill's stamps do not move the valid
+/// axis — the whole-ledger [`VALID_FOLD`] runs unbounded in `recorded` too,
+/// and the per-lineage read would answer differently if the paste bounded
+/// what the whole read does not.
+///
+/// The id and spelling come from the current row the fold already answered
+/// (the id the caller asked for; the lineage the projection carries — the
+/// mint lineage on an inherited read, the reading lineage's own spelling on
+/// its own). The answer turns back into a [`ConceptRow`] the same shape the
+/// CTE returns, `versioned: false` — it is the log's answer, not an overlay
+/// row — and `concept_visible_at` applies the same half-open window and
+/// retirement law the recorded folds apply, so a retired start's belief reads
+/// absent exactly as the projection doc reads `retired`.
+async fn paste_fold_row(
+    conn: &libsql::Connection,
+    current: &ConceptRow,
+    valid: &str,
+    recorded: Option<&str>,
+) -> Result<Option<ConceptRow>> {
+    let mut rows = conn
+        .query(
+            &format!(
+                "SELECT seq_id, table_name, entity_id, operation, payload, branch_id \
+                 FROM ( \
+                    SELECT seq_id, table_name, entity_id, operation, payload, branch_id, \
+                           ROW_NUMBER() OVER ( \
+                               PARTITION BY table_name, entity_id, branch_id, json_extract(payload, '$.valid_from') \
+                               ORDER BY seq_id DESC \
+                           ) as rn \
+                    FROM transaction_log \
+                    WHERE table_name = 'concepts' \
+                      AND entity_id = ?1 \
+                      AND branch_id = ?2 \
+                      {cap} \
+                ) WHERE rn = 1",
+                cap = match recorded {
+                    Some(_) => "AND recorded_at <= ?3",
+                    None => "",
+                }
+            ),
+            libsql::params![
+                current.id.as_str(),
+                current.branch_id.as_str(),
+                match recorded {
+                    Some(r) => libsql::Value::Text(r.to_string()),
+                    None => libsql::Value::Null,
+                },
+            ],
+        )
+        .await?;
+    while let Some(row) = rows.next().await? {
+        let seq_id: i64 = row.get(0)?;
+        let table_name: String = row.get(1)?;
+        let entity_id: String = row.get(2)?;
+        let op: String = row.get(3)?;
+        let payload_str: String = row.get(4)?;
+        let branch_id: String = row.get(5)?;
+        let mut payload =
+            crate::temporal::paste_log_row(seq_id, &table_name, &entity_id, &op, &payload_str)?;
+        if payload.get("__recorded_at").is_none() {
+            let stamp = log_recorded_at(conn, seq_id).await?;
+            payload["__recorded_at"] = serde_json::Value::String(stamp);
+        }
+        if !crate::temporal::as_of::concept_visible_at(&payload, Some(valid))? {
+            // Retired at the instant, or outside its own window: the old
+            // shape's law, not believed at this instant.
+            continue;
+        }
+        let title = payload
+            .get("title")
+            .and_then(|t| t.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let content = payload
+            .get("content")
+            .and_then(|t| t.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let embedding_model = payload
+            .get("embedding_model")
+            .and_then(|t| t.as_str())
+            .map(str::to_string);
+        let extra = payload
+            .get("extra")
+            .and_then(|t| t.as_str())
+            .unwrap_or("{}")
+            .to_string();
+        let valid_from = payload
+            .get("valid_from")
+            .and_then(|t| t.as_str())
+            .map(str::to_string);
+        let valid_to = payload
+            .get("valid_to")
+            .and_then(|t| t.as_str())
+            .map(str::to_string);
+        return Ok(Some(ConceptRow {
+            id: entity_id,
+            versioned: false,
+            title,
+            content,
+            embedding_model,
+            extra,
+            retired: false,
+            valid_from,
+            valid_to,
+            branch_id,
+            recorded_at: payload
+                .get("__recorded_at")
+                .and_then(|t| t.as_str())
+                .unwrap_or_default()
+                .to_string(),
+        }));
+    }
+    Ok(None)
 }
 
 /// Keep the ids the lineage shows, in the order given (0.22.0, M4).

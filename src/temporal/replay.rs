@@ -2612,7 +2612,7 @@ async fn absorb_fold_rows(
             d.max_seq = seq_id;
         }
 
-        let payload = parse_log_row(seq_id, &table_name, &entity_id, &op, &payload_str)?;
+        let payload = paste_log_row(seq_id, &table_name, &entity_id, &op, &payload_str)?;
         absorb_row(d, seq_id, &table_name, entity_id, branch_id, &payload)?;
     }
 
@@ -2627,7 +2627,7 @@ async fn absorb_fold_rows(
 /// path in the crate can produce one. Refusing here makes the doctrine enforced
 /// at the fold rather than assumed by it. Retirement is what removes a concept
 /// from a composed state; see [`absorb_row`].
-fn parse_log_row(
+pub(crate) fn paste_log_row(
     seq_id: i64,
     table_name: &str,
     entity_id: &str,
@@ -2961,7 +2961,7 @@ async fn collect_valid_rows(
         let op: String = row.get(3)?;
         let payload_str: String = row.get(4)?;
         let branch_id: String = row.get(5)?;
-        let payload = parse_log_row(seq_id, &table_name, &entity_id, &op, &payload_str)?;
+        let payload = paste_log_row(seq_id, &table_name, &entity_id, &op, &payload_str)?;
         out.push(ValidStart {
             seq_id,
             table_name,

@@ -1,6 +1,6 @@
 # Macrame — Architecture Quick Reference
 
-**v0.21.0 · A Bitemporal Graph Ledger on libSQL**
+**v0.22.0 · A Bitemporal Graph Ledger on libSQL**
 
 ---
 
@@ -192,7 +192,7 @@ Every temporal column is exactly 27 characters: `YYYY-MM-DDTHH:MM:SS.ffffffZ`
 | v26 | the concept overlay (M6-a, D-314): `concept_versions (id, branch_id, valid_from, …)`, one row per valid start per lineage, and `concept_cuts (id, branch_id, cut_at)`, the permanent fall-through cap — both `WITHOUT ROWID`, both outside the ledger's own keying, with log mirrors, the single-open audit on versions and the provenance guards on both ([Amendment 2](Macrame%20Update%20Plan%20v0.22.0%20-%20Amendment%202.md) §5.1, revision 3) |
 | v27 | the overlay's row laws (M6-b's continuation, the post-merge review's low finding): three guards from the baseline's constants — a cut row refuses every `UPDATE` (a cut is a decision, not a window), a version row's `recorded_at` is monotonic ([D-303]'s rule on the overlay), and a version row's start `(id, branch_id, valid_from)` is immutable — D-291-with's read-side twin, and the identity the resolution's fold channels key on |
 | v28 | the version pool's search machinery (M6-c, [Amendment 2](Macrame%20Update%20Plan%20v0.22.0%20-%20Amendment%202.md) §5.4 cost 3): `concept_version_fts_rows`, the rowid-bearing shadow an external-content FTS5 index needs over the `WITHOUT ROWID` version table, and `concept_versions_fts` over it — both filled by triggers on the version table and both backfilled on the rung; plus each registered model's version-embedding pair (`embeddings_<m>_versions`) discovered from the schema names |
-| v29 | the version pool's single-open law is the interval it always spoke of read-side (0.22.0's post-review fix, the confirmed one): `trg_concept_versions_single_open` widens from "open-ended `NEW`" to the interval predicate itself — any `concept_version` whose window shares an instant with the write's refuses (same-start rewrites stay carved out for the [D-291] heal) — and the rung drops and re-issues the trigger because `CREATE TRIGGER IF NOT EXISTS` keeps an old body ([D-126]'s recipe) |
+| v29 | the version pool's single-open law is the interval it always spoke of read-side (0.22.0's post-review fix, the confirmed one): `trg_concept_versions_single_open` widens from "open-ended `NEW`" to the interval predicate itself — any `concept_version` whose window shares an instant with the write's refuses (same-start rewrites stay carved out for the [D-291] heal) — and the rung drops and re-issues the trigger because `CREATE TRIGGER IF NOT EXISTS` keeps an old body ([D-126]'s recipe); and the trunk walk folds its past when the projection's row cannot serve the instant ([D-316](architecture/s13-decision-register.md#d-316)) |
 
 **This table stopped at v10 for seven rungs and fourteen releases** (corrected while writing the 0.16.0 release note). `tests/doc_currency_tests.rs` gates `docs/architecture/README.md`'s revision history and the register's `D-001…D-NNN` line; it does not read this file, which is why the drift here ran longer than anywhere the gate looks. The authority on the ladder is `src/schema/migrations.rs`'s `STEPS`, and `SCHEMA_VERSION` is the number to trust over this table.
 
@@ -967,4 +967,4 @@ A synchronous Python binding built on pyo3 0.29 and maturin, delivered as a whee
 
 ---
 
-*Last updated: 2026-11-01 · v0.21.0 · Synced against architecture (s4–s14, appendices A–C) · Pinned by `tests/doc_sync_tests.rs` and `tests/perf_claim_tests.rs`*
+*Last updated: 2026-11-09 · v0.22.0 · Synced against architecture (s4–s14, appendices A–C) · Pinned by `tests/doc_sync_tests.rs` and `tests/perf_claim_tests.rs`*

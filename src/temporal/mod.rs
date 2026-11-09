@@ -12,7 +12,7 @@ pub use as_of::{
 };
 pub use feed::Change;
 pub use interval::Interval;
-pub(crate) use replay::{concept_interval_overlaps, reconstruct_valid};
+pub(crate) use replay::{concept_interval_overlaps, paste_log_row, reconstruct_valid};
 pub use replay::{
     reconstruct, reconstruct_on, resolve_beliefs, verify_last_link, verify_snapshot_chain,
     ChainCheck, EdgeBelief, MaterializedState,
