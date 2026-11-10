@@ -992,3 +992,53 @@ async fn a_traversal_vector_filter_drops_what_the_branch_s_cut_resolves_as_absen
         "the branch's cut decides: {ids:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The scan's per-slot law: extra at 5, the embedding model at 6 (the final
+// SELECT's column order). While the scan read each from the other's slot,
+// every overlay-resolved row carried the empty extra default — which the
+// trunk/writer's resolution (the reader's own accept path) compared and
+// believed, churning every bulk's unchanged filter and refusing same-start
+// writes as AlreadyRecorded. Pinned public, because every resolution read
+// shares the walk.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_resolution_row_reads_its_extra_and_its_embedding_model_from_their_own_slots() {
+    let harness = TestHarness::new();
+    let db = forked_view(&harness, None).await;
+    let b0 = BranchId::new("b0").unwrap();
+    let view = db.view(b0.clone());
+
+    tick().await;
+    let layer_extra = r#"{"coderadar":{"content_hash":"a-hash"}}"#;
+    view.upsert_concept(
+        ConceptUpsert::new("x", NEW)
+            .supersede(true)
+            .extra(layer_extra)
+            .embedding_model("the-model")
+            .valid_from(T5)
+            .valid_to(FOREVER),
+    )
+    .await
+    .unwrap();
+
+    let resolved = db
+        .concepts_by_id(
+            &["x".to_owned()],
+            ReadPlan::new().on(b0.clone()).valid_at(AFTER.to_string()),
+        )
+        .await
+        .unwrap();
+    let v = resolved.first().expect("the branch's version resolves");
+    assert_eq!(
+        v.extra.as_str(),
+        layer_extra,
+        "the extra reads the extra column, not the model's slot"
+    );
+    assert_eq!(
+        v.embedding_model.as_deref(),
+        Some("the-model"),
+        "the model reads the model column, not the extra's slot"
+    );
+}

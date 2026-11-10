@@ -775,8 +775,14 @@ pub(crate) async fn overlay_scan(
                     versioned: true,
                     title: row.get::<Option<String>>(3)?.unwrap_or_default(),
                     content: row.get::<Option<String>>(4)?.unwrap_or_default(),
-                    embedding_model: row.get::<Option<String>>(5)?,
-                    extra: row.get::<Option<String>>(6)?.unwrap_or_else(|| "{}".into()),
+                    // Final SELECT's column order: extra at 5, the
+                    // embedding model at 6 — 0.22.0's post-merge round's
+                    // slot swap fix, caught from the trunk/write resolution
+                    // (the trunk arm of the writer's decision reads the
+                    // walk's same row and compared the extra a model slot
+                    // answered, churning every bulk's unchanged filter).
+                    embedding_model: row.get::<Option<String>>(6)?,
+                    extra: row.get::<Option<String>>(5)?.unwrap_or_else(|| "{}".into()),
                     // A version channel row is never the retired row: the
                     // retire is this lineage's cut or its own window's end.
                     retired: false,
