@@ -6528,7 +6528,7 @@ each in `tests/concept_state_rule_tests.rs`, both reconciled against
 
 
 
-<a id="d-311"></a><a id="d-311"></a>D-311 — A change feed over the log's sequence, refusing rather than skipping a gap (0.22.0, M7). [D-049](s13-decision-register.md#d-049), [D-189](s13-decision-register.md#d-189), [D-249](s13-decision-register.md#d-249), [D-288](s13-decision-register.md#d-288). Evidence: `src/temporal/feed.rs`, `src/connection.rs` (`head_seq`, `changes`), `tests/v020_conversation_tests.rs` (`m7_changes`, including `an_archived_range_is_refused_as_a_gap`), `tests_py/test_conversation.py`.
+<a id="d-311"></a>D-311 — A change feed over the log's sequence, refusing rather than skipping a gap (0.22.0, M7). [D-049](s13-decision-register.md#d-049), [D-189](s13-decision-register.md#d-189), [D-249](s13-decision-register.md#d-249), [D-288](s13-decision-register.md#d-288). Evidence: `src/temporal/feed.rs`, `src/connection.rs` (`head_seq`, `changes`), `tests/v020_conversation_tests.rs` (`m7_changes`, including `an_archived_range_is_refused_as_a_gap`), `tests_py/test_conversation.py`.
 
 Consumers that follow the ledger — a distillation hook, an OKFgraph producer, a timeline — rescanned runs to find what was new. The log already orders every write: `seq_id` is `AUTOINCREMENT`, strictly increasing in commit order, and a rolled-back transaction rolls the counter back (D-049), so a consumer holding the last `seq_id` it saw can ask for everything after it. `changes(after_seq, branch, tables, limit)` returns `(seq_id, branch_id, table, entity_id, operation, recorded_at)` rows, oldest first, with no payload — the feed says what changed, the ordinary reads say what it is now on whichever lineage the consumer cares about.
 

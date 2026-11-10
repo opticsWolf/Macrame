@@ -1,6 +1,6 @@
 # Macrame Update Plan v0.22.0 — conversation branching, ported
 
-**Status:** planned 2026-11-02, nothing built · **Branch:** `dev/0.22.0` from `main` at `5e2855a`
+**Status:** built and closes on `dev/0.22.0-revA` at `e05d7c1` — the port's track (Stage A/B, M1-M3, D-307...D-313) and the M6 overlay track (D-314 the overlay, D-315 adoption across lineages, D-316 the trunk walk's past fold, Amendment 2 revision 3 as the cycle's spec) with their reviews applied, the sweeps re-run at the release tail (1,048 / 1,026 / 1,074 / 752); merged to `dev/0.22.0` and `main` (both ff at `e05d7c1`) · **Branch:** `dev/0.22.0` from `main` at `5e2855a`
 (M0 is the first commit on it)
 **From:** 0.21.0 (schema v24, concepts payload v3, snapshot container stamps v24, `DbError` 49
 variants, public API 1,994 items, libSQL 0.10.0)

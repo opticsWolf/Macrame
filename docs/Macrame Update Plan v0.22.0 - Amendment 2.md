@@ -1,11 +1,16 @@
-# Macrame Update Plan v0.22.0 — Amendment 2 (PROPOSED, revision 3)
+# Macrame Update Plan v0.22.0 — Amendment 2 (ACCEPTED and BUILT, revision 3)
 
-> **Status: PROPOSED, revision 3, 2026-11-08.** Revision 1 was written for a second review, and
-> revision 2 applied that review (§1). Nothing here is decided, nothing else is committed, no code
-> exists, and the register has not moved. If the review accepts it, the next cycle promotes it as
-> **two** register entries, candidate **D-314** (the overlay) and candidate **D-315** (adoption
-> across lineages), on a branch after 0.22.0's tail (§13 Q7). 0.22.0's remaining work is untouched
-> by this file.
+> **Status: ACCEPTED and BUILT (2026-11-10).** Revision 1 was written for a second review, and
+> revision 2 applied that review (§1); revision 3 is the review's outcome on record. The review
+> accepted it (Q3, with P-7 as the gate) and the cycle promoted it as **two** register entries,
+> **D-314** (the overlay) and **D-315** (adoption across lineages), built on `dev/0.22.0-revA`
+> (schema v26-v28, the cycle's M6-a...M6-g) and merged to `main` at `e05d7c1`. The post-review
+> corrections the cycle's own reviews found are recorded under the register entries ("Amended by
+> 0.22.0's post-reply review"), the v29 rung is the widened guard reaching the direct writer, and
+> the overlay scan's slot swap (the resolution row's `extra` reading the model's slot) landed as
+> Macrame `40719ac` with its reader-side pin. This file's §13 Q7 answer ("on a branch after
+> 0.22.0's tail") is how it ran; the remaining sections stand as proposed, revision 3, as the
+> record of what was accepted.
 >
 > **What revision 3 changes, and why.** Probe P-8 confirmed before M6-a built on it that §5.3's
 > nearest-row-wins has a hole, in §5.3 itself, not in the probe: the design as written lets a
