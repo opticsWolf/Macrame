@@ -548,7 +548,7 @@ class BranchView:
         valid_from: Timestamp,
         weight: float = 1.0,
         link_previous: str | None = None,
-        expect: str | None = UNSET,
+        expect: str | None | Unset = UNSET,
     ) -> PointerChange:
         """`Database.set_pointer` on this lineage.
 
