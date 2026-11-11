@@ -8,8 +8,6 @@ instant whose turn had long since moved, `TypeError` for the keyword itself.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
-
 import pytest
 
 import macrame

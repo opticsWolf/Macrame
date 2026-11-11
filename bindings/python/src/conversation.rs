@@ -220,7 +220,9 @@ impl PyChange {
 /// `expect=None` is claim-if-free and `expect=UNSET` checks nothing. The
 /// value is a one-member class instance so the two spellings stay distinct;
 /// the module publishes it as `macrame.UNSET`.
-#[pyclass(name = "Unset", module = "macrame", frozen, eq)]
+// `skip_from_py_object`: a sentinel is matched by type, never extracted
+// as a value, so pyo3 0.29's opt-in `FromPyObject` stays off.
+#[pyclass(name = "Unset", module = "macrame", frozen, eq, skip_from_py_object)]
 #[derive(Clone, PartialEq)]
 pub(crate) struct PyUnset;
 

@@ -7,7 +7,7 @@ them a task with no open belief (Silk PR #3, ``e3f5666``).
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 
 import pytest
 
@@ -22,7 +22,8 @@ FAR = "2029-01-01T00:00:00.000000Z"
 
 
 def ts(z: str) -> datetime:
-    return datetime.fromisoformat(z).astimezone(UTC)
+    # 3.10-safe: `fromisoformat` takes a trailing `Z` only from 3.11 on.
+    return datetime.fromisoformat(z.replace("Z", "+00:00")).astimezone(timezone.utc)
 
 
 @pytest.fixture
