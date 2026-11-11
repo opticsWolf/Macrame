@@ -1,11 +1,11 @@
 # Macrame Update Plan v0.22.0 — conversation branching, ported
 
-**Status:** built and closes on `dev/0.22.0-revA` at `e05d7c1` — the port's track (Stage A/B, M1-M3, D-307...D-313) and the M6 overlay track (D-314 the overlay, D-315 adoption across lineages, D-316 the trunk walk's past fold, Amendment 2 revision 3 as the cycle's spec) with their reviews applied, the sweeps re-run at the release tail (1,048 / 1,026 / 1,074 / 752); merged to `dev/0.22.0` and `main` (both ff at `e05d7c1`) · **Branch:** `dev/0.22.0` from `main` at `5e2855a`
+**Status:** built and closes on `dev/0.22.0-revA` at `69336d7` — the port's track (Stage A/B, M1-M3, D-307...D-313) and the M6 overlay track (D-314 the overlay, D-315 adoption across lineages, D-316 the trunk walk's past fold, Amendment 2 revision 3 as the cycle's spec) with their reviews applied, the sweeps re-run at the release tail (1,048 / 1,026 / 1,074 / 752); merged to `dev/0.22.0` and `main` (both ff), tagged `v0.22.0` and published (crates.io and PyPI, 2026-11-11, the CI replication green — the README's suite row carries the runs); the docs record on all three branches at `1d57dae` · **Branch:** `dev/0.22.0` from `main` at `5e2855a`
 (M0 is the first commit on it)
 **From:** 0.21.0 (schema v24, concepts payload v3, snapshot container stamps v24, `DbError` 49
 variants, public API 1,994 items, libSQL 0.10.0)
 **To:** 0.22.0 (schema v24 → **v25** for the `edge_kinds` register; payload unchanged; `DbError`
-49 → **55**; decisions **D-307…D-313**)
+49 → **55**; decisions **D-307…D-313** — the plan's filed scope; the M6 track carried the release to schema **v29**, `DbError` **56**, decisions **D-307…D-316** (see Status and the release notes))
 
 The capabilities Silk's WorkLedger needs were decided, built and tested once already, on a branch
 `main` never merged. `a65c29e` ("Macrame 0.20.0 draft: conversation branching (M1-M5, M7)",
