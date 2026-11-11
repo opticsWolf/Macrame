@@ -19,7 +19,9 @@ reads are blocked by U-2, P5c's lineage fidelity by U-3; everything CodeRadar ca
 (P5b.4 sha addressing, P5b.5 out-of-order ingest, P5d the live tree, P6b, P8) proceeds without
 waiting. The plan's Q-13 recommended filing U-2 alone first, then U-3 — this plan does both in
 one minor, U-2 first, because they share the fold that honours them and neither is large
-enough to carry a cycle alone.
+enough to carry a cycle alone. Amendment 2's §13 Q8 kept U-3 out of 0.22.0 as "its own
+small amendment" ("it concerns the fork, not concept identity"); this plan is that
+filing, riding U-2's fold rather than standing alone.
 
 The asks, quoted from its §6:
 
@@ -237,6 +239,27 @@ suggests:
    verbs. Gated on a real consumer naming the need; if CodeRadar's P5c becomes that
    consumer, it files the ask and the answer is that act — not a retirement that silently
    stops short.
+
+### What this plan deliberately does not take
+
+Recorded so their absence reads as choice, not oversight — each with the home that keeps
+it and the trigger that would move it:
+
+- **Appendix C's two standing measurement items stay in Appendix C.** The first-chunk
+  warm-up (D-146) is due sooner only if a visible stall is attributed to a bulk import;
+  the R15 cold arm (D-147) only if a retry-budget change or an R15 figure is quoted
+  outside `.cargo/config.toml`. Neither trigger has fired; restating them here would be
+  a second home for items whose law is "recorded so their absence is read as choice".
+- **The Silk ask** (Amendment 2 §13 Q6 — "ask Silk whether retitling on a branch
+  matters") rides outside this plan, in parallel and not as a gate; Silk's
+  immutable-text practice stays the recommended pattern either way. This cycle's
+  consumer is CodeRadar, not Silk.
+- **P-9, the pricing probe** is CodeRadar's own item (it counts the heal's write volume
+  under the D-299 keep law) and needs no Macrame work; it runs beside this cycle on the
+  CodeRadar side. Its result can inform a later Macrame probe, not this plan's gates.
+- **The resolved 0.22.0 questions** (snapshots across v24→v25, concept shadowing on a
+  branch, the R15 standing rule, P5's `within_batch`) are history in the 0.22.0 plan,
+  register and release notes — not restated here.
 
 ## 8. Documentation
 
