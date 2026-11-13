@@ -1,15 +1,16 @@
 # Macrame Update Plan v0.23.0 — the lineage-resolved valid fold, and the fork's valid-axis cut
 
 **Status:** proposed (nothing built) — files CodeRadar's **U-2** and **U-3**, the two upstream
-requests its `docs/temporal-p5b-and-beyond.md` still names unfiled (§0 2026-11-11 note, §7,
-Q-13): U-2 gates P5b.3's branch reads, U-3 gates P5c's lineage fidelity · **Branch:**
+requests its `docs/temporal-p5b-and-beyond.md` named unfiled until this filing (§0 2026-11-11
+notes, §7, Q-13): U-2 gates P5b.3's branch reads, U-3 gates P5c's lineage fidelity · **Branch:**
 `dev/0.23.0` from `main` (M0, this plan, is the first commit on it)
 **From:** 0.22.0 (schema v29, concepts payload v3, snapshot container stamps the build's own
 version with the read floor at v24, `DbError` 56 variants, public API 2,271 items, libSQL
 0.10.0, MSRV 1.88)
-**To:** 0.23.0 (schema v29 → **v30** for the fork's valid-axis cutoff; `DbError` 56 → 57 by
-the size gate's count at build time; decisions **D-317, D-318**; the surface grows by what the
-build lands — counted at the Appendix D re-bless, not prophesied here)
+**To:** 0.23.0 (schema v29 → **v30** for the fork's valid-axis cutoff; `DbError` stays at
+56 — U-2 and U-3 add no variant (§3.1's and §3.2's refusals); decisions **D-317, D-318**; the
+surface grows by what the build lands — counted at the Appendix D re-bless, not prophesied
+here)
 
 ## 1. What this is
 
@@ -76,7 +77,9 @@ other; both live on the same `branches` row.
 `AsOf::bitemporal(v, r).on(branch)`, and `AsOf::recorded_at(r).on(branch)` (which is today's
 `reconstruct_on(ts, branch)` routed through one entry point — the recorded folds keep their
 signatures and their fast paths; nothing existing breaks, everything new is a builder
-addition). `reconstruct_as_of` routes:
+addition). `AsOf` derives `Serialize`/`Deserialize`, so the new field is
+`#[serde(default)]`: an `AsOf` serialized by 0.22.0 deserializes as a lineage-less read, and
+the compatibility test pins the round trip. `reconstruct_as_of` routes:
 
 - no `.on()` — today's whole-ledger answers, byte for byte (the D-310 law — a lineage-less
   read names no lineage and answers the creating lineage's row; this is the switch's whole
@@ -129,6 +132,15 @@ is the ordinary empty state, as the whole-ledger valid read answers. No new vari
 default). No trigger, no backfill, no other table touched; the rung is the column and
 nothing else.
 
+**Existing branches.** The column is written at the fork and never after: the
+`trg_branches_frozen_update` whole-row guard (Doctrine III) stands, and no setter verb is
+added. A setter would also rewrite the past — a read believed at a recorded instant before
+the set would answer differently after it, which is the one thing a bitemporal fold may not
+do. A lineage forked before 0.23.0 gains a valid cut the way any lineage gains a new fork
+point: a fresh fork that carries it (for CodeRadar, a new branch generation under its own
+D-5, which takes over the predecessor's ids through D-315 adoption). M3 states this as the acceptance's
+migration path.
+
 **API.** The valid cut is orthogonal to the recorded `ForkPoint` (now / at / after), so it
 rides as a second, optional argument beside any of the three recorded shapes. The exact Rust
 spelling is settled at build time with the surface accounting; the recommendation is a
@@ -137,12 +149,21 @@ spelling is settled at build time with the surface accounting; the recommendatio
 duplicated methods would triple the same law. Python gains `valid_cutoff=` keyword-only on
 the fork family (additions keyword-only; nothing renamed — the port's compatibility rule).
 
-**Checks and refusals.** The parent-precedes law mirrors the recorded one: a valid cutoff
-before the parent's own valid cutoff inherits nothing and refuses
-(`DbError::ValidCutoffPrecedesParent`, the estimated 57th variant — the size gate decides the
-count). A non-canonical stamp is `InvalidTimestamp` from the shared normaliser. A cutoff on a
-root fork refuses — a root has no parent to stop seeing (same shape as the recorded law's
-root handling).
+**Checks and refusals.** There is no parent-precedes law on this axis. The recorded one
+(`ForkPrecedesParent`) is sound because a child forked before its parent existed could
+inherit nothing; a valid cut earlier than the parent's own is not that case — the child
+still inherits the grandparent's state through the parent, up to its own cut, and the
+composition rule below answers it. So the recorded refusal is not mirrored, and `DbError`
+gains no variant. A non-canonical stamp is `InvalidTimestamp` from the shared normaliser. A
+cutoff on a root fork refuses — a root has no parent to stop seeing (same shape as the
+recorded law's root handling).
+
+**Composition along the chain.** The valid cap on an ancestor `A`, as read from lineage `b`,
+is the minimum of `forked_valid_at` over the fork edges between `b` and `A`; a `NULL` edge
+contributes no bound (it is "no cap", never "cap at the beginning of time"), and an all-`NULL`
+path leaves `A` uncapped on the valid axis. This is the running minimum `resolve` already
+carries for `forked_at` (src/graph/lineage.rs), carried as a second accumulator beside it —
+the two caps compose independently, each by its own minimum.
 
 **The fold law the cut earns its name by.**
 
@@ -150,19 +171,35 @@ root handling).
   child's `forked_valid_at` is not state on the child, even at an instant the child's own
   clock could name — this is what makes a forward-written parent supersede (recorded before
   the fork, valid from after the cut) invisible to the child, the case the recorded cap alone
-  cannot catch. The cap is applied per ancestor in both folds that bound ancestry (the
-  recorded fold keeps its single cap; the valid fold applies both).
-- **L8 — no clamping.** A row admitted by both caps is admitted whole: the child sees the
-  parent's belief per the row's own interval, and its own acts supersede, close or cut it on
-  the child's law. The child stops seeing its parent's *changes*, not the persistence of what
-  was already true — a branch of code whose merge-base file row is admitted answers that file
-  at every later instant until the child's own edit, which is the answer F3's test asks for.
-  The differential grid carries the case: parent forward-writes [T5, ∞) recorded pre-fork,
-  child cut at T3, child's read at T4 answers the pre-cut text, never absent.
+  cannot catch. The cap is the composed one (the chain rule above), and it binds the reads
+  that name a valid instant on a lineage: `reconstruct_valid_on` and the concept walk it
+  shares with `concepts_by_id(.on(b).valid_at(v))` (L2) — the cap enters
+  `resolve_concepts_overlay` itself, so the two surfaces stay one walk and gate 4 holds on
+  grids with valid cuts. A read that names no valid instant (`reconstruct_on`,
+  `.on(b)` with recorded only) keeps the recorded cap alone and is untouched (gate 8): it is
+  the branch of beliefs, where the valid cut has nothing to say.
+- **L8 — the parent's ends past the cut are changes too.** A row admitted by both caps keeps
+  its start; its end is read on the child against the cut. An ancestor row whose `valid_to`
+  is at or before the child's composed valid cap is admitted whole. One whose `valid_to` is
+  past the cap reads as **open** on the child: that end is the parent's close, supersede or
+  retirement, and a close is a change the child stopped seeing — the same law L7 applies to
+  a row that begins past the cut. Likewise an ancestor `concept_cuts` row whose `cut_at` is
+  past the cap is not seen on the child. The child's own acts supersede, close or cut the
+  inherited row on the child's law. Without this, L7 alone would fail the case it was written
+  for: a parent supersede recorded pre-fork with valid from T5 past a T3 cut closes the
+  admitted row at T5 *on the parent's row*, and the child would read the file absent from T5
+  on. With it, a branch of code whose merge-base file row is admitted answers that file at
+  every later instant until the child's own edit, which is the answer F3's test asks for.
+  The differential grid carries the case at instants on both sides of the parent's change:
+  parent forward-writes [T5, ∞) recorded pre-fork, child cut at T3, child's reads at T4
+  **and at T6** both answer the pre-cut text, never absent; the same grid again with the
+  parent's change a retirement, and again with it an ancestor cut at T5.
 
 **What does not change.** The whole-ledger folds, the overlay write law, the adoption rule,
 the triggers, the batch paths, the pointer and supersede verbs, the archive predicates — none
-gain a parameter. The recorded `forked_at` column and its checks stand unchanged; a fork
+gain a parameter. One existing read changes answer, by design: `concepts_by_id(.on(b)
+.valid_at(v))` on a lineage with a valid cut honours it (L7's scope) — on every store without
+one it answers byte for byte as 0.22.0 does. The recorded `forked_at` column and its checks stand unchanged; a fork
 without `valid_cutoff` writes the same row bytes as 0.22.0 (the migration gate's
 byte-identity law, and gate 8's no-regression).
 
@@ -182,8 +219,11 @@ suggests:
   decided rows, the D-316 paste's rows, and the adoption rows the walk admits.
 - `tests/fork_valid_cutoff_tests.rs` (D-318): the v30 rung on a populated 0.22.0 file
   (`forked_valid_at` null everywhere, nothing else moved); a fork with a valid cut; the
-  forward-written supersede case (L7/L8's grid); the parent-precedes refusal; the root
-  refusal; a no-cutoff fork byte-identical to 0.22.0's row.
+  forward-written supersede, retirement and cut cases read before and after the parent's
+  change (L7/L8's grid); the chain composition — a grandchild whose cut precedes its
+  parent's, a `NULL` edge between two cut edges — answered by the minimum, never refused; the
+  root refusal; a no-cutoff fork byte-identical to 0.22.0's row; an `AsOf` serialized
+  without `on` deserializing as the lineage-less read.
 - `tests_py/test_reconstruct_as_of_on.py`: the wheel's `on=` keyword, the stub, and the
   parity pins; `tests_py/test_fork_valid_cutoff.py` for the fork keyword.
 - `tests/doctrine_property_tests.rs` gains the fork-valid-coherence generator: forks with and
@@ -199,14 +239,17 @@ suggests:
    forward-write grid.
 4. **M3 — CodeRadar acceptance.** The P5b.3 branch-read refusal that names U-2 becomes
    buildable reads on Macrame 0.23.0; P5c's A-5 (fork at the merge-base on the valid axis)
-   becomes writable; CodeRadar's F3/F-6 tests flip. This plan's acceptance is stated there:
+   becomes writable; CodeRadar's F3/F-6 tests flip. A branch ingested before the uptake
+   gains its valid cut by a new generation forked with it (§3.2's "Existing branches"), not
+   by a setter. This plan's acceptance is stated there:
    "a store pinned to 0.23.0 answers `state of L, valid at V, as believed at R` in one call,
    and a fork records both cuts."
 5. **M4 — docs.** Register entries D-317/D-318 with the build's own numbers; quickref §4
    ladder to v30; README Schema Versioning row v30 and the release-notes bullet; Appendix D's
    re-bless with the surface delta; the release note, including the snapshot stamp
    re-measured at the tail (the container stamps the build's own version; the read floor
-   stays v24); okfgraph thoughts under `macrame-0.23.0-upstream-asks`.
+   stays v24); the stub's `reconstruct_on` docstring, stale since D-314 ("narrowed but not
+   resolved"), rewritten to the walk; okfgraph thoughts under `macrame-0.23.0-upstream-asks`.
 
 ## 6. Acceptance gates
 
@@ -218,7 +261,7 @@ suggests:
 | 4 | Overlay coherence | per id on every generated grid, the fold's concept leg equals `concepts_by_id(.on(b).valid_at(v))` — one walk, two surfaces, no drift |
 | 5 | Migration | v29 → v30 on a populated 0.22.0 file: `forked_valid_at` null everywhere, every other table byte-identical, the snapshot stamp behaviour stated (the container stamps v30; the read floor stays v24) |
 | 6 | Plans | every new statement (the per-lineage valid fold, the capped ancestor rows, the cold composition) has an `EXPLAIN QUERY PLAN` pin |
-| 7 | Error size | `size_of::<DbError>()` within the 128-byte gate at whatever variant count the build lands (56 or 57) |
+| 7 | Error size | `size_of::<DbError>()` within the 128-byte gate at 56 variants — the count does not move this cycle |
 | 8 | No single-lineage regression | gate-9 stations vs `main-0.22.0` (criterion, same machine) inside ±10%: `reconstruct`, `reconstruct_on`, `reconstruct_full_fold`, `reconstruct_composed`, `concepts/70`, `traverse` — the recorded paths are untouched, and the pins hold them to it |
 | 9 | Docs | perf-claim, currency, link, sync and stability gates green; public surface re-blessed with the count in Appendix D |
 
@@ -231,10 +274,17 @@ suggests:
    a cap on the reader would mean the reader stops seeing itself, which no ask names and no
    doctrine supports. If a consumer ever asks, the answer is a new decision, not a parameter
    slipped into this one.
-3. **`MAX_BATCH_ROWS` = 2,000** (carried from the 0.22.0 plan's §7 Q3, still open): revisit
+3. **L8 reads every ancestor end past the cut as open — including an end written with the
+   row** (a belief bounded from its first write, not closed by a later act). The row alone
+   cannot tell the two apart; only the log can. Recommendation: the row-only rule, stated in
+   D-318 with this consequence named — CodeRadar's rows are always opened open and closed by
+   a later act, so its answers do not depend on the choice, and a log-consulting rule would
+   cost the fold a join the plan pins (gate 6) for a case no consumer has. Revisit if one
+   does.
+4. **`MAX_BATCH_ROWS` = 2,000** (carried from the 0.22.0 plan's §7 Q3, still open): revisit
    with a measurement, not by reasoning. A probe can ride this cycle's probe budget without
    gating anything.
-4. **The retraction verb** (carried from D-315's amendment): "this lineage absent from T
+5. **The retraction verb** (carried from D-315's amendment): "this lineage absent from T
    onward" where the lineage holds an own row starting past T still has no name in today's
    verbs. Gated on a real consumer naming the need; if CodeRadar's P5c becomes that
    consumer, it files the ask and the answer is that act — not a retirement that silently
