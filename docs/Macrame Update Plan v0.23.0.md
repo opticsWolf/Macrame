@@ -290,6 +290,19 @@ suggests:
    consumer, it files the ask and the answer is that act — not a retirement that silently
    stops short.
 
+   *(2026-11-14, during M1 — **the consumer filed, and there is no case.** CodeRadar's
+   `docs/temporal-retraction-case.md` walks the only ledger state that would need the verb (an own
+   row starting at T5, absence asked from T3), measures today's acts on 0.22.0 (refused at every
+   layer — single write `ConceptSingleOpen`, engine bulk `OverlappingConcept`, its own bulk the
+   P5b.5 backfill refusal — when the later row exists; a point close a later write re-opens when it
+   does not, because no row shape binds the future), and finds no workflow anywhere in its plan:
+   A-5 is inheritance (this cycle's cut), A-6 and P5b.7 are forward assertions, D-5 answers rewrites
+   with generations, and its P5-D8 already says nothing recorded is retracted. The verb is **not a
+   requirement**; it stays unscheduled and is not a gate on U-2 or U-3. Reopen trigger, recorded
+   there: a named workflow needing a single lineage's own row invisible from before its start —
+   which would amend CodeRadar's P5-D8 first and make the act a new decision, not a parameter on the
+   cut.)*
+
 ### What this plan deliberately does not take
 
 Recorded so their absence reads as choice, not oversight — each with the home that keeps
